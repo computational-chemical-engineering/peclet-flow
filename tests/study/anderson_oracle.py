@@ -4,15 +4,22 @@
 An INSTRUMENT, not a gate and not production code. It implements the design note exactly, in NumPy
 over the zero-copy host buffers of `diagnostics.field_view`, on a host build of peclet.flow.
 
-Two revisions of the design (`--rev`, default 1):
+Three revisions of the design (`--rev`, default 2):
+  * rev 2 (the note's "Revision 2"): rev 1 without the instability guard. The window's Ritz radius
+    has no consequence; the oracle still COMPUTES it on rev 1's eligible calls and records where
+    rev 1 would have declared "unstable" (`ritz_would_fire`), as an instrument for the census.
+    Iterates, step counts and K equal rev 1's wherever rev 1's guard did not fire (the guard
+    never feeds back into gamma).
   * rev 1 (the note since its "Revision 1" section): velocity-only metric, P carried (mixed, not
     measured); phase A's target on the relative velocity residual; the Ritz guard only on mixed
     calls over windows of mixed columns and above max(1e-10, 1000 x tau), tau the inner tolerance;
     certification budget 2 (num_passes + 3) blocks with the early "slow" exit.
   * rev 0 (WO-1, the note's revision 0, reproduced bit for bit): the c_P-weighted W-metric with the
     fluid gauge, the guard on every active call above 1e-10, budget num_passes + 3.
-`--metric`, `--ritz-scope` and `--budget` override single pieces for ablation. Every run also sums
-the map's wall time and pressure iterations (MAP_STATS) into its JSON record.
+`--metric`, `--ritz-scope`, `--ritz-action` and `--budget` override single pieces for ablation
+(`--ritz-action fallback` = brief 3's alternative consequence: on "unstable", continue as the plain
+march from the current plain output). Every run also sums the map's wall time and pressure
+iterations (MAP_STATS) into its JSON record.
 
 The rev-0 description, which rev 1 modifies as above:
 
@@ -198,7 +205,7 @@ class AndersonOracle:
     """§4 AndersonCore + the flow adapter, on host NumPy views of the solver's padded buffers."""
 
     def __init__(self, solver, *, window=5, mixing=1.0, signature, c_p, gauged, collocated_advection,
-                 cells, metric="V", ritz_scope="mixed", inner_tolerance=0.0):
+                 cells, metric="V", ritz_scope="mixed", inner_tolerance=0.0, ritz_action="stop"):
         if not 1 <= window <= K_MAX_WINDOW:
             raise ValueError(f"window must be in [1, {K_MAX_WINDOW}]")
         if not 0.0 < mixing <= 1.0:
@@ -213,8 +220,14 @@ class AndersonOracle:
         self.gauged = bool(gauged)
         self.sig = tuple(signature)
         self.sig_source = tuple(signature)  # the case never changes it (see module docstring)
-        if metric not in ("V", "W") or ritz_scope not in ("mixed", "all"):
-            raise ValueError("metric must be 'V' or 'W', ritz_scope 'mixed' or 'all'")
+        if metric not in ("V", "W") or ritz_scope not in ("mixed", "all") \
+                or ritz_action not in ("stop", "fallback", "none"):
+            raise ValueError("metric must be 'V' or 'W', ritz_scope 'mixed' or 'all', "
+                             "ritz_action 'stop', 'fallback' or 'none'")
+        # rev 0/1 "stop": status "unstable", the driver returns not-converged; "fallback": status
+        # "unstable", the driver continues as the plain march; rev 2 "none": record only.
+        self.ritz_action = ritz_action
+        self.ritz_would_fire = []  # (call index, residual, radius) where rev 1 would fire
         # rev 1: metric "V" = velocity only, P is Carried (mixed + differenced, not measured);
         # rev 0: metric "W" = velocity + c_P^2 x the fluid-centred, gauge-centred pressure.
         self.metric = metric
@@ -280,6 +293,7 @@ class AndersonOracle:
         self.ritz_max = 0.0          # max ritz radius over the active range (G7c)
         self.sum_abs_alpha_max = 0.0  # §4.5: logged, never tested
         self.mixed_steps = 0
+        self.calls = 0  # every step() call (instrument; the census's step index)
         self.ritz_debug = None  # set to [] to record the Ritz cross-checks
 
     # ----------------------------------------------------------------------------------- helpers
@@ -330,6 +344,7 @@ class AndersonOracle:
 
     # ----------------------------------------------------------------------------------- §4.3
     def step(self, accelerate):
+        self.calls += 1
         if self.status != "active":  # plain step, no history maintenance, residual kept
             run_map(self.s)
             return
@@ -508,7 +523,11 @@ class AndersonOracle:
                         mixed=mixed))
                 self.ritz_max = max(self.ritz_max, self.ritzRadius)
                 self.ritzCount = self.ritzCount + 1 if self.ritzRadius > 1.0 + K_RITZ_DELTA else 0
-                if self.ritzCount >= K_RITZ_CONSECUTIVE:
+                if self.ritzCount >= K_RITZ_CONSECUTIVE and self.ritz_action == "none":
+                    # rev 2: no consequence; record where rev 1 would have fired, count afresh
+                    self.ritz_would_fire.append((self.calls, residual, self.ritzRadius))
+                    self.ritzCount = 0
+                elif self.ritzCount >= K_RITZ_CONSECUTIVE:
                     self.status = "unstable"
                     self.reason = (f"the plain map is locally unstable at this dt "
                                    f"(Ritz radius {self.ritzRadius:.6f})")
@@ -610,6 +629,8 @@ def march_to_steady(solver, monitor, *, rtol=1e-4, max_steps=5000, accelerate=Tr
             st["acc_steps"] += 1
             cb(st["steps"], "accelerate")
             if acc.status == "unstable":
+                if acc.ritz_action == "fallback":  # brief 3 alternative: the plain march decides
+                    return plain_tail("plain")
                 return result(False, "unstable")
             if acc.residual <= 0.5 * best:
                 best, since = acc.residual, 0
@@ -648,7 +669,7 @@ def settings_of(name):
     raise ValueError(name)
 
 
-def build_solver(flow, scheme, N, sdf_fn, L, *, rho, mu, F, dt, advection, settings):
+def build_solver(flow, scheme, N, sdf_fn, L, *, rho, mu, F, dt, advection, settings, vel_sweeps=200):
     Cls = flow.Solver if scheme == "staggered" else flow.SolverColocated
     s = Cls((N, N, N), extent=(L, L, L))
     s.set_rho(rho)
@@ -660,7 +681,7 @@ def build_solver(flow, scheme, N, sdf_fn, L, *, rho, mu, F, dt, advection, setti
         s.set_advection_scheme(advection)
     else:
         s.set_advection(False)
-    s.diagnostics.set_velocity_solver_params(200)
+    s.diagnostics.set_velocity_solver_params(vel_sweeps)
     s.set_pressure_multigrid(True, levels=max(2, int(np.log2(N)) - 1))
     s.set_pressure_pcg(True, max_iter=settings["pcg"][0], rtol=settings["pcg"][1])
     if settings["vel_rtol"] is not None:
@@ -705,11 +726,16 @@ def main():
     ap.add_argument("--json", default=None)
     ap.add_argument("--label", default="")
     ap.add_argument("--trace", action="store_true", help="print the per-step residual")
-    ap.add_argument("--rev", type=int, choices=(0, 1), default=1,
+    ap.add_argument("--rev", type=int, choices=(0, 1, 2), default=2,
                     help="design revision: 0 = W metric, Ritz on every call, floor 1e-10 (WO-1); "
-                         "1 = velocity metric, Ritz on mixed windows above 100 x tau")
+                         "1 = velocity metric, Ritz on mixed windows above 1000 x tau; "
+                         "2 = rev 1 without the guard (readings recorded, no consequence)")
     ap.add_argument("--metric", choices=("V", "W"), default=None, help="override the revision's metric")
     ap.add_argument("--ritz-scope", choices=("mixed", "all"), default=None)
+    ap.add_argument("--ritz-action", choices=("stop", "fallback", "none"), default=None,
+                    help="override the guard's consequence (rev 0/1: stop; rev 2: none)")
+    ap.add_argument("--vel-sweeps", type=int, default=200,
+                    help="velocity sweep cap (the study's 200; Revision 2's inexactness probe raised it)")
     ap.add_argument("--budget", type=int, default=None, help="certification budget in blocks "
                     "(default num_passes + 3)")
     a = ap.parse_args()
@@ -749,9 +775,10 @@ def main():
     dt = a.dt if a.dt is not None else a.beta * rho * h * h / a.mu
     for w in a.window:
         s, okw = build_solver(flow, a.scheme, a.N, sdf_fn, L, rho=rho, mu=a.mu, F=F, dt=dt,
-                              advection=a.advection, settings=st)
+                              advection=a.advection, settings=st, vel_sweeps=a.vel_sweeps)
         okw["metric"] = a.metric or ("W" if a.rev == 0 else "V")
         okw["ritz_scope"] = a.ritz_scope or ("all" if a.rev == 0 else "mixed")
+        okw["ritz_action"] = a.ritz_action or ("none" if a.rev == 2 else "stop")
         if a.rev == 0:
             okw["inner_tolerance"] = 0.0  # rev 0: the guard's floor is the constant 1e-10
         trace = []
@@ -777,6 +804,8 @@ def main():
         um = res["monitor"]
         K = drag_K(um) if math.isfinite(um) and um != 0 else math.nan
         rec = dict(label=a.label, rev=a.rev, metric=okw["metric"], ritz_scope=okw["ritz_scope"],
+                   ritz_action=okw["ritz_action"],
+                   ritz_would_fire=[list(t) for t in acc.ritz_would_fire] if acc else None,
                    inner_tolerance=okw["inner_tolerance"], budget=a.budget,
                    case=a.case, scheme=a.scheme, N=a.N, phi=a.phi, mu=a.mu, dt=dt,
                    advection=a.advection, settings=a.settings, window=w,
@@ -804,11 +833,13 @@ def main():
             first = next((t for t in trace if t[4] == "unstable"), None)
             rec["unstable_step"] = first[0] if first else None
             rec["unstable_phase"] = first[1] if first else None
-        print(f"{a.label:>10s} rev{a.rev}/{okw['metric']}/{okw['ritz_scope']} {a.case} {a.scheme:10s} N={a.N} {a.settings:10s} m={w} "
+        tag = f"rev{a.rev}/{okw['metric']}/{okw['ritz_scope']}/{okw['ritz_action']}"
+        print(f"{a.label:>10s} {tag} {a.case} {a.scheme:10s} N={a.N} {a.settings:10s} m={w} "
               f"conv={res['converged']} reason={res['reason']} steps={res['steps']} "
               f"acc={res['accelerated_steps']} K={K:.10f} restarts={res['num_restarts']} "
               f"ritzA={rec.get('ritz_max_accelerate')} ritzC={rec.get('ritz_max_certify')} "
               f"unstable@{rec.get('unstable_step')}/{rec.get('unstable_phase')} "
+              f"would_fire={[(t[0], f'{t[1]:.2e}', round(t[2], 5)) for t in (rec['ritz_would_fire'] or [])]} "
               f"sum|a|max={rec['sum_abs_alpha_max']} "
               f"drops={rec['cond_drops']}/{rec['zero_diag_drops']} wall={wall:.2f}s", flush=True)
         if a.json:

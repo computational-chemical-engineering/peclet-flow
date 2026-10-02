@@ -902,3 +902,176 @@ noise floor (stag N24 270 vs 207, Z&H 190/333 vs 174/396); production counts are
 at steps 151–200 (collocated 4.7×): the inner solves cost less near the fixed point, so "% of the
 plain step" depends on where in the march the plain step is timed (relative to the step under
 acceleration: 7.1–7.2 % staggered, 4.7–5.2 % collocated).
+
+---
+
+## 2026-10-02 — Revision 2 (architect pass on `doc/steady_acceleration_brief3.md`): the instability guard is removed
+
+**Instruments.** The oracle `tests/study/anderson_oracle.py` gained `--rev 2` (now its default: rev 1
+without the guard; the Ritz radius is still computed on rev 1's eligible calls and recorded with the
+calls where rev 1 would have fired, `ritz_would_fire`, but has no consequence), `--ritz-action
+{stop,fallback,none}` (the consequence ablation of brief 3 §6.2) and `--vel-sweeps` (the velocity
+sweep cap, default the study's 200). `--rev 1` still reproduces rev 1 (§11 collocated N14 tight:
+"unstable" at 64, radii 1.00412 / 1.00531 / 1.00527, as WO-5). New:
+`tests/study/anderson_synthetic_maps.py` — core U4's linear maps (and a stable non-normal variant)
+through the oracle's `AndersonOracle` and `march_to_steady` with a fake solver; no flow build needed.
+Host `build_omp` (WO-4 tree), 8 OpenMP threads, box load 10–40.
+
+    O="python tests/study/anderson_oracle.py"; export OMP_NUM_THREADS=8 OMP_PROC_BIND=false PYTHONPATH=$PWD/build_omp
+    BED=<scratch>/wo1/bed_phi0.6_n64_s0.npz        # the WO-1 / WO-5 arrangement (A1 random_arrangement(0.6, 64, seed 0))
+    python tests/study/anderson_synthetic_maps.py                                   # R2-1, R2-6
+    $O sphere --scheme collocated --N 14 --settings tight --window 5 --vel-sweeps 200 --trace    # R2-2
+    $O sphere --scheme collocated --N 14 --settings tight --window 5 --vel-sweeps 2000 --trace
+    $O sphere --scheme {collocated,staggered} --N {12,14,16,18,20,24} --settings tight --window 5   # R2-3 (N12 also --window 0)
+    $O sphere --scheme staggered --N 32 --phi {0.343,0.45} --settings tight --window 5
+    $O bed --arrangement $BED --scheme {collocated,staggered} --N 64 --settings tight --window 5
+    $O sphere --scheme {collocated,staggered} --N {14,16,18,20,24} --settings production --window 3 5 8   # R2-4
+    $O sphere --scheme staggered --N 32 --phi {0.343,0.45} --settings production --window 3 5 8
+    $O bed --arrangement $BED --scheme {staggered,collocated} --N 64 --settings production --window 3 5 8
+    $O sphere --scheme staggered --N 16 --mu 0.0158 --dt 1.234e-2 --advection sou --settings production --window 8 3 5   # R2-5
+    $O ... --window 8 --rev 1 [--ritz-action fallback]                              # R2-5 / R2-6 ablations
+    $O sphere --scheme {collocated --N 14, staggered --N 20} --settings tight --window 5 --rev 1 --ritz-action fallback
+
+Raw records: `<scratch>/rev2/*.jsonl`. K_plain references are WO-5's host G1 plain runs
+(`<scratch>/wo5/omp/g1.jsonl`); for N12 the oracle's own plain march.
+
+### R2-1. The rev-1 guard on EXACT synthetic maps (no noise), unconditional `acc.step(True)`
+
+U4's harness: bulk [0, 0.9], one outlier, a 2×2 block B on two entries, c = 1. "Stable non-normal":
+outlier 0.5, B = [[λ0, κ], [0, λ0]], so ρ(J) = λ0 < 1 and the plain march converges for every κ.
+
+| map | ρ(J) | rev 1 | max radius | rev 2: calls to residual 1e-8 / 1e-10 / 1e-12 |
+|---|---|---|---|---|
+| U4: outlier 1.02, rotation 1.01 | 1.02 | "unstable" at call 16 (engaged at 2); radii 1.01034, 1.01209, 1.01051 at residual 5.2e-3 | 1.01209 (rev 2: 1.01993) | 136 / 162 / 203, active, 0 restarts |
+| U4 twin: 0.996, rotation 0.95 | 0.996 | active | 0.99600 | 142 / 190 / 238 |
+| non-normal λ0 0.99, κ 0.1 | 0.99 | **"unstable" at call 12** (residual 7.8e-3) | 1.01329 | 91 / 129 / 152 |
+| non-normal λ0 0.99, κ 1 | 0.99 | **"unstable" at call 13** (3.1e-3) | 1.02680 | 75 / 91 / 104 |
+| non-normal λ0 0.99, κ 10 | 0.99 | active (radii > 1.001 never 3 in a row) | 1.03080 | 53 / 62 / 69 |
+| non-normal λ0 0.996, κ 0.1 | 0.996 | **"unstable" at call 12** (9.1e-3) | 1.01803 | 111 / 151 / 173 |
+| non-normal λ0 0.996, κ 1 | 0.996 | **"unstable" at call 13** (3.1e-3) | 1.03304 | 122 / 147 / 161 |
+| non-normal λ0 0.996, κ 10 | 0.996 | active | 1.03500 | 84 / 93 / 104 |
+
+Reading: on exact, stable maps the radius reaches 1.013–1.035 and the rev-1 guard fires in 4 of 6
+cases — above U4's true-positive radii (1.0103–1.0121). Every map converges under rev 2, including
+U4's unstable one (GMRES-like, §2.4). Rerunning U4 with the 2×2 block applied element-wise rather
+than by `B @ ab` gives 112 / 146 / 182 calls: the unstable map amplifies round-off, the outcome
+does not change.
+
+### R2-2. The WO-5 false alarms are reproducible, not noise; the "stall" is a plateau
+
+§11 collocated N14, tight, m = 5, rev 2 (no consequence), every radius > 1.0005 as (call, residual,
+radius):
+
+| velocity sweep cap | readings > 1.0005 | steps (rev 2) | K |
+|---|---|---|---|
+| 200 (study) | (19, 5.47e-6, 1.00207) (20, 5.41e-6, 1.00375) (22, 5.42e-6, 1.00467) (31, 4.78e-6, 1.00070) (33, 4.78e-6, 1.00622) (62, 6.69e-9, 1.00412) (63, 6.20e-9, 1.00531) (64, 5.89e-9, 1.00527) (65, 5.41e-9, 1.00332) (66, 5.39e-9, 1.00193) (67, 5.33e-9, 1.00839) (69, 5.09e-9, 1.00762) (74, 4.99e-9, 1.00306) (77, 4.82e-9, 1.00321) (78, 4.58e-9, 1.00335) (83, 4.55e-9, 1.00306) | 153 | 4.2456241364 |
+| 2000 | calls 19–33 **identical to 5 digits**; (62, 6.75e-9, 1.00419) (63, 6.28e-9, 1.00531) (64, 5.97e-9, 1.00516) (65, 5.50e-9, 1.00316) (66, 5.48e-9, 1.00185) (67, 5.43e-9, 1.00818) (69, 5.19e-9, 1.00739) (74, 5.02e-9, 1.00270) | 162 | 4.2456241364 |
+
+- A 10× tighter momentum solve leaves family (b) unchanged and moves family (a) by ≤ 2e-4: the
+  readings are not inner-solve inexactness.
+- Host and CUDA (WO-5 records) read 1.0062249 / 1.0062254 at call 33 while their trajectories
+  differ by 7.4e-9 in K: not round-off.
+- Phase A's residual sits at 5–7e-9 for calls ≈ 60–83 and then falls to 2.3e-13 (sweeps 200; 2.5e-13
+  at 2000): the "stall" WO-5 read as the map's noise floor is a stagnation plateau. Both families are
+  radii read on stagnating stretches, where the window is dominated by the map's non-normal action.
+
+### R2-3. Tight matrix, rev 2, m = 5 (every accelerated run whose plain march converges)
+
+| case | rev 2 steps | C++ rev 1 host / CUDA | \|K_acc/K_plain − 1\| | max radius (no consequence) | rev 1 would fire |
+|---|---|---|---|---|---|
+| §11 coll N12 | 106 | (ctest case) | 2.2e-10 (oracle plain 2035 steps) | 1.01201 | — |
+| §11 coll N14 | **153** | **"unstable" @64** / @64 | **2.49e-10** | 1.00839 | calls 64, 67 |
+| §11 coll N16 | 141 | 141 / 141 | 5.06e-10 | 0.99743 | — |
+| §11 coll N18 | 131 | 131 / 131 | 4.00e-10 | 0.99676 | — |
+| §11 coll N20 | 186 | 186 / 185 | 6.42e-10 | 0.99878 | — |
+| §11 coll N24 | 151 | 151 / 153 | 6.65e-10 | 0.99728 | — |
+| §11 stag N12 | 58 | (ctest case) | 2.7e-12 (oracle plain 165) | 0.90680 | — |
+| §11 stag N14 | 60 | 60 / 60 | 7.0e-12 | 0.94526 | — |
+| §11 stag N16 | 79 | 79 / 79 | 1.82e-11 | 0.95800 | — |
+| §11 stag N18 | 148 | 130 / 139 | 1.30e-10 | 1.01113 | — |
+| §11 stag N20 | **184** | **"unstable" @51** / @51 | **6.15e-10** | 1.00554 | call 51 |
+| §11 stag N24 | 160 | 270 / 207 | 7.64e-10 | 1.00771 | — |
+| Z&H 0.343 N32 | 180 | 190 / 174 | 4.06e-10 | 1.00297 | — |
+| Z&H 0.45 N32 | 351 | 333 / 396 | 1.43e-9 | 1.00100 | — |
+| bed coll N64 | 321 | 321 / 321 | 1.75e-9 | 0.99868 | — |
+| bed stag N64 | 536 | 536 / 536 | 1.44e-8 (the premature plain certificate, WO-5; vs the 60 000-step reference ≈ 5e-10) | 0.99988 | — |
+
+16 of 16 converge; G1 ≤ 1e-8 on all but the staggered bed, whose reference is the known WO-5 issue
+(out of scope here). Step counts at the noise plateau differ between oracle, host and CUDA, as WO-5
+found between host and CUDA.
+
+### R2-4. Production matrix, rev 2: identical to WO-5
+
+42 runs (§11 N14–24 both schemes, Z&H 0.343 / 0.45 N32 staggered, both beds; m = 3 / 5 / 8): **42 of
+42 step counts identical** to WO-5's C++ host G2, all `converged=True`, K within 2.9e-8 of the C++ K
+(reduction order). Max eligible radius 0.98253 (WO-5 census: 0.9825). The guard never fired in
+production and never fed γ, so removing it changes no production run.
+
+### R2-5. G7a (staggered §11 N16, μ 0.0158, dt 1.234e-2, SOU, production; plain diverges at 440)
+
+| variant | m = 3 | m = 5 | m = 8 |
+|---|---|---|---|
+| rev 2 (no guard) | diverged, 312 steps (a57 …) | diverged, 270 (a90 …) | **diverged, 208** (149 accelerated; would have fired at call 18, radius 1.0355, residual 9.6e-3) |
+| rev 1, consequence stop | = rev 2 (guard never fires) | = rev 2 | "unstable" at 18 (radii up to 1.1238) |
+| rev 1, consequence fallback | = rev 2 | = rev 2 | diverged, 358 (18 accelerated, then the plain march) |
+
+`converged=False` in every variant: the plain steps of the certification expose G7a's growth without
+the guard.
+
+### R2-6. The consequence ablation on the WO-5 false alarms (rev 1 guard, `--ritz-action fallback`)
+
+| case (tight, m 5) | stop (rev 1) | fallback | none (rev 2) | plain |
+|---|---|---|---|---|
+| §11 coll N14 | not converged, 64 | converged, **1134** steps, 1.4e-12 | converged, 153, 2.5e-10 | 2105 |
+| §11 stag N20 | not converged, 51 | converged, **6446**, 1.4e-12 | converged, 184, 6.2e-10 | 6550 |
+
+And the driver on U4's maps (`anderson_synthetic_maps.py`, rtol 1e-4):
+
+| map, evaluation noise σ | rev 1 | rev 2 |
+|---|---|---|
+| U4 unstable, σ 0 | "unstable" at 16 | **certified**, 200 steps (a114 c60 a1 c25), ⟨x⟩ within 2.3e-11 of the exact fixed point |
+| U4 unstable, σ 1e-12 | "unstable" at 16 | **certified**, 176 (a90 c60 a1 c25), 6.7e-11 |
+| U4 unstable, σ 1e-8 | "unstable" at 16 | not converged, max_steps 5000 (a63 c60 a51 c60 p4766; the plain tail grows to 1e34) |
+| U4 twin, σ 0 / 1e-12 / 1e-8 | certified 124 / 124 / 119 | identical |
+
+Reading: without the guard an EXACT map with a mode growing 1.02 per step is certified at its fixed
+point — stationary to 1e-11 over the 25–85 certification steps, i.e. a true stationarity
+certificate of the unique fixed point; with noise at the production inner tolerance the plain steps
+expose the growth. (The element-wise variant of the block gave 113 and 191 steps for σ 0 / 1e-12.)
+
+### R2-7. Register drafts (for the caller; not committed to `../docs/`)
+
+Replaces the PENDING guard-scope draft of the WO-6 entry.
+
+    ### The Anderson steady-march accelerator has no instability guard; stability evidence comes only from plain steps (rev 2)
+    - area: flow, core
+    - source: flow doc/steady_acceleration.md "Revision 2", D5, §2.4, §7; log "Revision 2"
+    - decided: 2026-10-02 (architect rev 2)
+    - status: proposed (architect); the user rules on Q18 (what converged=True promises)
+    - supersedes: the rev-0/rev-1 Ritz guard (D5), and D5's "Rejected: no instability guard"
+    - quote: |
+        AndersonCore makes no stability judgement: no Ritz estimate, no status "unstable", no
+        MarchResult reason "unstable". An unstable plain map shows only on plain steps — the
+        certification's growth exit, R >= 1 never passes, budget/slow resume, stagnation fallback.
+        converged=True certifies stationarity at this dt over the certification's plain steps,
+        not that a plain march from the initial state would arrive there.
+    - rejected: a Ritz-radius guard with a higher floor, a higher threshold, a longer consecutive
+      count, the fall-back-to-plain consequence, a diagnostic-only radius, a Ritz-pair residual test
+    - why: the radius is a Rayleigh-Ritz value of a non-normal map in an oblique (velocity-only)
+      metric, bounded by the numerical range, not the spectrum. Exact STABLE synthetic maps
+      (rho = 0.99) tripped the rev-1 guard in 12 calls with radii 1.013-1.035, above U4's true
+      positive 1.0105; the WO-5 tight false alarms (2 of 14 G1 cases) are reproducible across
+      backends and sweep caps. Without the guard G7a still ends not-converged at m = 3, 5, 8, both
+      false alarms converge (2.5e-10, 6.2e-10), and production is unchanged (42/42 step counts)
+
+    ### (core.md) AndersonState drops innerTolerance; AndersonCore drops the GG/GR Gram blocks (rev 2, WO-3c)
+    - area: core
+    - source: flow doc/steady_acceleration.md "Revision 2", §6.1, §9 WO-3c
+    - decided: 2026-10-02
+    - status: proposed (architect)
+    - supersedes: in the WO-6 core draft, "+ innerTolerance" in the AndersonState quote
+    - quote: |
+        AndersonState = padded state views + roles (Velocity = 0, Carried = 2) + extent + ghost +
+        AndersonComm. Pass 2 reduces RR(s,j) and b_j only (2 mk + 2 doubles); no reduction reads dG.
+    - rejected: keeping innerTolerance or GG/GR for a diagnostic
+    - why: both existed only for the Ritz guard; the branch is untagged, so this is the cheap moment

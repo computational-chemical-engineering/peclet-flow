@@ -11,6 +11,80 @@ evidence; the body of the note is the revision-1 design. Superseded readings are
 "superseded by rev 1" entries. Numbers and commands: `doc/steady_acceleration_log.md`, entry
 "Revision 1".*
 
+***Revision 2** (2026-10-02, architect pass on `doc/steady_acceleration_brief3.md`, after WO-5's
+G1 / G7c failures at tight settings). The instability (Ritz) guard is removed. The section below
+gives the decision and its oracle evidence; D5, §2.4, §4.1–§4.3, §4.6, §5, §6.1–§6.2, §7, §8 (G7,
+U4, U4b, U8, U9) and §9 (WO-7, WO-3c, WO-8) are amended in place and mark what they supersede.
+Numbers and commands: log, entry "Revision 2".*
+
+---
+
+## Revision 2 — the instability guard is removed
+
+**Decision.** `AndersonCore` makes no stability judgement. Deleted: the Ritz estimate, its
+eligibility rule and floor, the threshold and the consecutive count, the status "unstable", the
+`MarchResult` reason "unstable", the two Gram blocks GG and GR (used only by the estimate) and the
+descriptor field `innerTolerance` (used only by the floor). Evidence that the plain map is unstable
+comes from plain steps alone — the certification's growth exit, the instrument's R ≥ 1 (never
+passes), the budget / slow resume and the stagnation fallback, all unchanged (§7).
+
+**Why: the radius is not a stability test.** ρ(I + XX⁺XR) is a Rayleigh–Ritz value of the map on
+the window. Ritz values of a non-normal operator are confined to its numerical range, not to its
+spectrum, and under the velocity-only metric (P carried, D3 rev 1) the projection is oblique, so not
+even that bound holds. The march's map is non-normal (advection, cut-cell closures, the u–P
+coupling). A reading > 1 is therefore no evidence of ρ(J) > 1. Measured on the oracle:
+
+| test | result |
+|---|---|
+| exact, **stable** synthetic map: U4's harness with its 2×2 block replaced by [[λ0, κ], [0, λ0]], ρ(J) = λ0 < 1, no noise, plain march converges | rev-1 guard: **"unstable"** at call 12–13 for λ0 ∈ {0.99, 0.996} × κ ∈ {0.1, 1}, radii 1.013–1.033; κ = 10: radii up to 1.035 (not 3 in a row) |
+| core U4 (eigenvalue 1.02, rotation 1.01), the guard's unit test | "unstable" at call 16, radii 1.0103 / 1.0121 / 1.0105 — **inside** the stable maps' band |
+| G7a (plain diverges), the one real true positive | radii 1.035–1.124 at m = 8 — overlapping the stable maps' 1.035 |
+| WO-5 false alarms, same case on host and CUDA (trajectories 7e-9 apart in K) | radius 1.0062249 / 1.0062254: reproducible, not round-off |
+| same, velocity-sweep cap 200 → 2000 | family (b) (steps 19–33, residual ≈ 5e-6) identical to 5 digits; family (a) moves ≤ 2e-4 (1.00839 → 1.00818) |
+| the "stall at 5–7e-9" | a plateau of phase A, not the map's floor: the same run later reaches 2.3e-13 |
+
+So rev 1's premise — readings > 1 are inner-solve noise below 1000·τ — is false, and no floor,
+threshold or count can separate stable from unstable maps: their readings overlap at the same
+residuals (stable non-normal 3.1e-3 – 9.1e-3; G7a 9.4e-3 – 9.6e-3).
+
+**What the guard caught, the plain steps catch.** Rev-2 oracle on G7a: `converged=False` at m = 3,
+5 and 8 (diverged at 312, 270 and 208 steps; rev 1 at m = 8: "unstable" at 18). Its false alarms,
+by contrast, were wrong answers: rev 2 converges both WO-5 failures — §11 collocated N14 in 153
+steps, |K/K_plain − 1| = 2.5e-10; staggered N20 in 184 steps, 6.2e-10.
+
+**Rejected alternatives** (brief 3 §6, each measured or argued):
+
+| alternative | why not |
+|---|---|
+| higher floor (absolute, or k·τ) | stable-map false alarms fire at residual 3.1e-3 – 9.1e-3, the decade of G7a's true positive (9.4e-3); family (b) at 1.5e-5 (coll N12, 1.0120). No floor separates them |
+| higher threshold 1 + δ | stable readings reach 1.035 (κ ≤ 10) and are bounded only by the numerical range λ0 + κ/2, which has nothing to do with stability; U4's 1.0105 sits below them |
+| more consecutive readings | false alarms come in runs as long as the true ones: staggered N20 had 7 readings > 1.001 within 13 calls, collocated N14 6 of the 7 calls 62–69 above 1.0019; U4 fires on its first 3 |
+| consequence = fall back to the plain march (brief 3 §6.2) | a false alarm costs the whole plain march: coll N14 tight 1134 steps (vs 153), staggered N20 6446 (vs 184; plain 6550). On G7a m = 8 it diverges at 358, later than no guard (208) |
+| keep the radius as a diagnostic only | GG and GR are 3 of the 5 reductions per window column; a radius that reads 1.03 on stable maps invites the next session to re-attach a consequence |
+| a Ritz-pair residual test (trust only converged Ritz pairs) | for non-normal J a small Ritz residual places θ only in a pseudospectrum, which reaches past ρ(J); it needs complex eigenvectors, a new constant, and keeps GG / GR |
+
+**U4.** U4 asserted that the radius exceeds 1 on an unstable map and stays below on a stable twin.
+Both of its maps are normal; on a non-normal stable map the same assertion fails within 13 calls, so
+passing U4 certified nothing about the flow map. U4 becomes the property the design now relies on:
+the core **converges** on U4's unstable map (residual ≤ 1e-10 in 162 calls, 0 restarts) and judges
+nothing; U4b adds the stable non-normal map (91 calls). U8, U9 and the Gelfand test go with the
+guard (§8).
+
+**What `converged=True` certifies (stated, Q18).** Stationarity at this Δt over the certification's
+plain steps, not dynamic stability. Measured on U4's map with the rev-2 driver: exact map →
+certified in 200 steps, ⟨x⟩ within 2.3e-11 of the exact fixed point; noise 1e-12 → certified (176,
+6.7e-11); noise 1e-8 → not converged (max_steps). The step counts on this map are round-off
+sensitive (applying the 2×2 block element-wise instead of by a matrix product gave 113 and 191),
+the outcomes are not. In the supported scope the fixed point is unique (§2.3), so such a
+certificate names the discrete steady solution. Default: document it (Q18).
+
+**Unchanged.** Everything else in rev 1. Production iterates and step counts are unchanged — the
+guard never fired in production and never fed γ: the rev-2 oracle reproduces all 42 WO-5 production
+step counts (§11 N14–24 and Z&H, both schemes, beds; m = 3 / 5 / 8) exactly.
+
+**Work orders** (§9): WO-7 (flow: driver, adapter, bindings, `MarchState`, tests, CLAUDE.md) →
+WO-3c (core: delete the guard; pass 2 reads 3 vectors and packs 2·mk + 2 doubles) → WO-8 (re-gate).
+
 ---
 
 ## Revision 1 — what changed and why
@@ -64,7 +138,8 @@ carry at most rtol of remaining change") holds for the velocity residual. At the
 monitor error is 2e-8 to 1.4e-5 (≤ 0.14·rtol) on all seven cases. It failed for the W-residual
 because the bed's slow pressure modes carry no monitor change.
 
-**R3 — the Ritz guard runs only where its estimate means something (D5 amended).** It runs only on
+**R3 — the Ritz guard runs only where its estimate means something (D5 amended).** *(Superseded by
+Revision 2: the guard is removed.)* It runs only on
 an accelerated (mixed) call, only on a window whose every column was formed at a mixed call, and
 only while the residual is at least the Ritz floor max(1e-10, 1000·τ). Here τ is the inner-solve
 tolerance: the momentum residual tolerance in force, production 1e-8, so the floor is 1e-5. The
@@ -119,7 +194,7 @@ Every bar of the brief holds: steps_acc ≤ steps_plain on every case and window
 (staggered bed 11.5 vs 11.5, collocated 31.2 vs 33.3), so the iteration ratio tracks the step ratio.
 Wall time is measured at G2 (D11).
 
-**Core delta (WO-3b, §9).** Part 1 is required. `AndersonState` gains `innerTolerance`. The Ritz
+**Core delta (WO-3b, §9).** *(Part 1 is undone by WO-3c, Revision 2.)* Part 1 is required. `AndersonState` gains `innerTolerance`. The Ritz
 floor gets a constant `kRitzFloorFactor = 1000`. Each window slot gets a "formed at a mixed call"
 flag, and step 7 gets the eligibility rule of R3. Part 2 is a separate commit (Q14, default yes):
 delete the Pressure role, `sdf`, `cP`, `gauged` and pass 1, which no consumer uses after R1.
@@ -198,28 +273,27 @@ is dropped while the scaled Gram condition exceeds 1e12, i.e. κ(ΔR) > 1e6.
 - Acceleration is disabled after 5 restarts.
 - A non-finite residual or a failed pressure solve at a mixed iterate restores the last plain-map
   output and disables acceleration.
-- **(rev 1)** An instability guard watches the spectral radius of the window's Ritz matrix.
-  - It is evaluated only on an **eligible** call. The call's input must be a mixed iterate, every
-    window column must have been formed at a mixed call, and the residual must lie in
-    [kRitzFloor, 1e-2].
-  - kRitzFloor = max(1e-10, 1000·τ), where τ is the inner-solve tolerance (§4.1). That is 1e-5 at
-    production settings and 1e-9 at tight ones.
-  - If the radius exceeds 1 + 1e-3 on 3 consecutive calls, all of them eligible, the status
-    becomes "unstable" and the march returns not-converged. An ineligible call resets the count.
-- *Superseded by rev 1:* "evaluated on every active call while the residual is in
-  [1e-10, 1e-2]".
-- *Rejected (rev 1):* evaluating on plain calls. Their window holds near-collinear plain-march
-  differences (scaled cond(XX) 1.6e-11 – 4e-11), and the estimate there is inner-solve noise: radii
-  of 12.6–56 gave a false "unstable" in 5 of 12 WO-1 production runs. Growth on plain steps is
-  already caught by the certification's growth exit and by the instrument itself.
-- *Rejected (rev 1):* a stricter pseudo-inverse truncation in place of the eligibility rule.
-  Truncation is a threshold tuned between 1e-11 and 1e-5 on this data, and it does not cover the
-  noise floor. Readings > 1.001 occur in phase A too, at residual ≤ 5.5e-8 ≈ 5τ.
+- **(rev 2) No instability guard.** The core makes no stability judgement and has no status
+  "unstable". Evidence that the plain map is unstable at this Δt comes only from plain steps: the
+  certification's growth exit, the instrument's R ≥ 1 (a block with R ≥ 1 never passes), the
+  budget/slow resume and the stagnation fallback to the plain march (§7, all unchanged).
+- *Superseded by rev 2:* the rev-1 Ritz guard (on a mixed call over an all-mixed window with the
+  residual in [max(1e-10, 1000·τ), 1e-2]; "unstable" after 3 consecutive radii > 1 + 1e-3; the march
+  returned not-converged), and before it rev 0's "evaluated on every active call while the residual
+  is in [1e-10, 1e-2]".
+- *Rejected (rev 2):* every variant of a Ritz-radius guard — a higher floor, a higher threshold, a
+  longer consecutive count, the fallback consequence, a diagnostic-only radius, a Ritz-pair
+  residual test. The radius is a Rayleigh–Ritz value of a non-normal map in an oblique metric, not
+  an estimate of its spectral radius: on an exact, stable synthetic map (ρ(J) = 0.99) the rev-1
+  guard declared "unstable" in 12 calls. Evidence and the per-variant numbers: "Revision 2".
+- *Superseded rejection:* "Rejected: no instability guard. Measured: Anderson keeps marching where
+  the plain march at the same Δt diverges." Anderson still does; it no longer decides the outcome,
+  because the certification runs on plain steps (rev 1) and exposes the growth — G7a ends
+  not-converged at m = 3, 5 and 8 with no guard (rev-2 oracle: diverged at 312, 270, 208 steps).
+- *Rejected (rev 1, moot since rev 2):* evaluating on plain calls (radii 12.6–56 there); a stricter
+  pseudo-inverse truncation.
 - *Rejected:* a tight bound on the mixing coefficients Σ|α|. Extrapolating the 0.996/step
   checkerboard needs Σ|α| ≈ 2/(1−λ) ≈ 500; a tight bound forbids the acceleration being sought.
-- *Rejected:* no instability guard. Measured: Anderson keeps marching where the plain march at the
-  same Δt diverges. Anderson, like GMRES, can converge to fixed points that the plain march cannot
-  reach (§1.1, §2.4).
 
 **D6 (rev 1). Stop interplay: two phases.**
 - **Phase A** accelerates until the relative *velocity* residual reaches (1 − slow_rate)·rtol.
@@ -313,8 +387,8 @@ only and loses P.
 - Anderson stays appropriate while the plain march contracts. With explicit advection, Δt is
   CFL-bound and the slow spectrum is a continuum near 1, not a few outliers, so the gain falls to
   about 2.5× (measured).
-- Unsteady or march-unstable regimes are handled by the D5 guard plus the certification-growth
-  fallback (§7).
+- Unsteady or march-unstable regimes are handled by the certification on plain steps: growth
+  exit, R ≥ 1 never passes, then the plain march decides (§7; rev 2: no Ritz guard).
 
 
 **D13. `AndersonCore` lives in `core` (`peclet::core::solver`) from the start** (user decision,
@@ -449,7 +523,8 @@ verdicts.
 - *The Ritz guard at tight settings (G1, G7c).* False "unstable" on §11 collocated N14 and
   staggered N20: readings 1.001–1.005 at residual 5–7e-9, i.e. at 5× the floor 1000·τ = 1e-9,
   where the tight map's residual stalls; isolated readings up to 1.012 at residual 1e-6 – 1.5e-5.
-  The oracle reproduces them. Production: 0 of 946 eligible readings above 1.0005.
+  The oracle reproduces them. Production: 0 of 946 eligible readings above 1.0005. **Resolved by
+  Revision 2** (the guard is removed; both cases then converge, G1 ≤ 6.2e-10 on the oracle).
 - *The plain certificate on the staggered bed at rtol 1e-10 (G1).* The plain march certifies
   1.4e-8 below the fixed point (its tail runs at ~0.9999 per step against the instrument's
   slow_rate 0.997); the accelerated K is within ~5e-10 of a 60 000-step plain march.
@@ -524,25 +599,34 @@ plain march at the same Δt never reaches. Two kinds exist:
   Δt-independent discrete steady state, so a plain march at a stable Δt would reach the same point.
 - **Physical:** an unstable steady branch of an unsteady flow. The plain march never converges.
 
-Three defences, in the order they act:
+Since rev 2 every defence acts on **plain steps**; nothing reads Anderson's own window:
 
-1. **The Ritz guard (D5).** Anderson can suppress a growing mode only if that mode is in its
-   window, because the mode's growth dominates the secant differences. The Galerkin projection of
-   J − I onto the window then has spectral radius ρ(I+M) > 1. Three consecutive detections end the
-   march as not-converged ("unstable").
-   - Since rev 1 the guard reads only windows built by Anderson itself (mixed calls), and only
-     while the residual is at least 1000× the inner-solve noise.
-   - The one measured true positive (G7a, m = 8) fired at residual 9.4e-3, three decades above
-     the production floor.
-   - A growing mode that becomes visible only below the floor is left to defences 2 and 3, and to
-     the instrument, which cannot pass a tail with R ≥ 1.
-2. **Certification growth (§7).** If the plain steps grow from the accelerated state (residual
+1. **Certification growth (§7).** If the plain steps grow from the accelerated state (residual
    ×10, or non-finite), acceleration is disabled and the plain march continues on its own terms.
    The outcome is then the unaccelerated outcome from that state.
-3. **The residual risk is shared with the plain march.** An unstable mode that the transient never
-   excites (it sits at round-off, for example by symmetry) is invisible to Anderson and to the
-   plain march alike. The §3.2 instrument can stop the plain march on such a state too, so the
-   answers agree.
+2. **The instrument.** A block whose change grows (R ≥ 1) never passes, so a growing mode that
+   dominates the monitor's block change prevents the certificate. The budget / slow exit then
+   resumes acceleration with a 10× tighter target, and a stagnating phase A falls back to the plain
+   march (§7). Measured on G7a (Ritz readings up to 1.124): not-converged at m = 3, 5, 8 with no
+   guard.
+3. **What converged=True certifies — stationarity, not dynamic stability (rev 2, stated).** The
+   reported state passed the instrument on consecutive plain steps at this Δt: it is stationary to
+   rtol over that horizon (≥ (num_passes + 1)·check_every steps; 25–60 in every measured run). A
+   fixed point whose plain map has a mode that grows too slowly to reach the monitor within the
+   horizon can therefore be certified. Measured on core U4's map (one eigenvalue 1.02, a rotation of
+   modulus 1.01): with an exact map the driver certifies in 200 steps, ⟨x⟩ within 2.3e-11 of the
+   exact fixed point; with evaluation noise 1e-12 in 176 steps (6.7e-11); with noise 1e-8 it does
+   not converge (max_steps). In the supported scope the fixed point is unique (§2.3), so such a
+   certificate names the steady solution of the discrete equations; whether the flow settles there
+   is a question only a plain march answers (§10 Q18). An unstable mode that the transient never
+   excites is invisible to both marches alike, as before.
+
+*Superseded by rev 2:* defence "1. The Ritz guard (D5)". Its argument — a growing mode in the window
+dominates the secant differences, so ρ(I+M) > 1 — runs one way only. ρ(I+M) > 1 also occurs on
+**stable** maps: I + M is a Rayleigh–Ritz projection of a non-normal map, oblique under the
+velocity-only metric, and its eigenvalues are confined to the map's numerical range, not to its
+spectrum. Measured: an exact synthetic map with ρ(J) = 0.99 tripped the rev-1 guard in 12 calls
+("Revision 2").
 
 **Out of scope, refused (D10):**
 - Configurations whose fixed points are not unique, because Anderson would select among them
@@ -622,8 +706,8 @@ effect.
     U² = Σ_{f ∈ Velocity} Σ_{i ∈ I} g_f(i)²          (g = the step output just computed)
     residual = sqrt(⟨r,r⟩ / U²)                      (r = g(x) − x; = 0 if r = 0 and U = 0; +inf if U = 0 ≠ r)
 
-This is the relative *velocity* residual. It is what phase A's target, the restart test, the
-engagement rule and the Ritz floor compare against.
+This is the relative *velocity* residual. It is what phase A's target, the restart test and the
+engagement rule compare against (and, until rev 2, the Ritz floor).
 
 **The units trap.** Everything here is internal. No physical conversion happens anywhere in the
 accelerator, and none is needed: mixing is linear, and the metric is a ratio of velocities, so it is
@@ -641,28 +725,16 @@ unit-free.
 | `kEngageDecreases` | 2 | consecutive residual decreases before mixing engages |
 | `kRestartGrowth` | 4.0 | restart if ρ_k > 4·ρ_min (since the last restart), at a mixed iterate |
 | `kMaxRestarts` | 5 | disable acceleration at the 5th restart |
-| `kNoiseFloor` | 1e-10 | below this relative residual, no restart test; also the lower bound of the Ritz floor |
-| `kRitzFloorFactor` | 1000 | **(rev 1)** Ritz floor = max(kNoiseFloor, kRitzFloorFactor·τ), τ = the descriptor's `innerTolerance` |
+| `kNoiseFloor` | 1e-10 | below this relative residual, no restart test |
 | `kCondMin` | 1e-12 | minimum eigenvalue ratio of the Jacobi-scaled Gram (κ(ΔR) ≤ 1e6) |
-| `kRitzDelta` | 1e-3 | instability if ρ(I+M) > 1 + 1e-3 |
-| `kRitzHi` | 1e-2 | Ritz test only while residual ≤ 1e-2 (outside the strongly nonlinear initial transient) |
-| `kRitzConsecutive` | 3 | consecutive detections that declare "unstable" |
-| `kGelfandSquarings` | 20 | ρ(T) ≈ ‖T^(2^20)‖^(2^-20) |
 
 User-settable: `window` m ∈ [1, 8] (default 5), and `mixing` β ∈ (0, 1] (default 1.0).
 
-**τ, the inner-solve tolerance (rev 1).** The caller reports it in the descriptor as
-`innerTolerance`.
-- *Value:* flow sets it to `velocityResidualTolerance()` when that is > 0. Otherwise (the legacy
-  update criterion, `set_velocity_residual_tolerance(0)`) it uses the active pressure driver's
-  rtol: `chebRtol_` under Chebyshev, else `pcgRtol_`.
-- *Why this tolerance:* the momentum solve's stop is relative to max|b|, an absolute scale, so it
-  sets the map's noise floor. Measured: the production velocity residual stalls at ≈ 2e-8 = 2τ
-  with τ = 1e-8.
-- *Resulting floor:* 1e-5 at production settings, 1e-9 at tight ones. `innerTolerance = 0` means
-  unknown and gives the floor 1e-10 (revision 0's behaviour).
-- *Why 1000:* readings > 1 + kRitzDelta occur only at residual ≤ 5.5e-8 ≈ 5τ, apart from one
-  isolated 1.006 at 140τ. The true positive measured on G7a fired at 9.4e-3, about 1e6·τ.
+*Superseded by rev 2:* the constants `kRitzFloorFactor` (1000), `kRitzDelta` (1e-3), `kRitzHi`
+(1e-2), `kRitzConsecutive` (3) and `kGelfandSquarings` (20), and the descriptor's inner-solve
+tolerance τ (`innerTolerance`), which existed only to set the Ritz floor. Rev 1's premise for that
+floor — readings > 1 are inner-solve noise below 1000·τ — is false: the tight-setting readings are
+reproducible across backends and unchanged by a 10× higher velocity-sweep cap ("Revision 2").
 
 ### 4.2 Data held by `AndersonCore`
 
@@ -670,20 +742,20 @@ User-settable: `window` m ∈ [1, 8] (default 5), and `mixing` β ∈ (0, 1] (de
   `Kokkos::View<double*>`, one per state field. That makes 2m + 3 state vectors; the history slots
   are used circularly.
 - **Host:**
-  - window bookkeeping: `mk` (columns in use); slot indices ordered oldest→newest; and **(rev 1)**
-    `mixedCol[slot]`, whether the column in that slot was formed at a mixed call;
-  - Gram blocks: the m×m blocks `RR`, `GG` and `GR`, where GR(i,j) = ⟨Δg_i, Δr_j⟩;
+  - window bookkeeping: `mk` (columns in use); slot indices ordered oldest→newest;
+  - the Gram block: the m×m block `RR`, RR(i,j) = ⟨Δr_i, Δr_j⟩ (the least squares' only matrix);
   - state flags and counters: `havePrev`, `pending`, `gamma[m]`, `engaged`, `decCount`, `rhoPrev`,
-    `rhoMin`, `numRestarts`, `numResets`, `ritzCount`;
-  - status and reporting: `status` ∈ {active, disabled, unstable}, `reason`, `residual`, and
-    `ritzRadius` (last value, NaN if not computed).
+    `rhoMin`, `numRestarts`, `numResets`;
+  - status and reporting: `status` ∈ {active, disabled}, `reason`, `residual`.
+  - *Superseded by rev 2:* the Gram blocks `GG` and `GR` (used only by the Ritz estimate),
+    `mixedCol[slot]`, `ritzCount`, `ritzRadius` and the status `unstable`.
   - *Superseded by rev 1:* the per-column fluid P-means `mR[j]`, `mG[j]`; with no pressure in the
     metric they do not exist.
 - **Signature**, for change detection: internal Δt, ρ, μ and the body force (3 components) at the
   last call.
 
 `reset()` clears the history and the counters: mk = 0; pending = engaged = false;
-decCount = ritzCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
+decCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
 
 ### 4.3 One call: `step(accelerate)` (the adapter wraps the core around `solver.step()`)
 
@@ -715,16 +787,16 @@ decCount = ritzCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
           kernel DIFF over padded entries: r = buf − X;  dR_s = r − Rprev;  dG_s = buf − Gprev;  X = r
       else:
           kernel R: X = buf − X                     # X now holds r_k
-      # --- 4. reductions (§6.1; rev 1: velocity fields only, no pass 1) ------------------------
+      # --- 4. reductions (§6.1; rev 1: velocity fields only, no pass 1; rev 2: no GG, GR) -----
       ⟨X,X⟩, U², and for every window column j (plus s):
-              RR(s,j), GG(s,j), GR(s,j), GR(j,s), b_j = ⟨dR_j, X⟩   -> Allreduce
+              RR(s,j), b_j = ⟨dR_j, X⟩                                -> Allreduce
       # --- 5. host decision (all ranks compute; rank 0's packet is broadcast and wins) ---------
       rho = sqrt(⟨X,X⟩);  residual = rho / sqrt(U²)
       if not finite(rho) or (mixed and solver.pressureSolveFailed()):
           if mixed: buf = Gprev;  reason = "non-finite residual / failed pressure solve at an accelerated iterate"
           else:     reason = "non-finite residual on a plain step"
           status = disabled; reset(); havePrev = false; return
-      if havePrev: accept column s: copy the new RR/GG/GR row and column; mixedCol[s] = mixed; mk = min(mk+1, m)
+      if havePrev: accept column s: copy the new RR row and column; mk = min(mk+1, m)
       if mixed and residual ≥ kNoiseFloor and rho > kRestartGrowth·rhoMin:
           reset(); numRestarts++; rhoMin = rho
           if numRestarts ≥ kMaxRestarts: status = disabled; reason = "too many restarts"
@@ -739,29 +811,19 @@ decCount = ritzCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
           while mk > 1 and condScaled(RR) < kCondMin: drop the oldest column (mk--)
           gamma = solveTruncated(RR, b)             # §4.4
           pending = true
-          eligible = mixed and mk ≥ 2 and all(mixedCol[j] for j in window)        # rev 1
-                     and ritzFloor ≤ residual ≤ kRitzHi                          # ritzFloor: §4.1
-          if eligible:
-              ritzRadius = gelfand(I + pinvTruncated(XX)·XR)   # §4.6
-              ritzCount = (ritzRadius > 1 + kRitzDelta) ? ritzCount+1 : 0
-              if ritzCount ≥ kRitzConsecutive:
-                  status = unstable; reason = "the plain map is locally unstable at this dt (Ritz radius …)"
-                  pending = false; reset()
-          else:
-              ritzCount = 0                                                        # rev 1
       broadcast (rank 0 → all): status, reason code, mk and slot order, gamma[0..mk-1], pending, residual,
-                                ritzRadius, numRestarts
+                                numRestarts
+      # rev 2: the rev-1 Ritz block of step 7 (eligibility, ritzRadius, ritzCount, status = unstable) is deleted
 
 **Notes that are not left to the implementer:**
 - The **first call** has `havePrev = false`. It evaluates one plain step, records `Rprev`/`Gprev`,
   and forms no column. The residual of that first evaluation is defined (x = the initial state)
   and counts for engagement. With β = 1, the initial state never enters a mix (§2.5).
 - **A plain call** (`accelerate = False`) records history exactly like an accelerated one. A plain
-  step is an Anderson step with γ = 0. The pending mix is discarded, not deferred. Its column is
-  flagged `mixedCol = false`, so the Ritz guard does not read a window containing it (rev 1).
-  The least squares does use it: plain-march columns capture the slowest mode well.
-- **`mixed` is rank-consistent** (`accelerate` is the same on every rank, `pending` is broadcast),
-  so `mixedCol` and the eligibility rule need no extra broadcast.
+  step is an Anderson step with γ = 0. The pending mix is discarded, not deferred. The least
+  squares uses its column like any other: plain-march columns capture the slowest mode well.
+  (Rev 1's `mixedCol` flag, which kept the Ritz guard off such windows, went with the guard.)
+- **`mixed` is rank-consistent** (`accelerate` is the same on every rank, `pending` is broadcast).
 - **The column-drop rule (cond < kCondMin) and the zero-norm drop** are unchanged. With the velocity
   metric, a column whose velocity differences are exactly zero (only Carried fields moved) has
   D_j = 0 and is dropped first.
@@ -794,25 +856,13 @@ slot order. This equals Σα_i[βg_i + (1−β)x_i] with Σα = 1, and α never 
 diagnostics, Σ|α| is computable from γ (α_oldest = γ_oldest, …, α_newest = 1 − γ_newest after
 differencing). Log it; do not test it (D5).
 
-### 4.6 The Ritz guard (host)
+### 4.6 The Ritz guard — removed in rev 2
 
-Run only on an eligible call (§4.3 step 7, rev 1). From the cached blocks (rev 1: velocity inner
-products, §3.2):
-- XX = GG − GR − GRᵀ + RR, i.e. ⟨Δx_i, Δx_j⟩ with Δx = Δg − Δr.
-- XR = GR − RR, i.e. ⟨Δx_i, Δr_j⟩.
-
-Under the velocity metric the estimate is the window's action on the velocity components. A growing
-mode that Anderson suppresses must show there to matter to a velocity monitor; one with no velocity
-component at all can only blow up P, which ends in the non-finite-residual exit.
-
-Then:
-1. M = XX⁺·XR, where XX⁺ is the truncated pseudo-inverse from §4.4 with eigenvalues below
-   `kCondMin`·λ_max discarded and no column dropping.
-2. T = I + M.
-3. ρ(T) by Gelfand: A ← T/‖T‖_max, L ← log‖T‖_max. Then 20 times: A ← A·A; s ← ‖A‖_max;
-   A ← A/s; L ← 2L + log s. Result: ρ = exp(L/2^20), with ρ = 0 if A vanishes.
-
-The bias is ≤ ln(C)/2^20 ≈ 1e-5 for C ≤ 1e6, well below `kRitzDelta`.
+Rev 0/1 estimated ρ(I + XX⁺·XR) on the window (XX = GG − GR − GRᵀ + RR, XR = GR − RR, a truncated
+pseudo-inverse, a Gelfand radius with 20 squarings) and declared "unstable" above 1 + 1e-3. Deleted
+with the guard, together with the two Gram blocks GG and GR that only it used. Why: "Revision 2" and
+D5. The oracle (`tests/study/anderson_oracle.py --rev 2`) still computes the radius as an offline
+instrument, with no consequence.
 
 ---
 
@@ -822,10 +872,10 @@ The bias is ≤ ln(C)/2^20 ≈ 1e-5 for C ≤ 1e6, well below `kRitzDelta`.
 
 | file | content |
 |---|---|
-| **core:** `include/peclet/core/solver/anderson.hpp` | `peclet::core::solver::AndersonCore` (D13) — grid-agnostic: takes a core-level descriptor `AndersonState`, which since rev 1 holds the state views, the roles Velocity/Carried, the ghost width `G`, `innerTolerance` (§4.1) and the collectives `AndersonComm`; the rev-0 fields fluid mask, `cP` and `gauged` and the Pressure role are deleted by WO-3b part 2. It implements §4 (kernels MIX/COPY/DIFF/R/COUNT, the reductions, host LS, guards, MPI packets). Header-only, `inline` members, beside `csr_bicgstab.hpp`/`vector_ops.hpp`. No flow dependency — unit-testable with synthetic maps. The parameter signature (dt, ρ, μ, F) is NOT in the core descriptor; the flow adapter checks it. |
+| **core:** `include/peclet/core/solver/anderson.hpp` | `peclet::core::solver::AndersonCore` (D13) — grid-agnostic: takes a core-level descriptor `AndersonState`, which since rev 2 holds the state views, the roles Velocity/Carried, the ghost width `G` and the collectives `AndersonComm`; the rev-0 fields fluid mask, `cP` and `gauged` and the Pressure role are deleted by WO-3b part 2, and rev 1's `innerTolerance` by WO-3c. It implements §4 (kernels MIX/COPY/DIFF/R/COUNT, the reductions, host LS, the safeguards of D5, MPI packets). Header-only, `inline` members, beside `csr_bicgstab.hpp`/`vector_ops.hpp`. No flow dependency — unit-testable with synthetic maps. The parameter signature (dt, ρ, μ, F) is NOT in the core descriptor; the flow adapter checks it. |
 | `src/anderson_accelerator.hpp` | `template <class Grid> class AndersonAccelerator` — holds `Solver<Grid>&` + an `AndersonCore`; `step(bool accelerate)` = §4.3 around `solver.step()`; signature read; status accessors. Explicitly instantiated in `src/flow_solver_staggered.cpp` / `src/flow_solver_colocated.cpp` with a matching `extern template` at the end of the header (the G.8 pattern; link via `peclet_flow_solver`). |
 | `src/flow_ibm.hpp` | declare `struct MarchState` (= a `core::solver::AndersonState` + the flow signature) and `MarchState marchState();` (public C++, **not bound**). |
-| `src/flow_ibm_diagnostics.hpp` | define `marchState()`: builds the field list and roles of §3.1 (velocity components Velocity, `P_` and the face field Carried), `e_`, `G`, `innerTolerance` (§4.1: `velocityResidualTolerance()` if > 0, else `useChebyshev_ ? chebRtol_ : pcgRtol_`), the signature values, and (MPI) `comm_`/`distributed_`; throws `std::runtime_error` naming the first refusal of §5.3. |
+| `src/flow_ibm_diagnostics.hpp` | define `marchState()`: builds the field list and roles of §3.1 (velocity components Velocity, `P_` and the face field Carried), `e_`, `G`, the signature values, and (MPI) `comm_`/`distributed_`; throws `std::runtime_error` naming the first refusal of §5.3. |
 | `src/flow_bindings.cpp` | bind the two adapters as private classes `_AndersonAccelerator` / `_AndersonAcceleratorColocated`; add the factory `diagnostics.anderson_accelerator(window=5, mixing=1.0)` (returns a new accelerator; `nb::keep_alive` on the solver). |
 | `packaging/flow_steady.py` → installed as `peclet/flow/steady.py` | `march_to_steady` and `MarchResult` (pure Python, §7); `flow_init.py` adds `from .steady import march_to_steady, MarchResult`; `CMakeLists.txt` gets the `configure_file` (build tree) and `install` lines mirroring those for `flow_init.py` (lines 194, 353). |
 
@@ -833,11 +883,11 @@ The bias is ≤ ln(C)/2^20 ≈ 1e-5 for C ≤ 1e6, well below `kRitzDelta`.
 - `std::vector<CCField> fields`;
 - `std::vector<Role> roles` (Velocity / Carried);
 - `C3 e`; `int G`;
-- `double innerTolerance`;
 - `std::array<double,6> signature` (dt, rho, mu, Fx, Fy, Fz, all internal);
 - under `PECLET_FLOW_MPI`, `MPI_Comm comm` and `bool distributed`.
 
-*Superseded by rev 1:* the fields `CCConst sdf`, `double cP`, `bool gauged` and the role Pressure.
+*Superseded by rev 2:* `double innerTolerance` (WO-7 removes it). *Superseded by rev 1:* the fields
+`CCConst sdf`, `double cP`, `bool gauged` and the role Pressure.
 If WO-3b part 2 is declined (Q14), the core keeps them: `marchState()` then leaves `sdf` empty,
 `cP` at 1 and `gauged` false, and gives `P_` the role Carried, so the core never reads them.
 
@@ -859,8 +909,10 @@ peclet.flow.march_to_steady(solver, monitor, rtol=1e-4, max_steps=5000, accelera
 - `callback(steps, phase)` is optional and called after every step, with phase ∈ {"accelerate",
   "certify", "plain"}. Use it for logging and checkpoints.
 - `MarchResult` is a frozen dataclass: `converged: bool`, `steps: int`, `accelerated_steps: int`,
-  `reason: str` ∈ {"certified", "max_steps", "unstable", "diverged"}, `num_restarts: int`,
-  `monitor: float` (the last value).
+  `reason: str` ∈ {"certified", "max_steps", "diverged"}, `num_restarts: int`,
+  `monitor: float` (the last value). (Rev 2 deletes the reason "unstable".) `converged=True` certifies
+  stationarity over the certification's plain steps, not dynamic stability (§2.4 item 3); the
+  docstring says so.
 - `accelerate=True` on an unsupported configuration **raises** with the refusal reason and the hint
   "pass accelerate=False". An allocation that does not fit raises with the byte count (§6.3).
 - No parameter is a cell-unit quantity. `rtol`, `slow_rate` and `roundoff` are dimensionless;
@@ -872,8 +924,8 @@ peclet.flow.march_to_steady(solver, monitor, rtol=1e-4, max_steps=5000, accelera
 acc = s.diagnostics.anderson_accelerator(window=5, mixing=1.0)
 acc.step(accelerate=True)   # one map evaluation (+ the lazy mix when accelerate and engaged)
 acc.residual                # property: relative velocity residual of the last evaluation (inf before the first)
-acc.status                  # "active" | "disabled" | "unstable";   acc.reason: str
-acc.num_restarts, acc.num_resets, acc.num_columns, acc.ritz_radius, acc.window, acc.mixing,
+acc.status                  # "active" | "disabled";   acc.reason: str   (rev 2: no "unstable")
+acc.num_restarts, acc.num_resets, acc.num_columns, acc.window, acc.mixing,   # rev 2: no ritz_radius
 acc.memory_bytes            # properties
 acc.reset(); acc.disable()  # methods
 ```
@@ -925,19 +977,20 @@ Allowed:
 - Reductions over inner entries use `MDRange3<CCExec>` from `policy.hpp`, x fastest.
 
 **Pass 2 packet layout:**
-- One fused reduction per window column j, each a 5-double `Kokkos::Sum` on a small struct:
-  RR(s,j), GG(s,j), GR(s,j), GR(j,s), b_j.
+- (rev 2) One reduction per window column j (per Velocity field), each a 2-double `Kokkos::Sum`:
+  RR(s,j) = ⟨dR_s, dR_j⟩ and b_j = ⟨dR_j, X⟩. It reads 3 vectors (dR_s, dR_j, X); **no reduction
+  reads a dG column** (dG is read only by MIX).
 - One reduction for ⟨X,X⟩ and U².
 - (rev 1) Every reduction reads the Velocity fields only; Carried fields are never read by a
   reduction.
-- Each reduction reads at most 5 vectors (dR_s, dG_s, dR_j, dG_j, X), so its value type stays small
-  enough for GPU shared memory. A single ~45-double reducer is rejected for that reason.
-- The partial results are packed into one host array of 5·mk + 2 doubles, followed by **one**
+- The partial results are packed into one host array of 2·mk + 2 doubles, followed by **one**
   `MPI_Allreduce(SUM)` on the solver's communicator.
+- *Superseded by rev 2:* the 5-double column reduction {RR(s,j), GG(s,j), GR(s,j), GR(j,s), b_j},
+  reading 5 vectors, and the 5·mk + 2 packet; GG and GR fed only the Ritz guard.
 
-**Collectives per accelerated step** (all latency-bound, ≤ 42 doubles):
+**Collectives per accelerated step** (all latency-bound, ≤ 18 doubles):
 1. COUNT → `MPI_Allreduce(SUM)`, 1 double.
-2. Pass 2 → `MPI_Allreduce(SUM)`, 5·mk + 2 doubles.
+2. Pass 2 → `MPI_Allreduce(SUM)`, 2·mk + 2 doubles (rev 1: 5·mk + 2).
 3. The decision packet → `MPI_Bcast` from rank 0, ≤ 16 doubles plus ints.
 
 *Superseded by rev 1:* revision 0's pass 1, a 3-double `MPI_Allreduce` of the gauged fluid pressure
@@ -963,14 +1016,15 @@ about 90 µs against a step of ~0.8 s.
 | COUNT (buf vs Gprev, inner) | 2 |
 | MIX (buf, Rprev, 2m history → buf, X) | 2m + 4 = 14 |
 | DIFF (buf, X, Rprev, Gprev → dR_s, dG_s, X) | 7 |
-| pass 2 (m+1 reductions × ≤ 5 reads, velocity fields only = ¾ of a vector) | ≈ 22.5 |
+| pass 2 (m+1 reductions × 3 reads, velocity fields only = ¾ of a vector; rev 2) | ≈ 13.5 |
 | commit (Gprev ← buf) | 2 |
-| **total** | **≈ 48 vectors ≈ 1.5 KB per cell** (rev 0: 56 vectors, 1.8 KB, with pass 1 and P in pass 2) |
+| **total** | **≈ 39 vectors ≈ 1.2 KB per cell** (rev 1: 48 vectors, 1.5 KB, with 5 reads per column; rev 0: 56 vectors, 1.8 KB, with pass 1 and P in pass 2) |
 
 A plain step moves the equivalent of ≈ 48 KB per cell (4.7–6.2e-8 s/cell-step on an RTX 5080 at
 ~960 GB/s), so the overhead is ≈ 3 % of a step. Gate G8 bounds it at 5 % on CUDA. If the gate
 fails, the first optimisation is to fuse pass 2's per-column reductions in pairs; numerics are
-unchanged.
+unchanged. (WO-5 measured the overhead as latency, ~26 synchronising calls, not traffic; rev 2
+removes 40 % of pass 2's traffic but none of its calls — the fusion is what addresses G8.)
 
 ### 6.3 Memory (the binding constraint)
 
@@ -1021,7 +1075,7 @@ instrument (target residual, budget, early exit), never the instrument.
             best, since, stagnated = inf, 0, False
             while steps < max_steps and acc.status == "active" and acc.residual > target:
                 acc.step(True); steps += 1; callback(steps, "accelerate")
-                if acc.status == "unstable": return MarchResult(False, steps, "unstable", ...)
+                # rev 2: no "unstable" status; rev 1 returned MarchResult(False, steps, "unstable") here
                 if acc.residual <= 0.5 * best: best, since = acc.residual, 0
                 else: since += 1
                 if since >= 10 * window: stagnated = True; break
@@ -1089,6 +1143,14 @@ carry at most rtol of remaining change, since its error is at most residual/(1 �
 this Δt departs from the accelerated state. The honest outcome is whatever the unaccelerated march
 does from there: converge elsewhere, oscillate until `max_steps`, or diverge.
 
+**What `converged=True` certifies (rev 2, stated).** Stationarity at this Δt over the
+certification's plain steps — the instrument's own statement, made on plain steps — and not that a
+plain march from the initial state would arrive there (§2.4 item 3, §10 Q18). With the guard gone,
+every way an unstable plain map can end an accelerated march goes through this section's plain-step
+logic: growth → the plain march decides; R ≥ 1 → no pass → budget / slow → resume; stagnation →
+the plain march decides. The reasons a march can return are "certified", "max_steps" and
+"diverged".
+
 **Measured cost** (revision-1 oracle, production, m = 5): the full table is in "Revision 1".
 - §11 collocated N = 16: 39 accelerated + 50 certification = 89 steps against 395, **4.4×**.
 - Staggered N = 16: 21 + 30 = 51 against 75, **1.47×**. The instrument's fixed cost of at least
@@ -1122,7 +1184,7 @@ does from there: converge elsewhere, oscillate until `max_steps`, or diverge.
 | **G4c** MPI ctest | `test_anderson_mpi` (C++, `tests/kokkos_mpi`) | staggered N = 16 sphere, 40 `acc.step(True)`, np = 1, 2, 4; plus U7 | max\|u_np − u_1\| ≤ 1e-8·max\|u_1\|; γ bitwise equal on all ranks of a run (assert after the Bcast) |
 | **G5** restart | interrupt at step 25: `get_field` u,v,w,p → fresh solver, same setup → `set_field` → `march_to_steady` | §11 N = 16 collocated + staggered, tight | K vs uninterrupted accelerated K ≤ 1e-8; total steps ≤ uninterrupted + 15 (report); variant with `set_state` (velocity only): K ≤ 1e-8, extra steps reported |
 | **G6** finite Re | tight `march_to_steady`, accelerated vs plain | staggered §11 sphere N = 16 at μ = 0.05, dt = 3.906e-2 (Re ≈ 10, measured stable); collocated ghost same case (state n_s = 7); a random array at Re ≈ 10 and ≈ 100 (§10 Q3) | \|K_acc/K_plain − 1\| ≤ 1e-8; steps_acc ≤ steps_plain; report ratios (prototype: 2.5× to 1e-4 error at Re ≈ 10) |
-| **G7** unstable / unsteady | (a) both drivers on a case whose plain march diverges; (b) synthetic unstable maps; (c) false-alarm census | (a) staggered §11 sphere N = 16, μ = 0.0158, dt = 1.234e-2 (plain NaN at step ≈ 435, measured); (b) core unit test U4; (c) every G1–G6 run | (a) `converged=False` for accelerate True **and** False, no K reported; (b) status "unstable" within 3m steps of engagement; (c) status never "unstable", and every **eligible** Ritz reading (§4.3 step 7, rev 1) ≤ 1.0005 (rev-1 oracle: max 0.9974 over 21 runs) |
+| **G7** unstable / unsteady (rev 2) | (a) both drivers on a case whose plain march diverges; (b) the core converges on an unstable and on a stable non-normal map and judges neither (U4, U4b); the driver's instrument never passes a growing tail (WO-7 scripted test iv); (c) no false failure | (a) staggered §11 sphere N = 16, μ = 0.0158, dt = 1.234e-2, SOU, production, windows 3, 5 and 8 (plain NaN at step ≈ 440, measured); (b) core U4, U4b; flow ctest `march_to_steady`; (c) every G1–G6 run | (a) `converged=False` for accelerate False and True at every window, reason ∈ {"diverged", "max_steps"}, no K reported (rev-2 oracle: diverged at 312 / 270 / 208 steps); (b) as specified under U4 / U4b and WO-7; (c) every accelerated run whose plain march converges returns `converged=True` and meets its own bar (rev-2 oracle: 16 of 16 tight runs, 42 of 42 production). *Superseded by rev 2:* (b) "status 'unstable' within 3m steps of engagement"; (c) "status never 'unstable', and every eligible Ritz reading ≤ 1.0005" |
 | **G8** performance + memory | accelerator time (inside the adapter, excluding `solver.step()`), mean over 50 steps; `memory_bytes` | 64³ §11-type case, staggered + collocated, CUDA and host | overhead ≤ 5 % (CUDA), ≤ 8 % (host) of the mean plain step; `memory_bytes` = formula §6.3 exactly |
 
 **Core unit tests** (in **core**: `tests/test_anderson.cpp`, Kokkos-gated like `test_graph_amg_device.cpp`; U7 in core's MPI tests; synthetic maps on Views, host and CUDA):
@@ -1133,29 +1195,27 @@ does from there: converge elsewhere, oscillate until `max_steps`, or diverge.
 - **U2 affine hull:** every g output satisfies Σx_i = S. Mixed states satisfy it to 1e-14·|S|.
 - **U3 restore:** a map that returns NaN at the 3rd mixed iterate. Afterwards buf == Gprev
   bitwise, status "disabled", and the next `step(false)` works.
-- **U4 instability:** J with eigenvalues {0…0.9, 1.02} and a 2×2 rotation block of modulus 1.01.
-  Status becomes "unstable". A stable twin (max 0.996) never does, and its ritz_radius converges
-  within 1e-3 of 0.996.
+- **U4 (rev 2) — the core converges on an unstable map and judges nothing.** J with eigenvalues
+  {0…0.9, 1.02} and a 2×2 rotation block of modulus 1.01, c = 1 (the plain march diverges). 400
+  `step(true)` calls with no stop: status stays Active after every call, 0 restarts, and the
+  residual is ≤ 1e-10 within 300 calls (rev-2 oracle: 162, round-off sensitive — 146 in a variant
+  that applies the block element-wise; 1e-12 at 203). This pins the GMRES-like
+  property §2.4 relies on — the reason stability evidence must come from plain steps.
+  *Superseded by rev 2:* "Status becomes 'unstable' [within 3m steps of engagement]. A stable twin
+  (max 0.996) never does, and its ritz_radius converges within 1e-3 of 0.996."
+- **U4b (rev 2) — a stable non-normal map.** U4's harness with the 2×2 block replaced by
+  [[0.99, 1], [0, 0.99]] and the outlier entry set to 0.5: ρ(J) = 0.99, the plain march converges.
+  Assert status Active after every call, 0 restarts, residual ≤ 1e-10 within 150 calls (rev-2
+  oracle: 91). The test's comment records that the rev-1 guard declared "unstable" here at call 13
+  (radius 1.027) — the counterexample that removed it. Harness change: `LinearMap`'s rotation
+  (ra, rb) becomes a general 2×2 block (b00, b01, b10, b11); U4 passes (ra, −rb, rb, ra).
 - **U5 conditioning:** a map whose differences are rank-1. Columns drop, γ stays finite, no NaN.
 - **U6 change detection:** writing an inner entry between calls resets the history (`num_resets`
   increments, no mix applied). Writing only ghosts does not.
 - **U7 (MPI):** U1 distributed over np = 1, 2, 4. γ is equal on all ranks, and iterates are within
   1e-13 of np = 1 after 20 steps.
-- **U8 (rev 1) — no Ritz on plain windows.**
-  - *Setup:* x ← Jx + c + η, with J diagonal in [0, 0.999] and η a deterministic pseudo-random
-    perturbation of 1e-8·‖x‖ per evaluation (the inner-solve noise).
-  - *Plain phase:* 200 `step(false)` calls. Assert `ritzRadius` is NaN after every call and the
-    status stays "active".
-  - *Accelerated phase:* 50 `step(true)` calls with `innerTolerance = 1e-8`. Assert status never
-    "unstable".
-  - *Control:* the same accelerated sequence with eligibility forced to the rev-0 rule (a test-only
-    hook, or a recorded pre-delta build) is allowed to fail. Record it; do not assert it.
-- **U9 (rev 1) — the Ritz floor.** U4's stable twin run to a residual of 1e-12.
-  - With `innerTolerance = 1e-8`: assert `ritzRadius` is NaN on every call whose residual is
-    < 1e-5, and finite on at least one eligible call above it.
-  - With `innerTolerance = 0`: assert it is evaluated down to 1e-10.
-  - U4 itself must still report "unstable" within 3m steps of engagement (it runs only mixed
-    calls).
+- **U8, U9 (rev 1) — deleted in rev 2** with the guard (they tested the Ritz eligibility rule and
+  floor). So is the Gelfand unit test of `test_anderson.cpp`.
 - **U10 (rev 1, WO-3b part 2) — Carried fields.** A two-field state (Velocity + Carried) whose map
   moves only the Carried field after step 10. Assert:
   - the residual is 0 from then on;
@@ -1183,7 +1243,7 @@ run the blocking clang-format 18.1.8 check on `src/` and `tests/`. Record number
   - Window rule re-applied: not met, m stays 5.
 - The oracle stays the reference for WO-4's comparison. `--rev 0` reproduces WO-1.
 
-**WO-2 — `Solver::marchState()` and refusals (rev 1).**
+**WO-2 — `Solver::marchState()` and refusals (rev 1).** *(Rev 2: WO-7 removes `innerTolerance` and its checks.)*
 - Declaration in `flow_ibm.hpp`, definition in `flow_ibm_diagnostics.hpp` (§5.1, §5.3). The rev-1
   descriptor holds roles Velocity/Carried (P and the face field Carried) and `innerTolerance`
   (§4.1), and no `sdf`, `cP` or `gauged`.
@@ -1203,7 +1263,7 @@ Until then flow builds against the sibling core.
 
 **WO-3b — core delta for revision 1 (in `../core-anderson`, branch `anderson`; before WO-4).** Two
 commits, so that part 2 reverts on its own.
-- **Part 1 (required): the guard's scope.**
+- **Part 1 (required): the guard's scope.** *(Rev 2: undone by WO-3c.)*
   - `AndersonState::innerTolerance`: a `double`, default 0. `validate()` requires it finite and ≥ 0.
     Doc: "relative tolerance of the caller's inner solves; sets the Ritz floor; 0 = unknown".
   - `static constexpr double kRitzFloorFactor = 1000.0`, and
@@ -1275,8 +1335,84 @@ commits, so that part 2 reverts on its own.
     metric (c_P-weighted, gauge removed) is superseded by D3 rev 1.
   - "Steady state is certified by the unchanged stop instrument on PLAIN steps…": its residual
     becomes the velocity residual, its budget 2·(num_passes + 3) with the early slow exit (D6 rev 1).
-- Add a register entry for the guard's scope (D5 rev 1).
+- Add a register entry for the guard's scope (D5 rev 1). *Superseded by rev 2:* that entry (drafted
+  PENDING in the log) is replaced by the rev-2 draft "The Anderson accelerator has no instability
+  guard…" (log, entry "Revision 2"), which records the reversal of D5's old "Rejected: no
+  instability guard".
 - *Gate:* the docs build (`docs.yml`) is clean.
+
+**Revision 2 work orders.** Order: **WO-7 (flow) → WO-3c (core) → WO-8 (re-gate)**. WO-7 removes
+every flow use of what WO-3c deletes, so it compiles against the core before and after WO-3c and
+every commit builds. Between the two commits the old core still runs its guard at the floor 1e-10
+(flow no longer sets `innerTolerance`), and a firing then shows in the driver as status ≠ "active",
+i.e. the plain march continues — never gate or measure in that intermediate state.
+
+**WO-7 — flow delta for revision 2 (in `../flow-anderson`, branch `anderson`).** One commit.
+- `packaging/flow_steady.py`: delete `if acc.status == "unstable": return result(False, "unstable")`.
+  Docstring: reason ∈ {"certified", "max_steps", "diverged"}; add one sentence — "converged=True
+  certifies that the state passed the stop test on consecutive plain steps at this dt (stationarity);
+  it does not certify that a plain march from the initial state would reach it."
+- `src/anderson_accelerator.hpp`: delete `ritzRadius()` and `st.innerTolerance = ms.innerTolerance;`.
+- `src/flow_ibm.hpp`: delete `MarchState::innerTolerance` and the comment sentence that describes it
+  (around line 1294). `src/flow_ibm_diagnostics.hpp`: delete the `ms.innerTolerance = …` line (≈ 370).
+- `src/flow_bindings.cpp`: `status` doc → "'active' or 'disabled' (acceleration stopped; steps are
+  plain)"; delete the `ritz_radius` property.
+- `tests/kokkos/test_march_state.cpp`: delete the `innerTolerance` block (three checks) and its line
+  in the header comment.
+- `tests/python/test_march_to_steady.py`:
+  - G7a: run accelerate=True at window 3, 5 and 8 (plus False); assert `not converged` and reason ∈
+    {"diverged", "max_steps"} (rev-2 oracle: diverged at 312 / 270 / 208; plain 440).
+  - Scripted `certify` test (iv): monitor blocks whose changes give R = 0.9, 0.9 (two passes), then
+    R = 1.1 for every later block → returns "budget" after exactly 2·(num_passes + 3) blocks and
+    never "pass" (R ≥ 1 resets the pass count — the property rev 2 relies on).
+- `tests/study/steady_acceleration_gates.py`: drop `acc.ritz_radius` and the census fields
+  `ritz_max`, `ritz_n`, `ritz_over_1p0005`, `unstable_at`; G7c reports, per case, plain converged
+  vs accelerated converged.
+- `CLAUDE.md` "Steady marches": reason set {"certified", "max_steps", "diverged"}; developer tier
+  without `ritz_radius`; status "active" | "disabled"; the stationarity sentence above.
+- `tests/study/anderson_oracle.py` already has `--rev 2` (this revision's commit); nothing to do.
+- *Gate (host build `build_omp`):* G0(a) state hashes unchanged (`step()` untouched); the new ctest
+  `march_to_steady` passes; G0(c) the battery passes (`-LE bench`, OMP bound).
+
+**WO-3c — core delta for revision 2 (in `../core-anderson`, branch `anderson`; after WO-7, and
+after the concurrent pass-2 fusion commit has landed — rebase on it, do not edit the reductions in
+parallel with it).** One commit.
+- Delete from `include/peclet/core/solver/anderson.hpp`:
+  - `AndersonState::innerTolerance` and its `validate()` check;
+  - `kRitzFloorFactor`, `kRitzDelta`, `kRitzHi`, `kRitzConsecutive`, `kGelfandSquarings`;
+  - `Status::Unstable` (keep `Active = 0`, `Disabled = 1`), `Reason::Unstable` and its
+    `reasonText` case;
+  - `ritzEstimate()`, the Gelfand routine and the truncated pseudo-inverse used only by it (keep
+    whatever `solveTruncated` shares);
+  - `gg_`, `gr_`, `mixedCol_`, `allMixed()`, `ritzCount_`, `ritzRadius_`, `ritzRadius()`,
+    `ritzFloor()`, and `ritzRadius` in the broadcast packet;
+  - the step-7 eligibility block (`eligible = …`, the radius, the count, the Unstable transition)
+    and the `ritzCount_ = 0` resets.
+- Pass 2: the per-(velocity field, column) reduction becomes `SumN<2>` {⟨dR_s, dR_j⟩, ⟨dR_j, X⟩},
+  reading dR_s, dR_j and X only; the packet is 2·nCols + 2 doubles; the host copies the RR row and
+  column and b. dG views stay (MIX reads them).
+- Tests (`tests/test_anderson.cpp`, `tests/anderson_test_maps.hpp`): U4 rewritten and U4b added as
+  §8 specifies (the 2×2 block generalisation); U8, U9 and the Gelfand unit test deleted; the rest
+  untouched.
+- Doc comments of §4.1–§4.3, §4.6 and §6.1 updated to match.
+- *Gate:*
+  - host-openmp: the printed digests of U1a, U1b, U1c, U2, U3, U5, U6 and U10 are **identical** to
+    the build just before WO-3c (no guard fired in them, and the guard never fed γ; RR and b are
+    the same sums with the same per-thread partition). A changed digest stops the work order.
+  - CUDA: all tests pass; iterates may differ from the pre-delta build at reduction round-off (the
+    reducer's value type shrinks from 5 to 2 doubles, which may change the block size).
+  - U4 and U4b pass on host and CUDA; U7 at np = 1, 2, 4.
+
+**WO-8 — re-gate flow on the new core (no code).**
+- Rebuild `build_omp` (and `build_cuda`) against core-anderson after WO-3c.
+- G1 tight, m = 5, on §11 collocated N14 and staggered N20 (the WO-5 failures): `converged=True`
+  and |K_acc/K_plain − 1| ≤ 1e-8 against the WO-5 plain K (rev-2 oracle: 2.5e-10 in 153 steps,
+  6.2e-10 in 184).
+- G7a at windows 3, 5, 8 and plain: all `converged=False`, reasons "diverged" / "max_steps".
+- Production step counts unchanged from WO-5 G2 on §11 collocated N16 m5 (89), staggered N16 m5
+  (51) and the staggered bed m5 (93) — the guard never fired in production.
+- G8 re-measured with the same protocol (report only; its bar is the fusion's business).
+- Log every number; this closes G7c.
 
 ---
 
@@ -1290,7 +1426,7 @@ and has a default that work proceeds with.
 | Q1 | Should `march_to_steady` default to `accelerate=True`? | preference | **DECIDED by the user 2026-10-02: pre-registered rule** — `True` iff the dense bed gains ≥ 1.5× in wall time at G2 (D11) | — |
 | Q2 | Which dense random bed (φ ≈ 0.6) and resolution is the G1/G3 reference? | fact | the smallest dense-bed configuration in `~/Codes/peclet-study-A1-drag-audit/scripts/`, at its lowest resolution | A1 owner names the file |
 | Q3 | Which random array and Δt rule for G6 at Re ≈ 10, 100? | fact | the A1 finite-Re configuration at its lowest resolution with A1's own Δt rule; if none exists, the §11 sphere at Re ≈ 10 only (measured stable), Re ≈ 100 reported as "not run" | A1 owner |
-| Q4 | Do the §4.1 safeguard constants cause false restarts/"unstable" on production beds? | fact | **ANSWERED by WO-1:** restarts never (0 in every run); false "unstable" yes, on plain windows (rev 0). Rev 1 fixes the guard's *scope* (D5); no constant was tuned | WO-5's G7c re-checks |
+| Q4 | Do the §4.1 safeguard constants cause false restarts/"unstable" on production beds? | fact | **ANSWERED by WO-1:** restarts never (0 in every run); false "unstable" yes, on plain windows (rev 0). Rev 1 fixed the guard's *scope*; WO-5 then found false "unstable" at tight settings, and rev 2 removes the guard | — |
 | Q5 | Should A1 use an interim driver on the released wheel 1.2.0? | preference | **no**; A1 adopts on the flow release carrying this (the oracle is host-only and copies) | user (A1 budget vs effort) |
 | Q6 | Largest per-GPU grid in A1 production? Runs > 7.5 M cells on a 16 GB card do not fit at m = 5 | fact | such runs pass `accelerate=False` or go to two GPUs; the constructor's error names the bytes | A1 owner |
 | Q7 | Should the collocated face field be registered (`uf`, `vf`, `wf` in the field registry) so a collocated-advection checkpoint round-trips exactly? It would also make `redistribute` carry it, fixing CLAUDE.md's open item but changing a rebalanced run's numerics | preference (changes an existing path) | **not done here**; the collocated-advection restart re-seeds u_f (a transient, same fixed point) | user, as its own recorded decision |
@@ -1302,13 +1438,16 @@ and has a default that work proceeds with.
 | Q12 | Does a mixed iterate cost more inner work than a plain one (velocity sweeps; the oracle cannot count them)? | fact | proceed. Pressure iterations per step are equal (staggered bed 11.47 vs 11.49, collocated 31.2 vs 33.3). Host map time per step on a shared, loaded 48-core box: +3 % collocated bed, +10–28 % staggered bed (two repeats); map-time ratio 2.7–3.2× staggered, 2.2× collocated | G2's wall ratio on the C++ build (WO-5), host and CUDA |
 | Q13 | Which dense bed decides D11's 1.5× rule: staggered, collocated, or both? | preference | **staggered decides**: A1's solver is `peclet.flow.Solver` only (`common.make_solver`); the collocated bed is reported beside it. Both clear 1.5× in steps (3.5×, 2.3×) | user |
 | Q14 | Delete the core's Pressure role, `sdf`, `cP`, `gauged` and pass 1 (WO-3b part 2)? | preference (a tested core interface) | **yes**, as a separate commit, before the core tag. It has no consumer after rev 1, and removing it after the tag would be a breaking change | user / core owner |
-| Q15 | Is `kRitzFloorFactor = 1000` right on other configurations (GPU, MPI, large D)? | fact | 1000. Evidence: false readings only at ≤ 5τ, plus one isolated reading at 140τ; the true positive at ≈ 1e6τ | G7c census over WO-5 (every eligible reading ≤ 1.0005) |
+| Q15 | Is `kRitzFloorFactor = 1000` right on other configurations (GPU, MPI, large D)? | fact | **CLOSED by rev 2** — answered no by WO-5 (false "unstable" at tight settings); the guard and the constant are removed | — |
 | Q16 | Is the certification budget 2·(num_passes + 3) enough at production resolution (N = 128 beds, CUDA)? | fact | as stated. Measured passes within 5–10 blocks; one run (collocated bed, m = 3) used 12 and resumed once | G2 at WO-5; if a case needs > 12 blocks routinely, report the d/R traces to the architect, do not raise the budget |
 | Q17 | The 1,168 sealed single-cell pockets on the A1 bed: their pressure is never converged by either march (§1.2) and `get_p()` returns arbitrary values there. Act on it? | preference (outside this campaign) | **no action here**; note it for the A1 owner. It touches neither velocity nor K. A pressure post-processing user should mask pockets | user |
+| Q18 | **(rev 2)** What does `converged=True` from an accelerated march promise: stationarity at this Δt over the certification's plain steps, or also that the plain march from the initial state would arrive there (dynamic stability)? | preference | **stationarity**, documented in the docstring, CLAUDE.md and §2.4 item 3. Reasons: it is exactly what the instrument certifies on the plain march too; in the supported scope the fixed point is unique (§2.3), so the certificate names THE discrete steady solution; for the numerical kind of instability (Δt beyond the explicit-advection limit) that solution is the right answer. A user who needs the stronger statement runs the plain march (`accelerate=False`) from the initial state — at its cost, the only test a slowly growing mode cannot pass; continuing plain from the accelerated result watches the same short horizon and adds little | user. If the user wants a built-in stability statement, it needs its own design pass: a plain verification tail whose horizon the user sets (detecting per-step growth 1 + ε needs ≳ 1/ε steps); a Ritz-type a-priori test is not that mechanism (rev 2) |
+| Q19 | **(rev 2)** Does WO-3c reduce the measured G8 overhead? | fact | expected: little — WO-5 measured latency (~26 synchronising calls), and WO-3c removes traffic, not calls | WO-8 re-measures G8 after WO-3c and the fusion |
 
 **User ruling 2026-10-02:** the stated defaults of Q2–Q8, Q10 and Q11 are accepted; Q9 is
 decided the other way (D13); Q1 is decided by a pre-registered measurement rule (D11). Q12–Q17 are
-new in rev 1 and run on their defaults until the user rules.
+new in rev 1 and run on their defaults until the user rules. Q18–Q19 are new in rev 2 and likewise run on their
+defaults.
 
 **Risks stated plainly:**
 - **Staggered §11 gains are modest (1.47× at N = 16, 2.7× at N = 24).** The instrument's fixed
@@ -1319,17 +1458,22 @@ new in rev 1 and run on their defaults until the user rules.
   on collocated N = 16). G2's bars are per case and per window, not on the trend.
 - **Finite-Re gains are modest (2.6× at Re ≈ 10, m = 5).** CFL-bound Δt gives a continuum of slow
   modes; windows ≤ 8 cannot deflate a continuum.
-- **Anderson can reach states the plain march at that Δt cannot** (§2.4, measured). The Ritz guard
-  and the certification-growth fallback cover the cases where the plain march would visibly diverge
-  or Anderson actively suppresses growth. A weakly unstable steady state can still be certified, but
-  then the unaccelerated instrument would certify it too.
+- **Anderson can reach states the plain march at that Δt cannot** (§2.4, measured). Since rev 2
+  only plain steps decide: growth that reaches the monitor within the certification ends the march
+  not-converged (G7a, all windows); growth too slow for that can be certified — measured on U4's
+  map (1.02 per step): certified within 2.3e-11 of the exact fixed point when the map is exact, not
+  converged at evaluation noise 1e-8. That certificate is true as a stationarity statement (Q18) and
+  names the unique discrete steady solution; it does not say the flow settles there.
+  *Superseded by rev 2:* "The Ritz guard and the certification-growth fallback cover … ; a weakly
+  unstable steady state … the unaccelerated instrument would certify it too." The Ritz guard could
+  not cover that band either: its readings on stable non-normal maps (1.013–1.035) overlap it.
 - **Inner-solve cost at mixed iterates** may differ from plain iterates (Q12). Pressure
   iterations do not differ; host map time differed by +3 % to +28 % on a loaded machine. G2's
   wall-time ratio decides.
-- **The guard is blind below its floor** (1e-5 at production settings, rev 1). A growing mode
-  that Anderson suppresses only once the residual is below the floor is left to the certification:
-  growth exit, R ≥ 1 never passes, budget, then resume, then stagnation, then plain. That path
-  ends not-converged or diverged, never certified on a growing tail.
+- **No a-priori instability signal (rev 2).** A strongly unstable map now costs more steps before
+  the march gives up: G7a at m = 8 ends at step 208 (diverged) instead of 18 ("unstable"). That is
+  the price of never failing a converging case; on G7a at m = 3 / 5 the guard never fired anyway.
+  *Superseded by rev 2:* "The guard is blind below its floor…" (no guard, no floor).
 - **Monitor consistency under MPI** is the caller's responsibility (documented). A monitor that
   differs across ranks can deadlock the driver, as it would the study's `march()`.
 
