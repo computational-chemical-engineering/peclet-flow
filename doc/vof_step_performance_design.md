@@ -1754,3 +1754,220 @@ Each item carries a label and a default, so work can proceed unattended.
    `startup_steps=0` on restart.** Rejected: storing Pⁿ⁻¹; `set_field` hooks.
 7. **The split solve is MG-PCG on A0, independent of the driver selection;** the setter is
    order-independent of the rho closure. Rejected: following `useChebyshev_`/`useFcg_`.
+
+### 12.13 Addendum (2026-10-02): viscous stability. D-E2.8 is reversed and G-E2-BAL is re-derived
+
+**Why this section exists.** WO-E2.3 stopped (`doc/vof_step_performance_log.md`, "WO-E2.3 —
+STOPPED"):
+- G-E2-RED, G-E2-REC and G-E2-RST pass, and G-E2-BAL passes inviscid.
+- G-E2-BAL fails with viscosity. On the ratio-50 drop: μ = 0.0025 grows; μ = 0.01 grows ×1.04 per
+  step; μ = 0.1 blows up at step 22–23.
+- The bubble column reaches max|p| 6.9e5 against 577 after 300 steps.
+- §12.5 P3 was derived inviscid.
+
+This section:
+- replaces D-E2.8 and the split-stage order of §12.3 and §12.6;
+- extends P3 to viscosity;
+- restates G-E2-BAL and the static accuracy gates;
+- answers the implementer's points 2–4.
+
+Everything else in §12 stands.
+
+#### 12.13.1 Cause
+
+Compare the split increment with the exact increment computed from the same u*. Define
+`L_ρ = D(ρ_f⁻¹ G ·)`, `L0 = ρ0⁻¹ D G`, `K = L0⁻¹L_ρ`. K is similar to an SPD matrix; its Rayleigh
+quotient is `ρ0·Σ|Gv|²/ρ_f / Σ|Gv|²`, so its spectrum lies in [ρ0/ρ_max, 1]. Then S3 + S4 + S5 are
+exactly
+
+```
+δ_split = K δ_ex + (I − K) θΔPⁿ
+```
+
+**Two differences.** The schemes differ by this blend and, under D-E2.8, by the rotational term.
+- D-E2.8 reads `div(u**) = div(u*) + dt θ D(c G ΔPⁿ)`, with `c = 1/ρ0 − 1/ρ_f ≥ 0`.
+- So ΔP^{n+1} receives `+μ_r dt θ A_c ΔPⁿ`, with `A_c = −D c G ⪰ 0`.
+- That is an explicit **anti-diffusion** of the increment. It uses the light-phase mobility and acts
+  in the heavy phase.
+
+**Where §12.4's reasoning went wrong.** It said "q is lagged data and belongs with the predictor".
+That is false. The rotational term stands for the viscous action on every velocity change that the
+implicit solve did not see. That is the whole change u* → u^{n+1}, explicit part included. For
+constant μ on a periodic or walled box, the gradient (Helmholtz) part of `μL(u* − u^{n+1})` is
+exactly `G(μ div(u* − u^{n+1})) = G(μ div u*)`, because `div u^{n+1} = 0`. This holds for any
+projection, any ρ and any split. The extra `−μ_r div(u** − u*)` is not part of it.
+
+#### 12.13.2 D-E2.8′ (replaces D-E2.8): the rotational term reads div(u*)
+
+S7 uses `d = div(u*)`. This is the exact path's `div_`, under the exact path's filter rule. The
+split pressure update then differs from the exact one only by the increment blend above.
+
+**Split stages, new order** (replaces §12.3 S3/S4 and the `split` branch of §12.6):
+1. **S4′.** `projectAssembleDivergence()` on u*, unchanged: `div_ = D(u*)`, `rhs1_ = −div_`, as on
+   the exact path.
+2. **S3′.** The velocity pre-correction of §12.3 S3: the same fills and the same expression,
+   written as one inline face function
+   `q_c(j) = o_c(j) * (w_c * ((r0 / (0.5 * (rho(j) + rho(j - s_c))) - 1.0) * (cq * (dp(j) - dp(j - s_c)))))`.
+   Apply `u_c(j) -= q_c(j)` on the inner faces.
+3. **S3″.** Adjust the right-hand side on the inner cells, with the same inline function:
+   - `dq = ((q_x(i+s_x) − q_x(i)) + (q_y(i+s_y) − q_y(i))) + (q_z(i+s_z) − q_z(i))`, then
+     `if (dq != 0.0) rhs1_(i1) += dq;`.
+   - The guard keeps `rhs1_` bitwise, sign of zero included, in the reduction limit. Afterwards
+     `rhs1_ = −D(u**)` to rounding.
+   - The high face of the last inner cell reads the filled ρ and ΔP ghosts and the high-face
+     openness that `divergOpen` already reads.
+   - Under MPI, both ranks compute a shared face from identical inputs.
+4. **S5 and S6** are unchanged.
+5. **S7.** `d = div_` (= D(u*)). If `rotFilter_ && rotationalP_`, filter it exactly as
+   `projectPressureUpdate` does. Then the twin kernel.
+
+**Cost:** one more pointwise kernel, about 50 B/cell, with no halo exchange. It does not show in
+§12.8.
+
+**Unchanged:** θ, ρ0, the start-up and the history.
+- θ ≤ 1 is what keeps the history coefficient h below 1 (§12.13.3).
+- 2 exact start-up steps remain enough. A longer start-up cannot shorten the DF transient, because
+  ρ0/ρ_max sets its rate.
+
+**Rejected:**
+- **div(u**), i.e. D-E2.8.** Unstable for `μ_r dt κ_max/ρ0 > ρ0/(ρ_max − ρ0)` (§12.13.3).
+- **The rotational term switched off under the split.** It is stable, but it loses the rotational
+  accuracy and the bitwise reduction to the exact path (G-E2-RED).
+- **TBFsolver's non-incremental form.** TBFsolver's diffusion is explicit: an RK stage, with
+  diffusion inside `updateConveDiff` (`momentumEqn.f90:161–194`) and no viscous solve. So its
+  pressure has no viscous splitting to undo.
+  - flow uses backward-Euler viscosity. A non-incremental pressure outside the viscous solve has
+    the steady state `−μLu + Gp = f + μ dt L(ρ_f⁻¹ G p)`, which depends on dt.
+  - For a static drop, `Gp = σκ∇C` is concentrated on the interface, so this term is a
+    non-gradient force. It drives a spurious current ∝ μ dt σκ that never decays.
+  - That destroys P2, the exact equilibrium and the dt-independent steady states. It re-creates the
+    very σκ error the register objected to.
+  - Making flow's diffusion explicit for this driver would change the registered time integrator
+    and add a viscous dt limit. Not proposed.
+
+#### 12.13.3 Stability with viscosity (extends P3)
+
+**Model.** Frozen coefficients in a region of density ρ and viscosity μ; a Fourier mode with
+Laplacian symbol −κ, `0 < κ ≤ 4Σw_a` (12 isotropic, cell units). Define `a = ρ0/ρ`,
+`β = μ dt κ/ρ`, `β_r = μ_r dt κ/ρ`, `γ_r = μ_r dt κ/ρ0`. The predictor is backward Euler and uⁿ is
+solenoidal. For the pressure error e:
+
+```
+exact:  e^{n+1} = ((β − β_r)/(1+β)) eⁿ
+split:  e^{n+1} = s eⁿ + h (eⁿ − e^{n−1}),     s = 1 − (a + β_r)/(1+β)
+        D-E2.8′: h = θ(1 − a)          D-E2.8: h = θ(1 − a)(1 + γ_r)
+```
+
+**Criterion.** By Jury, the split is stable iff `h < 1`, `1 − s > 0` and `1 + s + 2h > 0`.
+
+**D-E2.8′ is stable for every dt and μ.**
+- `h ≤ 1 − a < 1` for θ ≤ 1, and `1 − s > 0` always.
+- `1 + s + 2h > 0` holds whenever `β_r ≤ 2β`, i.e. μ_r ≤ 2μ locally.
+- Every rotational mode flow has satisfies that, provided `rotWeight_ ≤ 2` and `varRotChi_ ≤ 2`
+  (defaults 1.0). The modes are:
+  - `rotWeight_·μ` (constant μ);
+  - `χ·μ_min ≤ χ·μ(x)` (min mode);
+  - `χ·μ(i)` (full mode);
+  - 0 (off).
+- The filter only lowers β_r.
+- The heavy-phase pair has `|z| = √(θ(1−a))`, as inviscid. Viscosity neither causes nor cures the
+  DF transient.
+
+**D-E2.8 is stable only if `(1−a)(1+γ_r) < 1`**, i.e. `μ_r dt κ_max/ρ0 < a/(1−a)`. For the probe
+(ρ0 = 1, ρ_max = 50, dt = 1.007, κ_max = 12) that gives μ_r < 1.7e-3. Measured: 0.001 is marginal,
+0.0025 grows, 0.01 grows ×1.04 per step, 0.1 blows up. The bound matches the measured onset.
+
+**Not covered by the model:** the interface faces, where a is mixed. G-E2-BAL and the column check
+(§12.13.4) cover them.
+
+**Precheck addition.** `constCoefPrecheck` raises if `rotWeight_ > 2` or
+`(varProps_ && varRotChi_ > 2)`. These are outside the proved region, and no configuration uses
+them.
+
+#### 12.13.4 What any Dodd–Ferrante scheme can and cannot match (re-derives G-E2-BAL)
+
+**The limit.** By the identity in §12.13.1, the split step removes the exact step's error component
+only K-weighted.
+- In the heavy phase `K ≈ ρ0/ρ_max`, and the extrapolation carries the rest.
+- With one constant-coefficient solve per step, a free transient therefore decays no faster than
+  `√(θ(1 − ρ0/ρ_max))` per step at θ = 1. θ = 0 gives about `1 − ρ0/ρ_max`, at the price of a
+  first-order splitting.
+- Faster decay needs several constant-coefficient solves per step. That is a Krylov solve of L_ρ
+  preconditioned by L0, with condition number ρ_max/ρ0, which costs more than the variable MG-PCG
+  it replaces.
+
+**Consequences:**
+- **"≤ 2× exact at step 200" is not achievable by any DF variant** whenever the start-up leaves a
+  heavy-phase remainder E0 above the exact path's level at step 200.
+  - The split's remainder at step n is at least `E0·(1 − ρ0/ρ_max)^{n/2}`: 0.137·E0 at n = 200,
+    ratio 50.
+  - The probe's div(u*) run (9.2e-5 against 2.3e-6 at step 200) is this transient, not a defect.
+- **What a correct split must show,** and what the gate now measures:
+  - (i) no growth;
+  - (ii) the split–exact difference decaying at the predicted rate;
+  - (iii) the same fixed point once the transient has gone (P2).
+
+**Definition.** `n_DF = ⌈14·ρ_max/ρ0⌉` steps gives a 10⁻³ decay at the P3 rate: 700 steps at ratio
+50, 13 800 at ratio 1000.
+
+**G-E2-BAL** replaces §12.10's μ = 0.1 item; the μ = 0 item stands.
+- Case as in §12.10: ρ_in/ρ_out ∈ {50, 0.02}, μ = 0.1 (constant μ).
+- Run split and exact from the identical setup for 1000 steps (≥ n_DF).
+- If the four runs exceed 120 s on the CI host, use 24³ with R = 6. The rates do not depend on
+  resolution.
+- **Pass, all of:**
+  - no growth: `max|u_split(n)| ≤ 1.5 × max_{m≤10} max|u_split(m)|` for every n;
+  - rate: with `D(n) = max|u_split(n) − u_exact(n)|`, require `D(1000) ≤ 1e-2·D(100)`. The model
+    gives about 1e-4;
+  - fixed point: `max|u_split(1000)| ≤ 2·max|u_exact(1000)| + 1e-14`.
+
+**Static-amplitude accuracy gates (§12.10 A1 static bubble, A2 translating bubble).** Their metrics
+are spurious-current amplitudes, which the start-up transient dominates. The same rule applies:
+- the comparison window starts at step n_DF of the split run. For A2, run several crossings if one
+  crossing is shorter than n_DF;
+- where n_DF exceeds a practical run (ratio 1000), the gate is no growth plus rate only: the
+  log-slope of D(n) over the run must be at least as steep as `0.8 · ½ ln(1 − ρ0/ρ_max)`. The static
+  accuracy at that ratio is reported, not gated;
+- this is a property of DF to state to the user: at ratio 10³, a heavy-phase pressure perturbation
+  needs about 10⁴ steps to decay by 10³;
+- A3 (Hysing) and A4 (bubble column) compare dynamic quantities much larger than the transient.
+  They are unchanged.
+
+**Column stability check** (new; it gates the WO-E2.3 commit and precedes WO-E2.6).
+- Run the bubble column from `ckpt_t43` with the split for 300 steps
+  (`e2/probe/prof_cc.py 300 --pcg --constcoef`).
+- **Pass:** max|p| and max|w| at step 300 ≤ 1.5 × the exact path's (measured: 577 and 16).
+- Otherwise STOP and report.
+
+#### 12.13.5 The implementer's points 2–4
+
+2. **Filtered rotational (`rotFilter_`): keep it,** applied as on the exact path. Under D-E2.8′ it
+   filters the same field, div(u*). G-E2-RED needs it in order to be bitwise, and its symbol ≤ 1
+   only lowers β_r.
+3. **`set_balanced_force_projection(True)` under the split: refuse it.** Add
+   `balancedForceActive()` to `constCoefPrecheck`, with a message that names both features. It
+   rebuilds the variable-ρ operator and runs a second pressure solve every step, the opposite of
+   D-E2.7, and the pair is unvalidated.
+4. **`stats()['theta']` is NaN before the first split step: accepted**, like `rho0`. Say so in the
+   docstring.
+
+#### 12.13.6 Changes to the work orders and the register
+
+- **WO-E2.3** resumes from `vof-e2-e23-stopped` (5b78816) with §12.13.2 and the precheck additions
+  (`balancedForceActive()`, `rotWeight_ > 2`, `varRotChi_ > 2`).
+  - **Accept,** on host-openmp and nvidia-cuda: G-E2-RED, G-E2-REC, G-E2-BAL (revised), and
+    G-E2-RST run **at μ = 0.1**, plus the column stability check.
+  - G-E2-RST was measured inviscid only because of the blow-up. The viscous restart is the
+    meaningful one.
+- **R-E2.2, sharpened.** A ratio-10³ rating rests on A3 case 2 and on no growth plus rate. Static
+  accuracy at that ratio cannot be tested in practical run lengths.
+- **§12.12 entry 1 is superseded by:** "Split pressure in incremental form; the rotational term
+  reads div(u*), the Helmholtz-consistent term for the whole change u* → u^{n+1}." Rejected:
+  - div(u**): explicit anti-diffusion of the increment, unstable for
+    `μ_r dt κ_max/ρ0 > ρ0/(ρ_max − ρ0)` (measured 2026-10-02);
+  - TBFsolver's non-incremental form: with implicit viscosity its steady state depends on dt and
+    carries a μ dt σκ spurious force.
+- **New register entry:** "Dodd–Ferrante gates measure stability, the transient rate
+  √(1 − ρ0/ρ_max) and the fixed point, not a fixed-step amplitude ratio. Static accuracy at ratio
+  ≥ 10³ is reported, not gated (n_DF ≈ 14·ρ_max/ρ0 steps)." Rejected: "≤ 2× exact at step 200",
+  which no one-solve-per-step DF variant can meet.
