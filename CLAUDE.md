@@ -363,7 +363,7 @@ deselected on its own; name the driver you want instead.
   the host GraphAMG (every host backend, every multi-rank run, every ineligible case) and, on a
   GPU backend, the **geometric-Krylov bottom** — one single-team launch of flexible CG
   preconditioned by a V-cycle over the geometric levels *below* the bottom (`CutcellMG::sub_`,
-  outside `lv_`), inner tolerance 1e-8 (relative, ∞-norm), cap 100, no host transfer. Eligible:
+  outside `lv_`), inner tolerance 1e-5 (relative, ∞-norm; E3), cap 100, no host transfer. Eligible:
   single rank, the singular operator (no outflow face), `auto`/`agglomerated` bottom, ≤ 8192 bottom
   cells, every interior bottom face open, ≥ 1 sub-level (`geoBottomIneligible()` names the first
   failure). `diagnostics.set_pressure_bottom_solver('auto' | 'geometric' | 'algebraic')` A/Bs them

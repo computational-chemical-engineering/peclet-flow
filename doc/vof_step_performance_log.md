@@ -570,3 +570,23 @@ unit problem's solve time rises as T falls (default T: 150 us per FCG iteration;
 5080's 1/64-rate FP64 on one SM. §4.1's premise (≈ 140 kFLOP per inner iteration, ≈ 0.2 ms per
 bottom) underestimates it ~10x on this card; on H100 / MI250X (FP64 1:2) the same kernel is
 expected 20-30x cheaper (§3.3), which this session could not measure.
+
+## 2026-10-02 — WO-6 / E3 (Q2): the geometric bottom's inner tolerance
+
+`kGeoTau` built at 1e-8, 1e-6 and 1e-5 (one CUDA module each; 1e-6 on an earlier draft of the
+kernel, 1e-8 and 1e-5 on the committed source, T = 640), 50 bubble-column steps from ckpt_t43
+(`prof.py 50 --pcg --dump --div`) against origin/main:
+
+| tau | outer iterations, 50 steps | per-step diff vs reference | max rel u v w p C | max div ratio | inner iterations per bottom |
+|---|---|---|---|---|---|
+| reference (GraphAMG, 1e-8 2-norm) | 653 | — | — | — | — |
+| 1e-8 | 653 | 0 on every step | 1.998e-14 | 1.000112 | 15-17 |
+| 1e-6 | 653 | 0 on every step | 5.156e-14 | 1.000121 | — |
+| 1e-5 | 653 | 0 on every step | 6.682e-14 | 1.000254 | 10-12 |
+
+Physics at 1e-5 (`d1_tolerance.py --cases static,hysing --rtols 1e-10`): static max|u|
+2.552041443788365e-03 identical; Hysing case 1 v_rise max rel 2.0e-16, its time and the final y_c
+identical, volume drift identical; p_iters_max 18 = 18. **Adopted: tau = 1e-5** (the loosest of
+the three with per-step outer iterations within +1 — here within 0). `GeoBottomKernel` per step
+(nsys, GPU 98 % busy with other work, indicative): 43.5 ms at 1e-8 against 18.9 ms at 1e-5 in
+back-to-back runs; the inner-iteration ratio (17 → 11) predicts ~1.5x.

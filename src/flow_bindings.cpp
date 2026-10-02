@@ -577,7 +577,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(periodic / wall) operator, a bottom of at most 8192 cells whose interior faces are "
           "all open, with a geometric level below it, one device launch runs flexible CG "
           "preconditioned by a V-cycle over the geometric levels below the bottom (inner "
-          "tolerance 1e-8, cap 100) -- no host transfer; everywhere else the host GraphAMG solve. "
+          "tolerance 1e-5, cap 100) -- no host transfer; everywhere else the host GraphAMG solve. "
           "'geometric' forces the device engine and raises at the bottom solve, naming the failed "
           "condition, where it is not eligible; 'algebraic' forces GraphAMG (the A/B instrument). "
           "Host backends always run GraphAMG under 'auto'. "

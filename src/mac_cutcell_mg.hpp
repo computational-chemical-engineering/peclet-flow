@@ -467,15 +467,17 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, i
 // geoBottomIneligible) is solved in ONE launch instead of the host GraphAMG round trip: a single
 // team runs flexible CG (Polak-Ribiere) on the bottom level's own operator, preconditioned by one
 // symmetric V-cycle M over the geometric sub-levels below the bottom (CutcellMG::sub_), to a
-// relative infinity-norm residual of 1e-8, capped at 100 iterations. Every per-cell update is the
-// A0 cell body the per-kernel V-cycle calls, behind the same ghost policy (the periodic wrap fill
-// before each colour and before the residual, the zero-gradient wall ghost before a prolongation),
-// so M is the per-kernel V-cycle over the same levels except for the summation order of its
-// fluid-mean reductions (team reductions here). The constants are fixed, not setters; E3 is the
-// only route to changing tau. Ghost width 1 on every level (single rank).
+// relative infinity-norm residual of tau = 1e-5 (E3), capped at 100 iterations. Every per-cell
+// update is the A0 cell body the per-kernel V-cycle calls, behind the same ghost policy (the
+// periodic wrap fill before each colour and before the residual, the zero-gradient wall ghost
+// before a prolongation), so M is the per-kernel V-cycle over the same levels except for the
+// summation order of its fluid-mean reductions (team reductions here). The constants are fixed, not
+// setters; E3 is the only route to changing tau. Ghost width 1 on every level (single rank).
 inline constexpr long kGeoBottomMaxCells = 8192;
 inline constexpr int kGeoMaxLevels = 16;  // bottom + sub-levels: <= 14, as 8192 = 2^13 cells
-inline constexpr double kGeoTau = 1e-8;
+// tau: 1e-5 since E3 (§7 WO-6, Q2): 1e-8, 1e-6 and 1e-5 give the SAME outer iteration count on
+// every one of the 50 bubble-column steps (653 total); 1e-5 cuts the inner iterations 17 -> 11.
+inline constexpr double kGeoTau = 1e-5;
 inline constexpr int kGeoCap = 100, kGeoPre = 2, kGeoPost = 2, kGeoSweeps = 12;
 
 struct GeoLevel {
