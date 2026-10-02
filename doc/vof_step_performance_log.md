@@ -470,3 +470,23 @@ Open points for the design session (each reversible, none decided here):
    refusal list; the split path runs with it (re-installing A0 every step). Recommend refusing it.
 4. `pressure_constant_coefficient_stats()['theta']` is NaN before the first split step (mirrors
    rho0; the note did not say).
+
+### Handoff (P4, 2026-10-02)
+
+- **Done on `vof-e2`** (not pushed): 1860ff5 WO-E2.1, dc1b8b8 WO-E2.0 record, 7c12ed8 WO-E2.2,
+  then this log. G-BIT PASS for E2.1 and E2.2 (CUDA + host 1x8/1x24); NAMING check: no conflict
+  (`enabled` leads, count argument `startup_steps` follows flow's `levels=`/`vcycles=` style, no
+  earlier spelling of the concept in the suite).
+- **Parked**: WO-E2.3 candidate on local branch `vof-e2-e23-stopped` (5b78816) — RED/REC/RST pass,
+  BAL mu=0.1 fails (above). WO-E2.4 … E2.7 not started; they depend on the D-E2.8 decision.
+- **Next, after the design session answers point 1:** `git checkout vof-e2-e23-stopped`, change S7
+  per the decision, then
+  `cmake --build build_omp --target test_pressure_constant_coefficient peclet_flow -j16 &&
+  OMP_NUM_THREADS=8 OMP_PROC_BIND=false ./build_omp/tests/kokkos/test_pressure_constant_coefficient`
+  (same on `build_cuda`), G-BIT with `~/Codes/bubble_column_perf/e2/gbit.sh <label> cuda|omp
+  <frozen module dir>` against `e2/baseline/`, the BAL viscosity probe
+  `PYTHONPATH=<build> python ~/Codes/bubble_column_perf/e2/probe/bal_mu.py MU 1 1 300`, and the
+  column check `python e2/probe/prof_cc.py 300 --pcg --constcoef --dump on.npz` (blew up: max|p|
+  6.9e5 vs 577 off).
+- Batteries for the committed tree: `~/Codes/bubble_column_perf/e2/battery.sh` (results in
+  `e2/ctest_{cuda,omp}.log`).
