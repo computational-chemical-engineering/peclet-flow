@@ -1,0 +1,40 @@
+diff --git a/src/flow_ibm_geometry.hpp b/src/flow_ibm_geometry.hpp
+index 7528d60..6a3dffc 100644
+--- a/src/flow_ibm_geometry.hpp
++++ b/src/flow_ibm_geometry.hpp
+@@ -118,6 +118,35 @@ void Solver<Grid>::setSolidDevice(CCField din, bool cutcellPressure) {
+   vmgDecided_ = false;
+   if (cutcellPressure_) {
+     setSolidBuildOpenness();
++#ifdef PECLET_FLOW_STUDY_MASK_CLOSED
++    // STUDY ONLY (pocket campaign, not production): mask every staggered velocity point whose
++    // projection aperture is exactly 0, so the momentum mask agrees with the projection.
++    if constexpr (!Grid::collocated) {
++      CCField oa[3] = {ox_, oy_, oz_};
++      const C3 e = e_;
++      long tot = 0;
++      for (int c = 0; c < 3; ++c) {
++        CCField m = C[c].mask;
++        CCConst o = CCConst(oa[c]);
++        long k = 0;
++        Kokkos::parallel_reduce(
++            "peclet::flow::study_mask_closed", Kokkos::RangePolicy<CCExec>(0, n_),
++            KOKKOS_LAMBDA(std::size_t i, long& acc) {
++              if (m(i) <= 0.5 && o(i) == 0.0) {
++                m(i) = 1.0;
++                const long x = (long)i % e.x, y = ((long)i / e.x) % e.y, z = (long)i / ((long)e.x * e.y);
++                if (x >= G && x < e.x - G && y >= G && y < e.y - G && z >= G && z < e.z - G)
++                  ++acc;
++              }
++            },
++            k);
++        tot += k;
++        maskVelocity(c);
++      }
++      std::fprintf(stderr, "[study] PECLET_FLOW_STUDY_MASK_CLOSED: masked %ld inner velocity points "
++                           "with projection aperture 0\n", tot);
++    }
++#endif
+     setSolidStarOverlay();
+     setSolidGhostProjectionOverlay(din);
+     setSolidInitPressureMg();
