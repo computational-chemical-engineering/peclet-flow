@@ -57,6 +57,12 @@ section).
   balanced-force surface tension, contact angles and phase change.
 - **Time integration:** pressure projection with optional incremental pressure, explicit (Koren) or
   implicit-deferred-correction advection, and Picard outer iteration.
+- **Steady states:** `peclet.flow.march_to_steady(solver, monitor)` marches to a certified steady
+  state, Anderson-accelerated by default (a dense sphere bed in 93 steps instead of 325);
+  `converged=True` certifies stationarity at the given time step.
+- **Forces on bodies:** `hydro_force_torque_reaction()`, the discrete momentum reaction (exactly
+  conservative). The surface-traction integral with its pressure/viscous split is the diagnostic
+  `diagnostics.hydro_force_torque_traction()`; `hydro_force_torque()` is deprecated.
 
 ## Build
 
