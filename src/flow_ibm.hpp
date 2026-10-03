@@ -4492,6 +4492,15 @@ class Solver {
   // (7-point diffusion + straight ±2 advection reach), so those corners are never consumed.
   void applyScalarBc(ScalarField& sc);
 
+  // The ADVECTIVE inflow state on the frozen c^n (cOld): at a scalar-Dirichlet face that is also a
+  // velocity INFLOW face (type 2 with a normal velocity or a profile -- the flux-openness rule),
+  // both ghost layers of cOld take the prescribed value v, so the upwind reconstruction of the
+  // inflow face returns v and the inflow carries u_n * v. The reflection 2v - c_inner that c's own
+  // ghost carries is right for the DIFFUSION row (face value v by linear interpolation) and wrong
+  // for upwinding: it carried u_n (2v - c_inner), +0.5 U dt of excess on a plug's first step.
+  // Walls (no normal velocity) keep the reflection. doc/uf_outlet_fix.md section B.
+  void scalarInflowGhosts(ScalarField& sc);
+
 
   // Does this rank's block touch global domain face f (always true single-rank)?
   bool touchesGlobalFace(int f) const;

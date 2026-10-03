@@ -127,6 +127,7 @@ void Solver<Grid>::advanceScalars() {
     // WO-P3f: add the enthalpy the interfacial cells' overwrite gave back (option, inert off).
     if (hasMask && pcCarryConserve_ && pcCarrySrc_.extent(0) == n_)
       pcCarryApply(sc);
+    scalarInflowGhosts(sc);  // cOld's inflow ghosts = the prescribed state (for upwinding)
     scalarFillGhosts(sc);
     if (energy)
       scalarBuildRhsHeat(sc.b, CCConst(sc.cOld), CCConst(sc.rcp), idt, e_, G);
@@ -193,6 +194,17 @@ void Solver<Grid>::applyScalarBc(ScalarField& sc) {
   for (int f = 0; f < 6; ++f)
     if (sc.bc[f] != 0 && touchesGlobalFace(f))
       applyScalarBcFace(sc.c, f / 2, f % 2, sc.bc[f], sc.bcVal[f]);
+}
+
+template <class Grid>
+void Solver<Grid>::scalarInflowGhosts(ScalarField& sc) {
+  for (int f = 0; f < 6; ++f) {
+    const int a = f / 2;
+    const bool inflow =
+        bc_[f] == 2 && (bcProf_[f].extent(0) > 0 || std::fabs(bcVel_[f][a]) > 1e-12);
+    if (sc.bc[f] == 2 && inflow && touchesGlobalFace(f))
+      applyScalarBcFace(sc.cOld, a, f % 2, 3, sc.bcVal[f]);
+  }
 }
 
 template <class Grid>
@@ -308,7 +320,9 @@ void Solver<Grid>::applyScalarBcFace(CCField c, int a, int side, int type, doubl
         for (int L = 1; L <= 2; ++L) {
           const long gcell = base + (long)dir * L * sa;
           const long icell = base - (long)dir * (L - 1) * sa;
-          c(gcell) = (type == 2) ? (2.0 * val - c(icell)) : c(icell);
+          // type 2 Dirichlet reflection, 3 the constant inflow state (scalarInflowGhosts), else
+          // the Neumann copy
+          c(gcell) = (type == 2) ? (2.0 * val - c(icell)) : (type == 3) ? val : c(icell);
         }
       });
 }

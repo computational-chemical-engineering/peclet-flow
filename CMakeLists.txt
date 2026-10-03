@@ -271,6 +271,14 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(colocated_open_boundary PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # A scalar enters through a Dirichlet inflow face with the prescribed flux u_n * v: the inlet
+  # column of a c = 1 field stays 1, and a 1-D plug's inventory is exactly U t (doc/uf_outlet_fix.md
+  # section B: stale cOld ghosts, and the reflection ghost that carried u_n (2v - c_inner)).
+  add_test(NAME scalar_inflow
+           COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_scalar_inflow.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(scalar_inflow PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The per-cell body force and drag coefficient are placed where the velocity lives (face mean on
   # the MAC grid, cell value collocated) on every density model; second-order steady Stokes.
   add_test(NAME cell_force_placement
