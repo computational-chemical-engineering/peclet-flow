@@ -37,7 +37,7 @@ conversions of §1.2 are on the path.
        10 (set through D). (i) converged, (ii) iteration bounds (prov.), (iii) growth per
        doubling <= 1.7x, (v) the steady budget identity <= 1e-11 of the gross budget (D-WO5c-1). (iv) C4 is in the
        `scalar_mg` ctest, (vi) a one-time logged check.
-  g8   Taylor-Aris (WO-6): G7's pipe, frozen Poiseuille face velocities, insulating walls, the
+  g8   Taylor-Aris (WO-6): G7's pipe, frozen face-averaged Poiseuille fluxes (D-WO6-1), insulating walls, the
        mean-gradient mode G = e_z, steady (advecting, singular): -<u'theta> -> Pe^2 D/48 at
        Pe = 10 (order >= 1.8, <= 1e-3 at R/h 32), scalar_mean_flux = its field sums to 1e-10;
        G-iter (<= 30, growth <= 5) on multigrid-friendly boxes (ruling D-WO4-1).
@@ -1061,8 +1061,8 @@ def mean_flux_fields(s, name, D, G, periodic):
 
 
 def poiseuille_face_average(s, c0, R, U, oz, m=24):
-    """INFO variant of G8's velocity: the EXACT Poiseuille flux through the open part of each
-    z-face (m x m midpoint sub-samples of the face), divided by oz A, so that F = oz w A carries no
+    """G8's velocity (ruling D-WO6-1): the Poiseuille flux through the open part of each z-face
+    (m x m midpoint sub-samples of the face), divided by oz A, so that F = oz w A carries no
     point-sampling error."""
     x, y, _ = (np.asarray(v) for v in s.cell_centers())
     h = x[1] - x[0]
@@ -1080,13 +1080,13 @@ def poiseuille_face_average(s, c0, R, U, oz, m=24):
     return np.repeat(w2[:, :, None], oz.shape[2], axis=2)
 
 
-def g8_case(Rh, off, U=1.0, Pe=10.0, nbox=None, nz=4, exact_flux=False):
-    """G8: G7's pipe (R = 1, nz = 4 periodic), frozen Poiseuille z-face velocities (set_field, face
-    centres, clipped >= 0; divergence-free because z-invariant), insulating walls, mean gradient
-    e_z, steady. Returns the Taylor-Aris coefficient -<u'theta> (interstitial, from fields) over
+def g8_case(Rh, off, U=1.0, Pe=10.0, nbox=None, nz=4, exact_flux=True):
+    """G8: G7's pipe (R = 1, nz = 4 periodic), frozen Poiseuille z-face velocities (set_field;
+    ruling D-WO6-1: the FACE-AVERAGED flux over the open part of each face; divergence-free
+    because z-invariant), insulating walls, mean gradient e_z, steady. Returns the Taylor-Aris coefficient -<u'theta> (interstitial, from fields) over
     its exact value Pe^2 D/48, Pe = U R/D. `nbox`/`nz` give G-iter's multigrid-friendly box (ruling
     D-WO4-1; the problem is z-invariant, so nz changes nothing but the cell count);
-    `exact_flux` the INFO variant of poiseuille_face_average."""
+    `exact_flux=False` the INFO variant: face-centre point samples, clipped >= 0."""
     R = 1.0
     D = U * R / Pe
     h = R / Rh
@@ -1117,7 +1117,7 @@ def g8_case(Rh, off, U=1.0, Pe=10.0, nbox=None, nz=4, exact_flux=False):
 
 
 def gate_g8():
-    print("G8 Taylor-Aris: pipe R/h in {16, 32, 64}, Poiseuille face velocities, insulating walls, "
+    print("G8 Taylor-Aris: pipe R/h in {16, 32, 64}, face-averaged Poiseuille fluxes (D-WO6-1), insulating walls, "
           "mean gradient e_z, steady; -<u'theta> -> Pe^2 D/48 at Pe = UR/D = 10")
     e = {}
     for Rh in (16, 32, 64):
@@ -1136,9 +1136,9 @@ def gate_g8():
         check(order(e[a], e[b]) >= 1.8, f"Taylor-Aris order {a}->{b} {order(e[a], e[b]):.2f} >= 1.8 "
               f"(rms {e[a]:.3e} -> {e[b]:.3e})")
     check(e[32] <= 1e-3, f"Taylor-Aris |err| {e[32]:.2e} <= 1e-3 at R/h = 32")
-    ex = {Rh: rms([g8_case(Rh, off, exact_flux=True)["err"] for off in OFFSETS]) for Rh in (16, 32)}
-    print(f"  INFO exact face fluxes (no velocity point-sampling error): rms {ex[16]:.3e} -> "
-          f"{ex[32]:.3e}, order {order(ex[16], ex[32]):.2f} (2-D oracle: 3.2e-4 at R/h 32)")
+    ex = {Rh: rms([g8_case(Rh, off, exact_flux=False)["err"] for off in OFFSETS]) for Rh in (16, 32)}
+    print(f"  INFO face-centre point samples (an O(h^2) flux-quadrature error): rms {ex[16]:.3e} -> "
+          f"{ex[32]:.3e}, order {order(ex[16], ex[32]):.2f}")
     print("G-iter singular steady on G8, multigrid-friendly boxes (ruling D-WO4-1): n = 48 / 80 / 144, "
           "nz = 16")
     its = []
@@ -1210,7 +1210,7 @@ def gate_g5b():
               f"{max(r['jdiff'] for r in rows):.1e}")
         for r in rows:
             check(r["conv"], f"n={n}: converged ({r['its']} iterations)")
-            if n >= 40:  # reading (WO-6 log): the bound of the exact k*, applied from ND 32 up
+            if n >= 40:  # ruling D-WO6-2: the bound of the exact k*, gated from ND 32 up
                 check(r["k"] <= hs, f"n={n}: k* {r['k']:.6f} <= Hashin-Shtrikman {hs:.6f}")
             check(r["jdiff"] <= 1e-10, f"n={n}: scalar_mean_flux = the field sums ({r['jdiff']:.1e})")
     d1 = rms([a - b for a, b in zip(k[20], k[40])])

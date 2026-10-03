@@ -217,14 +217,19 @@ void testBudget() {
       for (int k = 0; k < 2; ++k)
         s.advanceScalars();
     const auto b = s.scalarBudget("c");
-    const double scale = std::fmax(std::fmax(std::fabs(b.dMass), std::fabs(b.wallIn)),
-                                   std::fmax(std::fabs(b.boundaryIn), std::fabs(b.sourceIn)));
+    // ruling D-WO6-3 (the D-WO5c-1 convention): the identity relative to the GROSS budget, the
+    // sum of the terms' absolute values (the source is uniform: |source_in|), bound 1e-11 — it is
+    // reduction-order round-off and must not depend on the thread count. Cell units: the rates
+    // are internal, and a transient budget is in mass units (dt times the rates).
+    const double dtB = steady ? 1.0 : s.scalarField("c").cut->dt;
+    const double scale = std::fabs(b.dMass) + dtB * ((std::fabs(b.wallIn) + std::fabs(b.boundaryIn)) +
+                                                     std::fabs(b.sourceIn));
     std::printf(
         "budget (%s): d_mass %.6e wall %.6e boundary %.6e source %.6e defect %.2e "
         "identity %.2e (rel %.1e)\n",
         steady ? "steady" : "transient", b.dMass, b.wallIn, b.boundaryIn, b.sourceIn, b.defect,
         b.identityError, std::fabs(b.identityError) / scale);
-    CHECK(std::fabs(b.identityError) <= 1e-13 * scale);
+    CHECK(std::fabs(b.identityError) <= 1e-11 * scale);
     CHECK(std::fabs(b.wallIn) > 0.0 && std::fabs(b.boundaryIn) > 0.0 && b.sourceIn > 0.0);
     // the per-body wall flux is the budget's wall term
     const auto wf = s.scalarWallFlux("c");

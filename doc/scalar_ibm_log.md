@@ -1137,3 +1137,19 @@ later ruling.
 - **Q-K (G8 bound).** 1.03e-3 against ≤ 1e-3 at R/h 32 with face-centre velocity samples; 3.3e-4
   with exact face fluxes. Is the bound meant for the scalar discretization (then the setup should
   write the face-averaged flux, or the bound should be restated), or for the setup as written?
+
+**WO-6 rulings (orchestrator) and their rerun.**
+- **D-WO6-1 (Q-K).** G8 writes FACE-AVERAGED fluxes over the open part of each face (24 × 24
+  midpoint sub-samples, divided by oz A); the face-centre-sampled variant stays as an INFO row. The
+  ≤ 1e-3 bound at R/h 32 stays.
+- **D-WO6-2.** The G5b reading is confirmed: "k* ≤ HS" is gated from ND 32 up and on the
+  extrapolated value.
+- **D-WO6-3.** `scalar_cutcell_operator`'s budget identity follows D-WO5c-1: relative to the gross
+  budget (|d_mass| + dt (|wall_in| + |boundary_in| + |source_in|); steady without d_mass and dt),
+  bound ≤ 1e-11. It is reduction-order round-off and must not depend on the thread count.
+- **D-WO6-4.** The thin-axis observation (nz = 4: a one-cell periodic axis on the coarse levels lags
+  the axial coarse advection) is noted for WO-9 under Q18. No change now.
+- **Rerun:** `scalar_cutcell_g8` PASS — rms 1.20e-3 / **3.32e-4** / 7.8e-5 at R/h 16 / 32 / 64
+  (bound 1e-3; INFO face-centre samples 4.20e-3 → 1.03e-3); mg-box iterations 6 / 6 / 9.
+  `scalar_cutcell_operator` PASS at OMP 1, 2, 4, 8 (identity 1.1e-13 of the gross budget at OMP 1,
+  2.7e-14 at OMP 4). G12 12/12 at OMP_NUM_THREADS=1. **WO-6 done.**
