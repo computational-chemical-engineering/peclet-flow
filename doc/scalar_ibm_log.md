@@ -1567,3 +1567,54 @@ the remaining 172 at OMP 2, -j4 with OMP_WAIT_POLICY=passive and OMPI_MCA_mpi_yi
   1e11 amplification at the blob front as a defect of the koren path (a threshold or guard in the
   limiter or the small-cell face treatment) and find it first — it is backend-independent and
   would also bound G10's koren row.
+
+## 2026-10-04 — WO-9b, Q-N (ruling D-WO9-1): G9 koren at R_o/h 32 is reduction-order noise carried by the Koren update, not a stencil defect
+
+**Question.** Does the explicit Koren flux (§6.2) ever take a non-unknown cell (solid or sealed) as its
+upwind or upwind-upwind state? **No.**
+- Code: `sco::explicitFaceFluxes` (src/scalar_cutcell_operator.hpp) skips a face unless both of its cells
+  are unknowns. It then falls back to FOU unless, for F > 0, cells i−2s, i−s, i are all unknowns
+  (for F < 0: i+s, i, i−s). `sadv::tvd` reads exactly (LL, L, R) for F > 0 and (RR, R, L) for F < 0. The
+  `unknown` flags are haloed on both ghost layers and cleared beyond non-periodic faces. This is §6.2's
+  rule as written.
+- Measured (`tests/study/scalar_ibm/koren_branch.py`, G9 koren R_o/h 32 Cr 0.5, OpenMP build at 1 vs 4
+  threads): the two runs are bitwise equal through step 53. At step 56 they differ by 6.6e-24 and at
+  step 57 by 3.19e-13 (absolute; max c 0.998), at six columns of cut cells (κ 0.16–0.94, c ~ 1e-10–1e-9).
+  On step 57's c^n, the reconstructed explicit Koren fluxes of the two runs differ by ≤ 1.1e-22 (F/V),
+  and no Koren face changes limiter branch (|den| < 1e-10 → r = 0; both < 1e-10 → r = 1).
+
+**Mechanism: not the limiter.**
+- *Seed.* Step 57 was re-run alone from the SAME c^n on a fresh solver, at 1 and at 4 threads. The two
+  results differ by 3.19e-13; the fresh 1-thread step reproduces the original run bitwise. So the
+  difference is generated inside the step, not amplified from 1e-24.
+- The only operations whose result depends on the thread count are the Krylov dots:
+  `ccReduce3` = MDRange tiles {nx, 2, 2} on host, a tree on CUDA. Within one step they move
+  BiCGStab's iterate inside its stopping tolerance. Iteration counts are equal (3), and the census
+  true residual is 2.13165e-11 against 2.13199e-11. Over the 700 steps the residuals differ in 641,
+  by up to 10× relative.
+- *Carried, not damped.* The same seeds occur under FOU: 615 of the 700 steps have differing
+  residuals, with per-step differences up to 1.1e-12. FOU's monotone, diffusive update contracts them
+  to 8.8e-16 by the end.
+- Koren's limited update does not contract them: the median per-step ratio of the difference is
+  0.995–0.997. New seeds stack on top: 3.2e-13 → 1.0e-11 at step 66, 9.2e-12 → 1.8e-10 at step 215.
+  The difference is 1.6e-12 at step 100, 1.9e-10 at step 400 and 1.5e-9 at step 700 (max per step
+  9.0e-9).
+- Only once the difference reaches ~4e-12 (step 211) do the limiter's absolute 1e-10 thresholds begin
+  to flip branches. By then they are part of the accumulation, not its cause.
+- The same chain explains CUDA against OpenMP (6.8e-9).
+
+**Verdict: no defect.** Following the ruling, G11's G9 koren rows are restated:
+- the solution ≤ 1e-7·max|c|;
+- G9 (i), (ii) and (iv), and (iii) where G9 gates it (bulk Courant ½, D-WO5-1), on both dumps;
+- design note §11 G11; `tests/python/scalar_cutcell_backends.py` now records G9's integral quantities
+  per row and gates them.
+
+**G11 rerun** (the WO-9a builds, unchanged; RTX 5080 idle this time; floor = OpenMP 1 thread):
+
+| row | solution | Δits | floor |
+|---|---|---|---|
+| G9 koren 16 Cr 0.5 / 0.9 | 5.3e-11 / 4.3e-13 | 0 / 0 | 2.7e-11 / 1.2e-10 |
+| G9 koren 32 Cr 0.5 / 0.9 | 6.8e-9 / 6.5e-9 (≤ 1e-7) | 0 / 1 | 1.8e-9 / 1.5e-9 |
+| G9 koren integral, both backends | ident ≤ 1.3e-14, cons ≤ 4.7e-16, finite; Cr 0.5 min −4.1e-10, max = max c₀ | | |
+
+- Every other row is as in WO-9a. **G11: PASS** (19/19).

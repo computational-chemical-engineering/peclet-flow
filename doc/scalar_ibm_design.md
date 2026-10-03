@@ -1776,6 +1776,12 @@ Rules:
 - Probe rungs identical.
 - Solutions ≤ 1e-9 relative.
 - Iterations within ±1.
+- *Ruling D-WO9-1 (WO-9b, 2026-10-04):* the G9 **koren** rows gate the solution at ≤ 1e-7·max|c|,
+  plus G9's integral quantities (i), (ii) and (iv), and (iii) where G9 gates it, met on **both**
+  backends at their existing bounds. Reason (log, WO-9b Q-N): the Krylov dots' reduction order
+  (thread count, backend) moves each converged iterate inside the stopping tolerance; FOU damps
+  these differences, while the Koren update carries them, so no backend tolerance holds koren at 1e-9.
+  The Koren stencil never reads a non-unknown (§6.2's guard).
 
 **G12 legacy.**
 - `tests/regression/state_hash.py`: all 12 hashes equal `doc/scalar_ibm_baseline_hashes.txt`.

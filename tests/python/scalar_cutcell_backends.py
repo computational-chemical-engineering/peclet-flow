@@ -24,6 +24,10 @@ solver is captured by a recording subclass that logs every solve's BiCGStab coun
 G11 (doc/scalar_ibm_design.md §11): geometry fields <= 1e-12 relative; probe rungs identical;
 solutions <= 1e-9 relative; iterations within +-1 per solve. "Relative" = the max-norm difference
 over the max-norm of the reference array (solutions: over the unknowns of the reference).
+The koren rows of G9 (ruling D-WO9-1, §11 G11 as restated): solution <= 1e-7 relative, and G9's
+own integral bounds (budget identity, conservation, positivity, finite) met on BOTH dumps. Their
+pointwise difference is reduction-order noise inside the Krylov tolerance that the koren update
+does not damp (doc/scalar_ibm_log.md, WO-9b Q-N); no backend tolerance holds it at 1e-9.
 Exit 0 pass, 1 fail, 77 skipped (no module).
 """
 import os
@@ -39,6 +43,20 @@ EXACT_CELL = ("unknown", "solid_unknown")
 GEOM_FACET = ("centroid", "normal", "area")
 EXACT_FACET = ("instance", "probe_rung")
 SOL_FACET = ("flux", "wall_value")
+G9_STATS = ("ident", "cons", "min", "max", "cmax0", "finite")
+
+
+def g9_bounds(D, n):
+    """G9 (i)-(iv) on one dump's row n, as test_scalar_cutcell_gates.gate_g9 gates them (koren's
+    (iii) only at bulk Courant 1/2, ruling D-WO5-1; the rtol-1e-13 drift clause is not a G11 row)."""
+    s = {k: float(D[f"{n}/g9/{k}"]) for k in G9_STATS}
+    if "_fou_" in n:
+        pos = s["min"] >= -1e-12 * s["cmax0"]
+    elif n.endswith("_c09"):
+        pos = True
+    else:
+        pos = s["min"] >= -1e-3 * s["cmax0"] and s["max"] <= (1 + 1e-3) * s["cmax0"]
+    return s["ident"] <= 1e-13 and s["cons"] <= 1e-12 and pos and s["finite"] > 0.5
 
 
 def rows(g):
@@ -99,7 +117,7 @@ def dump(path, only=None):
         made.clear()
         its.clear()
         t0 = time.time()
-        run()
+        st = run()
         dt = time.time() - t0
         s = made[-1]
         geo = s.diagnostics.scalar_geometry("c")
@@ -117,6 +135,9 @@ def dump(path, only=None):
         pr = cen["probe_rungs"]
         out[f"{name}/rungs"] = np.asarray([*pr["fluid"], *pr.get("solid", ())], dtype=np.int64)
         out[f"{name}/time"] = np.asarray(dt)
+        if name.startswith("g9_"):  # G9's integral quantities (the koren rows' gate, D-WO9-1)
+            for k in G9_STATS:
+                out[f"{name}/g9/{k}"] = np.asarray(float(st[k]))
         print(f"{name:20s} {dt:7.1f} s  solves {len(its):4d}  iterations {sum(its):6d}  "
               f"rungs {out[f'{name}/rungs'].tolist()}", flush=True)
     np.savez_compressed(path, **out)
@@ -166,7 +187,13 @@ def compare(pa, pb, pc=None):
             floor = f"  floor {rel(A[f'{n}/sol/c'], C[f'{n}/sol/c'], unk):9.2e}"
         ia, ib = A[f"{n}/its"], B[f"{n}/its"]
         di = int(np.max(np.abs(ia - ib))) if ia.shape == ib.shape else 10**9
-        ok = g <= 1e-12 and ex and sol <= 1e-9 and di <= 1
+        koren = n.startswith("g9_koren_")
+        ok = g <= 1e-12 and ex and sol <= (1e-7 if koren else 1e-9) and di <= 1
+        if n.startswith("g9_"):
+            if f"{n}/g9/ident" in A.files and f"{n}/g9/ident" in B.files:
+                ok = ok and g9_bounds(A, n) and g9_bounds(B, n)
+            elif koren:
+                ok = False  # the restated koren row needs G9's integral quantities on both dumps
         print(f"{n:20s} {g:9.2e} {'yes' if ex else 'NO':>5s} {sol:9.2e} {di:8d} {ia.size:6d} "
               f"{float(A[f'{n}/time']):7.1f} {float(B[f'{n}/time']):7.1f}  {'ok' if ok else 'FAIL'}{floor}")
         if not ok:
