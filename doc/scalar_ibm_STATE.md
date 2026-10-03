@@ -72,7 +72,8 @@ own gates.
 | WO-6 closures | DONE b5cb6a5 + 3eb151c: Taylor–Aris 3.3e-4 at R/h 32 (order 2.02); SC k* → 0.60566 < HS; D-WO6-1..4 |
 | WO-7 conjugate | DONE 401de1e + bb039d1 + G5a tol: G4 order 1.84–1.94, G6 1.91–2.00 (total mass), K exact, MPI bitwise; D-WO7-1..5 |
 | WO-8 contacts | DONE except conjugate contact (1c56587; D-WO8-1/2): Dirichlet contacts order 1.9; conjugate contact OPEN → Frank (§13 Q4) |
-| WO-9 backends/performance | IN PROGRESS |
+| WO-9a GPU correctness | DONE 21593aa: CUDA builds, G11 parity ≤ 6.5e-13 except Koren R_o/h 32 (Q-N, ruling D-WO9-1: investigate the stencil reading non-unknowns) |
+| WO-9b performance (Q9 triggered: GPU sync-bound, advance/projection 33.7 CUDA, 1.58 OMP) | IN PROGRESS, opus-engineer, with Q-N first |
 | WO-10 docs/register | |
 
 **Side study running:** `tests/study/scalar_ibm/packing2d.py`, near-contact conjugate (square
