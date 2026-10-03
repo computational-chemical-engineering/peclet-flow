@@ -179,6 +179,43 @@ inline void vofHostRowFor(const char* name, int nj, Rows rows, F row) {
   });
 }
 
+/// H-4(d): a host compaction scan over ROWS. `rowOf(k, r, x0, x1)` returns the index of x = 0 on
+/// job k's local row r and sets its x range; a row's value is its count of `hit(k, i)` cells, and
+/// the final pass writes the row's hits at [prefix, prefix + count) in x order -- so the list, and
+/// each job's `start(base + k)` / `end(base + k)`, are the device scan's exactly.
+template <class Exec, class Rows, class RowOf, class Hit>
+inline void vofHostRowScan(const char* name, int nj, int base, Rows rows, RowOf rowOf, Hit hit,
+                           LField list, LField start, LField end) {
+  VofRowTable R;
+  R.off[0] = 0;
+  for (int k = 0; k < nj; ++k)
+    R.off[k + 1] = R.off[k] + rows(k);
+  for (int k = nj; k < kVofBlockBatch; ++k)
+    R.off[k + 1] = R.off[nj];
+  Kokkos::parallel_scan(name, Kokkos::RangePolicy<Exec>(Exec(), 0, R.off[nj]),
+                        [=](const long t, long& upd, const bool final) {
+                          const int k = vofJobOf(R.off, t);
+                          const long r = t - R.off[k];
+                          int x0, x1;
+                          const long i0 = rowOf(k, r, x0, x1);
+                          long q = upd;
+                          if (final) {
+                            if (r == 0)
+                              start(base + k) = q;
+                            for (int x = x0; x < x1; ++x)
+                              if (hit(k, i0 + x))
+                                list(q++) = i0 + x;
+                            if (t + 1 == R.off[k + 1])
+                              end(base + k) = q;
+                          } else {
+                            for (int x = x0; x < x1; ++x)
+                              if (hit(k, i0 + x))
+                                ++q;
+                          }
+                          upd = q;
+                        });
+}
+
 // ---- stage 1: the Courant numbers ---------------------------------------------------------------
 
 /// One team per job: `WyAdvector::maxCourant` or `maxCourantInterface` (per the job's
@@ -274,7 +311,23 @@ inline void vofBatchFreeze(const VofBlockTable& T) {
 /// (`T.off` = `vofJobGrown1`). The list of job k is written at `list(listBase + start(k) ...)` in
 /// the per-block scan's order; `start(base + k)` / `end(base + k)` receive the job's list range
 /// (absolute positions), so its count never leaves the device.
+template <class Exec = SExec>
 inline void vofBatchWorklist(const VofBlockTable& T, LField list, LField start, LField end) {
+  if constexpr (kVofHostExec<Exec>) {  // H-4(d): the grown-by-one rows
+    vofHostRowScan<Exec>(
+        "vof::block::batch_worklist", T.nj, T.base,
+        [&](const int k) { return static_cast<long>(T.job[k].n.y + 2) * (T.job[k].n.z + 2); },
+        [=](const int k, const long r, int& x0, int& x1) {
+          const VofBlockJob& J = T.job[k];
+          const int ry = J.n.y + 2, g = J.g;
+          x0 = g - 1;
+          x1 = g + J.n.x + 1;
+          return L3(0, g - 1 + static_cast<int>(r % ry), g - 1 + static_cast<int>(r / ry), J.e);
+        },
+        [=](const int k, const long i) { return wyIsMixed(T.job[k].c[i], T.job[k].weps); }, list,
+        start, end);
+    return;
+  }
   Kokkos::parallel_scan(
       "vof::block::batch_worklist", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t, long& upd, const bool final) {
@@ -706,8 +759,31 @@ KOKKOS_INLINE_FUNCTION bool vofResidueCell(double ci, double weps) {
 /// One mark scan over the concatenated inner regions (`T.off` = `vofJobInner`), in each block's
 /// inner-box index order -- the per-block scan's order, so every list is the per-block list.
 /// `kind`: 0 debris, 1 residue, 2 attached. Each job's range lands in `start`/`end` (absolute).
+template <class Exec = SExec>
 inline void vofBatchMark(const VofBlockTable& T, int kind, double ieps, double cfull, double weps,
                          LField list, LField start, LField end) {
+  if constexpr (kVofHostExec<Exec>) {  // H-4(d): the inner rows
+    vofHostRowScan<Exec>(
+        "vof::block::batch_debris_mark", T.nj, T.base,
+        [&](const int k) { return static_cast<long>(T.job[k].n.y) * T.job[k].n.z; },
+        [=](const int k, const long r, int& x0, int& x1) {
+          const VofBlockJob& J = T.job[k];
+          const int g = J.g;
+          x0 = g;
+          x1 = g + J.n.x;
+          return L3(0, g + static_cast<int>(r % J.n.y), g + static_cast<int>(r / J.n.y), J.e);
+        },
+        [=](const int k, const long i) {
+          const VofBlockJob& J = T.job[k];
+          const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+          const VofRawField c{J.c};
+          return kind == 0   ? vofDebrisCell(c, i, sy, sz, ieps, cfull)
+                 : kind == 1 ? vofResidueCell(c(i), weps)
+                             : vofAttachedCell(c, i, sy, sz, ieps, cfull);
+        },
+        list, start, end);
+    return;
+  }
   Kokkos::parallel_scan(
       "vof::block::batch_debris_mark", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t, long& upd, const bool final) {
@@ -1057,10 +1133,37 @@ KOKKOS_INLINE_FUNCTION long vofCurvCell(const VofCurvJob& J, long r, bool grown)
   return L3(J.g - gr + ix, J.g - gr + iy, J.g - gr + iz, J.e);
 }
 
+/// Rows of job `J`'s grown (`grown`) or inner region, for the host row forms (H-4b).
+inline long vofCurvRows(const VofCurvJob& J, bool grown) {
+  const int gr = grown ? kPvHalf : 0;
+  return static_cast<long>(J.n.y + 2 * gr) * (J.n.z + 2 * gr);
+}
+
+/// The first cell of row `r` of job `J`'s grown or inner region, and the region's x range.
+inline long vofCurvRow(const VofCurvJob& J, long r, bool grown, int& x0, int& x1) {
+  const int gr = grown ? kPvHalf : 0;
+  const int ry = J.n.y + 2 * gr;
+  x0 = J.g - gr;
+  x1 = J.g + J.n.x + gr;
+  return L3(0, J.g - gr + static_cast<int>(r % ry), J.g - gr + static_cast<int>(r / ry), J.e);
+}
+
 /// `VofCurvature::compact`: the interfacial cells of the grown (`grown`) or inner region, in the
 /// per-cascade scan's order; each job's range lands in `start`/`end` (absolute list positions).
+template <class Exec = SExec>
 inline void vofCurvCompact(const VofCurvTable& T, bool grown, LField list, LField start,
                            LField end) {
+  if constexpr (kVofHostExec<Exec>) {  // H-4(d): the grown or inner rows
+    vofHostRowScan<Exec>(
+        "vof::block::batch_curv_compact", T.nj, T.base,
+        [&](const int k) { return vofCurvRows(T.job[k], grown); },
+        [=](const int k, const long r, int& x0, int& x1) {
+          return vofCurvRow(T.job[k], r, grown, x0, x1);
+        },
+        [=](const int k, const long i) { return vofIsInterface(T.job[k].c[i], T.job[k].ieps); },
+        list, start, end);
+    return;
+  }
   Kokkos::parallel_scan(
       "vof::block::batch_curv_compact", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t, long& upd, const bool final) {
@@ -1080,21 +1183,6 @@ inline void vofCurvCompact(const VofCurvTable& T, bool grown, LField list, LFiel
         if (hit)
           ++upd;
       });
-}
-
-/// Rows of job `J`'s grown (`grown`) or inner region, for the host row forms (H-4b).
-inline long vofCurvRows(const VofCurvJob& J, bool grown) {
-  const int gr = grown ? kPvHalf : 0;
-  return static_cast<long>(J.n.y + 2 * gr) * (J.n.z + 2 * gr);
-}
-
-/// The first cell of row `r` of job `J`'s grown or inner region, and the region's x range.
-inline long vofCurvRow(const VofCurvJob& J, long r, bool grown, int& x0, int& x1) {
-  const int gr = grown ? kPvHalf : 0;
-  const int ry = J.n.y + 2 * gr;
-  x0 = J.g - gr;
-  x1 = J.g + J.n.x + gr;
-  return L3(0, J.g - gr + static_cast<int>(r % ry), J.g - gr + static_cast<int>(r / ry), J.e);
 }
 
 /// `reconstructPlanes` (worklist mode), part 1: zero the four plane fields over the grown region.
