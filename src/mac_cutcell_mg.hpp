@@ -28,6 +28,7 @@
 #include "ghost_projection.hpp"  // GpOverlay + gpApplyDelta (ghost-projection BiCGStab matvec)
 #include "mac_bc.hpp"
 #include "mac_pressure.hpp"
+#include "mg_bottom_direct.hpp"              // §13: the direct preconditioner of the device bottom
 #include "peclet/core/solver/graph_amg.hpp"  // decomposition-agnostic algebraic bottom solve
 #include "star_elimination.hpp"  // StarOverlay + starApplyDelta (mode-B fluid-only PCG matvec)
 
@@ -502,6 +503,11 @@ struct GeoLabelKernel {
   Kokkos::View<int*, CCMem> comp, tmp;
   Kokkos::View<long*, CCMem> cnt;
   Kokkos::View<int*, CCMem> nc;
+  // §13.4.2: with a slow axis (slow >= 0), each component's last plane kc(c) (the largest
+  // coordinate along `slow` among its cells) and aug(c) = 1/m_c, m_c = its cells in that plane.
+  int slow = -1;
+  Kokkos::View<int*, CCMem> kc;
+  Kokkos::View<double*, CCMem> aug;
   KOKKOS_INLINE_FUNCTION long cell(int q, int& lx, int& ly, int& lz) const {
     const int t = q / inner.x;
     lx = 1 + (q - t * inner.x);
@@ -577,12 +583,42 @@ struct GeoLabelKernel {
         }
       }
       nc(0) = n;
+      if (slow >= 0) {
+        long m[kGeoMaxComponents];
+        for (int c = 0; c < kGeoMaxComponents; ++c) {
+          kc(c) = -1;
+          m[c] = 0;
+        }
+        for (int pass = 0; pass < 2; ++pass)
+          for (int q = 0; q < ninner; ++q) {
+            int lx, ly, lz;
+            const long i = cell(q, lx, ly, lz);
+            const int c = comp(i);
+            if (c < 0 || c >= kGeoMaxComponents)
+              continue;
+            const int k = (slow == 0 ? lx : (slow == 1 ? ly : lz)) - 1;
+            if (pass == 0 && k > kc(c))
+              kc(c) = k;
+            else if (pass == 1 && k == kc(c))
+              m[c] += 1;
+          }
+        for (int c = 0; c < kGeoMaxComponents; ++c)
+          aug(c) = m[c] > 0 ? 1.0 / (double)m[c] : 0.0;
+      }
     });
   }
 };
 
+// The preconditioner M of the bottom's FCG, a compile-time choice (each instantiation carries only
+// its own M, so the V-cycle kernel's code -- and hence its team size and reduction order -- is the
+// B1 kernel's): kPrecondVcycle = B1's V-cycle over the sub-levels (§5.7); kPrecondDirect = the
+// block-tridiagonal direct factor of §13 (mg_bottom_direct.hpp; `dir`, factored by
+// BottomFactorKernel before the launch; dir.stat(0) = 0 takes the failure path).
+inline constexpr int kPrecondVcycle = 0, kPrecondDirect = 1;
+template <class FacReal = float, int Precond = kPrecondVcycle>
 struct GeoBottomKernel {
   using Member = Kokkos::TeamPolicy<CCExec>::member_type;
+  BottomDirect<FacReal> dir;
   int nl = 0;  // levels: lv[0] = the bottom, lv[1..nl-1] = the sub-levels
   GeoLevel lv[kGeoMaxLevels];
   CCField x, b, r, p, z, zp, ap;    // the bottom's solution and rhs (its x, rhs), FCG vectors
@@ -862,13 +898,25 @@ struct GeoBottomKernel {
         removeMean(t, lv[L], X, cnt[L]);
     }
   }
+  // z = M r: the V-cycle, or the direct factor's M followed by the component means' removal
+  // (§13.4.4 step 5). With `keep`, z's previous values go there first.
+  KOKKOS_INLINE_FUNCTION void applyM(const Member& t, const CCField& R, const CCField& Z,
+                                     const long* cnt, const CCField* keep) const {
+    if constexpr (Precond == kPrecondDirect) {
+      dir.apply(t, R, Z, comp, keep);
+      if (!noMeanForTest)
+        removeMeanBottom(t, Z);
+    } else {
+      vcycle(t, R, Z, cnt, keep);
+    }
+  }
   KOKKOS_INLINE_FUNCTION void operator()(const Member& t) const {
     const GeoLevel& B0 = lv[0];
     long cnt[kGeoMaxLevels];  // fluid counts of the sub-levels ("all" scope only)
     for (int L = 0; L < nl; ++L)
-      cnt[L] = (L > 0 && meanAll) ? fluidCount(t, lv[L]) : 0;
+      cnt[L] = (Precond == kPrecondVcycle && L > 0 && meanAll) ? fluidCount(t, lv[L]) : 0;
     if (precondOnly) {
-      vcycle(t, b, z, cnt, nullptr);
+      applyM(t, b, z, cnt, nullptr);
       return;
     }
     const long sy = B0.ext.x, sz = (long)B0.ext.x * B0.ext.y;
@@ -897,9 +945,12 @@ struct GeoBottomKernel {
         },
         Kokkos::Max<double>(r0));
     int it = 0;
+    // a direct factor that failed even with the largest shift (non-finite input): the failure path
     bool fail = false;
-    if (r0 != 0.0) {
-      vcycle(t, r, z, cnt, nullptr);
+    if constexpr (Precond == kPrecondDirect)
+      fail = dir.stat(0) == 0;
+    if (r0 != 0.0 && !fail) {
+      applyM(t, r, z, cnt, nullptr);
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nExt(B0)), [&](int i) { p(i) = z(i); });
       t.team_barrier();
       double rz = dot(t, B0, r, z);
@@ -947,7 +998,7 @@ struct GeoBottomKernel {
             Kokkos::Max<double>(rn));
         if (rn <= kGeoTau * r0)
           break;
-        vcycle(t, r, z, cnt, &zp);  // zp = z (the previous one), z = M r
+        applyM(t, r, z, cnt, &zp);  // zp = z (the previous one), z = M r
         double rzc = 0.0;           // <r, z - zp>: Polak-Ribiere, robust to M's R != P^T asymmetry
         Kokkos::parallel_reduce(
             Kokkos::TeamThreadRange(t, nInner(B0)),
@@ -1857,7 +1908,8 @@ class CutcellMG {
     // B1: the sub-levels' operators are re-coarsened lazily from the new bottom (ensureGeoSub);
     // condition 6 is evaluated once per hierarchy, here at its first operator build.
     subStale_ = true;
-    if (!geoConnKnown_ && !sub_.empty())
+    facStale_ = true;  // §13: the direct factor is rebuilt at the next direct bottom solve
+    if (!geoConnKnown_ && bottomStore_)
       evalGeoConnected();
   }
 
@@ -2982,6 +3034,29 @@ class CutcellMG {
       return "no geometric sub-level exists below the bottom";
     return nullptr;
   }
+  // §13.4.6: the direct preconditioner's eligibility -- §5.7 conditions 1-6 (6 = B1b's 1-64
+  // components) and a slow axis whose planes hold at most kBottomMaxPlane cells; condition 7 (a
+  // sub-level) is dropped. nullptr when eligible, else the first failed condition.
+  const char* directBottomIneligible() const {
+    if (kHostMemory)
+      return "the backend's memory space is a host space (host backends keep GraphAMG)";
+    if (distributed_)
+      return "the solve is distributed (multi-rank)";
+    if (!removeMean_ || hasOutflow_)
+      return "the operator is not the singular one (an outflow face is present)";
+    if (!agglomerateBottom())
+      return "the bottom is not agglomerated (set_pressure_bottom / set_pressure_bottom_extent)";
+    if (lv_.empty() ||
+        (long)lv_.back().inner.x * lv_.back().inner.y * lv_.back().inner.z > kGeoBottomMaxCells)
+      return "the bottom level has more than 8192 inner cells";
+    if (!geoConnKnown_)
+      return "the pressure operator has not been built (no setOpenness since the hierarchy)";
+    if (!geoConnected_)
+      return "the bottom level has no fluid cell or more than 64 fluid components (B1b)";
+    if (!dirPlanes_.valid())
+      return "no axis gives planes of at most 192 cells (the direct factor's cap)";
+    return nullptr;
+  }
   // The sub-hierarchy below the bottom (§5.7): built from the bottom by init()'s rule --
   // mgChooseRatio over the axes `can()` admits -- until no axis can coarsen. Held OUTSIDE lv_, so
   // no loop over lv_ changes. Single rank, device backends, bottom <= 8192 cells only; otherwise
@@ -2990,8 +3065,11 @@ class CutcellMG {
     sub_.clear();
     bottomRatio_ = C3{1, 1, 1};
     subStale_ = true;
+    facStale_ = true;
     geoConnKnown_ = false;
     geoConnected_ = false;
+    bottomStore_ = false;
+    dirPlanes_ = BottomPlanes{};
     if ((kHostMemory && !forceHost) || distributed_ || lv_.empty())
       return;
     const Level& bt = lv_.back();
@@ -3030,8 +3108,9 @@ class CutcellMG {
       sub_.push_back(v);
       assert((int)sub_.size() + 1 <= kGeoMaxLevels);
     }
-    if (sub_.empty())
-      return;
+    // The bottom's own storage, shared by both preconditioners (§13.6): the FCG vectors, the
+    // component labels; and the direct engine's plane ordering and factor storage (§13.4.7).
+    bottomStore_ = true;
     for (CCField* f : {&geoR_, &geoP_, &geoZ_, &geoZp_, &geoAp_})
       *f = CCField("mg_geo_fcg", bt.n);
     geoInfo_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_geo_info", 1);
@@ -3040,6 +3119,12 @@ class CutcellMG {
     geoCompCnt_ = Kokkos::View<long*, CCMem>("peclet::flow::mg_geo_compcnt", kGeoMaxComponents);
     geoCompMean_ = CCField("peclet::flow::mg_geo_compmean", kGeoMaxComponents);
     geoTeam_ = 0;
+    dirKc_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_kc", kGeoMaxComponents);
+    dirAug_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_bottom_aug", kGeoMaxComponents);
+    dirPlanes_ = bottomChoosePlanes(bt.inner, bc_);
+    dir_ = BottomDirect<float>::allocate(dirPlanes_, bt.ext);
+    dirTeam_ = 0;
+    dirFacTeam_ = 0;
   }
   // Condition 6, as B1b replaced it (§5.14): the bottom level's fluid components, labelled on the
   // device by GeoLabelKernel -- eligible with 1..64 of them (the register's per-component projector
@@ -3050,7 +3135,7 @@ class CutcellMG {
     geoConnKnown_ = true;
     geoConnected_ = false;
     geoNComp_ = 0;
-    if (sub_.empty())
+    if (!bottomStore_)
       return;
     const Level& bt = lv_.back();
     GeoLabelKernel k;
@@ -3064,6 +3149,9 @@ class CutcellMG {
     k.tmp = geoLabTmp_;
     k.cnt = geoCompCnt_;
     k.nc = geoInfo_;  // info(0) doubles as the component-count landing slot here
+    k.slow = dirPlanes_.s;
+    k.kc = dirKc_;
+    k.aug = dirAug_;
     Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
     const int T = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
     Kokkos::parallel_for("peclet::flow::mg_geo_label", Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T),
@@ -3100,9 +3188,10 @@ class CutcellMG {
     }
     subStale_ = false;
   }
-  GeoBottomKernel makeGeoKernel(Level& lv, bool precondOnly) {
+  template <class FR = float, int Precond = kPrecondVcycle>
+  GeoBottomKernel<FR, Precond> makeGeoKernel(Level& lv, bool precondOnly) {
     ensureScalars();
-    GeoBottomKernel k;
+    GeoBottomKernel<FR, Precond> k;
     auto set = [](GeoLevel& d, const Level& s, C3 ratio) {
       d.ext = s.ext;
       d.inner = s.inner;
@@ -3139,7 +3228,7 @@ class CutcellMG {
     k.cmean = geoCompMean_;
     return k;
   }
-  void launchGeoKernel(const GeoBottomKernel& k) {
+  void launchGeoKernel(const GeoBottomKernel<>& k) {
     if (geoTeam_ == 0) {
       Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
       geoTeam_ = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
@@ -3173,6 +3262,74 @@ class CutcellMG {
     if (v != 0.0) {
       solveFailed_ = true;
       setSlot(kGeoFlag, 0.0);
+    }
+  }
+
+  // --- §13: the direct preconditioner of the device bottom (mg_bottom_direct.hpp) ---------------
+  // The factor launch: one team, T = min(1024, team_size_max) unless `team` > 0 (the U3 hook; the
+  // factor is bitwise independent of T). Returns the team size used.
+  template <class FR>
+  int launchDirectFactor(const BottomDirect<FR>& D, int team, double tauPiv0) {
+    const Level& bt = lv_.back();
+    BottomFactorKernel<FR, FPC> k;
+    k.D = D;
+    k.AFX = bt.AFX;
+    k.AFY = bt.AFY;
+    k.AFZ = bt.AFZ;
+    k.comp = geoComp_;
+    k.kc = dirKc_;
+    k.aug = dirAug_;
+    k.tauPiv0 = tauPiv0;
+    Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
+    const int tmax = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
+    const int T = (team > 0) ? std::min(team, tmax) : tmax;
+    Kokkos::parallel_for("peclet::flow::mg_bottom_factor",
+                         Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
+    return T;
+  }
+  // The FCG kernel with M = the direct factor `D`: the production solve (precondOnly = false) or,
+  // for the tests, z = M(lv.rhs) alone. Returns the team size used.
+  template <class FR>
+  int launchDirectKernel(const BottomDirect<FR>& D, bool precondOnly, int team, bool noMean,
+                         CCField zOut = CCField(), CCField rIn = CCField()) {
+    Level& bt = lv_.back();
+    GeoBottomKernel<FR, kPrecondDirect> k = makeGeoKernel<FR, kPrecondDirect>(bt, precondOnly);
+    k.nl = 1;  // the direct preconditioner reads no sub-level
+    k.dir = D;
+    k.noMeanForTest = noMean ? 1 : 0;
+    if (precondOnly) {
+      k.z = zOut;
+      k.b = rIn;
+    }
+    Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
+    const int tmax = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
+    const int T = (team > 0) ? std::min(team, tmax) : tmax;
+    Kokkos::parallel_for("peclet::flow::mg_bottom_direct",
+                         Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
+    return T;
+  }
+  // The production direct bottom solve: lv.x = A_b^{-1} lv.rhs (component-mean-free) by the FCG
+  // preconditioned by the FP32 factor, refactored first if setOpenness changed the operator (a
+  // host flag, not a device read).
+  void directBottomSolve() {
+    if (facStale_) {
+      dirFacTeam_ = launchDirectFactor(dir_, 0, dirPivotTol_);
+      facStale_ = false;
+      if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
+        int st[2] = {0, 0};
+        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dir_.stat);
+        st[0] = h(0);
+        st[1] = h(1);
+        printf("[mg]     direct bottom factor: ok %d, restarts %d (team %d)\n", st[0], st[1],
+               dirFacTeam_);
+      }
+    }
+    dirTeam_ = launchDirectKernel(dir_, false, dirTeam_, false);
+    geoFlagPending_ = true;
+    if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
+      int it = 0;
+      Kokkos::deep_copy(it, Kokkos::subview(geoInfo_, 0));
+      printf("[mg]     direct bottom: %d inner iterations (team %d)\n", it, dirTeam_);
     }
   }
 
@@ -4240,8 +4397,20 @@ class CutcellMG {
   CCField geoCompMean_;                               // the kernel's per-component means
   bool geoFlagPending_ = false;  // a geometric solve ran since the device flag was last read
   int bottomSolver_ = 0;         // kBottomAuto / kBottomGeometric / kBottomAlgebraic
-  double stopRef_ = -1.0;        // see setStopReference
-  std::vector<double> lvTime_;   // per-level V-cycle wall time (mgDebugLevel() >= 3)
+  // §13, the direct preconditioner: the bottom storage exists (single rank, <= 8192 cells, device
+  // or forced by a hook), the plane ordering, the FP32 factor, the per-component augmentation, the
+  // factor's staleness (set by setOpenness), the two kernels' team sizes, the first attempt's
+  // pivot floor (kBottomPivotTol; the U5 hook raises it).
+  bool bottomStore_ = false;
+  BottomPlanes dirPlanes_;
+  BottomDirect<float> dir_;
+  Kokkos::View<int*, CCMem> dirKc_;
+  Kokkos::View<double*, CCMem> dirAug_;
+  bool facStale_ = true;
+  int dirTeam_ = 0, dirFacTeam_ = 0;
+  double dirPivotTol_ = kBottomPivotTol;
+  double stopRef_ = -1.0;       // see setStopReference
+  std::vector<double> lvTime_;  // per-level V-cycle wall time (mgDebugLevel() >= 3)
   int lvCycles_ = 0;
   // Zero-gradient (Neumann) coarse ghost before the prolongation on wall/inflow faces — the WO-H
   // symmetry repair (see applyNeumannGhost). ON by default; `setCoarseGhost(false)` restores the
@@ -4538,7 +4707,7 @@ class CutcellMG {
   bool geoConnected() const { return geoConnected_; }
   int geoComponents() const { return geoNComp_; }
   void geoForceSubForTest() {
-    if (sub_.empty() && kHostMemory) {
+    if (!bottomStore_ && kHostMemory) {
       // host backends never build sub_; the hooks build it so the kernel can be exercised there
       buildGeoSub(/*forceHost=*/true);
       evalGeoConnected();
@@ -4547,7 +4716,7 @@ class CutcellMG {
   void geoBottomPrecondForTest(CCField z, CCField r, bool noMean = false) {
     ensureGeoSub();
     Level bt = lv_.back();  // shallow: the kernel reads b and writes z
-    GeoBottomKernel k = makeGeoKernel(bt, true);
+    GeoBottomKernel<> k = makeGeoKernel(bt, true);
     k.b = r;
     k.z = z;
     k.noMeanForTest = noMean ? 1 : 0;
@@ -4566,6 +4735,42 @@ class CutcellMG {
     Kokkos::deep_copy(v, slot(kGeoFlag));
     return v != 0.0;
   }
+  // §13 test hooks (tests/kokkos/test_bottom_direct.cpp; host backends after geoForceSubForTest).
+  // `directFactorForTest<FR>`: a fresh factor of the bottom in FR arithmetic (team T, 0 = the
+  // default), `*Tused` = the team size it ran with. `directApplyForTest`: z = M(r) by that factor
+  // through the FCG kernel's precondition-only path (`noMean`: without the component means'
+  // removal); returns the team size. `directSolveForTest`: the production solve (FP32 factor,
+  // lazily refactored) on the bottom's rhs; returns the inner iterations.
+  const BottomPlanes& directPlanes() const { return dirPlanes_; }
+  template <class FR>
+  BottomDirect<FR> directFactorForTest(int team, double tauPiv0 = kBottomPivotTol,
+                                       int* Tused = nullptr) {
+    BottomDirect<FR> D = BottomDirect<FR>::allocate(dirPlanes_, lv_.back().ext);
+    const int T = launchDirectFactor(D, team, tauPiv0);
+    Kokkos::fence();
+    if (Tused)
+      *Tused = T;
+    return D;
+  }
+  template <class FR>
+  int directApplyForTest(const BottomDirect<FR>& D, CCField z, CCField r, int team,
+                         bool noMean = false) {
+    const int T = launchDirectKernel(D, true, team, noMean, z, r);
+    Kokkos::fence();
+    return T;
+  }
+  int directSolveForTest() {
+    directBottomSolve();
+    int it = 0;
+    Kokkos::deep_copy(it, Kokkos::subview(geoInfo_, 0));
+    return it;
+  }
+  int directRestarts() const {
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dir_.stat);
+    return h(1);
+  }
+  void directPivotTolForTest(double t) { dirPivotTol_ = t; }
+  void directMarkStaleForTest() { facStale_ = true; }
   // `noMean`: the reference V-cycle without its mean removals (removeMean_ off in the copy).
   CutcellMG geoBottomReferenceForTest(bool noMean = false) {
     ensureGeoSub();
