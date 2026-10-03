@@ -26,34 +26,22 @@ vs ~0.80 (0.99 at ratios 0.02). GPU now 42.7 ms/step (main 035121a+). Landed sin
 vof_momentum+blocks (2d0a0d0). OPEN: vof_momentum isolated-bubble acceleration seen in the D/h 16
 pair run (1.84) but not at D/h 20 (on/off within 7 % transient, 1.6 % settled).
 
-**Running / results (2026-10-02 late).**
-- P3 DONE (branch vof-b1, worktree flow-vof-b1, not pushed; handoff in its doc/vof_step_performance_log.md):
-  WO-6 device geometric-Krylov bottom (tau 1e-5 via E3) + WO-11 solids — numerically clean (column
-  2e-14, identical iterations; host bitwise; bulk transfers 13/19 -> 0/2), BUT slower on the RTX 5080:
-  74 vs 50 ms/step (bottom 2.8 ms/solve; single team, FP64-weak card; measured on a 90-99 % shared
-  GPU). DECISION: land with the host GraphAMG still the GPU default, B1 opt-in, until a quiet-GPU and
-  an H100 measurement; if confirmed, back to the architect (premise R3; a device dense LU of the
-  1536-unknown bottom looks ~1-2 ms/step). CUDA battery was cut at 47/189 (0 failed): rerun at merge.
-- P5 DONE (vof-pvfit, flow-vof-pvfit; core cb4c7ba on core-pvfit, NOT pushed — release session
-  suite-73 asked to release it): WO-7b team kernel bitwise (fallbackBatch 5.37 -> 1.61 ms/launch);
-  WO-13 D1: rtol 1e-6 passes all criteria, iterations 13.9 -> 7.4, but systematic ~5e-8 volume
-  drift over production -> DECISION: published case stays 1e-10 (peclet-examples ac35a14 reverts
-  f28b2ce); D1 rerun on main scripted (~/Codes/bubble_column_perf/d1_main/run_d1_main.sh) for a
-  quiet GPU. WO-7c (persistent teams on the WO-8 batched tier-3 path, DECISION option C) running.
-- P4 E2(a) STOPPED TWICE (vof-e2 = 74beb93 + ab1f2bc handoff; candidate vof-e2-e23-stopped2
-  60655dd): with §12.13's D-E2.8' the column is STABLE (max|p| 577.7 vs 576.5, max|w| 16.39 vs 16.43,
-  PCG 8.00 vs 13.32) but the revised G-E2-BAL FAILS: static drop mu=0.1 ratio 50 split 2.6e-4 vs exact
-  5.5e-8 (ratio 0.02: 7.9e-6 vs 1.7e-7); split-exact decays 7-20x slower than the DF model
-  (non-gradient q at interface faces; live-interface feedback — hypotheses). RECOMMENDATION to the
-  user: park E2(a) (register: failed BAL with these numbers), spend effort on B1 redesign / WO-7 /
-  host MG launches / tolerance. AWAITING USER: park vs third design round; core tag.
-- Gallery publish FIXED: 11 stale freezes re-rendered (peclet-examples 3491f02/bb0732f), prose
-  follow-ups e01f927; deploy 2026-10-02 17:05 success (2m40s); bubble-column page LIVE.
-  Production peclet runs archived in /home/frankp/Codes/bubble_column_perf/peclet_runs/.
-- Core cb4c7ba (pvFit split) PUSHED to core main; core TAG = USER decision (v1.3.2 / v1.4.0 / wait);
-  flow + amr pins still v1.3.0. WO-7b/c parked on vof-pvfit until the tag.
+**Status (2026-10-03).** LANDED on flow main: WO-0..5, WO-8 (bitwise), WO-7b/c team-per-target PV
+fallback (5a34c69, bitwise, core v1.3.2 released for it; now pinned v1.4.0 by the Anderson session),
+device bottom 'direct' = §13 (23a3631; GPU default; quiet RTX 5080 bubble column step 42.6 ->
+36.1-37.4 ms, projection 23.7 -> ~17.5; misses §13's 12.5 ms target — L2-latency-bound factor chains;
+the next lever splits dots = numerics change; B1 retired). Umbrella fce1c06 (register + NAMING).
+PARKED: E2(a) (branch vof-e2, worktree flow-vof-e2): stable in the column but fails static balance
+by ~5000x; USER asked to choose park vs third design round (recommended: park). D1: published case
+stays rtol 1e-10; D1 rerun on main scripted (~/Codes/bubble_column_perf/d1_main/run_d1_main.sh).
+Known pre-existing: PECLET_FLOW_OPERATOR_DOUBLE=OFF (non-default) fails 6 tests on main too
+(cell_force_placement, collocated_stability_guard, balanced_force_restart, hydro_force_units,
+vof_collocated, balanced_force) — float-storage tolerances.
 
-**Next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
+**Next.** Snellius same-node rerun (bubble_cpu.slurm) + update the page's cost table; host MG launch
+structure (CPU still ~4x TBF); WO-9/10/12; E2(a) per the user's answer.
+
+**Old next.** Production column result -> D/h=24 + channel_18 rerun; WO-6 (B1 device
 bottom, recorded decision) + WO-13 (D1 tolerance, needs correct physics); WO-7 (C3, core change
 + core tag: coordinate with the release session); E2(a) per §12; register entries of design §11 as
 their WOs land; Snellius rerun (`/projects/0/prjs1022/peclet/bubble-cpu/bubble_cpu.slurm`, 15 min);
