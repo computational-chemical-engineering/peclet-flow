@@ -783,3 +783,19 @@ problems unchanged (mixed 1.11e-15, g1 6.04e-14, singular 5.33e-15 at np 4).
 
 **Not changed:** projection/advection code, `ufAdvVelocity`, the legacy scalar kernels and
 advanceScalars, CutcellMG/VelocityMG.
+
+## 2026-10-03 — WO-5 orchestrator rulings
+
+- **D-WO5-1 (Q-G).** Koren is gated at bulk Courant ≤ ½. Forward Euler with the Koren limiter is TVD
+  only to ½; with no solid it reaches min −21 at C = 0.9. This is a bulk-scheme limit,
+  legacy-identical.
+- **D-WO5-2 (Q-F).** Keep refusing cut-cell scalars in a moving fluid without `cutcell_pressure`. A
+  fluid at rest is allowed.
+- **D-WO5-3 (Q-E).** Inflow/outflow faces take the boundary-face flux the projection constrained,
+  captured right after the projection. New gate G9c: a channel with a solid and inflow/outflow, with
+  the budget closing including the boundary fluxes.
+- **D-WO5-4.** The collocated 'ghost' scheme is refused for cut-cell scalars (Q13): its face field
+  is not divergence-free under any openness (2–4.5e-2). Collocated users select gauge-exact, plain
+  or embed.
+- **Q-H → architect (brief `doc/scalar_ibm_brief_A2.md`).** Steady advection-diffusion is not
+  preconditioned by the symmetric surrogate: 13 → 40 → 89 → no convergence at Pe_h 0 / 0.1 / 0.3 / 1.
