@@ -222,6 +222,65 @@ void Solver<Grid>::setScalarTolerance(const std::string& name, double rtol) {
 }
 
 template <class Grid>
+void Solver<Grid>::setScalarMeanGradient(const std::string& name, const std::array<double, 3>& G) {
+  ScalarCutState& st = *cutcellScalar(name, "set_scalar_mean_gradient").cut;
+  for (double v : G)
+    if (!std::isfinite(v))
+      throw std::invalid_argument("set_scalar_mean_gradient: the gradient must be finite");
+  for (int a = 0; a < 3; ++a)
+    st.meanGrad[a] = G[(std::size_t)a];
+}
+
+template <class Grid>
+sco::MeanGradPosition Solver<Grid>::scalarMeanGradPosition(const double Gphys[3]) const {
+  sco::MeanGradPosition p;
+  const int og[3] = {og_.x, og_.y, og_.z};
+  for (int a = 0; a < 3; ++a) {
+    p.G[a] = Gphys[a];
+    p.org[a] = u_.org[a];
+    p.h[a] = u_.h[a];
+    p.base[a] = (long)og[a] - G;
+  }
+  p.sy = e_.x;
+  p.sz = (long)e_.x * e_.y;
+  return p;
+}
+
+template <class Grid>
+std::array<double, 3> Solver<Grid>::scalarMeanFlux(const std::string& name) {
+  ScalarField& sc = cutcellScalar(name, "scalar_mean_flux");
+  ScalarCutState& st = *sc.cut;
+  std::array<double, 3> out{0.0, 0.0, 0.0};
+  if (!st.built)
+    return out;
+  const scg::ScalarCutGeometry& gm = scg_;
+  fillGhosts(sc.c);
+  // the face flux of the last solve (read only when it advected; any field otherwise)
+  const bool adv = st.advecting;
+  double d[3], v[3];
+  sco::meanFluxLocal(CCConst(sc.c), CCConst(gm.kappa), CCConst(gm.unknown), CCConst(gm.sax),
+                     CCConst(gm.say), CCConst(gm.saz), CCConst(adv ? st.phi[0] : sc.c),
+                     CCConst(adv ? st.phi[1] : sc.c), CCConst(adv ? st.phi[2] : sc.c), adv, st.lam,
+                     st.gInt, u_.hp, st.ubar, e_, G, d, v);
+  double s[6] = {d[0], d[1], d[2], v[0], v[1], v[2]};
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    double o[6];
+    MPI_Allreduce(s, o, 6, MPI_DOUBLE, MPI_SUM, comm_);
+    for (int j = 0; j < 6; ++j)
+      s[j] = o[j];
+  }
+#endif
+  // the box average: per unit full-cell volume sums over the GLOBAL cell count, then physical
+  const auto gc = globalCells();
+  const double nBox = (double)gc[0] * (double)gc[1] * (double)gc[2];
+  const double toPhys = 1.0 / u_.speedToInt();
+  for (int a = 0; a < 3; ++a)
+    out[(std::size_t)a] = (s[a] + s[3 + a]) / nBox * toPhys;
+  return out;
+}
+
+template <class Grid>
 void Solver<Grid>::setScalarMaxIterations(const std::string& name, int maxit) {
   ScalarCutState& st = *cutcellScalar(name, "set_scalar_max_iterations").cut;
   if (maxit < 1)
@@ -277,6 +336,13 @@ void Solver<Grid>::scalarCutRefusals(const ScalarField& sc) const {
         "and " +
         "the staggered Solver without set_ghost_projection");
   static const char* kFace[6] = {"-x", "+x", "-y", "+y", "-z", "+z"};
+  // §1.5 / §8.1: theta is periodic along every axis the mean gradient has a component on
+  for (int f = 0; f < 6; ++f)
+    if (sc.cut->meanGrad[f / 2] != 0.0 && (bc_[f] != 0 || sc.bc[f] != 0))
+      throw std::runtime_error(who + "the mean gradient has a component along " +
+                               std::string(1, "xyz"[f / 2]) + " but the domain face " + kFace[f] +
+                               " is not periodic (set_scalar_mean_gradient needs periodic faces "
+                               "on every axis it has a component on)");
   for (int f = 0; f < 6; ++f) {
     const bool flowPeriodic = bc_[f] == 0, scalarPeriodic = sc.bc[f] == 0;
     if (flowPeriodic != scalarPeriodic)
@@ -553,6 +619,14 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
   st.srcFactor = srcFactor;
   st.steady = steady;
   st.numUnknowns = gm.census.numUnknowns;
+  // mean-gradient mode (§1.5): G' = G hRef; every G term below is skipped when G = 0
+  st.meanGradOn = st.meanGrad[0] != 0.0 || st.meanGrad[1] != 0.0 || st.meanGrad[2] != 0.0;
+  for (int a = 0; a < 3; ++a) {
+    st.gPhys[a] = st.meanGrad[a];
+    st.gInt[a] = st.meanGrad[a] * u_.lenToPhys();
+    st.ubar[a] = 0.0;
+  }
+  const sco::MeanGradPosition mgPos = scalarMeanGradPosition(st.gPhys);
   // the field: identity-row cells hold exactly 0 (§1.3), the time base is c^n
   sco::zeroNonUnknown(sc.c, unk, e_, G);
   Kokkos::deep_copy(CCExec(), sc.cOld, sc.c);
@@ -601,6 +675,8 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     Kokkos::deep_copy(wt.q, hq);
   }
   sco::facetCoefficients(st.cw, st.rw, gm.fac, unk, wt, lam);
+  if (st.meanGradOn)  // §1.5: rw = alpha G_phi (g - sum_k w_k G.x_k) on Dirichlet/Robin facets
+    sco::meanGradientProbeShift(st.rw, gm.fac, st.cw, mgPos);
   // right-hand side: kappa (idt c^n + S') + the walls' rw
   if (st.sourceIsField && st.sourceField.extent(0) != n_)
     throw std::runtime_error("cut-cell scalar '" + sc.name +
@@ -623,13 +699,29 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     const int n[3] = {nx_, ny_, nz_};
     const long nf = (long)n[t1] * n[t2];
     Kokkos::View<double*, CCMem> gv(sc.name + "_cc_gface", nf);
-    if (st.hasProfile[f]) {
-      if (st.profileN[f][0] != n[t1] || st.profileN[f][1] != n[t2])
-        throw std::runtime_error("cut-cell scalar '" + sc.name +
-                                 "': the domain-face profile no longer matches this rank's block");
+    if (st.hasProfile[f] &&
+        (st.profileN[f][0] != n[t1] || st.profileN[f][1] != n[t2]))
+      throw std::runtime_error("cut-cell scalar '" + sc.name +
+                               "': the domain-face profile no longer matches this rank's block");
+    if (st.hasProfile[f] || st.meanGradOn) {
+      // §1.5: in mean-gradient mode the face holds theta_bf = g - G.x_bf (x_bf the boundary face
+      // centre; G_a = 0 on this non-periodic axis by the refusals)
+      const int og[3] = {og_.x, og_.y, og_.z};
+      const double xa = u_.org[a] + (double)(og[a] + (side == 0 ? 0 : n[a])) * u_.h[a];
       auto hv = Kokkos::create_mirror_view(gv);
-      for (long k = 0; k < nf; ++k)
-        hv(k) = st.profile[f][(std::size_t)k];
+      for (int j2 = 0; j2 < n[t2]; ++j2)
+        for (int j1 = 0; j1 < n[t1]; ++j1) {
+          const long k = (long)j1 + (long)j2 * n[t1];
+          double v = st.hasProfile[f] ? st.profile[f][(std::size_t)k] : sc.bcVal[f];
+          if (st.meanGradOn) {
+            double p[3];
+            p[a] = xa;
+            p[t1] = u_.org[t1] + ((double)(og[t1] + j1) + 0.5) * u_.h[t1];
+            p[t2] = u_.org[t2] + ((double)(og[t2] + j2) + 0.5) * u_.h[t2];
+            v -= (st.gPhys[0] * p[0] + st.gPhys[1] * p[1]) + st.gPhys[2] * p[2];
+          }
+          hv(k) = v;
+        }
       Kokkos::deep_copy(gv, hv);
     } else {
       Kokkos::deep_copy(gv, sc.bcVal[f]);
@@ -638,6 +730,13 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     st.dirFace[f] = true;
     anyDir = true;
     sco::dirichletFaceFold(sc.AC, sc.b, unk, CCConst(saAx[a]), gv, lam * u_.w[a], a, side, e_, G);
+  }
+  if (st.meanGradOn) {  // §1.5 faces: the G.x part of every coupled face term on the rhs
+    double gf[3];
+    for (int a = 0; a < 3; ++a)
+      gf[a] = lam * u_.w[a] * u_.hp[a] * st.gInt[a];
+    sco::meanGradientFaceRhs(sc.b, unk, CCConst(gm.sax), CCConst(gm.say), CCConst(gm.saz), gf, e_,
+                             G);
   }
   // advection (WO-5, §6): the face flux of the projection, the small-cell split, the implicit FOU
   // bands (their outflow lumps into the surrogate diagonal through AC) and the explicit faces' net
@@ -673,6 +772,26 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
                                steady, e_, G, st.omegaOpen, steady);
     if (steady)
       sco::clampNonNegative(st.omegaOpen, e_, G);
+    if (st.meanGradOn) {
+      // §1.5 advection: theta is advected; the linear part enters exactly as the source
+      // -G'.(U'_i/V - kappa_i U'bar), U'bar = sum U'_i / sum kappa_i V (the moving frame)
+      const double hh[3] = {0.5 * u_.hp[0], 0.5 * u_.hp[1], 0.5 * u_.hp[2]};
+      double m[4];
+      sco::cellVelocitySumLocal(px, py, pz, unk, hh, e_, G, m);
+      double kc = 0.0;
+      sco::kappaMomentsLocal(CCConst(sc.c), kap, unk, e_, G, kc, m[3]);
+#ifdef PECLET_FLOW_MPI
+      if (distributed_) {
+        double o[4];
+        MPI_Allreduce(m, o, 4, MPI_DOUBLE, MPI_SUM, comm_);
+        for (int j = 0; j < 4; ++j)
+          m[j] = o[j];
+      }
+#endif
+      for (int a = 0; a < 3; ++a)
+        st.ubar[a] = m[3] > 0.0 ? m[a] / m[3] : 0.0;
+      sco::meanGradientAdvectionRhs(sc.b, px, py, pz, kap, unk, st.gInt, hh, st.ubar, e_, G);
+    }
   }
   // the level-0 surrogate diagonal (§4.3)
   sco::surrogateDiagonal(st.SAC, CCConst(sc.AC), gm.fac, st.cw);
@@ -792,12 +911,13 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     bK = st.kb;
   }
   // gauge of the singular solve: sum kappa V c is kept at its pre-solve value (§5.1)
+  // (in mean-gradient mode the target is 0: sum kappa V theta = 0, §5.1)
   double kc0 = 0.0, k0 = 0.0;
   if (st.singular) {
     double m[2];
     sco::kappaMomentsLocal(CCConst(sc.c), kap, unk, e_, G, m[0], m[1]);
     allSum(m, 2);
-    kc0 = m[0];
+    kc0 = st.meanGradOn ? 0.0 : m[0];
     k0 = m[1];
   }
 
@@ -1033,6 +1153,11 @@ typename Solver<Grid>::ScalarCutFacets Solver<Grid>::scalarFacets(const std::str
   }
   auto hup = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), up);
   auto hq = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), qin);
+  // mean-gradient mode (§1.5): the probe value of c is that of theta plus sum_k w_k G.x_k
+  const bool mgOn = have && st.meanGradOn;
+  const sco::MeanGradPosition mgPos = scalarMeanGradPosition(st.gPhys);
+  auto hoff = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fo.offF);
+  auto hw = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fo.wF);
   const int og[3] = {og_.x, og_.y, og_.z};
   const double l = u_.lenToPhys();
   const int nb = scalarNumBodies();
@@ -1052,7 +1177,11 @@ typename Solver<Grid>::ScalarCutFacets Solver<Grid>::scalarFacets(const std::str
     int b = hb(f);
     if (b < 0 || b >= nb)
       b = 0;
-    const double a = halpha(f), s = hs(f), u = hup(f), lam = st.lam;
+    double u = hup(f);
+    if (mgOn)
+      for (int k = 0; k < 8; ++k)
+        u += hw(f, k) * mgPos(i + (long)hoff(f, k));
+    const double a = halpha(f), s = hs(f), lam = st.lam;
     const int t = st.wtType[(std::size_t)b];
     double cG;
     if (t == 1)

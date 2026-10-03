@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Cut-cell scalar transport: the accuracy and iteration gates of WO-3/WO-4/WO-5 (doc/scalar_ibm_design.md §11).
+"""Cut-cell scalar transport: the accuracy and iteration gates of WO-3 to WO-6 (doc/scalar_ibm_design.md §11).
 
 Single phase; diffusion, and advection by the projection's face flux (WO-5); BiCGStab preconditioned by one ScalarMG V-cycle (WO-4; level 0 alone
 under the transient level rule). Every case is in PHYSICAL units (an extent), so the unit
@@ -31,11 +31,20 @@ conversions of §1.2 are on the path.
   gadv  §11 G-adv (WO-5c, design Amendment A2: the steady advective surrogate), Pe_h = the census
        max_cell_peclet 0.1 / 1 / 10 by rescaling the face field: (a) WO-5's C3 problem (periodic
        box 4R, a Dirichlet sphere with a source, a projected Stokes field) at R/h 16 and 32;
-       (b) the closure on G9b's SC array (Neumann spheres, singular, source u_x - <u_x>) and (b')
+       (b) the closure on G9b's SC array (Neumann spheres, singular, the mean-gradient mode of
+       WO-6 with G = e_x) and (b')
        the same with Dirichlet spheres, 32^3 and 64^3; (c) G9c's channel (open faces), Pe_h 1 and
        10 (set through D). (i) converged, (ii) iteration bounds (prov.), (iii) growth per
        doubling <= 1.7x, (v) the steady budget identity <= 1e-11 of the gross budget (D-WO5c-1). (iv) C4 is in the
        `scalar_mg` ctest, (vi) a one-time logged check.
+  g8   Taylor-Aris (WO-6): G7's pipe, frozen Poiseuille face velocities, insulating walls, the
+       mean-gradient mode G = e_z, steady (advecting, singular): -<u'theta> -> Pe^2 D/48 at
+       Pe = 10 (order >= 1.8, <= 1e-3 at R/h 32), scalar_mean_flux = its field sums to 1e-10;
+       G-iter (<= 30, growth <= 5) on multigrid-friendly boxes (ruling D-WO4-1).
+  g5b  the insulating periodic SC array (c = 0.3) in the mean-gradient mode (WO-6): k* =
+       -J_x/(D G_x) from scalar_mean_flux, self-convergence order >= 1.7, k* below the
+       Hashin-Shtrikman bound; G-iter on multigrid-friendly boxes; the no-solid identity k* = 1
+       to 1e-12 (at rest, and under a uniform flow: the moving frame).
   giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 10 per step,
        the cold first step included — ruling of WO-4, restating the provisional 8) and the singular
        steady problem on G5b's geometry (periodic simple-cubic array, c = 0.3, insulating + flux +
@@ -996,6 +1005,249 @@ def gate_g9c():
     raises(RuntimeError, s.advance_scalars, "open faces, a moving fluid and no projection yet: refused")
 
 
+# ------------------------------------------------------------------------- WO-6: closures ----
+def low_face_flux(s, name, a):
+    """The scalar's advective face flux per unit area through the LOW a-face of each cell
+    (physical, c-free: open * u), from fields: the projection's openness (get_ox/oy/oz, the
+    staggered non-ghost openness of §6.1) times the face velocity (get_field, internal, converted),
+    zero unless both cells are fluid unknowns (the guard of §6.1). Periodic roll; a non-periodic
+    axis' low boundary face is zeroed by the caller's mask."""
+    geo = s.diagnostics.scalar_geometry(name)
+    unk = geo["unknown"] > 0.5
+    o = (s.get_ox, s.get_oy, s.get_oz)[a]()
+    v = s.get_field("uvw"[a]) / s.unit_scales["velocity_to_internal"][a]
+    return np.where(unk & np.roll(unk, 1, axis=a), o * v, 0.0)
+
+
+def cell_velocity(s, name, periodic=(True, True, True)):
+    """U_i/V (§1.5) per cell, physical: sum_f F_out (x_f - x_i) / V = the mean of the cell's two
+    a-face fluxes per area, per axis."""
+    U = []
+    for a in range(3):
+        f = low_face_flux(s, name, a)
+        if not periodic[a]:
+            idx = [slice(None)] * 3
+            idx[a] = 0
+            f[tuple(idx)] = 0.0
+        U.append(0.5 * (f + np.roll(f, -1, axis=a)))
+    return U
+
+
+def mean_flux_fields(s, name, D, G, periodic):
+    """scalar_mean_flux recomputed from fields (§8.1): the diffusive face sum of -D a (c_j - c_i)/h
+    (c = theta + G.x, the true displacement) over the coupled low faces, plus the advective
+    sum (U_i/V - kappa_i Ubar) theta_i, both over the whole box's cell count. Returns
+    (J (3,), the advective part (3,), Ubar (3,), phi = sum kappa / N)."""
+    geo = s.diagnostics.scalar_geometry(name)
+    unk = geo["unknown"] > 0.5
+    kap = np.where(unk, geo["kappa"], 0.0)
+    th = s.get_field(name)
+    h = s.spacing
+    N = th.size
+    U = cell_velocity(s, name, periodic)
+    ksum = math.fsum(kap[unk].ravel())
+    ub = [math.fsum(U[a][unk].ravel()) / ksum for a in range(3)]
+    J, Ja = np.zeros(3), np.zeros(3)
+    for a, ap in enumerate((geo["aperture_x"], geo["aperture_y"], geo["aperture_z"])):
+        cpl = unk & np.roll(unk, 1, axis=a)
+        if not periodic[a]:
+            idx = [slice(None)] * 3
+            idx[a] = 0
+            cpl[tuple(idx)] = False
+        dc = th - np.roll(th, 1, axis=a) + G[a] * h[a]
+        J[a] = math.fsum((-D * ap * dc / h[a])[cpl].ravel()) / N
+        Ja[a] = math.fsum(((U[a] - kap * ub[a]) * th)[unk].ravel()) / N
+    return J + Ja, Ja, ub, ksum / N
+
+
+def poiseuille_face_average(s, c0, R, U, oz, m=24):
+    """INFO variant of G8's velocity: the EXACT Poiseuille flux through the open part of each
+    z-face (m x m midpoint sub-samples of the face), divided by oz A, so that F = oz w A carries no
+    point-sampling error."""
+    x, y, _ = (np.asarray(v) for v in s.cell_centers())
+    h = x[1] - x[0]
+    g = (np.arange(m) + 0.5) / m - 0.5
+    GX, GY = np.meshgrid(g * h, g * h, indexing="ij")
+    flux = np.zeros((x.size, y.size))
+    for i in range(x.size):
+        px = x[i] + GX - c0[0]
+        for j in range(y.size):
+            py = y[j] + GY - c0[1]
+            r2 = (px * px + py * py) / (R * R)
+            flux[i, j] = np.mean(np.where(r2 < 1.0, 2.0 * U * (1.0 - r2), 0.0))
+    o = oz[:, :, :1][:, :, 0]
+    w2 = np.where(o > 0, flux / np.where(o > 0, o, 1.0), 0.0)
+    return np.repeat(w2[:, :, None], oz.shape[2], axis=2)
+
+
+def g8_case(Rh, off, U=1.0, Pe=10.0, nbox=None, nz=4, exact_flux=False):
+    """G8: G7's pipe (R = 1, nz = 4 periodic), frozen Poiseuille z-face velocities (set_field, face
+    centres, clipped >= 0; divergence-free because z-invariant), insulating walls, mean gradient
+    e_z, steady. Returns the Taylor-Aris coefficient -<u'theta> (interstitial, from fields) over
+    its exact value Pe^2 D/48, Pe = U R/D. `nbox`/`nz` give G-iter's multigrid-friendly box (ruling
+    D-WO4-1; the problem is z-invariant, so nz changes nothing but the cell count);
+    `exact_flux` the INFO variant of poiseuille_face_average."""
+    R = 1.0
+    D = U * R / Pe
+    h = R / Rh
+    n = nbox or 2 * Rh + 6
+    L = n * h
+    s = walled((n, n, nz), (L, L, nz * h), periodic_z=True)
+    c0 = np.array([0.5 * L, 0.5 * L]) + np.asarray(off[:2]) * h
+    X, Y, Z = grid(s)
+    rr = np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2)
+    s.set_solid(np.asfortranarray(R - rr), cutcell_pressure=True)
+    if exact_flux:
+        w = poiseuille_face_average(s, c0, R, U, s.get_oz())
+    else:
+        w = np.maximum(2.0 * U * (1.0 - rr * rr / (R * R)), 0.0)  # z-face centres share (x, y)
+    s.set_field("w", np.asfortranarray(w * s.unit_scales["velocity_to_internal"][2]))
+    add_cc(s, D, box="neumann", periodic_z=True)
+    s.set_scalar_mean_gradient("c", (0.0, 0.0, 1.0))
+    s.solve_scalar_steady("c")
+    per = (False, False, True)
+    J, Ja, ub, phi = mean_flux_fields(s, "c", D, (0.0, 0.0, 1.0), per)
+    Jc = np.asarray(s.scalar_mean_flux("c"))
+    val = -Ja[2] / phi  # -<u' theta> interstitial, G = 1
+    c = s.diagnostics.scalar_census("c")
+    return dict(err=48.0 * val / (Pe * Pe * D) - 1.0, its=c["krylov_iterations"],
+                conv=c["krylov_converged"], pe_h=c["max_cell_peclet"], ubar=ub[2],
+                jdiff=float(np.max(np.abs(Jc - J)) / np.max(np.abs(Jc))), J=Jc, phi=phi,
+                incompat=c["steady_incompatibility"], s=s)
+
+
+def gate_g8():
+    print("G8 Taylor-Aris: pipe R/h in {16, 32, 64}, Poiseuille face velocities, insulating walls, "
+          "mean gradient e_z, steady; -<u'theta> -> Pe^2 D/48 at Pe = UR/D = 10")
+    e = {}
+    for Rh in (16, 32, 64):
+        rows = [g8_case(Rh, off) for off in OFFSETS]
+        e[Rh] = rms([r["err"] for r in rows])
+        print(f"  R/h={Rh:3d}  rel err {[f'{r['err']:+.3e}' for r in rows]}  iterations "
+              f"{[r['its'] for r in rows]}  census Pe_h {rows[0]['pe_h']:.3f}  Ubar/U - 1 "
+              f"{rows[0]['ubar'] - 1.0:+.2e}  |J - J_fields| / |J| <= {max(r['jdiff'] for r in rows):.1e}"
+              f"  incompatibility {max(r['incompat'] for r in rows):.1e}")
+        for r in rows:
+            check(r["conv"], f"R/h={Rh}: converged ({r['its']} iterations; native box: correctness "
+                  f"only, ruling D-WO4-1)")
+            check(r["jdiff"] <= 1e-10, f"R/h={Rh}: scalar_mean_flux = the field sums to "
+                  f"{r['jdiff']:.1e} <= 1e-10")
+    for a, b in ((16, 32), (32, 64)):
+        check(order(e[a], e[b]) >= 1.8, f"Taylor-Aris order {a}->{b} {order(e[a], e[b]):.2f} >= 1.8 "
+              f"(rms {e[a]:.3e} -> {e[b]:.3e})")
+    check(e[32] <= 1e-3, f"Taylor-Aris |err| {e[32]:.2e} <= 1e-3 at R/h = 32")
+    ex = {Rh: rms([g8_case(Rh, off, exact_flux=True)["err"] for off in OFFSETS]) for Rh in (16, 32)}
+    print(f"  INFO exact face fluxes (no velocity point-sampling error): rms {ex[16]:.3e} -> "
+          f"{ex[32]:.3e}, order {order(ex[16], ex[32]):.2f} (2-D oracle: 3.2e-4 at R/h 32)")
+    print("G-iter singular steady on G8, multigrid-friendly boxes (ruling D-WO4-1): n = 48 / 80 / 144, "
+          "nz = 16")
+    its = []
+    for Rh in (16, 32, 64):
+        rows = [g8_case(Rh, off, nbox=mg_box(2 * Rh + 6), nz=mg_box(4)) for off in OFFSETS]
+        its.append(max(r["its"] for r in rows))
+        print(f"  R/h={Rh:3d}  iterations {[r['its'] for r in rows]}  rel err "
+              f"{[f'{r['err']:+.3e}' for r in rows]}")
+        for r in rows:
+            check(r["conv"], f"R/h={Rh} mg box: converged")
+    check(max(its) <= 30, f"G8 singular steady: <= 30 iterations at every rung ({its})")
+    gr = [b - a for a, b in zip(its, its[1:])]
+    check(all(g <= 5 for g in gr), f"G8 singular steady: growth <= 5 per doubling ({gr})")
+
+
+def g5b_case(n, off, D=0.6):
+    """G5b: the periodic simple-cubic array, solid fraction 0.3, on an n^3 grid of the unit
+    period, insulating spheres, mean gradient e_x, steady (singular). k* = -J_x/(D G_x)."""
+    L = 1.0
+    h = L / n
+    s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    R = 0.5 * L * (0.3 * 6.0 / math.pi) ** (1.0 / 3.0)
+    c0 = np.array([0.5 * L, 0.5 * L, 0.5 * L]) + np.asarray(off) * h
+    X, Y, Z = grid(s)
+    r = np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2 + (Z - c0[2]) ** 2)
+    s.set_solid(np.asfortranarray(r - R))
+    s.add_scalar("c", diffusivity=D, cutcell=True)
+    s.set_scalar_mean_gradient("c", (1.0, 0.0, 0.0))
+    s.solve_scalar_steady("c")
+    J = np.asarray(s.scalar_mean_flux("c"))
+    c = s.diagnostics.scalar_census("c")
+    Jf, _, _, _ = mean_flux_fields(s, "c", D, (1.0, 0.0, 0.0), (True, True, True))
+    return dict(k=-J[0] / D, its=c["krylov_iterations"], conv=c["krylov_converged"],
+                lv=c["mg_levels"], nd=2.0 * R / h, jdiff=float(np.max(np.abs(J - Jf)) / abs(J[0])))
+
+
+def no_solid_case(G, vel=None, D=0.6, n=16):
+    """The no-solid identity: a box with no solid (SDF > 0 everywhere), mean gradient G, at rest
+    or with a uniform velocity; the closure solution is theta = const and J = -D G exactly."""
+    s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    s.set_solid(np.asfortranarray(np.ones((n, n, n))), cutcell_pressure=vel is not None)
+    if vel is not None:
+        for a, nm in enumerate("uvw"):
+            s.set_field(nm, np.asfortranarray(np.full((n, n, n), vel[a] *
+                                                      s.unit_scales["velocity_to_internal"][a])))
+    s.add_scalar("c", diffusivity=D, cutcell=True)
+    s.set_field("c", np.asfortranarray(np.random.default_rng(7).uniform(-1, 1, (n, n, n))))
+    s.set_scalar_mean_gradient("c", G)
+    s.solve_scalar_steady("c")
+    J = np.asarray(s.scalar_mean_flux("c"))
+    c = s.diagnostics.scalar_census("c")
+    return J, c
+
+
+def gate_g5b():
+    print("G5b insulating periodic SC array, c = 0.3, mean gradient e_x: k* = -J_x/(D G_x) via "
+          "scalar_mean_flux; ND = 16.6 / 33.2 / 66.4 (n = 20 / 40 / 80, doublings)")
+    hs = (1.0 - 0.3) / (1.0 + 0.15)
+    k = {}
+    for n in (20, 40, 80):
+        rows = [g5b_case(n, off) for off in OFFSETS]
+        k[n] = [r["k"] for r in rows]
+        print(f"  n={n:3d} (ND {rows[0]['nd']:.1f})  k* {[f'{v:.7f}' for v in k[n]]}  iterations "
+              f"{[r['its'] for r in rows]}  mg levels {rows[0]['lv']}  |J - J_fields|/|J_x| <= "
+              f"{max(r['jdiff'] for r in rows):.1e}")
+        for r in rows:
+            check(r["conv"], f"n={n}: converged ({r['its']} iterations)")
+            if n >= 40:  # reading (WO-6 log): the bound of the exact k*, applied from ND 32 up
+                check(r["k"] <= hs, f"n={n}: k* {r['k']:.6f} <= Hashin-Shtrikman {hs:.6f}")
+            check(r["jdiff"] <= 1e-10, f"n={n}: scalar_mean_flux = the field sums ({r['jdiff']:.1e})")
+    d1 = rms([a - b for a, b in zip(k[20], k[40])])
+    d2 = rms([a - b for a, b in zip(k[40], k[80])])
+    p = order(d1, d2)
+    check(p >= 1.7, f"self-convergence order {p:.2f} >= 1.7 (rms |k_20 - k_40| {d1:.3e}, "
+          f"|k_40 - k_80| {d2:.3e})")
+    kx = [c + (c - b) / (2.0 ** p - 1.0) for b, c in zip(k[40], k[80])]
+    print(f"  Richardson-extrapolated k* {[f'{v:.6f}' for v in kx]}; ND 16.6 rung "
+          f"{max(k[20]) - hs:+.2e} against the bound (INFO: the bound is of the exact k*)")
+    check(max(kx) <= hs, f"extrapolated k* {max(kx):.6f} <= Hashin-Shtrikman {hs:.6f}")
+    print("G-iter singular steady on the G5b closure, multigrid-friendly n = 32 / 48 / 80 (ruling Q-C)")
+    mx = []
+    for n in (mg_box(20), mg_box(40), mg_box(80)):
+        rows = [g5b_case(n, off) for off in OFFSETS]
+        mx.append(max(r["its"] for r in rows))
+        print(f"  n={n:3d}  iterations {[r['its'] for r in rows]}  k* {[f'{r['k']:.6f}' for r in rows]}")
+        for r in rows:
+            check(r["conv"], f"n={n}: converged")
+    check(max(mx) <= 30, f"G5b singular: <= 30 iterations at every rung ({mx})")
+    gr = [b - a for a, b in zip(mx, mx[1:])]
+    check(all(g <= 5 for g in gr), f"G5b singular: growth <= 5 per rung ({gr})")
+    print("no-solid identity: k* = 1 to 1e-12")
+    J, c = no_solid_case((1.0, 0.0, 0.0))
+    ks = -J[0] / 0.6
+    print(f"  at rest, G = e_x: k* - 1 = {ks - 1.0:+.1e}, J_y, J_z = {J[1]:+.1e}, {J[2]:+.1e}; "
+          f"{c['krylov_iterations']} iterations")
+    check(abs(ks - 1.0) <= 1e-12 and abs(J[1]) <= 1e-12 and abs(J[2]) <= 1e-12,
+          "no solid, at rest: k* = 1 to 1e-12, transverse flux 0")
+    G = np.array([0.3, -0.5, 0.8])
+    J, c = no_solid_case(tuple(G), vel=(0.2, 0.1, -0.3))
+    dev = float(np.max(np.abs(J + 0.6 * G)) / (0.6 * np.linalg.norm(G)))
+    print(f"  uniform flow (0.2, 0.1, -0.3), G = (0.3, -0.5, 0.8): max|J + D G| / (D|G|) = {dev:.1e}; "
+          f"census Pe_h {c['max_cell_peclet']:.3g}, {c['krylov_iterations']} iterations")
+    check(dev <= 1e-12, "no solid, uniform flow (moving frame): J = -D G to 1e-12")
+
+
 # -------------------------------------------------------------------------------------- G-adv ----
 def rescale_peclet(s, name, target):
     """G-adv's parametrization (A2): one probe steady solve at the present face field, then u, v, w
@@ -1008,9 +1260,10 @@ def rescale_peclet(s, name, target):
 
 def gadv_budget(s, name):
     """(v), ruling D-WO5c-1: the steady rate balance relative to the GROSS budget — the sum of the
-    terms' absolute values, the source taken gross (V sum kappa |s| for a per-cell source,
-    |source_in| for a uniform one) — bound 1e-11. Returns (that ratio, the ratio against the
-    largest NET term: INFO, O(1) for the mean-free closure source of (b) / (b'))."""
+    terms' absolute values, the source taken gross (V sum |r| over the unknowns, r the per-cell
+    source density of the right-hand side: kappa s for a per-cell source, the mean-gradient terms
+    in closure mode; |source_in| for a uniform one) — bound 1e-11. Returns (that ratio, the ratio
+    against the largest NET term: INFO, O(1) for the mean-free closure source of (b) / (b'))."""
     b = s.diagnostics.scalar_budget(name)
     net = max(abs(b["wall_in"]), abs(b["source_in"]), abs(b["boundary_in"]))
     src = abs(b["source_in"])
@@ -1019,10 +1272,10 @@ def gadv_budget(s, name):
         unk = geo["unknown"] > 0.5
         x, y, z = s.cell_centers()
         V = (x[1] - x[0]) * (y[1] - y[0]) * (z[1] - z[0])
-        src = V * math.fsum((geo["kappa"] * np.abs(GADV_SRC[name]))[unk].ravel())
+        src = V * math.fsum(np.abs(GADV_SRC[name])[unk].ravel())
     gross = abs(b["wall_in"]) + src + abs(b["boundary_in"])
     ie = abs(b["identity_error"])
-    return ie / gross, ie / net
+    return ie / gross, (ie / net if net > 0.0 else None)  # closure mode: every net term is 0
 
 
 def gadv_a_case(Rh, pe):
@@ -1083,20 +1336,45 @@ def closure_source(s, name):
     return np.asfortranarray(np.where(unk, ux - mean, 0.0))
 
 
+def closure_rhs_density(s, name, D, G):
+    """The mean-gradient terms of the right-hand side per unit volume (§1.5), physical, per cell:
+    the faces' D G_a (a_a^+ - a_a^-)/h_a over the coupled faces, minus G.(U_i/V - kappa_i Ubar);
+    the gross scale of (v) in closure mode."""
+    geo = s.diagnostics.scalar_geometry(name)
+    unk = geo["unknown"] > 0.5
+    kap = np.where(unk, geo["kappa"], 0.0)
+    h = s.spacing
+    U = cell_velocity(s, name)
+    ksum = math.fsum(kap[unk].ravel())
+    r = np.zeros(unk.shape)
+    for a, ap in enumerate((geo["aperture_x"], geo["aperture_y"], geo["aperture_z"])):
+        lo = np.where(unk & np.roll(unk, 1, axis=a), ap, 0.0)
+        hi = np.roll(lo, -1, axis=a)
+        ub = math.fsum(U[a][unk].ravel()) / ksum
+        r += D * G[a] * (hi - lo) / h[a] - G[a] * (U[a] - kap * ub)
+    return np.where(unk, r, 0.0)
+
+
 def gadv_b_case(n, pe, wall):
-    """(b) the closure problem on the SC array (insulating spheres: steady, singular) or (b') the
-    reactive bed (Dirichlet spheres, c = 0), per-cell source u_x - <u_x>, D = 0.05; census
-    Pe_h = pe."""
+    """(b) the closure problem on the SC array (insulating spheres: steady, singular) in the
+    mean-gradient mode of WO-6 (theta, G = e_x), or (b') the reactive bed (Dirichlet spheres,
+    c = 0) with the per-cell source u_x - <u_x> (WO-5c's form), D = 0.05; census Pe_h = pe."""
     s = sc_array(n)
     s.add_scalar("c", diffusivity=0.05, cutcell=True)
     if wall == "neumann":
         s.set_scalar_wall("c", "neumann", 0.0)
-    else:
-        s.set_scalar_wall("c", "dirichlet", 0.0)
+        s.set_scalar_mean_gradient("c", (1.0, 0.0, 0.0))
+        rescale_peclet(s, "c", pe)
+        GADV_SRC["c"] = closure_rhs_density(s, "c", 0.05, (1.0, 0.0, 0.0))
+        s.solve_scalar_steady("c")
+        return s
+    s.set_scalar_wall("c", "dirichlet", 0.0)
     s.set_scalar_source("c", closure_source(s, "c"))
     rescale_peclet(s, "c", pe)
-    GADV_SRC["c"] = closure_source(s, "c")  # the source of the rescaled field
-    s.set_scalar_source("c", GADV_SRC["c"])
+    src = closure_source(s, "c")  # the source of the rescaled field
+    s.set_scalar_source("c", src)
+    geo = s.diagnostics.scalar_geometry("c")
+    GADV_SRC["c"] = geo["kappa"] * src
     s.solve_scalar_steady("c")
     return s
 
@@ -1168,7 +1446,8 @@ def gate_gadv():
             its[Rh][pe] = gadv_row(f"(a) R/h={Rh} ({4 * Rh}^3)", s, "c", pe, bd)
     gadv_growth("(a)", its[16], its[32])
     print(f"  [(a): {time.time() - t0:.0f} s]")
-    for wall, nm in (("neumann", "(b) closure, Neumann spheres"), ("dirichlet", "(b') Dirichlet spheres")):
+    for wall, nm in (("neumann", "(b) closure, Neumann spheres, mean gradient e_x"),
+                     ("dirichlet", "(b') Dirichlet spheres")):
         t0 = time.time()
         its = {}
         for n in (32, 64):
@@ -1251,6 +1530,27 @@ def gate_api():
     s.set_scalar_bc("c", "-x", "dirichlet", 0.5)  # the flow -x face is periodic
     raises(RuntimeError, s.advance_scalars, "a scalar Dirichlet face against a periodic flow face is refused")
     s.set_scalar_bc("c", "-x", "periodic")
+    raises(ValueError, lambda: s.set_scalar_mean_gradient("c", (float("nan"), 0.0, 0.0)),
+           "a non-finite mean gradient is a ValueError")
+    raises(ValueError, lambda: s.set_scalar_mean_gradient("legacy", (1.0, 0.0, 0.0)),
+           "set_scalar_mean_gradient on a legacy scalar is a ValueError")
+    s.set_scalar_mean_gradient("c", (1.0, 0.0, 0.0))
+    s.advance_scalars()  # periodic box: the closure mode steps
+    sw = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    sw.set_rho(1.0)
+    sw.set_mu(1.0)
+    sw.set_domain_bc("-y", "wall")
+    sw.set_domain_bc("+y", "wall")
+    sw.set_solid(np.asfortranarray(np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2) - 0.2))
+    sw.add_scalar("c", 1.0, cutcell=True)
+    sw.set_scalar_bc("c", "-y", "neumann")
+    sw.set_scalar_bc("c", "+y", "neumann")
+    sw.set_scalar_mean_gradient("c", (1.0, 0.0, 0.5))  # x, z periodic: accepted
+    sw.solve_scalar_steady("c")
+    sw.set_scalar_mean_gradient("c", (0.0, 1.0, 0.0))
+    raises_naming(RuntimeError, lambda: sw.solve_scalar_steady("c"), ("along y", "-y"),
+                  "a mean gradient along a non-periodic axis is refused, naming the axis and face")
+    s.set_scalar_mean_gradient("c", (0.0, 0.0, 0.0))
     s.set_porous_continuity(True)
     raises(RuntimeError, s.advance_scalars, "porous continuity is refused")
     # ruling D-WO5-2: a moving fluid without the cut-cell projection is refused, naming the remedy
@@ -1281,7 +1581,8 @@ def gate_api():
 
 
 GATES = {"api": gate_api, "g1": gate_g1, "g2": gate_g2, "g3a": gate_g3a, "g3b": gate_g3b, "g7": gate_g7,
-         "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b, "g9c": gate_g9c, "gadv": gate_gadv}
+         "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b, "g9c": gate_g9c, "gadv": gate_gadv,
+         "g8": gate_g8, "g5b": gate_g5b}
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(GATES)

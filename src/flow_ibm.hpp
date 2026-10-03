@@ -2648,6 +2648,15 @@ class Solver {
   void setScalarTolerance(const std::string& name, double rtol);
   // BiCGStab iteration cap (default 200, §5.1). Diagnostics tier.
   void setScalarMaxIterations(const std::string& name, int maxit);
+  // Mean-gradient (closure) mode (§1.5, WO-6): G physical (c/L); the field then holds theta,
+  // c = G.x + theta, in the frame moving with the fluid's mean velocity. (0, 0, 0) is off.
+  void setScalarMeanGradient(const std::string& name, const std::array<double, 3>& G);
+  // `scalar_mean_flux` (§8.1): the box-averaged total flux (3,), c L/T (physical), of the last
+  // advance or steady solve: the face sum of -Lam a A (c_j - c_i), c = theta + G.x, plus
+  // (1/V_box) sum_i (U_i - kappa_i V Ubar) theta_i. Collective under MPI.
+  std::array<double, 3> scalarMeanFlux(const std::string& name);
+  // G.x at an extended-block cell centre for the physical gradient G (§1.5; global, unwrapped).
+  sco::MeanGradPosition scalarMeanGradPosition(const double Gphys[3]) const;
   // Dirichlet value of a domain face as a per-face profile: n1 x n2 values over this rank's face
   // cells in the face's tangential axes in x, y, z order, the first fastest (§8.1).
   void setScalarBcProfile(const std::string& name, int face, const std::vector<double>& prof,

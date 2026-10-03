@@ -1,5 +1,5 @@
-// Cut-cell scalar solve under MPI (doc/scalar_ibm_design.md §5.1, §5.2, §5.4, §6; WO-3, WO-4,
-// WO-5, WO-5b).
+// Cut-cell scalar solve under MPI (doc/scalar_ibm_design.md §1.5, §5.1, §5.2, §5.4, §6; WO-3,
+// WO-4, WO-5, WO-5b, WO-5c, WO-6).
 //
 // np = 1, 2, 4 on the production ORB. Each problem is solved on the distributed solver and on a
 // single-rank reference of the same problem; the parallel contract of §5.4 (G10) is checked at
@@ -24,6 +24,9 @@
 //   g9c       — G9c (WO-5b): a channel with inflow / walls / outflow, a sphere and a cap cutting
 //               the outflow face across the rank boundaries, the scalar advected by the full NS
 //               step on the captured open-face flux, fou, 30 steps (small-cell counts exact);
+//   g8        — G8 (WO-6): the Taylor-Aris closure in the mean-gradient mode (a pipe, Poiseuille
+//               face velocities, insulating walls, G = e_z), steady, advecting and singular; the
+//               compared output is the box-averaged flux along G (scalar_mean_flux).
 //   steady_adv — G-adv(a) (WO-5c, design Amendment A2): the periodic C3 problem (a Dirichlet sphere
 //               R/h = 16 in a 64^3 box with a source) advected by a projected Stokes field
 //               rescaled to census Pe_h 1, steady: the advective V-cycle. Plus its z = M^-1 r
@@ -618,6 +621,74 @@ int main(int argc, char** argv) {
             CHECK(tt[0] == 0 && tt[1] == (long)N * N * N);
           },
           1e-11);
+    }
+    // ---- G10 on G8 (WO-6): the Taylor-Aris closure, steady, advecting, singular ----
+    {
+      // G8's pipe in a cubic box (z-invariant, so the cube is the same problem): R = 16 cells,
+      // insulating walls, x/y no-slip flow walls, z periodic; frozen Poiseuille z-face velocities
+      // at Pe = U R/D = 10 (census Pe_h 1.25) set on every block; mean gradient e_z.
+      const int N = 40;
+      const double R = 16.0, D = 0.7, U = 10.0 * D / R, cx = 19.83, cy = 20.27;
+      std::vector<double> gsdf((std::size_t)N * N * N);
+      for (int z = 0; z < N; ++z)
+        for (int y = 0; y < N; ++y)
+          for (int x = 0; x < N; ++x)
+            gsdf[(std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * N] =
+                R - std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+      compare(
+          "g8", N, gsdf,
+          [](IbmSolver& s) {
+            s.setRho(1.0);
+            s.setMu(1.0);
+            s.setDt(1.0);
+            for (int f = 0; f < 4; ++f)
+              s.setDomainBc(f, 1, 0.0, 0.0, 0.0);
+          },
+          [&](IbmSolver& s, const Block& B) {
+            std::vector<double> w((std::size_t)B.l[0] * B.l[1] * B.l[2]);
+            for (int z = 0; z < B.l[2]; ++z)
+              for (int y = 0; y < B.l[1]; ++y)
+                for (int x = 0; x < B.l[0]; ++x) {
+                  const double dx = x + B.o[0] - cx, dy = y + B.o[1] - cy;
+                  w[(std::size_t)x + (std::size_t)y * B.l[0] + (std::size_t)z * B.l[0] * B.l[1]] =
+                      std::fmax(2.0 * U * (1.0 - (dx * dx + dy * dy) / (R * R)), 0.0);
+                }
+            s.setField("w", w);
+            s.addScalar("c", D, 1, 50, true);
+            for (int f = 0; f < 4; ++f)
+              s.setScalarBc("c", f, 1, 0.0);
+            s.setScalarMeanGradient("c", {0.0, 0.0, 1.0});
+          },
+          [](IbmSolver& s) {
+            Run r;
+            s.solveScalarSteady("c");
+            r.iters.push_back(s.scalarField("c").cut->iterations);
+            // the compared "flux" is the closure's output: the box-averaged flux along G
+            r.flux.push_back(s.scalarMeanFlux("c")[2]);
+            // ruling D-WO5c-1: the steady identity relative to the GROSS budget; every net term
+            // is 0 here (insulating, no source, periodic along G), the gross is V sum |b| (b the
+            // mean-gradient terms of the right-hand side; V = 1 in cell units)
+            auto& sc = s.scalarField("c");
+            auto hb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sc.b);
+            const int ext[3] = {s.nx() + 2 * G, s.ny() + 2 * G, s.nz() + 2 * G};
+            double g = 0.0;
+            for (int z = G; z < ext[2] - G; ++z)
+              for (int y = G; y < ext[1] - G; ++y)
+                for (int x = G; x < ext[0] - G; ++x)
+                  g += std::fabs(hb(x + (long)y * ext[0] + (long)z * ext[0] * ext[1]));
+            double gg = 0.0;
+            MPI_Allreduce(&g, &gg, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+            r.identity.push_back(s.scalarBudget("c").identityError / gg);
+            const auto& st = *sc.cut;
+            if (rank_ == 0)
+              std::printf("  [g8] census max_cell_peclet %.6g, singular %d, %d levels, %d iterations, "
+                          "mean flux z %.15e\n",
+                          st.maxCellPeclet, (int)st.singular, st.mgLevels, st.iterations,
+                          r.flux.back());
+            CHECK(st.advecting && st.steady && st.singular && st.meanGradOn);
+            return r;
+          },
+          false, true, true, nullptr, 1e-11);
     }
   }
   Kokkos::finalize();

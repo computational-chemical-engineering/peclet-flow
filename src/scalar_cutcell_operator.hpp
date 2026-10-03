@@ -60,6 +60,9 @@ struct ScalarCutState {
   bool hasProfile[6] = {false, false, false, false, false, false};
   std::vector<double> profile[6];  ///< Dirichlet domain-face profile (t1 fastest)
   int profileN[6][2] = {};         ///< its tangential extents
+  /// Mean-gradient (closure) mode (§1.5, WO-6): the field holds theta, c = G.x + theta, in the
+  /// frame moving with the fluid's mean velocity. G physical (c/L); (0, 0, 0) is off.
+  double meanGrad[3] = {0.0, 0.0, 0.0};
   // ---- the operator of the last advance / steady solve ----
   CCField SAC;                            ///< level-0 surrogate diagonal (bands + lumped wall)
   Kokkos::View<double*, CCMem> cw, rw;    ///< per facet (§4.1)
@@ -73,6 +76,10 @@ struct ScalarCutState {
   std::vector<double> wtK, wtG, wtQ;  ///< (internal k', g, q')
   long numUnknowns = 0;               ///< global fluid unknowns (the singular mean)
   bool steady = false, built = false, singular = false;
+  bool meanGradOn = false;            ///< that operator carried the mean-gradient terms (§1.5)
+  double gPhys[3] = {0.0, 0.0, 0.0};  ///< its G (physical, c/L)
+  double gInt[3] = {0.0, 0.0, 0.0};   ///< its G' = G hRef (c per internal length)
+  double ubar[3] = {0.0, 0.0, 0.0};   ///< its moving-frame velocity U'bar = sum U_i / sum kappa_i V
   // ---- Krylov scratch and statistics ----
   CCField kr, krh, kp, kv, kt, kz, kz2;
   CCField kb, kq;  ///< singular case: the projected rhs, and the preconditioner's rhs copy
@@ -1025,6 +1032,196 @@ inline double maxFacetLocal(Kokkos::View<const double*, CCMem> cw) {
       },
       Kokkos::Max<double>(m));
   return m;
+}
+
+// ---- mean-gradient (closure) mode (WO-6, §1.5) --------------------------------------------------
+//
+// The unknown is theta, c = G.x + theta. Wherever the discretization evaluates c at a point x it
+// uses theta + G.x and moves the G.x part to the right-hand side. Face differences use the TRUE
+// displacement +-h'_a e_a (never a wrapped index difference); a probe stencil cell or a domain-face
+// centre uses its global position, unwrapped relative to the cut cell (an extended-block index
+// past a periodic face is simply its unwrapped position).
+
+/// G.x at the centre of extended-block cell j (physical; `cellCentres`' formula, unwrapped).
+struct MeanGradPosition {
+  double G[3] = {0.0, 0.0, 0.0};    ///< the physical mean gradient (c/L)
+  double org[3] = {0.0, 0.0, 0.0};  ///< the physical lower corner of the global grid
+  double h[3] = {1.0, 1.0, 1.0};    ///< the physical cell size
+  long base[3] = {0, 0, 0};         ///< og_a - g: global index of extended-block index 0
+  long sy = 1, sz = 1;              ///< extended-block strides
+  KOKKOS_INLINE_FUNCTION double operator()(long j) const {
+    const long z = j / sz, y = (j - z * sz) / sy, x = j - z * sz - y * sy;
+    const double px = org[0] + ((double)(base[0] + x) + 0.5) * h[0];
+    const double py = org[1] + ((double)(base[1] + y) + 0.5) * h[1];
+    const double pz = org[2] + ((double)(base[2] + z) + 0.5) * h[2];
+    return (G[0] * px + G[1] * py) + G[2] * pz;
+  }
+};
+
+/// Faces (§1.5): b(i) += sum_a gf_a (a_a^+ - a_a^-) over the coupled faces (the bands' guard),
+/// gf_a = Lam w_a h'_a G'_a — the G.x part of the face terms Lam w_a a (c_i - c_nb) moved to the
+/// right-hand side. Unknown inner cells only.
+inline void meanGradientFaceRhs(CCField b, CCConst unk, CCConst sax, CCConst say, CCConst saz,
+                                const double gf[3], C3 e, int g) {
+  const double gx = gf[0], gy = gf[1], gz = gf[2];
+  ccFor3(
+      "peclet::flow::sco_mg_face_rhs", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        const double aw = unk(i - sx) > 0.5 ? sax(i) : 0.0;
+        const double ae = unk(i + sx) > 0.5 ? sax(i + sx) : 0.0;
+        const double as = unk(i - sy) > 0.5 ? say(i) : 0.0;
+        const double an = unk(i + sy) > 0.5 ? say(i + sy) : 0.0;
+        const double ab = unk(i - sz) > 0.5 ? saz(i) : 0.0;
+        const double at = unk(i + sz) > 0.5 ? saz(i + sz) : 0.0;
+        b(i) += (gx * (ae - aw) + gy * (an - as)) + gz * (at - ab);
+      });
+}
+
+/// Dirichlet/Robin probes (§1.5): rw(f) -= cw(f) sum_k w_k G.x_k, so that rw = alpha G_phi (g -
+/// sum_k w_k G.x_k); x_k the global centres of the stencil cells. Neumann facets (cw = 0) and
+/// facets of non-unknown cells (cw = rw = 0) are unchanged.
+inline void meanGradientProbeShift(Kokkos::View<double*, CCMem> rw, const scg::ScalarFacetOverlay& fo,
+                                   Kokkos::View<const double*, CCMem> cw,
+                                   const MeanGradPosition& pos) {
+  auto fcell = fo.cell;
+  auto offF = fo.offF;
+  auto wF = fo.wF;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_mg_probe_shift", Kokkos::RangePolicy<CCExec>(space, 0, fo.n),
+      KOKKOS_LAMBDA(const long f) {
+        if (cw(f) == 0.0)
+          return;
+        const long i = fcell(f);
+        double gxp = 0.0;
+        for (int k = 0; k < 8; ++k)
+          gxp += wF(f, k) * pos(i + (long)offF(f, k));
+        rw(f) -= cw(f) * gxp;
+      });
+  space.fence();
+}
+
+/// U'_a/V of cell i (§1.5): the volume-integrated cell velocity sum_f F_out (x_f - x_i) per unit
+/// full-cell volume, = (h'_a/2) (phi_a(i + s_a) + phi_a(i)) (internal length per internal time).
+KOKKOS_INLINE_FUNCTION void cellVelocity(const CCConst& phx, const CCConst& phy, const CCConst& phz,
+                                         long i, long sy, long sz, const double hh[3],
+                                         double u[3]) {
+  u[0] = hh[0] * (phx(i + 1) + phx(i));
+  u[1] = hh[1] * (phy(i + sy) + phy(i));
+  u[2] = hh[2] * (phz(i + sz) + phz(i));
+}
+
+/// (sum U'_x/V, sum U'_y/V, sum U'_z/V) over the unknown inner cells (the moving frame's
+/// numerator; its denominator is sum kappa, `kappaMomentsLocal`). hh = h'/2.
+inline void cellVelocitySumLocal(CCConst phx, CCConst phy, CCConst phz, CCConst unk,
+                                 const double hh[3], C3 e, int g, double s[3]) {
+  CCExec space;
+  const double h0 = hh[0], h1 = hh[1], h2 = hh[2];
+  double a = 0.0, b = 0.0, c = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_mg_cell_velocity_sum",
+      MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& p1, double& p2, double& p3) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        const double hq[3] = {h0, h1, h2};
+        double u[3];
+        cellVelocity(phx, phy, phz, i, sy, sz, hq, u);
+        p1 += u[0];
+        p2 += u[1];
+        p3 += u[2];
+      },
+      a, b, c);
+  s[0] = a;
+  s[1] = b;
+  s[2] = c;
+}
+
+/// Advection (§1.5): b(i) -= G'.(U'_i/V - kappa_i U'bar), the exact linear part of the advective
+/// term in the frame moving with U'bar. Sums to zero over the unknowns (exactly, in exact
+/// arithmetic), which keeps steady problems compatible.
+inline void meanGradientAdvectionRhs(CCField b, CCConst phx, CCConst phy, CCConst phz,
+                                     CCConst kappa, CCConst unk, const double gi[3],
+                                     const double hh[3], const double ub[3], C3 e, int g) {
+  const double g0 = gi[0], g1 = gi[1], g2 = gi[2], h0 = hh[0], h1 = hh[1], h2 = hh[2], u0 = ub[0],
+               u1 = ub[1], u2 = ub[2];
+  ccFor3(
+      "peclet::flow::sco_mg_adv_rhs", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        const double hq[3] = {h0, h1, h2};
+        double u[3];
+        cellVelocity(phx, phy, phz, i, sy, sz, hq, u);
+        const double k = kappa(i);
+        b(i) -= (g0 * (u[0] - k * u0) + g1 * (u[1] - k * u1)) + g2 * (u[2] - k * u2);
+      });
+}
+
+/// `scalar_mean_flux` (§8.1), this rank's sums (internal; the caller divides by the global cell
+/// count): diffusive, over the low faces of the inner cells whose two cells are unknowns,
+/// sum -Lam a (theta_i - theta_{i - s_a} + G'_a h'_a) / h'_a; advective, over the unknown inner
+/// cells, sum (U'_i/V - kappa_i U'bar) theta_i (zero when the operator carried no advection).
+inline void meanFluxLocal(CCConst th, CCConst kappa, CCConst unk, CCConst sax, CCConst say,
+                          CCConst saz, CCConst phx, CCConst phy, CCConst phz, bool advecting,
+                          double lam, const double gi[3], const double hp[3], const double ub[3],
+                          C3 e, int g, double diff[3], double adv[3]) {
+  CCExec space;
+  const double g0 = gi[0], g1 = gi[1], g2 = gi[2], hp0 = hp[0], hp1 = hp[1], hp2 = hp[2];
+  const double h0 = 0.5 * hp[0], h1 = 0.5 * hp[1], h2 = 0.5 * hp[2], u0 = ub[0], u1 = ub[1],
+               u2 = ub[2];
+  double d0 = 0.0, d1 = 0.0, d2 = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_mean_flux_diff",
+      MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& p1, double& p2, double& p3) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        if (unk(i - 1) > 0.5)
+          p1 += -lam * sax(i) * ((th(i) - th(i - 1)) + g0 * hp0) / hp0;
+        if (unk(i - sy) > 0.5)
+          p2 += -lam * say(i) * ((th(i) - th(i - sy)) + g1 * hp1) / hp1;
+        if (unk(i - sz) > 0.5)
+          p3 += -lam * saz(i) * ((th(i) - th(i - sz)) + g2 * hp2) / hp2;
+      },
+      d0, d1, d2);
+  diff[0] = d0;
+  diff[1] = d1;
+  diff[2] = d2;
+  adv[0] = adv[1] = adv[2] = 0.0;
+  if (!advecting)
+    return;
+  double a0 = 0.0, a1 = 0.0, a2 = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_mean_flux_adv",
+      MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& p1, double& p2, double& p3) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        const double hq[3] = {h0, h1, h2};
+        double u[3];
+        cellVelocity(phx, phy, phz, i, sy, sz, hq, u);
+        const double k = kappa(i), t = th(i);
+        p1 += (u[0] - k * u0) * t;
+        p2 += (u[1] - k * u1) * t;
+        p3 += (u[2] - k * u2) * t;
+      },
+      a0, a1, a2);
+  adv[0] = a0;
+  adv[1] = a1;
+  adv[2] = a2;
 }
 
 }  // namespace sco

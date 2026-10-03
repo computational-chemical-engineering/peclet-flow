@@ -2693,6 +2693,32 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "Cut-cell scalars: the max-norm relative residual tolerance of the solve, "
           "max|b - A c| <= rtol * max(max|b|, max|A c0|) (default 1e-10).")
       .def(
+          "set_scalar_mean_gradient",
+          [](S& s, const std::string& name, const std::array<double, 3>& gradient) {
+            s.setScalarMeanGradient(name, gradient);
+          },
+          nb::arg("name"), nb::arg("gradient"),
+          "Cut-cell scalars: the closure (mean-gradient) mode. The field then holds the periodic "
+          "fluctuation theta of c = G.x + theta, written in the frame moving with the fluid's mean "
+          "velocity; G = `gradient` (c/L, physical; x the cell_centers() coordinates). Every axis "
+          "with a nonzero component must be periodic (checked at the next advance or solve). "
+          "(0, 0, 0) turns it off. Read the result with scalar_mean_flux.")
+      .def(
+          "scalar_mean_flux",
+          [](S& s, const std::string& name) {
+            const auto j = s.scalarMeanFlux(name);
+            return peclet::core::python::vector_to_ndarray(std::vector<double>(j.begin(), j.end()),
+                                                           {3}, {1});
+          },
+          nb::arg("name"),
+          "Cut-cell scalars: the box-averaged total flux vector (3,), c L/T (physical), of the "
+          "last advance or steady solve: the diffusive face sum of -D a A (c_j - c_i) with "
+          "c = theta + G.x (the face's true displacement), plus the advective (1/V_box) sum_i "
+          "(U_i - kappa_i V Ubar) theta_i in the moving frame, V_box the whole box (solid "
+          "included). Exact as a plane average for steady fields without wall sources. Effective "
+          "diffusivity k* = -J.G/(D|G|^2); dispersion D* = -J/(phi G), phi the discrete porosity. "
+          "Collective under MPI.")
+      .def(
           "solve_scalar_steady",
           [](S& s, const std::string& name) { s.solveScalarSteady(name); }, nb::arg("name"),
           "Cut-cell scalars: solve the steady problem now (no storage term) from the current "

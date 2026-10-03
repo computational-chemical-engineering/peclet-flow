@@ -1046,3 +1046,94 @@ wall gather, the probe operator, the Krylov driver, CutcellMG / VelocityMG, the 
   (iterations unchanged); `scalar_cutcell_solve_mpi_np{1,2,4}` PASS, `steady_adv` identity 5.7e-13
   of the gross budget at every rank count (bound 1e-11); G12 12/12 at OMP_NUM_THREADS=1.
   **WO-5c done.**
+
+## 2026-10-03 — WO-6: mean gradient and closures (§1.5, §8) — built; G5b, G10, G-adv(b), G12 pass; stopped on G8's absolute bound
+
+**Built** (per §1.5 and A2's WO-6 note; nothing tuned).
+- `scalar_cutcell_operator.hpp`: `ScalarCutState::meanGrad` (physical G) + the operator's `meanGradOn`,
+  `gPhys`, `gInt` (G' = G hRef), `ubar`; kernels `MeanGradPosition` (G.x at an extended-block cell
+  centre, `cellCentres`' formula, unwrapped), `meanGradientFaceRhs` (b += Σ_a Λ w_a h'_a G'_a (a⁺ − a⁻)
+  over the bands' coupled faces), `meanGradientProbeShift` (rw −= cw Σ_k w_k G.x_k: Dirichlet/Robin),
+  `cellVelocitySumLocal` + `meanGradientAdvectionRhs` (b −= G'.(U'_i/V − κ_i Ū'), U'_i/V =
+  (h'_a/2)(φ_a(i+e_a) + φ_a(i)), Ū' = ΣU'/Σκ over the unknowns, all-rank sums), `meanFluxLocal`.
+- `flow_ibm_scalars_cutcell.hpp`: `setScalarMeanGradient`, `scalarMeanFlux`, the refusal (G_a ≠ 0
+  with a non-periodic face on axis a), the terms in `scalarCutAssembleSolve` (all skipped when
+  G = 0), Dirichlet domain faces as θ_bf = g − G.x_bf (constant and profile), the singular gauge
+  Σκθ = 0 in closure mode, `scalar_facets` wall value as c (θ probe + Σ w G.x).
+- Bindings `set_scalar_mean_gradient(name, gradient)`, `scalar_mean_flux(name)` → (3,).
+- Tests: gates `g8`, `g5b` (ctests `scalar_cutcell_g8/g5b`); G-adv(b) now in the mean-gradient
+  mode (θ, G = e_x; (b′) keeps WO-5c's source form); api rows (non-finite G, legacy name,
+  non-periodic axis refused naming the face, periodic axes accepted); MPI problem `g8`.
+
+**Inert proof** (vs the unmodified ec6b4e4 build, saved before any change; harness frozen in the
+scratchpad): 201/201 arrays `np.array_equal` — G1-like steady (Dirichlet faces), 3 transient Robin +
+source steps, singular steady (G5b geometry, flux + source), G9 annulus koren 10 steps (stats),
+G-adv(a) R/h 16 Pe_h 1, G-adv(b) source form and (b′) at 32³ Pe_h 1, G-adv(c) channel; fields,
+census, budget, wall flux, facet wall values and fluxes. **G12** 12/12 at OMP_NUM_THREADS=1.
+
+**G8 Taylor–Aris** (Pe = 10, D = 0.1, U = R = 1; native pipe boxes, nz = 4; OMP 4):
+
+| R/h | rel err (3 offsets) | rms | iterations | census Pe_h | Ū/U − 1 |
+|---|---|---|---|---|---|
+| 16 | +3.98e-3 +4.48e-3 +4.11e-3 | 4.20e-3 | 8 8 8 | 1.248 | +2.2e-4 |
+| 32 | +1.04e-3 +1.03e-3 +1.02e-3 | **1.03e-3** | 14 17 15 | 0.625 | +4.0e-5 |
+| 64 | +2.47e-4 +2.58e-4 +2.55e-4 | 2.53e-4 | 28 31 29 | 0.312 | +1.3e-5 |
+
+- Order 2.03 / 2.02 (≥ 1.8) PASS. `scalar_mean_flux` = its field sums to ≤ 1.0e-14 relative.
+- **|err| ≤ 1e-3 at R/h 32 FAILS: 1.03e-3.** Cause (diagnosed, not tuned): the face-centre
+  velocity samples of the setup carry an O(h²) flux-quadrature error. With the EXACT Poiseuille
+  flux through each face's open part (INFO row of the gate): 1.21e-3 → **3.32e-4**, order 1.86 —
+  the 2-D oracle's 3.2e-4 at R/h 32. Normalizing by the discrete Ū instead of U gives 9.46e-4
+  (not applied: the note defines Pe = UR/D). Left FAILING as evidence.
+- G-iter on multigrid-friendly boxes (D-WO4-1 per axis: 48/80/144 × nz 16; z-invariant, same
+  errors to all digits): **6 / 6 / 9** (≤ 30, growth 0, +3) PASS. Native boxes (correctness only):
+  8 / 15 / 30 — the growth comes from nz = 4: from level 2 on the z axis is one periodic cell, and
+  the purely axial flow's coarse advection becomes a self-coupling the colour sweep lags (on the
+  same boxes with nz = 4: 9 / 14 / 23 (max over offsets); nz = 16: 6 / 6 / 9). Recorded for
+  Q18; nothing changed.
+
+**G5b** (insulating SC array, c = 0.3, G = e_x, D = 0.6; n = 20/40/80, ND 16.6/33.2/66.4):
+k* = 0.610100 … 0.610108 / 0.606779 … 0.606780 / 0.605942; self-convergence order **1.99**
+(≥ 1.7); Richardson extrapolate **0.605659** (below HS 0.608696). Iterations 5 at every rung.
+- **Reading (reversible in `gate_g5b`):** "k* ≤ HS" is applied to ND ≥ 32 and to the
+  extrapolate, since the bound is of the exact k*; the ND 16.6 rung lies +1.4e-3 above it
+  (discretization error, positive, 2nd order) and is printed as INFO.
+- G-iter on the closure, mg boxes 32/48/80: 5 / 5 / 5.
+- No-solid identity: k* − 1 = +2.2e-16 at rest (random initial θ); under a uniform flow with
+  G = (0.3, −0.5, 0.8): max|J + DG|/(D|G|) = 8.4e-16 (the moving frame).
+
+**G-adv(b) in the mean-gradient mode** (bounds unchanged): 5 / 8 / 12 at 32³, 6 / 10 / 17 at 64³
+(Pe_h 0.1 / 1 / 10; WO-5c's source form: 5 / 8 / 12, 7 / 10 / 17); growth 1.20 / 1.25 / 1.42;
+(v) ≤ 1.5e-14 of the gross budget (gross = V Σ|r_G|, the mean-gradient terms from fields; every net
+term is 0). (a), (b′), (c) unchanged: 8/13/23, 10/17/33; 12/10/15, 12/13/18; 8, 9.
+
+**G10 on G8** (`scalar_cutcell_solve_mpi`, problem `g8`: 40³ cube, R = 16, Pe_h 1.25, rtol 1e-13):
+np 1 bitwise (field, 10 iterations, mean flux); np 2 / 4: max|θ − θ₁| = 7.8e-14 / 1.1e-13 of max
+13.35, iterations 10 = 10, mean flux to 8.6e-14 / 5.4e-14 relative; identity ≤ 2.1e-14 of the gross
+budget. All other problems of the ctest unchanged and passing.
+
+**Battery** (`-LE bench`, 213 tests, host load 90-100 from other sessions): the first 11 (the
+longest) at OMP 4 -j3 all pass; the run was stopped (np 4 MPI tests at 30 min under busy-wait
+oversubscription) and the other 202 rerun at OMP 2 -j4 with OMP_WAIT_POLICY=passive /
+OMPI_MCA_mpi_yield_when_idle=1 (scheduling only): 200 pass. Failures: `scalar_cutcell_g8` (the
+absolute bound, Q-K) and `scalar_cutcell_operator`'s budget identity bound 1e-13 at OMP 2 (1.0e-13;
+OMP 1: 1.8e-13 / 2.2e-13; OMP 4: 5.5e-14 PASS; OMP 8: 2.4e-14) — reduction-order round-off of a
+test untouched by WO-6, on a path no WO-6 statement reaches at G = 0 (every new term is behind
+`meanGradOn`); it passes at the gate setting OMP 4. Same normalization question as Q-J, for a
+later ruling.
+
+**Readings (none changes a gate):**
+- x in G.x is the `cell_centers()` coordinate (physical, the domain origin included); it matters
+  only for Dirichlet/Robin walls and Dirichlet domain faces, where θ_Γ = g − G.x.
+- The singular gauge in closure mode is Σ κ V θ = 0 (§5.1 "0 for mean-gradient closures"),
+  independent of the initial field.
+- `scalar_mean_flux`'s V_box is the global cell count × V (solid included); the diffusive sum runs
+  over the low faces of the inner cells whose two cells are unknowns (each face once over the ranks).
+- The budget is unchanged: the mean-gradient terms sum to zero (faces pairwise; the advective
+  source by Ū), so the identity closes on the θ system as before.
+- The conjugate rows of §1.5 (RHS ∓= α G_c (Σ_s w G.x − Σ_f w G.x)) belong to WO-7.
+
+**Questions (stopped):**
+- **Q-K (G8 bound).** 1.03e-3 against ≤ 1e-3 at R/h 32 with face-centre velocity samples; 3.3e-4
+  with exact face fluxes. Is the bound meant for the scalar discretization (then the setup should
+  write the face-averaged flux, or the bound should be restated), or for the setup as written?
