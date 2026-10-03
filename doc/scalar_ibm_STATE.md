@@ -79,6 +79,15 @@ own gates.
 cylinder array, gap 0.2→0.01, k_s = 100 and 0.01): P2F vs Peters' hybrid ladder. It feeds WO-8 /
 Q4. Results go in `pack_ks*.out` → the log.
 
+## Side thread awaiting Frank
+
+Branch `uf-outlet-diag` (worktree `suite/flow-uf-outlet`) fixes the legacy scalar open-boundary bugs
+(log 2026-10-03). Three questions are open:
+1. c002c8e: high-side inflow face plane; changes collocated momentum there.
+2. af88101: ghost = v at the Dirichlet inflow.
+3. Its two register entries.
+If it lands, the G12 `scalar` hash becomes 438db94e.
+
 ## Open decisions (defaults; DEFAULT-PENDING-USER in design §13)
 
 - **Q5** API spelling `add_scalar(..., cutcell=True)`.

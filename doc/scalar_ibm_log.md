@@ -1011,3 +1011,24 @@ wall gather, the probe operator, the Krylov driver, CutcellMG / VelocityMG, the 
   a bound that scales with N·ε; or compensated summation in the budget (changes no solve, but
   `scalar_budget` output digits). The same choice decides `compare()`'s identity check for
   `steady_adv`.
+
+## 2026-10-03 — side thread: legacy scalar open-boundary bugs (branch `uf-outlet-diag`, worktree `suite/flow-uf-outlet`)
+
+**Status:** found by WO-5b, diagnosed, and fixed on that branch (commits 4f9c284..3962089 on origin/main 39680a4). NOT merged; it awaits Frank. Evidence: `doc/uf_outlet_fix.md` on that branch.
+
+**A. Face-plane wraps** (`fillFaceGhostsKeepBoundary`).
+- The periodic ghost fill overwrote the high-side open-face plane in the collocated projection and in `advanceScalars` (both grids).
+- Legacy scalars at an outflow overshot to 1.35. The collocated backflow census read the inlet.
+- Momentum was unaffected for outflow (it reads the open view).
+- Extra commit c002c8e covers every non-periodic high face. A high-side INFLOW changes shipped collocated momentum: inlet u −1.0382 → −1.0004 (staggered −1.0021). Needs Frank.
+- 0420c93: the VoF bridge. All 12 hashes are unchanged.
+
+**B. Inlet influx.**
+- e56dc77: `cOld` was copied before the ghost fill (stale zeros on the first step after `set_field`). This changes the `scalar` hash 387d9bac → 438db94e.
+- af88101: Dirichlet inflow upwinded from 2v − c. Ghost = v on `cOld` at velocity-inflow faces. Needs Frank's approval as a numerical-BC choice.
+
+**Gates:** `open_face_plane`, `scalar_inflow` (both grids), battery 190/190.
+
+**Implication for the cut-cell path:** check in WO-10 / the review that the cut-cell path has neither the stale-`cOld` pattern nor the inflow-ghost pattern. Its boundary flux is the projection's capture (WO-5b), but `advanceScalars`' fill runs first.
+
+**Merge consequence:** if `uf-outlet-diag` lands before `scalar-ibm`, G12's `scalar` baseline hash changes to 438db94e.
