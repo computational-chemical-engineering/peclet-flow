@@ -1287,6 +1287,19 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     };
     ops.maxabs = [&](const ScalarVec& a) { return allMax(sco::maxabsLocal(CCConst(a.f), e_, G)); };
     ops.removeMean = [&](const ScalarVec& a) { removeMean(a.f); };
+    if (!distributed_) {  // WO-9b: the device-resident pass (scalar_krylov.hpp), single rank
+      residentKrylov(st, ops);
+      ops.dotTo = [&](const ScalarVec& a, const ScalarVec& b, skr::Slot s) {
+        sco::dotReduce(CCConst(a.f), CCConst(b.f), e_, G, s);
+      };
+      ops.dot2To = [&](const ScalarVec& a, const ScalarVec& b, const ScalarVec& c, skr::Slot s1,
+                       skr::Slot s2) {
+        sco::dot2Reduce(CCConst(a.f), CCConst(b.f), CCConst(c.f), e_, G, s1, s2);
+      };
+      ops.maxabsTo = [&](const ScalarVec& a, skr::Slot sf, skr::Slot) {
+        sco::maxabsReduce(CCConst(a.f), e_, G, Kokkos::Max<double, CCMem>(sf));
+      };
+    }
     auto vec = [](CCField f) {
       ScalarVec v;
       v.f = f;
@@ -1401,6 +1414,21 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
           std::fmax(sco::maxabsLocal(CCConst(a.f), e_, G), sco::maxabsLocal(CCConst(a.s), e_, G)));
     };
     ops.removeMean = [&](const ScalarVec& a) { removeMeanTwo(a.f, a.s); };
+    if (!distributed_) {  // WO-9b: the device-resident pass (scalar_krylov.hpp), single rank
+      residentKrylov(st, ops);
+      ops.dotTo = [&](const ScalarVec& a, const ScalarVec& b, skr::Slot s) {
+        sco::dotTwoReduce(CCConst(a.f), CCConst(b.f), CCConst(a.s), CCConst(b.s), e_, G, s);
+      };
+      ops.dot2To = [&](const ScalarVec& a, const ScalarVec& b, const ScalarVec& c, skr::Slot s1,
+                       skr::Slot s2) {
+        sco::dot2TwoReduce(CCConst(a.f), CCConst(b.f), CCConst(c.f), CCConst(a.s), CCConst(b.s),
+                           CCConst(c.s), e_, G, s1, s2);
+      };
+      ops.maxabsTo = [&](const ScalarVec& a, skr::Slot sf, skr::Slot ss) {
+        sco::maxabsReduce(CCConst(a.f), e_, G, Kokkos::Max<double, CCMem>(sf));
+        sco::maxabsReduce(CCConst(a.s), e_, G, Kokkos::Max<double, CCMem>(ss));
+      };
+    }
     auto vec2 = [](CCField f, CCField s2) {
       ScalarVec v;
       v.f = f;

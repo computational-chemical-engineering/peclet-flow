@@ -86,6 +86,14 @@ target_include_directories(test_scalar_mg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..
 target_link_libraries(test_scalar_mg PRIVATE Kokkos::kokkos)
 add_test(NAME scalar_mg COMMAND test_scalar_mg)
 
+# The cut-cell scalar BiCGStab (doc/scalar_ibm_design.md §5.1; WO-9b): the device-resident pass
+# against the host-scalar pass, bitwise, healthy and on every breakdown exit.
+add_executable(test_scalar_krylov test_scalar_krylov.cpp)
+target_include_directories(test_scalar_krylov PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_scalar_krylov PRIVATE Kokkos::kokkos)
+add_test(NAME scalar_krylov COMMAND test_scalar_krylov)
+
 # Property closures + per-cell body force (LinearMix / Boussinesq / Arrhenius vs host oracle).
 add_executable(test_closures test_closures.cpp)
 target_include_directories(test_closures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src

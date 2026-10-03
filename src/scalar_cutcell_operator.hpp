@@ -26,6 +26,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "mac_cutcell.hpp"  // CCField, CCConst, CCExec, CCMem, C3, ccFor3
@@ -86,6 +87,8 @@ struct ScalarCutState {
   double ubar[3] = {0.0, 0.0, 0.0};   ///< its moving-frame velocity U'bar = sum U_i / sum kappa_i V
   // ---- Krylov scratch and statistics ----
   CCField kr, krh, kp, kv, kt, kz, kz2;
+  Kokkos::View<double*, CCMem> ks;           ///< WO-9b: the resident Krylov's scalar slots
+  Kokkos::View<double*, Kokkos::HostSpace> pk;  ///< and its host packet
   CCField kb, kq;  ///< singular case: the projected rhs, and the preconditioner's rhs copy
   int iterations = 0;
   double residual = 0.0;  ///< final TRUE residual max|b - A c| / ref
@@ -488,23 +491,31 @@ inline void facetFlux(Kokkos::View<double*, CCMem> up, Kokkos::View<double*, CCM
 
 // ---- inner-cell reductions (this rank; the Solver adds the MPI_Allreduce) ----------------------
 
-/// sum over inner cells of a(i) b(i).
-inline double dotLocal(CCConst a, CCConst b, C3 e, int g) {
-  double s = 0.0;
+// Each reduction is written once, with its result as a parameter: a host double (the Local
+// form) or a device slot (the resident Krylov, scalar_krylov.hpp). Same policy, same functor, so
+// the same value either way (WO-9b).
+
+/// sum over inner cells of a(i) b(i), into `result`.
+template <class R>
+inline void dotReduce(CCConst a, CCConst b, C3 e, int g, R&& result) {
   ccReduce3(
       "peclet::flow::sco_dot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         acc += a(i) * b(i);
       },
-      s);
+      std::forward<R>(result));
+}
+inline double dotLocal(CCConst a, CCConst b, C3 e, int g) {
+  double s = 0.0;
+  dotReduce(a, b, e, g, s);
   return s;
 }
 
-/// (sum a b, sum c c) over inner cells in one pass.
-inline void dot2Local(CCConst a, CCConst b, CCConst c, C3 e, int g, double& ab, double& cc) {
+/// (sum a b, sum c c) over inner cells in one pass, into (r1, r2).
+template <class R1, class R2>
+inline void dot2Reduce(CCConst a, CCConst b, CCConst c, C3 e, int g, R1&& r1, R2&& r2) {
   CCExec space;
-  double s1 = 0.0, s2 = 0.0;
   Kokkos::parallel_reduce(
       "peclet::flow::sco_dot2", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z, double& p1, double& p2) {
@@ -512,14 +523,19 @@ inline void dot2Local(CCConst a, CCConst b, CCConst c, C3 e, int g, double& ab, 
         p1 += a(i) * b(i);
         p2 += c(i) * c(i);
       },
-      s1, s2);
+      std::forward<R1>(r1), std::forward<R2>(r2));
+}
+inline void dot2Local(CCConst a, CCConst b, CCConst c, C3 e, int g, double& ab, double& cc) {
+  double s1 = 0.0, s2 = 0.0;
+  dot2Reduce(a, b, c, e, g, s1, s2);
   ab = s1;
   cc = s2;
 }
 
-/// max over inner cells of |a|.
-inline double maxabsLocal(CCConst a, C3 e, int g) {
-  double m = 0.0;
+/// max over inner cells of |a|, through the Max reducer `red` (Kokkos::Max over a host double or
+/// a device slot).
+template <class Red>
+inline void maxabsReduce(CCConst a, C3 e, int g, Red red) {
   ccReduce3(
       "peclet::flow::sco_maxabs", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
@@ -528,7 +544,11 @@ inline double maxabsLocal(CCConst a, C3 e, int g) {
         if (v > acc)
           acc = v;
       },
-      Kokkos::Max<double>(m));
+      red);
+}
+inline double maxabsLocal(CCConst a, C3 e, int g) {
+  double m = 0.0;
+  maxabsReduce(a, e, g, Kokkos::Max<double>(m));
   return m;
 }
 
@@ -1750,23 +1770,27 @@ inline void conjFacetFlux(Kokkos::View<double*, CCMem> up, Kokkos::View<double*,
 }
 
 /// sum over inner cells of af bf + as bs (the two-field dot).
-inline double dotTwoLocal(CCConst af, CCConst bf, CCConst as, CCConst bs, C3 e, int g) {
-  double s = 0.0;
+template <class R>
+inline void dotTwoReduce(CCConst af, CCConst bf, CCConst as, CCConst bs, C3 e, int g, R&& result) {
   ccReduce3(
       "peclet::flow::sco_dot_two", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         acc += af(i) * bf(i) + as(i) * bs(i);
       },
-      s);
+      std::forward<R>(result));
+}
+inline double dotTwoLocal(CCConst af, CCConst bf, CCConst as, CCConst bs, C3 e, int g) {
+  double s = 0.0;
+  dotTwoReduce(af, bf, as, bs, e, g, s);
   return s;
 }
 
-/// (sum a b, sum c c) over inner cells, both fields, in one pass.
-inline void dot2TwoLocal(CCConst af, CCConst bf, CCConst cf, CCConst as, CCConst bs, CCConst cs,
-                         C3 e, int g, double& ab, double& cc) {
+/// (sum a b, sum c c) over inner cells, both fields, in one pass, into (r1, r2).
+template <class R1, class R2>
+inline void dot2TwoReduce(CCConst af, CCConst bf, CCConst cf, CCConst as, CCConst bs, CCConst cs,
+                          C3 e, int g, R1&& r1, R2&& r2) {
   CCExec space;
-  double s1 = 0.0, s2 = 0.0;
   Kokkos::parallel_reduce(
       "peclet::flow::sco_dot2_two", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
       KOKKOS_LAMBDA(int x, int y, int z, double& p1, double& p2) {
@@ -1774,7 +1798,12 @@ inline void dot2TwoLocal(CCConst af, CCConst bf, CCConst cf, CCConst as, CCConst
         p1 += af(i) * bf(i) + as(i) * bs(i);
         p2 += cf(i) * cf(i) + cs(i) * cs(i);
       },
-      s1, s2);
+      std::forward<R1>(r1), std::forward<R2>(r2));
+}
+inline void dot2TwoLocal(CCConst af, CCConst bf, CCConst cf, CCConst as, CCConst bs, CCConst cs,
+                         C3 e, int g, double& ab, double& cc) {
+  double s1 = 0.0, s2 = 0.0;
+  dot2TwoReduce(af, bf, cf, as, bs, cs, e, g, s1, s2);
   ab = s1;
   cc = s2;
 }
