@@ -228,6 +228,25 @@ void Solver<Grid>::fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow
 }
 
 template <class Grid>
+void Solver<Grid>::fillFaceGhostsKeepBoundary(CCField f, int a) {
+  const bool keep =
+      hasBc_ && a >= 0 && a < 3 && bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1);
+  B3 eb{e_.x, e_.y, e_.z};
+  if (keep) {
+    const int b = (a + 1) % 3, c = (a + 2) % 3;
+    const int d[3] = {e_.x, e_.y, e_.z};
+    const std::size_t np = (std::size_t)(d[b] - 2 * G) * (d[c] - 2 * G);
+    if (outflowPlane_[a].extent(0) != np)
+      outflowPlane_[a] = CCField(
+          Kokkos::view_alloc("peclet::flow::outflow_face_plane", Kokkos::WithoutInitializing), np);
+    bcSaveHighFacePlaneInner(outflowPlane_[a], f, eb, G, a);
+  }
+  fillGhosts(f);
+  if (keep)
+    bcRestoreHighFacePlaneInner(f, outflowPlane_[a], eb, G, a);
+}
+
+template <class Grid>
 void Solver<Grid>::applyVelocityBcCompTo(CCField f, int comp, int fold, bool doOutflow) {
   if (!hasBc_)
     return;

@@ -1506,9 +1506,13 @@ void Solver<Grid>::projectCorrectVelocities() {
     if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
       starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
                        C3{nx_, ny_, nz_}, e_, G, e_, G, exactResidual_, u_.w[0], u_.w[1], u_.w[2]);
-    fillGhosts(uf_);
-    fillGhosts(vf_);
-    fillGhosts(wf_);    // complete the divergence-free face field (boundary faces)
+    // Complete the face field's ghosts, KEEPING each high-side boundary face: a plain fillGhosts
+    // wraps the inlet plane onto the outlet, so bcCorrectOutflow below would correct the wrong
+    // value (doc/uf_outlet_fix.md). Momentum never saw it (openFaceView), the scalars and the
+    // backflow census did.
+    fillFaceGhostsKeepBoundary(uf_, 0);
+    fillFaceGhostsKeepBoundary(vf_, 1);
+    fillFaceGhostsKeepBoundary(wf_, 2);
     if (hasOutflow_) {  // correct the high-side outflow face on the face field so mass leaves
                         // (phi=0 there)
       B3 e{e_.x, e_.y, e_.z};

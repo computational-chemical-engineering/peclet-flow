@@ -2408,6 +2408,15 @@ class Solver {
   // Inert for everything that existed: `bridgeVelocityToVof` runs only under `enable_vof`, and no
   // VoF configuration before this rung combined VoF with an outflow face.
   void fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow = true);
+  // Ghost-fill a MAC FACE field whose normal axis is `a` (collocated uf_/vf_/wf_, or a staggered
+  // C[a].u handed to a face-velocity consumer) WITHOUT losing its high-side domain-boundary face.
+  // That face is the first GHOST index along `a`, and fillGhosts wraps every axis periodically
+  // (single-rank fillAxis and the distributed exchange alike), so it would come back carrying
+  // the LOW boundary's face -- on an inflow/outflow channel the inlet plane on the outlet
+  // (doc/uf_outlet_fix.md). The plane is saved and restored over the INNER transverse range only
+  // (the transverse ghost rows are legitimately the neighbour's; SCALING_ISSUES #8), and only on
+  // an axis whose high global face is an OUTFLOW this rank owns; otherwise it IS fillGhosts.
+  void fillFaceGhostsKeepBoundary(CCField f, int a);
 
 
   // Distributed: a rank applies a face's BC iff its block TOUCHES that global face
@@ -4959,7 +4968,8 @@ class Solver {
   int vofProf3Nc_[6] = {0, 0, 0, 0, 0, 0}, vofProfG2Nc_[6] = {0, 0, 0, 0, 0, 0};
   vof::UCField vofOutside_;              // the out-of-domain mask on the g=3 block
   // SCALING_ISSUES #3/#8: scratch for fillVelGhostsTo's save/restore of the high-side outflow face
-  // plane across the distributed halo exchange, one per axis, allocated on first use.
+  // plane across the distributed halo exchange, one per axis, allocated on first use. Shared
+  // with fillFaceGhostsKeepBoundary (the two never overlap: each restores before returning).
   CCField outflowPlane_[3];
   double vofBcVol_[6] = {0, 0, 0, 0, 0, 0};       // signed liquid volume of the LAST step, + = in
   double vofBcVolTotal_[6] = {0, 0, 0, 0, 0, 0};  // running total since enable_vof

@@ -64,9 +64,12 @@ void Solver<Grid>::advanceScalars() {
     Vf = C[1].u;
     Wf = C[2].u;
   }
-  fillGhosts(Uf);
-  fillGhosts(Vf);
-  fillGhosts(Wf);  // face velocities need the ±2 advection reach
+  // Face velocities need the ±2 advection reach -- and the high-side boundary face must survive
+  // the fill: a plain fillGhosts hands the outlet the INLET plane on both grids, and on the
+  // staggered one it overwrote the projection-corrected C[0].u in place (doc/uf_outlet_fix.md).
+  fillFaceGhostsKeepBoundary(Uf, 0);
+  fillFaceGhostsKeepBoundary(Vf, 1);
+  fillFaceGhostsKeepBoundary(Wf, 2);
   // Phase 3 (V5.4): the cell metric the scalar/energy GFM rows pull back through. The per-axis
   // Laplacian weights are `u_.w[a]` — Phase 2's, passed at each call site in its own spelling.
   const vof::VofMetric gmS = u_.vofMetric();
