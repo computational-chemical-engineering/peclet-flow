@@ -354,20 +354,51 @@ inline void ccForRows3(const char* name, C3 lo, C3 hi, F f) {
   ccdetail::ccRows3<false>(name, lo, hi, f);
 }
 
-// Reduction sibling of ccFor3 (same host tiling rationale). NOTE: the host tiling changes the
-// FP accumulation order of sum-reductions — numerically legitimate (parallel reductions are
-// unordered by contract) but not bit-identical to the previous host rounding.
-template <class F, class R>
-inline void ccReduce3(const char* name, C3 lo, C3 hi, F f, R&& reducer) {
+// Reduction sibling of ccFor3. On a host backend it is the PENCIL reduction of B2
+// (doc/vof_step_performance_design.md §5.8, a recorded order): a RangePolicy over the (y, z) rows
+// of the box -- the same static row partition as ccFor3 -- each thread reducing its rows in (y, z)
+// order with x ascending inside a row, scalar (no `omp simd` reduction), and the per-thread
+// partials combined by Kokkos in thread order. Sum results therefore depend on the thread count
+// only, as before; max/min reductions are order-free and unchanged. Unlike ccFor3 a reduction is
+// never cut over to a serial loop below kHostSerialCellCutoff (that would make the summation
+// order a function of the block size). The device branch is the MDRange reduction, unchanged.
+namespace ccdetail {
+template <class R, bool = Kokkos::is_reducer_v<std::decay_t<R>>>
+struct ReduceValue {
+  using type = typename std::decay_t<R>::value_type;
+};
+template <class R>
+struct ReduceValue<R, false> {  // a scalar result, or a View holding it
+  using D = std::decay_t<R>;
+  template <class T, bool = Kokkos::is_view_v<T>>
+  struct Pick {
+    using type = T;
+  };
+  template <class T>
+  struct Pick<T, true> {
+    using type = typename T::non_const_value_type;
+  };
+  using type = typename Pick<D>::type;
+};
+}  // namespace ccdetail
+template <class F, class... R>
+inline void ccReduce3(const char* name, C3 lo, C3 hi, F f, R&&... reducers) {
   CCExec space;
   using MD = MDRange3<CCExec>;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
-    Kokkos::parallel_reduce(name,
-                            MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}, {hi.x - lo.x, 2, 2}),
-                            f, std::forward<R>(reducer));
+    const int ny = hi.y - lo.y > 0 ? hi.y - lo.y : 0, nz = hi.z - lo.z > 0 ? hi.z - lo.z : 0;
+    const long rows = hi.x > lo.x ? (long)ny * nz : 0;
+    Kokkos::parallel_reduce(
+        name, Kokkos::RangePolicy<CCExec>(space, 0, rows),
+        [=](long r, typename ccdetail::ReduceValue<R>::type&... acc) {
+          const int y = lo.y + (int)(r % ny), z = lo.z + (int)(r / ny);
+          for (int x = lo.x; x < hi.x; ++x)
+            f(x, y, z, acc...);
+        },
+        std::forward<R>(reducers)...);
   } else {
     Kokkos::parallel_reduce(name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}), f,
-                            std::forward<R>(reducer));
+                            std::forward<R>(reducers)...);
   }
 }
 

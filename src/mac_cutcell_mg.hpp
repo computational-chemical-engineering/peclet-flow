@@ -3925,18 +3925,19 @@ class CutcellMG {
     const int g = lv.g;
     CCField ff = f;
     FPV ac = lv.AC;
+    // the {sum, count} body; ccReduce3 runs it in B2's pencil order on a host backend (§5.8) and
+    // as the MDRange reduction it always was on a device
+    auto body = KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
+      const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+      if (ac(i) > 1e-30f) {
+        s += ff(i);
+        k += 1;
+      }
+    };
     if (!distributed_) {
       ensureScalars();
-      Kokkos::parallel_reduce(
-          "mgmeanr", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-          KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
-            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-            if (ac(i) > 1e-30f) {
-              s += ff(i);
-              k += 1;
-            }
-          },
-          Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
+      ccReduce3("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body,
+                Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
       auto ks = ks_;
       auto kc = kcnt_;
       const bool guard = stopGuard;
@@ -3954,16 +3955,7 @@ class CutcellMG {
     }
     double sum = 0;
     long cnt = 0;
-    Kokkos::parallel_reduce(
-        "mgmeanr", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          if (ac(i) > 1e-30f) {
-            s += ff(i);
-            k += 1;
-          }
-        },
-        sum, cnt);
+    ccReduce3("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body, sum, cnt);
     double dcnt = (double)cnt;
     allreduceSum2(sum, dcnt
 #ifdef PECLET_FLOW_MPI
