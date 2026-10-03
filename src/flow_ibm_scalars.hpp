@@ -116,6 +116,13 @@ void Solver<Grid>::advanceScalars() {
     // operator therefore bit-identical — until a caller allocates the mask.
     if (hasMask)
       scalarMaskStencil(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(sc.dmask), e_, G);
+    // c^n's ghosts must be valid BEFORE they are frozen into cOld, which the explicit advection
+    // reads at +-2: set_field, the coupling drivers and the VoF energy transport write inner
+    // cells only, and the fill below acts on c, not on cOld -- so the first step after any such
+    // write upwinded the inflow from a band of stale values (zeros on a fresh scalar: c = 1 at a
+    // Dirichlet-1 inlet fell to 0.5 in one step). The pcBuildInterface fix (WO-P23) is the same
+    // defect on the phase-change side. doc/uf_outlet_fix.md section B.
+    scalarFillGhosts(sc);
     Kokkos::deep_copy(sc.cOld, sc.c);
     // WO-P3f: add the enthalpy the interfacial cells' overwrite gave back (option, inert off).
     if (hasMask && pcCarryConserve_ && pcCarrySrc_.extent(0) == n_)
