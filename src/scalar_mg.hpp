@@ -35,9 +35,9 @@
 // there before the trilinear prolongation reads it, and every face coefficient toward them is 0.
 //
 // Smoother: red-black Gauss-Seidel, colour = (gx + gy + gz) mod 2 from GLOBAL indices, an exchange
-// before each colour — on a single rank (WO-9b; flow's A3) the colour passes and the residual of a
-// level with even inner dimensions read the periodic neighbour through the wrapped index instead
-// (`wrapReads`), and a coarse level's fill is ONE launch (`smg::fillShell`), no fence. V-cycle: pre 2 sweeps R -> B, residual (after a fresh exchange), restrictAvg,
+// before each colour — on a single rank on a device backend (WO-9b; flow's A3) the colour passes and
+// the residual of a level with even inner dimensions read the periodic neighbour through the wrapped
+// index instead (`wrapReads`); a coarse level's fill is ONE launch (`smg::fillShell`), no fence. V-cycle: pre 2 sweeps R -> B, residual (after a fresh exchange), restrictAvg,
 // (singular: the coarse rhs mean removed), recurse, coarse ghosts filled, prolongAdd (trilinear),
 // pinned cells re-zeroed, post 2 sweeps B -> R. Bottom: 16 sweeps (8 R -> B then 8 B -> R, so the
 // cycle stays symmetric) plus the mean removal when singular. The level rule (§5.2): transient with
@@ -293,6 +293,19 @@ KOKKOS_INLINE_FUNCTION Nb nbrs(int lx, int ly, int lz, C3 n, int g, long i, long
   return w;
 }
 
+/// `nbrs` in the kernels: on a host backend always the plain i +- s (ScalarMG::wrapReads never asks
+/// a host pass to wrap), as a compile-time constant, so the x-row loop vectorizes exactly as the
+/// former kernels did; on a device backend `nbrs` itself.
+KOKKOS_INLINE_FUNCTION Nb nbrsOn(int lx, int ly, int lz, C3 n, int g, long i, long sy, long sz,
+                                 int wrap) {
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    (void)lx, (void)ly, (void)lz, (void)n, (void)g, (void)wrap;
+    return Nb{i + 1, i - 1, i + sy, i - sy, i + sz, i - sz};
+  } else {
+    return nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+  }
+}
+
 /// One colour of the face-form red-black Gauss-Seidel: cutcellSmoothColorFace (mac_pressure.hpp)
 /// with the neighbours of `nbrs` (wrap = 0: that kernel, the same launch forms and cell body).
 template <class OpV>
@@ -309,7 +322,7 @@ inline void sweepColorFace(CCField x, CCConst rhs, OpV AC, OpV AFX, OpV AFY, OpV
       PECLET_FLOW_OMP_SIMD  // same-colour cells are independent (ccFor3's contract)
           for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         cutcellSmoothFaceCell(x, rhs, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
                               w.zp, w.zm);
       }
@@ -331,7 +344,7 @@ inline void sweepColorFace(CCField x, CCConst rhs, OpV AC, OpV AFX, OpV AFY, OpV
           return;
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         cutcellSmoothFaceCell(x, rhs, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
                               w.zp, w.zm);
       });
@@ -346,7 +359,7 @@ inline void residualFace(CCField r, CCConst x, CCConst b, CCField AC, CCField AF
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
                                 w.zp, w.zm);
       });
@@ -395,7 +408,7 @@ inline void sweepColorBand(CCField x, CCConst rhs, BV AC, BV AW, BV AE, BV AS, B
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
         if (!(unk(i) > 0.5))
           continue;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, w)) / AC(i);
       }
     };
@@ -418,7 +431,7 @@ inline void sweepColorBand(CCField x, CCConst rhs, BV AC, BV AW, BV AE, BV AS, B
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
         if (!(unk(i) > 0.5))
           return;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, w)) / AC(i);
       });
 }
@@ -493,7 +506,7 @@ inline void sweepColorTwo(CCField x, CCField rhs, CCField AC, CCField AFX, CCFie
       const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
       for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         twoPhaseCell<Band>(x, rhs, AC, AFX, AFY, AFZ, AW, AE, AS, AN, AB, AT, xs, rhss, ACs, AFXs,
                            AFYs, AFZs, W, unkF, i, sx, sy, sz, w);
       }
@@ -515,7 +528,7 @@ inline void sweepColorTwo(CCField x, CCField rhs, CCField AC, CCField AFX, CCFie
           return;
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         twoPhaseCell<Band>(x, rhs, AC, AFX, AFY, AFZ, AW, AE, AS, AN, AB, AT, xs, rhss, ACs, AFXs,
                            AFYs, AFZs, W, unkF, i, sx, sy, sz, w);
       });
@@ -533,7 +546,7 @@ inline void residualTwo(CCField r, CCConst x, CCConst b, CCField AC, CCField AFX
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         const double ax = Band ? AC(i) * x(i) + bandOff(x, AW, AE, AS, AN, AB, AT, i, w)
                                : AC(i) * x(i) + faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz, w);
         const double axs = ACs(i) * xs(i) + faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz, w);
@@ -552,7 +565,7 @@ inline void residualBand(CCField r, CCConst x, CCConst b, CCField AC, CCField AW
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const Nb w = nbrsOn(lx, ly, lz, n, g, i, sy, sz, wrap);
         r(i) = b(i) - (AC(i) * x(i) + bandOff(x, AW, AE, AS, AN, AB, AT, i, w));
       });
 }
@@ -1108,6 +1121,12 @@ class ScalarMG {
   /// periodic wrap of every axis (`setLevel0Wrap`), else -1. A read-only pass (residual) needs
   /// nothing more.
   int wrapReads(int L) const {
+    // Device backends only: on a host backend the per-cell wrapped-index arithmetic costs more than
+    // the fill it saves — it keeps the x-row loop from vectorizing (128^3 bed advance, 1 thread:
+    // the smoother 700 -> 1131 ms and the residual 80 -> 124 ms per advance, against 44 ms of
+    // level-0 fills), so host passes fill first (`fill` is one launch per coarse level anyway).
+    if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>)
+      return -1;
     if (distributed_)
       return -1;
     if (L == 0)
