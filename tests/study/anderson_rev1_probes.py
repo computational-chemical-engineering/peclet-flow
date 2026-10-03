@@ -106,17 +106,35 @@ def cmd_slowmode(flow, a):
         if k0 >= 50:
             rt = lambda q: (q[k1 - 1] / q[k0 - 1]) ** (1.0 / (k1 - k0))  # noqa: E731
             print(f"rate {k0:4d}-{k1:4d}: W {rt(W):.6f} vel {rt(V):.6f} pres {rt(P):.6f}")
-    # structure: fluid components of the aperture graph (ox at index i couples cells i and i+1)
+    # structure: fluid components of the aperture graph. get_ox[i] is the -x face of cell i, i.e.
+    # the face between cells i-1 and i (the binding's docstring); rolled by -1 so that opn[ax][i]
+    # is the face between cells i and i+1. (Corrected 2026-10-03: until then this read get_ox[i]
+    # itself as the face (i, i+1), one cell off, which turned 205 sealed pockets / 217 cells into
+    # 1,085 / 1,168 on the A1 bed -- tests/study/pocket_pressure_probe.py checks the convention.)
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
     n = fluid.shape
     idx = np.arange(fluid.size).reshape(n, order="F")
-    opn = [np.asarray(o).reshape(n, order="F") for o in (s.get_ox(), s.get_oy(), s.get_oz())]
+    opn = [np.roll(np.asarray(o).reshape(n, order="F"), -1, axis=ax)
+           for ax, o in enumerate((s.get_ox(), s.get_oy(), s.get_oz()))]
     mods = sorted(saved)
-    for th in (0.0, 1e-2, 5e-2, 0.1, 0.2):
+    # the cut-cell operator's own graph at aperture 0: every open face couples its two cells,
+    # whatever their sdf sign, so a fluid cell joined to the main space only through a solid-
+    # CENTRED cut cell is not sealed. 'operator' below = fluid cells outside its main component.
+    # Its apertures are the PROJECTION's (get_ox_proj: binary under the collocated ghost scheme,
+    # identical to get_ox on the staggered grid).
+    opp = [np.roll(np.asarray(o).reshape(n, order="F"), -1, axis=ax)
+           for ax, o in enumerate((s.get_ox_proj(), s.get_oy_proj(), s.get_oz_proj()))]
+    node = fluid.copy()
+    for ax in range(3):
+        o = opp[ax] > 0.0
+        node |= o | np.roll(o, 1, axis=ax)
+    for th, nodes in ((0.0, node), (0.0, fluid), (1e-2, fluid), (5e-2, fluid), (0.1, fluid),
+                      (0.2, fluid)):
         Ii, Jj = [], []
         for ax in range(3):
-            m = (opn[ax] > th) & fluid & np.roll(fluid, -1, axis=ax)
+            o = opp[ax] if nodes is node else opn[ax]
+            m = (o > th) & nodes & np.roll(nodes, -1, axis=ax)
             Ii.append(idx[m])
             Jj.append(np.roll(idx, -1, axis=ax)[m])
         Ii, Jj = np.concatenate(Ii), np.concatenate(Jj)
@@ -130,8 +148,9 @@ def cmd_slowmode(flow, a):
             v = saved[key][3][fluid]
             v = v - v.mean()
             line.append(f"{key}: off-main {float(np.sum(v[fl != main] ** 2) / np.sum(v ** 2)):.3f}")
-        print(f"aperture > {th:g}: {len(np.unique(fl))} fluid components, main {sizes[main]} of "
-              f"{fl.size} fluid cells; " + "; ".join(line))
+        tag = "operator graph, " if nodes is node else ""
+        print(f"{tag}aperture > {th:g}: {len(np.unique(fl))} fluid components, main {sizes[main]} "
+              f"of {fl.size} fluid cells ({fl.size - sizes[main]} off main); " + "; ".join(line))
     for key in mods:
         r = saved[key]
         rp = r[3][fluid] - r[3][fluid].mean()
