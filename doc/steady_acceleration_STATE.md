@@ -4,25 +4,21 @@
 steady marches, `peclet.flow.march_to_steady`. History and every number:
 `doc/steady_acceleration_log.md`.
 
-**Where we are (2026-10-03, landing).**
-- **core 1.4.0 RELEASED** (user GO 2026-10-03): core main `c656ccb` = 1.3.2 merge `5763934` +
-  version bump, tag `v1.4.0`, peclet-halo + peclet-core 1.4.0 on PyPI. Gates on that tip:
-  host+MPI 77/77, Kokkos CUDA+MPI 97/97; landing pages OK. Release worktree `suite/core-release-1.4.0`.
-- **flow `anderson`** rebased onto origin/main (2 doc-only commits, clean) + `f1de647` pins
-  `PECLET_CORE_TAG v1.4.0`; builds read core from `../core-release-1.4.0` (= the tag).
-- **Re-gate in progress** (`<scratch>/flow_battery.sh`): build_omp serial + MPI ctests, G0 hashes
-  vs the previous session's `fix/hash2_{serial,mpi}.txt`, build_cuda `march_*`.
-- **Umbrella** worktree `.claude/worktrees/anderson-register`, branch `anderson-register`,
-  `7baa4c6` (local): register (2 superseded, 5 flow + 1 core new, 593 -> 599), CLAUDE.md counts,
-  CHANGELOG core 1.4.0. Pointer bumps (core `c656ccb`, flow head) come after flow is pushed.
-- Previous gates (pre-rebase head): flow host serial 63/63, MPI 130/130, CUDA march_* 2/2, G0 13/13,
-  G2 42/42, G8 CUDA 3.4 % / 1.2 %, G1 14/14 + bed, G3 bed K agreement (restarts documented limitation).
+**Where we are (2026-10-03): LANDED.**
+- **core 1.4.0 RELEASED** (user GO 2026-10-03): core main `c656ccb`, tag `v1.4.0`, peclet-halo +
+  peclet-core 1.4.0 on PyPI. Gates on that tip: host+MPI 77/77, Kokkos CUDA+MPI 97/97.
+- **flow main** carries `march_to_steady` (branch `anderson` rebased onto VoF's `5a34c69`, pin
+  `PECLET_CORE_TAG v1.4.0`, which supersedes VoF's v1.3.2). Re-gate on the combined tree against
+  the tagged headers: host serial 63/63, MPI 130/130, CUDA march_* 2/2, G0 hashes 13/13 + np2
+  byte-identical to the pre-rebase head.
+- **Umbrella**: register (2 superseded, 5 flow + 1 core new; 593 -> 599), CLAUDE.md counts,
+  CHANGELOG core 1.4.0, pointers core + flow.
 - **Q18 OPEN (user)**: converged=True promises stationarity only (documented default) vs also
-  plain-march reachability. Recorded as open in the register; "also reachability" -> architect.
+  plain-march reachability. Recorded as open in the register; "also reachability" -> a small
+  architect question (a plain verification tail of user-chosen length) before the driver changes.
 
-**Next action.** Battery green -> push flow main (ff-only) -> umbrella: gitlinks core + flow on
-`anderson-register`, ff onto origin/main, push LAST -> remove worktrees core-anderson,
-core-release-1.4.0, flow-anderson, anderson-register.
+**Next action.** Q18 when the user rules. flow's next release (1.3.0 in the pending family 1.4.0)
+ships march_to_steady; its CHANGELOG entry goes under [Unreleased] at that release.
 
 **Anchors.** Note §4.3 "Restart (amended)", §7 "Why stagnation is measured against slow_rate",
 §8 G1 / G3; core `AndersonCore::complete` (step 5 restart, step 6 after the broadcast); driver
