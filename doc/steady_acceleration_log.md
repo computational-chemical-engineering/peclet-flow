@@ -1541,3 +1541,14 @@ pocket_mask_probe.py run/compare` against `build_cuda`:
   so (iv) is bit-identical there.
 - The tight accelerated march took 39 % more steps with (iv) (785 → 1090); the plain and production
   marches did not change. Not investigated.
+
+### 2026-10-03 — Coordinator ruling on option (iv): PARKED
+
+Masking the 41 staggered velocity points whose projection aperture is 0 is not adopted. ΔK ≤ 2.0e-8
+on the bed (tight) and bit-identical on Z&H. The 1.8e-3 per-body reaction shift is the body force on
+those points (13 x-points remove exactly 13·f·h³ from ΣFx). The points hold real fluid in
+near-contact gaps, and fluid that is forced but cannot flow passes that force to the enclosing
+walls, so the current accounting (ΣF = f·V_fluid) is the physically right one; masking would drop
+1.24e-4 of the fluid volume from that balance. The +39 % tight-march step count under the patch
+(785 → 1090) was not investigated, since the patch is not adopted. Register: "Zero-aperture
+staggered velocity points stay live in the momentum solve".
