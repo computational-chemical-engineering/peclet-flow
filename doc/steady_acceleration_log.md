@@ -1346,3 +1346,59 @@ list (`Solver::marchState()` returns u, v, w, P whatever the advection flag;
 `src/flow_ibm_diagnostics.hpp` marchState), so no field-list check can see it. Detecting it needs
 a new signature/configuration key (which flags: advection, scheme, implicit advection?) — a
 design choice the fix list does not make. Implemented: the field-count change (collocated) only.
+
+---
+
+## 2026-10-03 — Orchestrator decisions on the open items (flow `a6da9eb`, `d2ff05a`) — G1 bed Δt 60 has no plain certificate; G3 bed Δt 60 / 600 fail on restarts (reported, not tuned)
+
+Decisions: (1) G1 staggered bed at tight rtol: pass iff |K_acc/K∞ − 1| ≤ |K_plain/K∞ − 1| + 1e-8,
+K_plain the plain tight certificate at the same Δt; (2) G3 bed: a fixed 3000 calls per Δt, K at the
+last non-restart call, spread ≤ 1e-8, other criteria unchanged; (3) R5: the advection settings join
+the signature. Builds rebuilt at `a6da9eb`.
+
+**R5 (`a6da9eb`).** `MarchState::signature` = (dt, ρ, μ, F, advection on, scheme, implicit). Host
+`ctest -R '^(march_state|march_to_steady)$'`: 2/2 pass — march_state checks signature[6..8] and that
+they follow the setters; gate_adapter: staggered `set_advection(True)` between calls → num_resets
+0 → 1, the call bitwise the twin's plain step (a mix was pending without it); the set_dt, refusal
+and collocated configuration-change checks as before; G7a diverged 591 / 662 / 782 (unchanged).
+G0(a) `state_hash.py` serial + `mpirun --bind-to none -np 2 … mpi`: **13/13 identical** to WO-8.
+clang-format 18.1.8 (154 files): clean.
+
+**G1 bed.** Plain tight march at ν dt/h² = 60, CUDA (snapshot of `build_cuda` at `fddcec7`; the
+plain path is untouched, G0):
+
+    steady_acceleration_gates.py run bed --arrangement <bed> --scheme staggered --N 64 --beta 60 \
+        --settings tight --window 0          # -> <scratch>/fix/cuda/g1plain.jsonl
+
+→ **`converged=False`, "max_steps", 20 000 steps** (779 s, 18.0 pressure iterations / step),
+K = 98.9156740628, 2.6e-7 below K∞. The plain march has **no tight certificate at Δt 60** within
+G1's max_steps, so the new criterion has no K_plain there. (At Δt 6 the plain certificate is WO-5's
+19 510-step 98.91569802678.)
+
+| ν dt/h² | plain certificate, \|K_plain/K∞ − 1\| | acc CUDA steps, \|K_acc/K∞ − 1\| | acc host steps, \|K_acc/K∞ − 1\| | criterion |
+|---|---|---|---|---|
+| 6 | 19 510 steps, 1.39e-8 – 1.49e-8 | 695, 1.0e-9 – 2.1e-9 | 809, 1.6e-10 – 1.2e-9 | **pass** (≤ 2.4e-8 – 2.5e-8) |
+| 60 | **none** (max_steps 20 000; at 20 000 2.6e-7 off) | 724, 1.7e-8 – 1.8e-8 | 686, 2.0e-8 – 2.1e-8 | **undefined — stopped** |
+
+Host plain at Δt 60 not run (the CUDA run already shows no certificate within 20 000 steps; host
+≈ 1–3 s / step).
+
+**G3 bed, fixed 3000 calls** (`<scratch>/fix/g3fixed.sh <cuda|omp> <betas>`, i.e. `g3 bed
+--scheme staggered --N 64 --window 5 --steps 3000 --betas …`; host one process per Δt, 8 threads):
+
+| backend | ν Δt/h² | calls | status | restarts (max / 100) | min res | K (call) | \|K/K∞ − 1\| | criteria |
+|---|---|---|---|---|---|---|---|---|
+| CUDA | 60 | 2699 | **disabled ("too many restarts")** | **5 (2)** | 3.08e-12 | 98.915699373568 (2698) | 7.7e-10 | **FAIL** |
+| CUDA | 600 | 3000 | active | **3 (2)** | 2.74e-12 | 98.915698956031 (3000) | 5.0e-9 | **FAIL** (restarts/100) |
+| CUDA | 1e4 | 3000 | active | 0 (0) | 1.96e-12 | 98.915698911231 (3000) | 5.4e-9 | pass |
+| host | 60 | 1917 | **disabled ("too many restarts")** | **5 (2)** | 2.17e-12 | 98.915699428013 (1916) | 2.2e-10 | **FAIL** |
+| host | 600 | 3000 | active | 0 (0) | 2.88e-12 | 98.915698905044 (3000) | 5.5e-9 | pass |
+| host | 1e4 | 3000 | active | 0 (0) | 1.80e-12 | 98.915698888050 (3000) | 5.7e-9 | pass |
+
+**K agreement over Δt: spread 4.67e-9 (CUDA) / 5.46e-9 (host) — pass** (≤ 1e-8; K sampled at
+non-restart calls, and since R2 the state after a restart is the last kept output). **Status and
+"≤ 1 restart per 100" fail at Δt 60 on both backends and at Δt 600 on CUDA**: below ~5e-12 the
+restart rule fires (the R2 regime: single-call jumps at the inexact-solve floor). Pre-fix (WO-8,
+CUDA) the same: Δt 60 disabled at 2588 with 5 restarts, Δt 600 1 restart. With R2 the disabled run
+holds the last good output (K 7.7e-10 / 2.2e-10 from K∞) instead of the rejected one (WO-8: 4e-7).
+Reported, not tuned.

@@ -12,18 +12,20 @@ steady marches, `peclet.flow.march_to_steady`. History and every number:
   (field-count change = configuration change), R4 `48b9174` (adapter ctest), R1 `03e5757`
   (stagnation against `slow_rate**(10·window)`), R3 `fddcec7` (G3 bed depth 5e-11, K at a
   non-restart call); note §4.3 / §7 / §8 amended.
-- **Gates now:** G0 hashes 13/13, flow ctests 63 + 130, core 96 + 96 pass; G1 14/14 old cases pass
-  (bed stag ν dt/h² 6: 695 CUDA / 809 host steps, ≤ 2.0e-9 vs K∞); G2 42/42 identical to WO-8; G8
-  CUDA 3.4 % / 1.2 %; unit digests identical except U5 (its one restart) and the new U11.
-- **FAILING (reported, not tuned):** (1) new G1 case, staggered bed ν dt/h² = 60 tight: certified
-  in 724 (CUDA) / 686 (host) steps, |K/K∞ − 1| = 1.7e-8 / 2.0e-8 > 1e-8. (2) G3 bed K agreement at
-  depth 5e-11: spread 2.5e-8 (CUDA) / 3.1e-8 (host); Δt 600 / 1e4 sit 2.6–4.1e-8 from K∞ — the
-  R3 ratio premise (37–170) does not hold at large Δt (500–830).
-- **Open (not implemented):** R5's staggered `set_advection` invalidation — the staggered field
-  list never changes, so it needs a new configuration key; a design choice for the caller.
+- **Then (orchestrator decisions):** R5 signature `a6da9eb` (advection on / scheme / implicit in
+  the signature); gate script `d2ff05a` (G1 bed vs the plain certificate's error; G3 bed fixed 3000
+  calls); note §4.2 / §5.1 / §8 G1 / G3 amended.
+- **Gates now:** G0 hashes 13/13; flow ctests 63 + 130 (full battery at `fddcec7`), march_state +
+  march_to_steady pass at `a6da9eb`; core 96 + 96; G2 42/42 identical to WO-8; G8 CUDA 3.4 % / 1.2 %;
+  G1 14/14 old cases; G1 bed Δt 6 under the new criterion: pass (acc ≤ 2.1e-9 vs plain 1.5e-8).
+- **STOPPED (reported, not tuned):** (1) G1 bed Δt 60: the plain tight march does NOT certify in
+  20 000 steps (K 2.6e-7 off at 20 000), so the criterion has no K_plain; acc is 1.7e-8 (CUDA) /
+  2.0e-8 (host) from K∞. (2) G3 bed fixed 3000: K spread passes (4.7e-9 CUDA / 5.5e-9 host), but
+  Δt 60 is disabled by "too many restarts" on both backends (2699 / 1917 calls) and Δt 600 CUDA has
+  3 restarts (2 per 100): status / restart criteria fail.
 
-**Next action.** Caller: decide on the two failing bars (G1 bed Δt 60, G3 bed depth/spread) and on
-the staggered-advection signature; then register entries, push core → tag → flow → umbrella.
+**Next action.** Caller: decide on G1 bed Δt 60 (no plain certificate) and on the G3 restart
+criteria at the inexact-solve floor; then register entries, push core → tag → flow → umbrella.
 
 **Anchors.** Note §4.3 "Restart (amended)", §7 "Why stagnation is measured against slow_rate",
 §8 G1 / G3; core `AndersonCore::complete` (step 5 restart, step 6 after the broadcast); driver

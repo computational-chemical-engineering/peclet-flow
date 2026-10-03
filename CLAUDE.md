@@ -631,6 +631,8 @@ res = peclet.flow.march_to_steady(s, lambda: float(s.get_u().mean()))   # <u_x> 
   `acc.disable()`. A redistribute
   reallocates the state buffers, and collocated `set_advection` changes the field count (a
   configuration change, history reset); the accelerator then refuses to step (construct a new one).
+  A change of dt, rho, mu, the body force or the advection settings (on / scheme / implicit) between
+  calls resets the history (`num_resets`).
 
 ## Open items
 
