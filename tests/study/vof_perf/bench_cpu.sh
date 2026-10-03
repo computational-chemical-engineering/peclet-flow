@@ -1,5 +1,6 @@
 #!/bin/bash
-# CPU timings of the bubble column from ckpt_t43, MG-PCG pressure (set_pressure_pcg(True, 800, 1e-10))
+# CPU timings of the bubble column from ckpt_t43, MG-PCG pressure (set_pressure_pcg(True, 800, RTOL);
+# RTOL defaults to the case's registered 1e-8 -- doc/vof_step_performance_design.md sec. 14.3 H-0)
 # -- the VoF step-performance harness (WO-0, doc/vof_step_performance_design.md sec. 8 G-PERF).
 # RUN ON A QUIET HOST (load average < ~2, or a Snellius node): numbers taken at load average 50-100
 # (2026-09-25, other sessions' jobs) are indicative only.
@@ -26,13 +27,13 @@ echo "load: $(cat /proc/loadavg)"
 run1() {  # label, pythonpath[, threads = 24]
   echo "== 1 rank x ${3:-24} threads: $1"
   OMP_NUM_THREADS=${3:-24} OMP_PROC_BIND=spread OMP_PLACES=cores PYTHONPATH="$2" \
-    python prof.py 20 --warm 3 --pcg --flux device --ckpt "$CKPT" 2>&1 | grep -E "ms/step|iters"
+    python prof.py 20 --warm 3 --pcg --rtol "${RTOL:-1e-8}" --flux device --ckpt "$CKPT" 2>&1 | grep -E "ms/step|iters"
 }
 run8() {  # label, pythonpath
   echo "== 8 ranks x 3 threads (TBFsolver's layout): $1"
   OMP_NUM_THREADS=3 OMP_PROC_BIND=true OMP_PLACES=cores PYTHONPATH="$2" \
     mpirun -np 8 --map-by ppr:8:node:pe=3 --bind-to core -x OMP_NUM_THREADS -x OMP_PROC_BIND \
-    -x OMP_PLACES -x PYTHONPATH python run_mpi.py 20 --warm 3 --ckpt "$CKPT" 2>&1 | grep -E "ms/step"
+    -x OMP_PLACES -x PYTHONPATH python run_mpi.py 20 --warm 3 --rtol "${RTOL:-1e-8}" --ckpt "$CKPT" 2>&1 | grep -E "ms/step"
 }
 LAST=
 # ROUNDS interleaved rounds (A B C A B C ...) so a drifting background load biases no one tree;
@@ -50,5 +51,5 @@ for r in $(seq 1 "${ROUNDS:-2}"); do
 done
 echo "== $LAST, 1 x 24, per-stage (set_vof_timing)"
 OMP_NUM_THREADS=24 OMP_PROC_BIND=spread OMP_PLACES=cores PYTHONPATH="$LAST" \
-  python prof.py 20 --warm 3 --pcg --flux device --timing --ckpt "$CKPT" 2>&1 | sed -n '/ms\/step/,$p'
+  python prof.py 20 --warm 3 --pcg --rtol "${RTOL:-1e-8}" --flux device --timing --ckpt "$CKPT" 2>&1 | sed -n '/ms\/step/,$p'
 echo "load: $(cat /proc/loadavg)"
