@@ -38,6 +38,14 @@ Known pre-existing: PECLET_FLOW_OPERATOR_DOUBLE=OFF (non-default) fails 6 tests 
 (cell_force_placement, collocated_stability_guard, balanced_force_restart, hydro_force_units,
 vof_collocated, balanced_force) — float-storage tolerances.
 
+**Snellius rerun 2026-10-03** (flow d02d3b0, genoa, same-node TBF): 24 cores 1x24 peclet 144 ms
+(znver4 140) vs TBF 46 (3.1x, was 4.1x); 8x3 166-169 vs 45-46; 192 cores 82-85 vs 25 (unchanged).
+1x24 stages: projection 84.6 (60 %), momentum 14.2, curvature 16.7, block_advect 15.0. Page cost
+table updated (peclet-examples aaaeaa0, deployed). Snellius budget warning: "running low".
+D1 rerun on main (a0afc9b): same pattern — rtol 1e-8: iterations 13.93 -> 10.55, column volume
+drift 5.2e-12 / 2000 steps; 1e-6: 7.49, 1.5e-9. USER decision pending: published case rtol (now 1e-10).
+E2(a) PARKED (register 43c78cb; branches vof-e2, vof-e2-e23-stopped2 on origin).
+
 **Next.** Snellius same-node rerun (bubble_cpu.slurm) + update the page's cost table; host MG launch
 structure (CPU still ~4x TBF); WO-9/10/12; E2(a) per the user's answer.
 
