@@ -26,7 +26,7 @@ that depends on the normal. It is committed with this note.
 | D7 | Double precision everywhere; no float variant | a templated `Real` | §3.5 |
 | D8 | Conjugate: **two fields on one grid** (fluid c, solid c_s), ψ = c/K inside the solver, series-resistance 2×2 elimination at the probes | one field + side array; mixture one-field surrogate; Peters directional one-field; Das-style lagged coupling | §1.3, §1.4 |
 | D9 | Solver: **BiCGStab** on the true probe operator, preconditioned by one V-cycle of a new **ScalarMG** on the SPD lumped-probe surrogate | fixed RB-GS sweeps; FGMRES/GMRES; centroid-distance surrogate | §5 |
-| D10 | ScalarMG coarse levels are **rediscretized** from the coarsened geometry: wall terms use the probe distance at the level's own cell size. Coupled two-field levels with a 2×2 block RB-GS for conjugate | Galerkin RAP (kept as the named fallback); extending CutcellMG; VelocityMG's staircase; block-Jacobi per phase | §5.2–5.3 |
+| D10 | ScalarMG coarse **faces** are rediscretized from the coarsened geometry. Coarse **wall/interface terms** are the plain average of the level-0 terms at the **fine** probe distance (Amendment A1). Coupled two-field levels with a 2×2 block RB-GS for conjugate | wall terms at the level's probe distance s_L (overshoots; measured divergent, A1); Galerkin RAP (27-point, no better, A1); extending CutcellMG; VelocityMG's staircase; block-Jacobi per phase | §5.2 (A1)–5.3 |
 | D11 | Stop on the max-norm relative residual (the velocity solver's form); the legacy 50-sweep path is untouched | fixed iteration count | §5.1 |
 | D12 | Small cells under advection: **dynamic split** — implicit FOU on faces touching a cut cell whose explicit outflow would exceed what bulk cells see this step; explicit Koren/SOU/FOU elsewhere | weighted state redistribution (now; revisit for VoF/slip); explicit κ storage; unit storage; fully implicit FOU | §6 |
 | D13 | Conservation is exact for the discretization; the budget reports the linear-solver defect; **no mass fix-up** | a uniform mass correction after the solve | §6.4, §9 |
@@ -636,7 +636,10 @@ cut-cell scalar.
   For one phase with constant Λ, this is exactly CutcellMG's rule.
 - **Mass:** m_C = average of the children's m (κ/Δt, or C K κ_s/Δt), with `restrictAvg`. Mass is
   extensive, so averaging is both the Galerkin and the rediscretized value.
-- **Wall/interface term (direct gather from level-0 facets; no atomics):**
+- **Wall/interface term — SUPERSEDED by Amendment A1 below: use the FINE probe distance s_φ, not
+  s_L.** The original text follows for the record.
+
+  Direct gather from level-0 facets; no atomics:
 
       W_C^(L) = (1/N_L) Σ_{fine facets φ under C} α_φ · G_φ(s_L(φ)),
       s_L(φ) = 1.1 · ½ Σ_a |n_a(φ)| H'_a(L)
@@ -646,7 +649,7 @@ cut-cell scalar.
     1/(s/Λ + 1/k), or 1/(s/Λ_f + R_c + s/Λ_s).
   - One kernel per level over coarse cells loops over the descendant fine cells in fixed order, and
     over their facets via the CSR. Cost O(N₀) per level, paid only when the operator is dirty.
-- **Why the probe distance is rescaled.**
+- **Why the probe distance is rescaled** (*refuted by measurement; see A1*).
   - Face terms scale as Λ/H². An averaged wall term scales as (area/volume)·(Λ/s₀) ~ Λ/(H·h).
   - Plain averaging would therefore grow the wall-to-face ratio by 2× per level, 2^L at depth L:
     the coarse problem drifts toward a stiff Dirichlet wall that the fine problem does not have.
@@ -675,6 +678,120 @@ cut-cell scalar.
   level 0 only, i.e. 2 + 2 RB-GS sweeps as the preconditioner. Otherwise use the full table.
 - Steady: always the full table.
 
+#### Amendment A1 (WO-4, 2026-10-03) — the coarse wall term uses the fine probe distance
+
+**Decision (Q-A).**
+- Coarse faces stay rediscretized: averaged Λ·a times w_a(L), 7-point.
+- Every lumped wall or interface term on a coarse level is the **plain average of its level-0
+  value**, evaluated at the **fine** probe distance:
+
+      W_C^(L) = (1/N_L) Σ_{fine facets φ under C} α_φ G_φ(s_φ)
+
+  - This is the gather of §5.2 with s_L(φ) replaced by s_φ. Keep the gather and its fixed summation
+    order.
+  - The same rule covers Robin (G at s_φ) and, in WO-7, the conjugate coupling: G_c with the fine
+    s_f, s_s.
+- **Galerkin RAP does not ship.**
+  - Delete `setGalerkin`, the RAP assembly and its 8-colour sweep from `scalar_mg.hpp`, together with
+    their test rows. The evidence stays in the log and in commit `c1e312e`.
+  - **Q-B is therefore moot:** red-black Gauss–Seidel on 7-point coarse levels stays, and so does the
+    2×2 block variant for conjugate.
+
+**Why (first principles).**
+- A coarse-grid correction never overshoots if the coarse operator is at least as stiff, in energy,
+  as the fine operator applied to prolongated coarse functions, i.e. as the Galerkin energy
+  e_Cᵀ Pᵀ S P e_C.
+- Rediscretized faces satisfy this to leading order for trilinear P. CutcellMG relies on it, and
+  here the no-solid and Neumann cases contract at 0.18–0.25.
+- A prolongated coarse function is smooth across the fine cut cells beneath it. Its sink energy is
+  therefore ≈ Σ W_i e_C², with W_i at the fine s_φ, **whatever H is**.
+- Rescaling s by the level size divides that energy by ~2^L. The coarse problem becomes softer than
+  any prolongated function, by 2^L, exactly where the coarse cell cannot resolve the near-wall dip.
+  The correction then overshoots by that factor.
+- It diverges once an under-resolved Dirichlet body is the dominant sink.
+- The averaged term is the variational value for piecewise-constant P, and close to Pᵀ W P for
+  trilinear P.
+- §5.2's argument (keep the wall-to-face ratio level-independent) treated a coarse level as a
+  rediscretization of the continuous problem. A coarse correction needs the fine operator restricted
+  to the coarse space, and the two differ precisely where the geometry is under-resolved.
+- So the amr register lesson ("coarsen the exact operator") **does** apply to the wall term. §12
+  entry 7 and §5.3 are amended accordingly.
+
+**Evidence.**
+
+3-D, log WO-4 — stand-alone V-cycle contraction ρ(I − M⁻¹S):
+
+| case | rediscretized s_L | averaged at s₀ | RAP |
+|---|---|---|---|
+| G1 128³ | 0.788 | 0.274 | 0.358 |
+| G1-like 64³ | 0.470 | 0.222 | 0.303 |
+| periodic box + Dirichlet sphere, 64³ | 3.105 | 0.503 | 0.284 |
+| Dirichlet box, no solid | 0.175 | (= rediscretized) | 0.334 |
+
+2-D prototype `tests/study/scalar_ibm/mg_coarse_wall.py`. It uses the same 4-colour Gauss–Seidel,
+average restriction, bilinear prolongation and exact 4×4 bottom for all three columns, so only the
+coarse operator differs. Entries are contraction [BiCGStab iterations to 1e-10]; n = 64 → n = 128:
+
+| case | rediscretized s_L | averaged at s₀ | RAP (avg R, bilinear P) |
+|---|---|---|---|
+| box + disc R = L/4 (G1-like) | 0.444 → 0.682 [7, 8] | 0.190 → 0.229 [6, 7] | 0.295 → 0.360 [6, 7] |
+| periodic + disc R = L/8 | **1.477 → 1.975** [8, 10] | 0.324 → 0.355 [7, 7] | 0.290 → 0.301 [7, 7] |
+| periodic + disc R = L/32 | **2.078 → 2.653** [8, 10] | 0.658 → 0.705 [7, 8] | 0.609 → 0.648 [7, 7] |
+| periodic 4×4 dense Dirichlet array | 0.356 → 0.586 [5, 7] | 0.183 → 0.256 [4, 6] | 0.116 → 0.155 [4, 5] |
+| box, no solid | 0.233 → 0.253 [6, 6] | 0.233 → 0.253 [6, 6] | 0.361 → 0.417 [7, 7] |
+
+Readings:
+1. s_L overshoots, and worsens with every added level, both in 2-D and in 3-D (0.47 → 0.79 for
+   6 → 7 levels).
+2. Averaging at s₀ never diverges and is nearly depth-stable.
+3. RAP is not better overall:
+   - it wins on the dense array;
+   - it loses on boxes without a solid, through its non-symmetric average/bilinear pair;
+   - it costs 27-point coarse operators and an 8-colour sweep.
+4. The tiny isolated sink (R = L/32) sits at 0.65–0.70 for **both** variational constructions. That
+   is the limit of a coarse space that cannot represent the dip, not a defect of either.
+5. BiCGStab hides all of it at these sizes. The 3-D runs agree: 13–16 iterations on the diverging
+   periodic case (log D-WO4).
+
+**Why not keep s_L and gate only on Krylov iterations** (the orchestrator's alternative)? The defect
+is structural, and it grows where the tests do not look:
+- (a) The overshoot factor ~2^L grows by one factor of 2 per added level. 256³ and 512³ runs get
+  divergent modes even on G1-like geometry.
+- (b) There is one bad mode per under-resolved Dirichlet body. In a dilute suspension of reacting
+  particles, the Krylov count therefore grows with the number of bodies.
+- (c) A contraction of 3.1 means an eigenvalue of M⁻¹S below 0 or above 2. The preconditioned
+  operator is indefinite: a breakdown risk for BiCGStab, not merely a slower solve.
+- (d) The cure is a one-line change that makes the construction safe by principle.
+
+Krylov counts stay the **primary** gate. A contraction guard stays as well, because it is the only
+gate that sees (a)–(c) at test sizes.
+
+**Gate restatement** (replaces the §11 G-iter contraction line):
+- **Primary:** BiCGStab iteration counts, G-iter as ruled in D-WO4-1 and D-WO4-3. Unchanged.
+- **Contraction guard**, measured by the implemented power estimate:
+  - **(C1)** ρ < 1 on every gate geometry. A stand-alone V-cycle that diverges fails, whatever the
+    iteration count.
+  - **(C2)** ρ ≤ 0.35 on Dirichlet/Robin box geometries (G1, G2, G3a), Neumann geometries and
+    no-solid geometries, at every rung. Measured: 0.22–0.27 in 3-D, 0.19–0.26 in 2-D.
+  - **(C3)** ρ ≤ 0.75 on periodic geometries whose only sink is one Dirichlet body. Add the periodic
+    box + Dirichlet sphere case of D-WO4 as a `scalar_mg` row. Measured: 0.503 in 3-D, 0.32–0.71 in
+    2-D.
+- The old "≤ 0.3" was set without data. With red-black or colour Gauss–Seidel and average/trilinear
+  transfers, a no-solid box already sits at 0.18–0.25 and RAP at 0.33–0.42, so that bound mostly
+  measured the smoother/transfer pair.
+
+**Implementation order (WO-4 continuation).**
+1. s_L → s_φ in the coarse gather.
+2. Remove the RAP path.
+3. Rerun `scalar_mg` (C1–C3), G-iter, G10 at rtol 1e-13, and G12. Log the numbers.
+4. If any G-iter row gets worse by more than 2 iterations, stop and report; do not tune.
+
+**Left open (§13 Q2′, a fact, with a default).** The tiny-sink limit (C3) is inherent to geometric
+coarse spaces. Default: accept it. If a dilute-suspension run (many bodies smaller than the coarse
+cells) shows iteration counts growing with the number of bodies, the next step is operator-dependent
+prolongation (BoxMG-type, so that coarse basis functions follow the dips). That is a new design,
+not a knob.
+
 ### 5.3 Why this, and the register
 
 - **Not CutcellMG.**
@@ -695,6 +812,9 @@ cut-cell scalar.
   level. The non-family part (the probe off-diagonals) is handled by the outer Krylov on the true
   operator. This departure is recorded as a new register entry (§12, R7), with the trigger for
   switching to Galerkin RAP (§13 Q2).
+  - **Amended by A1:** this holds for the face part only. The wall term must take its variational
+    (fine-s) value. Being "in the family" per cell does not make a rediscretized coarse sink match
+    the fine operator on the coarse space.
 - **Coupled two-field levels rather than block-Jacobi per phase.** Per-body mean offsets, at high
   contrast and in steady periodic conjugate problems, are slow modes of any per-phase preconditioner,
   and their number grows with the number of particles. The coupled coarse problem carries them.
@@ -1281,7 +1401,9 @@ Rules:
 - Singular steady (G5b, G8): ≤ 30, growth ≤ 5.
 - Transient at Δt·D/h² = 1: ≤ 8 per step (warm start).
 - Conjugate G4/G6: ≤ 30.
-- V-cycle contraction on the surrogate (power estimate of I − M⁻¹S) ≤ 0.3 at the finest G1 and G5b.
+- V-cycle contraction on the surrogate: *restated by Amendment A1* as C1 (< 1 everywhere), C2
+  (≤ 0.35 on box, Neumann and no-solid geometries) and C3 (≤ 0.75 on periodic isolated-sink
+  geometries). Krylov counts are the primary gate.
 
 **G-perf** (recorded; red flags rather than failures).
 - Matvec effective bandwidth ≥ 50 % of measured STREAM.
@@ -1324,14 +1446,20 @@ Rules:
    - 4³ subsampling;
    - the cell-centre projection as facet centroid;
    - reusing the gated pressure openness.
-7. **ScalarMG preconditions the SPD lumped-probe surrogate with rediscretized coarse levels (wall
-   terms at the level's own probe distance).** Rejected:
-   - Galerkin RAP as the default;
-   - averaged (PC-Galerkin) wall diagonals (wall/face ratio grows 2^L);
+7. *(as amended by A1, 2026-10-03)* **ScalarMG preconditions the SPD lumped-probe surrogate with
+   rediscretized coarse FACES and variational coarse WALL/interface terms: the plain average of the
+   level-0 terms at the fine probe distance.** Rejected:
+   - wall terms at the level's own probe distance s_L. This was the original design and is
+     measured to overshoot: stand-alone contraction 0.79 at the finest G1 and 3.1 (divergent) on a
+     periodic box with a Dirichlet sphere; 2-D 1.5–2.7. Its rationale (keep the wall-to-face ratio
+     level-independent) is refuted.
+   - Galerkin RAP: 27-point, a new smoother, and no better overall (0.28–0.36 in 3-D; 0.33–0.42
+     without a solid);
    - extending CutcellMG;
    - VelocityMG's staircase coarse operator.
-   - **This qualifies** the amr entry "Rediscretized coarse momentum operators fail": that failure
-     needs a fine operator outside the rediscretized family, which the surrogate is not.
+   - This **confirms**, for the wall term, the amr entry "Rediscretized coarse momentum operators
+     fail": a coarse sink softer than the fine operator on the coarse space overshoots. The face part
+     stays rediscretized.
 8. **The scalar linear solve is BiCGStab + one ScalarMG V-cycle with a max-norm relative stop
    (default 1e-10).** Rejected: fixed RB-GS sweeps; (F)GMRES; the centroid-distance surrogate
    (ρ = 0.995).
@@ -1354,7 +1482,7 @@ Rules:
 | # | Question | Needs | Default (work proceeds on it) | Revisit trigger / experiment |
 |---|---|---|---|---|
 | Q1 | 3-D absolute accuracy bounds | **fact** | the *(prov.)* bounds of §11 | first passing run; tighten to 2× measured |
-| Q2 | Is the rediscretized ScalarMG good enough? | **fact** | rediscretized (§5.2) | if G-iter fails (> 25 iterations or growth > +5 per doubling on G1/G4/G5b), replace coarse construction with Galerkin RAP of S (restrict = average, prolong = trilinear), inside `scalar_mg.hpp` only |
+| Q2 | Is the rediscretized ScalarMG good enough? | **fact** — **answered by A1 (2026-10-03)** | rediscretized faces + wall terms averaged at the fine probe distance | Q2′: if dilute suspensions (many bodies smaller than the coarse cells) show iterations growing with the number of bodies, design operator-dependent (BoxMG-type) prolongation; RAP is not the remedy (A1) |
 | Q3 | Depth at scale without telescoping | **fact** | in-place depth only | if steady singular at np ≥ 8 needs > 1.5× the np = 1 iterations, add core stage telescoping (`chooseStageTarget`/`RedistributeTopology`, as CutcellMG) |
 | Q4 | Contact-region accuracy for packed-bed Nu | **fact** | ladder of §3.3, one solid DOF per cell | G13 self-convergence < 1 or R2 > 1 % → design a contact model (Claassen 2024 line) |
 | Q5 | API spelling of the opt-in | **user preference** | `add_scalar(..., cutcell=True)` — **DEFAULT-PENDING-USER** | rename before the first release that ships it (no alias needed while unreleased) |
