@@ -897,3 +897,117 @@ preconditioner, steady mode (Q-H / A2), the design note.
 - **D-WO5b-3.** Accepted: the new refusal (open face + moving fluid before the first projection)
   and the inert boundary capture.
 - **Known limitation:** outflow backflow uses the signed F_out·c_i (zero-gradient). It is ungated.
+
+## 2026-10-03 — WO-5c: the steady advective surrogate (Amendment A2) — built, every iteration and contraction bound met; stopped on G-adv (v)
+
+**Built** (per A2, §6.7; nothing tuned).
+- `scalar_mg.hpp`: `Inputs::advective` (+ the operator's bands AW…AT, `phi[3]`, `omegaOpen`). On the
+  advective path level 0 is the operator's 7 bands with SAC as the diagonal (views, no storage);
+  each coarse level gets lazily allocated Qp/Qm (6) and bands (6). Q coarsening: level 1 from the
+  guarded positive parts of the level-0 flux (`smg::GuardedPart`, advectionBands' steady coupling
+  predicate), deeper levels from the finer Q, by `coarsenOpenAvgCell`'s sum and division, then
+  ×1/r_a; `fill` of the 6 arrays, the low-face plane of every non-periodic axis zeroed. Assembly:
+  AC_L = [AC as today, mass = κ·idt + ω_open] + ((Qm_x(i) + Qp_x(i+e_x)) + (Qm_y(i) + Qp_y(i+e_y)))
+  + (Qm_z(i) + Qp_z(i+e_z)) (evaluated left to right, as written), AW = AFX(i) − Qp_x(i),
+  AE = AFX(i+e_x) − Qm_x(i+e_x), …; pinned rows identity. Band-form colour sweep (unknown cells of
+  the colour), band-form residual, both in A2's summation order; `applySurrogate` on the advective
+  path is the operator's band matvec `applyCutcellOp(SAC, AW…AT)` (u4's reference); `contraction()`
+  follows. Cycle, transfers, colours, exchanges, bottom and level rule untouched.
+- `scalar_cutcell_operator.hpp`: `ScalarCutState::omegaOpen` (steady advecting solves only: the
+  open-face rows' implicit outflow, written by `openFaceAdvection`'s new optional output, clamped
+  at 0 afterwards — read as max(Σ_open faces F_out, 0)); `maxCellPecletLocal` (interior faces = both
+  cells unknown; λ = 0 with flux gives +inf).
+- `flow_ibm_scalars_cutcell.hpp`: `in.advective = steady && st.advecting` with the views; the
+  transient advecting path keeps `outflow` on the mass verbatim; `max_cell_peclet` as the third
+  entry of the advance's MAX reduction. `flow_bindings.cpp`: census key `max_cell_peclet`.
+- Tests: `scalar_mg` rows u1–u6 (+ `test_scalar_mg advective` runs them alone); MPI problem
+  `steady_adv` with the z = M⁻¹r check; gate `gadv` (ctest `scalar_cutcell_gadv`, CMakeLists).
+
+**Inert proof** (vs the unmodified 9ac02d3 build, saved before any change): 170/170 arrays
+`np.array_equal` — at rest: G1-like steady (Dirichlet faces), transient Robin + source at level 0
+and on the full table (3 steps each), singular steady (G5b geometry); transient advecting: G9
+annulus R_o/h 16 fou and koren at C 0.5 (50 steps, every 5th: field, census, budget), the annulus
+R_o/h 32 with D at dt·D/h² = 3 and 30 (8 steps each), the G9c channel koren C ≤ ½ and fou C ~0.9
+(15 steps of `step()`, fields incl. u). `scalar_mg` C1–C3 rows unchanged (0.186 … 0.523, the same
+digits as WO-4/A1). **G12:** 12/12 hashes = `doc/scalar_ibm_baseline_hashes.txt` at
+OMP_NUM_THREADS=1.
+
+**G-adv (vi)** (one-time): (a) R/h 16, Pe_h 0.1, rtol 1e-13, the same face field (scale computed in
+Python, independent of the build): max|c_A2 − c_WO5| = 9.8e-12 max|c| (≤ 1e-9); iterations 43
+(WO-5) → 13 (A2).
+
+**`scalar_mg` A2 rows** (cell units).
+- (u1) uniform flow 0.75 along x, y, z on 32³ and 32×32×4 (5 levels; (2,2,1) levels): 0 of 14 040
+  / 2 040 entries differ from Qp_a = φ/cf_a, Qm_a = 0.
+- (u2) divergence-free random field, 32³: max|out − in| / max Q = 4.7e-16, 5.9e-16, 1.0e-15,
+  7.5e-16, 8.6e-16 (levels 0–4); column sums ≤ 3.6e-16 max AC.
+- (u3) C3 at Pe_h 10: min (AC − Σ|b|)/AC = −4.5e-16 … −5.5e-16 on levels 0–4, +3.7e-2 at the
+  bottom; no positive band. **Needs a divergence-free field:** with the default pressure rtol 1e-10
+  the margin is −5.8e-13 (level 0), −3.3e-13, −1.5e-13 (levels 1, 2) — A2's row sums are exact only
+  up to the field's divergence. The C4/u3 harness therefore runs the pressure PCG to 1e-14 (test
+  only).
+- (u4) level-0 advective applySurrogate vs the band matvec with SAC: 0 of 262 144 rows differ.
+- (u5) channel 64×32×32, inflow −x / outflow +x, walls y, z, a sphere: 3 424 domain-face entries
+  over 5 coarse levels, 0 nonzero; steady 8 iterations, Pe_h 0.26.
+- (u6) **C4** (C3 at R/h 16, census Pe_h): 0.566 / 0.680 / 0.764 at Pe_h 0.1 / 1 / 10 (11 / 16 / 24
+  iterations) — C1 and ≤ 0.90 (prov.) pass.
+
+**G-adv** (physical units, OMP 4; iterations at Pe_h 0.1 / 1 / 10; all converged to rtol 1e-10 —
+(i) passes everywhere):
+
+| row | 32³ or R/h 16 | 64³ or R/h 32 | bound (prov.) | growth per doubling |
+|---|---|---|---|---|
+| (a) C3 problem | 8 / 13 / 23 | 10 / 17 / 33 | 20/25/40, 25/35/55 | 1.25 / 1.31 / 1.43 |
+| (b) closure, Neumann (singular) | 5 / 8 / 12 | 7 / 10 / 17 | 15 / 20 / 30 | 1.40 / 1.25 / 1.42 |
+| (b′) Dirichlet spheres | 12 / 10 / 15 | 12 / 13 / 18 | 15 / 20 / 30 | 1.00 / 1.30 / 1.20 |
+| (c) G9c channel, Pe_h 1 / 10 | 8 / 9 | — | 40 | — |
+
+Q20's tightened bounds (2× measured) would be (a) 16/26/46 and 20/34/66 — not applied (the note
+says "may"; the orchestrator's call). Census Pe_h equals the target to ≤ 1e-9 relative on every
+row. (c) sets Pe_h through D (the captured open-face flux cannot be rescaled by `set_field`).
+(b)'s source: u_x = the cell average of its two x-face velocities (`get_u`), mean κ-weighted over
+the fluid unknowns — a harness reading of "u_x − ⟨u_x⟩".
+
+**G-adv (v): FAILS — the normalization of "relative" is open (stopped; nothing chosen).**
+- (a): |identity_error| / max(|wall_in|, |source_in|, |boundary_in|) = 1.1e-12 at R/h 16 and
+  1.9e-12 at R/h 32, the same at every Pe_h — **and the same at rest** (Pe_h 0: 1.15e-12 / 1.88e-12)
+  and with the WO-5 build (1.14e-12 at Pe_h 0.1). It is the round-off of the budget's N-cell sums on
+  this problem (a uniform source balanced by one wall), independent of A2 and of advection; it
+  grows ~√N.
+- (b), (b′): the source is mean-free, so wall_in, source_in and boundary_in are all round-off
+  (≤ 1e-13); relative to them the identity is O(1) (4.7e-1 … 1.1). Relative to the gross source
+  V Σκ|s| it is 1e-17 … 2.1e-15 (printed as INFO by the gate).
+- (c): 1.5e-14 of the inflow rate Q c_in (G9c's normalization) — passes.
+- The same quantity fails the existing `compare()` identity check (≤ 1e-12 of |wall_in|) on
+  `steady_adv` in `scalar_cutcell_solve_mpi`: 4.7e-13 at OMP 2 but 1.1e-12 at OMP 4 on the
+  SINGLE-RANK reference itself — the thread count changes the reduction order, i.e. round-off.
+- Left FAILING as evidence (`scalar_cutcell_gadv`, `scalar_cutcell_solve_mpi_np{1,2,4}`), not
+  loosened.
+
+**G10 row `steady_adv`** (64³ periodic, Dirichlet sphere R 16, Pe_h 1 from a single-rank Stokes
+field set on every block, rtol 1e-13): np 1 bitwise (field, 22 iterations, wall flux); np 2 / 4:
+max|c − c₁| = 4.7e-13 / 3.1e-12 of max|c₁| 182.4 (≤ 1e-10 relative), iterations 22 = 22; the
+advective V-cycle's z = M⁻¹r for a fixed global-index r: **0 of 262 144 cells differ at np 1, 2,
+4**. Other problems unchanged (mixed 1.33e-15, g1 2.13e-14, singular 7.11e-15, g9 6.9e-17, g9c
+6.7e-16 at np 4).
+
+**G-perf.** V-cycle at 64³ (6 levels, C3): advective 3.2–3.6 ms vs symmetric 2.9–3.2 ms on the same
+block, ratio 1.00–1.23 over two runs on a loaded host (expected ≈ 1.5; red flag > 2: none).
+Steady G-adv(b) at 64³ (OMP 4): 0.16 s (Pe_h 1, 10 iterations), 0.25 s (Pe_h 10, 17 iterations).
+
+**Battery** (`-LE bench`, 211 tests, OMP 4; run in three pieces on a host at load 70–100 — the
+first two were cut by the 30-min background limit and by a restart with OMP_WAIT_POLICY=passive /
+OMPI_MCA_mpi_yield_when_idle=1, scheduling only): 207 pass; the 4 failures are exactly the (v)
+identity rows — `scalar_cutcell_gadv` (18 FAIL lines, every one a (v) row) and
+`scalar_cutcell_solve_mpi_np1/np2/np4` (only the identity CHECK on `steady_adv`).
+
+**Not changed:** the face-form path (transient, steady at rest, `hasOutflow` on the mass), A1's
+wall gather, the probe operator, the Krylov driver, CutcellMG / VelocityMG, the discretization.
+
+**Question (stopped):**
+- **Q-J (G-adv (v)).** "≤ 1e-12 relative" against what? Against the net terms it is round-off-
+  limited on (a) at rest and in the WO-5 build already (1.1–1.9e-12, ~√N), and ill-posed for the
+  mean-free closure source of (b)/(b′). Options: the gross source V Σκ|s| (or a gross flux scale);
+  a bound that scales with N·ε; or compensated summation in the budget (changes no solve, but
+  `scalar_budget` output digits). The same choice decides `compare()`'s identity check for
+  `steady_adv`.

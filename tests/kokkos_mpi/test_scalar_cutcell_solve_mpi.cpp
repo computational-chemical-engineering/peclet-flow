@@ -23,7 +23,11 @@
 //               counts compared exactly across decompositions);
 //   g9c       — G9c (WO-5b): a channel with inflow / walls / outflow, a sphere and a cap cutting
 //               the outflow face across the rank boundaries, the scalar advected by the full NS
-//               step on the captured open-face flux, fou, 30 steps (small-cell counts exact).
+//               step on the captured open-face flux, fou, 30 steps (small-cell counts exact);
+//   steady_adv — G-adv(a) (WO-5c, design Amendment A2): the periodic C3 problem (a Dirichlet sphere
+//               R/h = 16 in a 64^3 box with a source) advected by a projected Stokes field
+//               rescaled to census Pe_h 1, steady: the advective V-cycle. Plus its z = M^-1 r
+//               for a fixed global-index r, bitwise equal to the single-rank build at np 1, 2, 4.
 //
 // Plus the level table: ScalarMG's distributed table equals VelocityMG::initMpi's (in place).
 #include <mpi.h>
@@ -90,9 +94,11 @@ static void record(IbmSolver& s, Run& r, bool transient) {
   r.identity.push_back(b.identityError / std::fabs(transient ? b.dMass : b.wallIn));
 }
 
+using Post = std::function<void(IbmSolver&, IbmSolver&, const Block&)>;
+
 static void compare(const char* tag, int n, const std::vector<double>& gsdf, FlowSetup flow,
                     ScalarSetup scalar, Solve solve, bool checkLevels = false, bool gated = true,
-                    bool cutcellPressure = false) {
+                    bool cutcellPressure = false, Post post = nullptr) {
   peclet::core::decomp::BlockDecomposer<3> dec =
       peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size_), n, n, n);
   const auto blk = dec.block(rank_);
@@ -158,6 +164,8 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
       idm = std::fmax(idm, std::fmax(std::fabs(D.identity[k]), std::fabs(R.identity[k])));
     std::printf("  budget identity (rel) <= %.1e\n", idm);
   }
+  if (post)
+    post(sd, sr, B);
   if (!gated)
     return;
   CHECK(D.iters.size() == R.iters.size());
@@ -489,6 +497,119 @@ int main(int argc, char** argv) {
             return r;
           },
           false, true, true);
+    }
+    // ---- G10 on G-adv(a) (WO-5c, Amendment A2): steady advection, the advective V-cycle ----
+    {
+      // The C3 problem: a periodic 64^3 box, a Dirichlet sphere R = 16 with a source, D = 0.7;
+      // the face velocities are the projected Stokes field of a SINGLE-RANK build (20 steps under
+      // a body force: WO-5's harness), rescaled so that the census max_cell_peclet is 1, and set
+      // on every block (identical input on every decomposition).
+      const int N = 64;
+      const std::vector<double> gsdf = sphereSdf(N, 31.87, 31.28, 32.11, 16.0);
+      auto flowAdv = [](IbmSolver& s) {
+        s.setRho(1.0);
+        s.setMu(1.0);
+        s.setDt(1.0);
+      };
+      auto scalarAdv = [](IbmSolver& s) {
+        s.addScalar("c", 0.7, 1, 50, true);
+        s.setScalarWall("c", 1, 1.0, 0.0, -1);
+        s.setScalarSource("c", -0.3);
+      };
+      std::vector<double> gv[3];
+      const char* nm[3] = {"u", "v", "w"};
+      {
+        IbmSolver g(N, N, N);
+        flowAdv(g);
+        g.setSolid(gsdf, true);
+        g.setBodyForce(1e-3, 4e-4, 2e-4);
+        for (int k = 0; k < 20; ++k)
+          g.step();
+        scalarAdv(g);
+        g.solveScalarSteady("c");  // the probe: census max_cell_peclet of the unscaled field
+        const double k = 1.0 / g.scalarField("c").cut->maxCellPeclet;
+        for (int a = 0; a < 3; ++a) {
+          gv[a] = g.getField(nm[a]);
+          for (double& v : gv[a])
+            v *= k;
+        }
+      }
+      compare(
+          "steady_adv", N, gsdf, flowAdv,
+          [&](IbmSolver& s, const Block& B) {
+            const std::size_t nl = (std::size_t)B.l[0] * B.l[1] * B.l[2];
+            for (int a = 0; a < 3; ++a) {
+              std::vector<double> f(nl);
+              for (int z = 0; z < B.l[2]; ++z)
+                for (int y = 0; y < B.l[1]; ++y)
+                  for (int x = 0; x < B.l[0]; ++x)
+                    f[(std::size_t)x + (std::size_t)y * B.l[0] + (std::size_t)z * B.l[0] * B.l[1]] =
+                        gv[a][(std::size_t)(x + B.o[0]) + (std::size_t)(y + B.o[1]) * N +
+                              (std::size_t)(z + B.o[2]) * N * N];
+              s.setField(nm[a], f);
+            }
+            scalarAdv(s);
+          },
+          [](IbmSolver& s) {
+            Run r;
+            s.solveScalarSteady("c");
+            record(s, r, false);
+            const auto& st = *s.scalarField("c").cut;
+            if (rank_ == 0)
+              std::printf("  [steady_adv] census max_cell_peclet %.6g, %d levels, %d iterations\n",
+                          st.maxCellPeclet, st.mgLevels, st.iterations);
+            CHECK(st.advecting && st.steady && std::fabs(st.maxCellPeclet - 1.0) <= 1e-12);
+            return r;
+          },
+          false, true, true,
+          // z = M^-1 r of the advective V-cycle for a fixed global-index r: bitwise equal to the
+          // single-rank build on every decomposition (the in-place coarsening keeps children
+          // rank-local, the bands are pointwise, the colours come from global parity)
+          [&](IbmSolver& sd, IbmSolver& sr, const Block& B) {
+            auto zOf = [&](IbmSolver& s, const Block& b) {
+              const std::vector<double> unk = s.scalarGeometryField(4);
+              std::vector<double> rv(unk.size());
+              for (int z = 0; z < b.l[2]; ++z)
+                for (int y = 0; y < b.l[1]; ++y)
+                  for (int x = 0; x < b.l[0]; ++x) {
+                    const std::size_t l =
+                        (std::size_t)x + (std::size_t)y * b.l[0] + (std::size_t)z * b.l[0] * b.l[1];
+                    const double gk =
+                        (double)((x + b.o[0]) + (y + b.o[1]) * N + (long)(z + b.o[2]) * N * N);
+                    rv[l] = unk[l] > 0.5 ? std::sin(0.37 * gk) * (1.0 + 0.2 * std::cos(1e-3 * gk))
+                                         : 0.0;
+                  }
+              auto& sc = s.scalarField("c");
+              s.setField("c", rv);
+              const std::size_t n = sc.c.extent(0);
+              peclet::flow::CCField r("r", n), z("z", n);
+              Kokkos::deep_copy(r, sc.c);
+              sc.cut->mg->apply(z, r);
+              return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), z);
+            };
+            const auto zd = zOf(sd, B);
+            const auto zr = zOf(sr, Block{{0, 0, 0}, {N, N, N}});
+            const long dsy = B.l[0] + 2 * G, dsz = dsy * (B.l[1] + 2 * G), rsy = N + 2 * G,
+                       rsz = rsy * (N + 2 * G);
+            long notSame = 0, cells = 0;
+            for (int z = 0; z < B.l[2]; ++z)
+              for (int y = 0; y < B.l[1]; ++y)
+                for (int x = 0; x < B.l[0]; ++x) {
+                  const double a = zd((x + G) + (y + G) * dsy + (z + G) * dsz);
+                  const double b =
+                      zr((x + B.o[0] + G) + (y + B.o[1] + G) * rsy + (z + B.o[2] + G) * rsz);
+                  notSame += same(a, b) ? 0 : 1;
+                  ++cells;
+                }
+            long t[2] = {notSame, cells}, tt[2];
+            MPI_Allreduce(t, tt, 2, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+            if (rank_ == 0)
+              std::printf(
+                  "  [steady_adv] advective V-cycle z = M^-1 r: %ld of %ld cells not "
+                  "bitwise vs single rank\n",
+                  tt[0], tt[1]);
+            CHECK(tt[0] == 0 && tt[1] == (long)N * N * N);
+          });
     }
   }
   Kokkos::finalize();

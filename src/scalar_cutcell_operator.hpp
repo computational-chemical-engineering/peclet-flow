@@ -92,6 +92,11 @@ struct ScalarCutState {
   CCField Phi[3];   ///< explicit face fluxes phi c*(c^n), 0 on implicit faces (§6.2)
   CCField small;    ///< 1 on a small cell (§6.3), inner cells + ghost layer 1
   CCField outflow;  ///< lumped implicit outflow per cell (inside SAC; ScalarMG coarse mass, §5.2)
+  /// A2 (§6.7, D-WO5-3): the implicit outflow the open-face rows add to AC, summed over the cell's
+  /// open faces and clamped at 0 (implicit backflow), 0 elsewhere — the advective path's coarse
+  /// mass. Written by steady advecting solves only (`outflow` stays the transient path's input).
+  CCField omegaOpen;
+  double maxCellPeclet = 0.0;  ///< census `max_cell_peclet` (A2): max |phi_a| / (Lam' w_a)
   bool openFace[6] = {false, false, false, false, false, false};  ///< open face rows built (WO-5b)
   bool openInflow[6] = {false, false, false, false, false, false};  ///< ... and it is an inflow
   bool advecting = false;     ///< some face carried flux: else every advection kernel was skipped
@@ -612,6 +617,42 @@ inline double maxAbsFluxLocal(CCConst phx, CCConst phy, CCConst phz, C3 e, int g
   return m;
 }
 
+/// A2 census `max_cell_peclet` on this rank: the max over the interior flux faces (the low faces
+/// of the inner cells whose two cells are fluid unknowns) and the axes of |phi_a| / (lam w_a), the
+/// aperture-weighted face Peclet number |u_a| a h_a / D (lam = 0 with flux: +inf).
+inline double maxCellPecletLocal(CCConst phx, CCConst phy, CCConst phz, CCConst unk, double lam,
+                                 const double w[3], C3 e, int g) {
+  const double dx = lam * w[0], dy = lam * w[1], dz = lam * w[2];
+  double m = 0.0;
+  ccReduce3(
+      "peclet::flow::sco_max_cell_peclet", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        const double P[3] = {unk(i - sx) > 0.5 ? Kokkos::fabs(phx(i)) / dx : 0.0,
+                             unk(i - sy) > 0.5 ? Kokkos::fabs(phy(i)) / dy : 0.0,
+                             unk(i - sz) > 0.5 ? Kokkos::fabs(phz(i)) / dz : 0.0};
+        for (int k = 0; k < 3; ++k)
+          if (P[k] > acc)  // (0 / 0 = NaN when lam = 0 and no flux: skipped)
+            acc = P[k];
+      },
+      Kokkos::Max<double>(m));
+  return m > 0.0 ? m : 0.0;
+}
+
+/// omega = max(omega, 0) on the inner cells (A2: implicit backflow never enters the coarse mass).
+inline void clampNonNegative(CCField omega, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::sco_clamp_omega", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        if (omega(i) < 0.0)
+          omega(i) = 0.0;
+      });
+}
+
 /// Out_i = sum over the six faces of max(F_out, 0), per unit V (§6.3), in a fixed order.
 KOKKOS_INLINE_FUNCTION double cellOutflow(const CCConst& phx, const CCConst& phy,
                                           const CCConst& phz, long i, long sy, long sz) {
@@ -846,9 +887,11 @@ inline void openFaceFluxes(CCField phi, Kokkos::View<const double*, CCMem> plane
 /// inflow b += F_in g (gv over the inner tangential range, j1 + j2 n1, as dirichletFaceFold);
 /// outflow implicit (steady or small) AC += F_out and outflow += F_out (the surrogate's lumped
 /// outflow, as advectionBands), explicit b -= F_out c^n. Runs after advectionBands.
+/// A2: `omega` (when `wOmega`) += F_out on the implicit outflow rows as well (omega_open).
 inline void openFaceAdvection(CCField AC, CCField b, CCField outflow, CCConst cOld, CCConst phi,
                               CCConst small, CCConst unk, Kokkos::View<const double*, CCMem> gv,
-                              bool inflow, int a, int side, bool steady, C3 e, int g) {
+                              bool inflow, int a, int side, bool steady, C3 e, int g,
+                              CCField omega = CCField(), bool wOmega = false) {
   int t1, t2;
   faceTangents(a, t1, t2);
   const int ext[3] = {e.x, e.y, e.z};
@@ -869,6 +912,8 @@ inline void openFaceAdvection(CCField AC, CCField b, CCField outflow, CCConst cO
         } else if (steady || small(i) > 0.5) {
           AC(i) += Fout;
           outflow(i) += Fout;
+          if (wOmega)
+            omega(i) += Fout;
         } else {
           b(i) -= Fout * cOld(i);
         }

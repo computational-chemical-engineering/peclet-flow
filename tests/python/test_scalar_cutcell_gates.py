@@ -28,6 +28,14 @@ conversions of §1.2 are on the path.
   g9b  constant preservation under flow's own projection (Stokes through an SC array, c = 1):
        staggered and the collocated 'gauge-exact', 'plain', 'embed' pass; the ghost projection
        is refused (§13 Q13).
+  gadv  §11 G-adv (WO-5c, design Amendment A2: the steady advective surrogate), Pe_h = the census
+       max_cell_peclet 0.1 / 1 / 10 by rescaling the face field: (a) WO-5's C3 problem (periodic
+       box 4R, a Dirichlet sphere with a source, a projected Stokes field) at R/h 16 and 32;
+       (b) the closure on G9b's SC array (Neumann spheres, singular, source u_x - <u_x>) and (b')
+       the same with Dirichlet spheres, 32^3 and 64^3; (c) G9c's channel (open faces), Pe_h 1 and
+       10 (set through D). (i) converged, (ii) iteration bounds (prov.), (iii) growth per
+       doubling <= 1.7x, (v) the steady budget identity <= 1e-12 relative. (iv) C4 is in the
+       `scalar_mg` ctest, (vi) a one-time logged check.
   giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 10 per step,
        the cold first step included — ruling of WO-4, restating the provisional 8) and the singular
        steady problem on G5b's geometry (periodic simple-cubic array, c = 0.3, insulating + flux +
@@ -988,6 +996,196 @@ def gate_g9c():
     raises(RuntimeError, s.advance_scalars, "open faces, a moving fluid and no projection yet: refused")
 
 
+# -------------------------------------------------------------------------------------- G-adv ----
+def rescale_peclet(s, name, target):
+    """G-adv's parametrization (A2): one probe steady solve at the present face field, then u, v, w
+    times target / (census max_cell_peclet), so the next solve's census reads `target`."""
+    s.solve_scalar_steady(name)
+    k = target / s.diagnostics.scalar_census(name)["max_cell_peclet"]
+    for nm in ("u", "v", "w"):
+        s.set_field(nm, np.asfortranarray(s.get_field(nm) * k))
+
+
+def gadv_budget(s, name):
+    """(v): the steady rate balance relative to the largest of its terms (wall, source, boundary);
+    and, for information, relative to the gross source V sum kappa |s| — the only O(1) scale of a
+    mean-free closure source, whose net terms are all round-off (the normalization of "relative"
+    is OPEN, reported to the orchestrator: WO-5c)."""
+    b = s.diagnostics.scalar_budget(name)
+    scale = max(abs(b["wall_in"]), abs(b["source_in"]), abs(b["boundary_in"]))
+    geo = s.diagnostics.scalar_geometry(name)
+    unk = geo["unknown"] > 0.5
+    x, y, z = s.cell_centers()
+    V = (x[1] - x[0]) * (y[1] - y[0]) * (z[1] - z[0])
+    gross = None
+    if name in GADV_SRC:
+        gross = V * math.fsum((geo["kappa"] * np.abs(GADV_SRC[name]))[unk].ravel())
+    return abs(b["identity_error"]) / scale, (abs(b["identity_error"]) / gross if gross else None)
+
+
+def gadv_a_case(Rh, pe):
+    """(a) WO-5's C3 problem: a periodic box 4R, a Dirichlet sphere (c = 1) R = 1 with a source,
+    D = 0.7, the projected Stokes field of that geometry (20 steps under a body force, mu dt/h^2 =
+    1), rescaled to census Pe_h = pe; steady."""
+    R, D = 1.0, 0.7
+    n = 4 * Rh
+    L = 4.0 * R
+    h = L / n
+    s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    s.set_dt(h * h)
+    X, Y, Z = grid(s)
+    c0 = np.array([0.5 * L + 0.37 * h, 0.5 * L - 0.22 * h, 0.5 * L + 0.11 * h])
+    s.set_solid(np.asfortranarray(np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2 + (Z - c0[2]) ** 2) - R),
+                cutcell_pressure=True)
+    s.set_body_force((1.0, 0.4, 0.2))
+    for _ in range(20):
+        s.step()
+    s.add_scalar("c", diffusivity=D, cutcell=True)
+    s.set_scalar_wall("c", "dirichlet", 1.0)
+    s.set_scalar_source("c", -0.3)
+    rescale_peclet(s, "c", pe)
+    s.solve_scalar_steady("c")
+    return s
+
+
+def sc_array(n):
+    """G9b's geometry and flow: the periodic simple-cubic sphere array, solid fraction 0.3, one
+    sphere per unit period on n^3 cells; Stokes through it from step() (G9b's body force, 50
+    steps)."""
+    s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    s.set_dt(0.01)
+    R = (0.3 * 3.0 / (4.0 * math.pi)) ** (1.0 / 3.0)
+    X, Y, Z = grid(s)
+    s.set_solid(np.asfortranarray(np.sqrt((X - 0.513) ** 2 + (Y - 0.479) ** 2 + (Z - 0.507) ** 2) - R),
+                cutcell_pressure=True)
+    s.set_body_force((30.0, 9.0, 0.0))
+    for _ in range(50):
+        s.step()
+    return s
+
+
+def closure_source(s, name):
+    """The B-field source for G = e_x (until WO-6's mean-gradient mode): s = u_x - <u_x> per
+    unknown cell, u_x the cell average of its two x-face velocities (physical), <.> the kappa-
+    weighted mean over the fluid unknowns; 0 elsewhere."""
+    geo = s.diagnostics.scalar_geometry(name)
+    unk = geo["unknown"] > 0.5
+    kap = geo["kappa"]
+    u = s.get_u()
+    ux = 0.5 * (u + np.roll(u, -1, axis=0))
+    mean = float(np.sum((kap * ux)[unk]) / np.sum(kap[unk]))
+    return np.asfortranarray(np.where(unk, ux - mean, 0.0))
+
+
+def gadv_b_case(n, pe, wall):
+    """(b) the closure problem on the SC array (insulating spheres: steady, singular) or (b') the
+    reactive bed (Dirichlet spheres, c = 0), per-cell source u_x - <u_x>, D = 0.05; census
+    Pe_h = pe."""
+    s = sc_array(n)
+    s.add_scalar("c", diffusivity=0.05, cutcell=True)
+    if wall == "neumann":
+        s.set_scalar_wall("c", "neumann", 0.0)
+    else:
+        s.set_scalar_wall("c", "dirichlet", 0.0)
+    s.set_scalar_source("c", closure_source(s, "c"))
+    rescale_peclet(s, "c", pe)
+    GADV_SRC["c"] = closure_source(s, "c")  # the source of the rescaled field
+    s.set_scalar_source("c", GADV_SRC["c"])
+    s.solve_scalar_steady("c")
+    return s
+
+
+def gadv_c_case(pe):
+    """(c) G9c's channel (inflow U = 1 / no-slip walls / outflow, a sphere + a cap cutting the
+    outlet), the flow developed by 20 NS steps; a steady scalar, Dirichlet 1 at the inlet, Neumann
+    elsewhere. The captured open-face flux cannot be rescaled through set_field, so the census
+    Pe_h is set through D instead (Pe_h ~ 1/D: the same operator up to a factor)."""
+    st = g9c_run(20, scheme="koren", dt=0.008)
+    s = st["s"]
+    D0 = 0.5
+    s.add_scalar("p", diffusivity=D0, cutcell=True)
+    s.set_scalar_bc("p", "-x", "dirichlet", 1.0)
+    for f in FACES[1:]:
+        s.set_scalar_bc("p", f, "neumann")
+    s.solve_scalar_steady("p")
+    p0 = s.diagnostics.scalar_census("p")["max_cell_peclet"]
+    s.add_scalar("d", diffusivity=D0 * p0 / pe, cutcell=True)
+    s.set_scalar_bc("d", "-x", "dirichlet", 1.0)
+    for f in FACES[1:]:
+        s.set_scalar_bc("d", f, "neumann")
+    s.solve_scalar_steady("d")
+    return s
+
+
+GADV_PE = (0.1, 1.0, 10.0)
+GADV_SRC = {}  # the per-cell source of the last (b) / (b') case, for the gross scale of (v)
+
+
+def gadv_row(tag, s, name, pe, bound, rate=None):
+    """(i), (ii), (v) of one row; returns the iteration count."""
+    c = s.diagnostics.scalar_census(name)
+    its = c["krylov_iterations"]
+    b = s.diagnostics.scalar_budget(name)
+    gross = None
+    if rate:
+        ident = abs(b["identity_error"]) / rate
+    else:
+        ident, gross = gadv_budget(s, name)
+    extra = f" (INFO: {gross:.1e} of the gross source)" if gross is not None else ""
+    print(f"  {tag} Pe_h {c['max_cell_peclet']:.4g}: {its} iterations (<= {bound}), residual "
+          f"{c['krylov_residual']:.1e}, {c['mg_levels']} levels; budget identity {ident:.1e}{extra}")
+    check(abs(c["max_cell_peclet"] / pe - 1.0) <= 1e-9, f"{tag}: census Pe_h {c['max_cell_peclet']:.6g} = {pe}")
+    check(c["krylov_converged"] and c["krylov_residual"] <= 1e-10,
+          f"{tag} Pe_h {pe}: (i) converged to rtol 1e-10 within 200 ({its} iterations)")
+    check(its <= bound, f"{tag} Pe_h {pe}: (ii) {its} <= {bound} iterations (prov.)")
+    check(ident <= 1e-12, f"{tag} Pe_h {pe}: (v) steady budget identity {ident:.1e} <= 1e-12")
+    return its
+
+
+def gadv_growth(tag, lo, hi):
+    for pe in GADV_PE:
+        g = hi[pe] / lo[pe]
+        check(g <= 1.7, f"{tag} Pe_h {pe}: (iii) growth per doubling {lo[pe]} -> {hi[pe]} = {g:.2f}x <= 1.7x")
+
+
+def gate_gadv():
+    print("G-adv: steady advection on the advective surrogate (design Amendment A2), "
+          "Pe_h = census max_cell_peclet")
+    t0 = time.time()
+    bounds = {16: (20, 25, 40), 32: (25, 35, 55)}
+    its = {}
+    for Rh in (16, 32):
+        its[Rh] = {}
+        for pe, bd in zip(GADV_PE, bounds[Rh]):
+            GADV_SRC.clear()
+            s = gadv_a_case(Rh, pe)
+            its[Rh][pe] = gadv_row(f"(a) R/h={Rh} ({4 * Rh}^3)", s, "c", pe, bd)
+    gadv_growth("(a)", its[16], its[32])
+    print(f"  [(a): {time.time() - t0:.0f} s]")
+    for wall, nm in (("neumann", "(b) closure, Neumann spheres"), ("dirichlet", "(b') Dirichlet spheres")):
+        t0 = time.time()
+        its = {}
+        for n in (32, 64):
+            its[n] = {}
+            for pe, bd in zip(GADV_PE, (15, 20, 30)):
+                s = gadv_b_case(n, pe, wall)
+                if wall == "neumann":
+                    check(s.diagnostics.scalar_census("c")["steady_incompatibility"] >= 0.0 and
+                          s.diagnostics.scalar_census("c")["mg_levels"] > 1, f"{nm} n={n}: full table")
+                its[n][pe] = gadv_row(f"{nm} n={n}", s, "c", pe, bd)
+        gadv_growth(nm, its[32], its[64])
+        print(f"  [{nm}: {time.time() - t0:.0f} s]")
+    t0 = time.time()
+    for pe in (1.0, 10.0):
+        s = gadv_c_case(pe)
+        gadv_row("(c) G9c channel, open faces", s, "d", pe, 40, rate=1.0)
+    print(f"  [(c): {time.time() - t0:.0f} s]")
+
+
 # --------------------------------------------------------------------------------------- API ----
 def raises(exc, fn, msg):
     try:
@@ -1081,7 +1279,7 @@ def gate_api():
 
 
 GATES = {"api": gate_api, "g1": gate_g1, "g2": gate_g2, "g3a": gate_g3a, "g3b": gate_g3b, "g7": gate_g7,
-         "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b, "g9c": gate_g9c}
+         "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b, "g9c": gate_g9c, "gadv": gate_gadv}
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(GATES)

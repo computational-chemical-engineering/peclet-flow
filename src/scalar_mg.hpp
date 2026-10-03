@@ -41,6 +41,17 @@
 // cycle stays symmetric) plus the mean removal when singular. The level rule (§5.2): transient with
 // kappa_A = 1 + 4 dt' D' sum_a w_a < 13 uses level 0 alone (2 + 2 sweeps, the WO-3 preconditioner);
 // otherwise, and always when steady, the full table. The cycle is a fixed linear operator.
+//
+// Steady mode WITH advection (design Amendment A2, §6.7; `Inputs::advective`, the same on every
+// rank): the cycle runs on the ADVECTIVE surrogate S_adv, in band form (AC, AW..AT). Level 0 is
+// the operator's 7 bands with SAC as the diagonal (no new storage). A coarse level keeps everything
+// above (faces, wall, Dirichlet planes, pins; its mass carries the open-face outflow omega_open,
+// not the interior outflow) and adds the summed positive parts of the sub-face fluxes, Qp/Qm per
+// low face per unit level volume (the piecewise-constant Galerkin FOU): AC += the cell's outgoing
+// Q, AW = AFX - Qp_x, AE = AFX(i+e_x) - Qm_x(i+e_x), ... The sweep (unknown cells of the colour),
+// the residual, applySurrogate and the contraction instrument use the bands; the cycle structure,
+// transfers, colours and exchanges are unchanged. Transient mode and steady mode at rest take the
+// face-form path above, bitwise unchanged.
 #ifndef PECLET_FLOW_SCALAR_MG_HPP
 #define PECLET_FLOW_SCALAR_MG_HPP
 
@@ -51,6 +62,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "mac_cutcell_mg.hpp"  // coarsenOpenAvgCell, restrictAvg, prolongAdd, CutcellMG::mgChooseRatio
@@ -174,6 +186,87 @@ inline void residualFace(CCField r, CCConst x, CCConst b, CCField AC, CCField AF
       });
 }
 
+// ---- the advective path (design Amendment A2, §6.7): band form ----------------------------------
+
+/// Level-0 guarded positive part of the signed low-face flux: P(i) = max(sgn phi_a(i), 0) when
+/// cells i - st and i are both fluid unknowns (advectionBands' implicit-coupling predicate in
+/// steady mode), else 0. sgn = +1: the flow toward +a (Qp); -1: toward -a (Qm). Read by
+/// `coarsenOpenAvgCell` (the GuardedProduct pattern).
+struct GuardedPart {
+  CCConst phi, unk;
+  long st = 1;
+  double sgn = 1.0;
+  KOKKOS_INLINE_FUNCTION double operator()(long i) const {
+    return (unk(i) > 0.5 && unk(i - st) > 0.5) ? Kokkos::fmax(sgn * phi(i), 0.0) : 0.0;
+  }
+};
+
+/// The band-form off-diagonal sum of A2, in its fixed order:
+/// ((AW x_W + AE x_E) + (AS x_S + AN x_N)) + (AB x_B + AT x_T).
+template <class XV, class BV>
+KOKKOS_INLINE_FUNCTION double bandOff(const XV& x, const BV& AW, const BV& AE, const BV& AS,
+                                      const BV& AN, const BV& AB, const BV& AT, long i, long sx,
+                                      long sy, long sz) {
+  return ((AW(i) * x(i - sx) + AE(i) * x(i + sx)) + (AS(i) * x(i - sy) + AN(i) * x(i + sy))) +
+         (AB(i) * x(i - sz) + AT(i) * x(i + sz));
+}
+
+/// One colour of the band-form Gauss-Seidel (A2), on the unknown inner cells of the colour:
+/// x_i <- (rhs_i - bandOff) / AC_i. Colour = (og + l) parity, as cutcellSmoothColorFace (same
+/// launch forms: host pencils, device MDRange).
+template <class BV, class UV>
+inline void sweepColorBand(CCField x, CCConst rhs, BV AC, BV AW, BV AE, BV AS, BV AN, BV AB, BV AT,
+                           UV unk, C3 e, C3 og, int g, int color) {
+  CCExec space;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
+    const long cells = (long)nyi * nzi * (e.x - 2 * g);
+    auto pencil = KOKKOS_LAMBDA(long t) {
+      const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        if (!(unk(i) > 0.5))
+          continue;
+        x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)) / AC(i);
+      }
+    };
+    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::smg_smooth_band",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+    return;
+  }
+  using MD = MDRange3<CCExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::smg_smooth_band", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)) / AC(i);
+      });
+}
+
+/// r = b - (AC x + bandOff) over the inner cells (A2's band-form residual).
+inline void residualBand(CCField r, CCConst x, CCConst b, CCField AC, CCField AW, CCField AE,
+                         CCField AS, CCField AN, CCField AB, CCField AT, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::smg_residual_band", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        r(i) = b(i) - (AC(i) * x(i) + bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz));
+      });
+}
+
 }  // namespace smg
 
 class ScalarMG {
@@ -194,6 +287,12 @@ class ScalarMG {
     CCField mass, px, py, pz;   ///< coarse levels: m and the face products <Lam a>
     Kokkos::View<double*, CCMem> plane[6];  ///< Dirichlet domain faces: <Lam a_bf> (owning rank)
     double nUnk = 0.0;                      ///< global count of unknown cells (the singular mean)
+    /// Advective path (A2): the 7 bands (level 0: the operator's AW..AT, AC = SAC; coarse: owned,
+    /// allocated on the first advective build) and, on coarse levels, the summed positive parts
+    /// of the sub-face fluxes on the LOW a-face, per unit level volume: qp[a] toward +a (from
+    /// i - e_a into i), qm[a] toward -a.
+    CCField AW, AE, AS, AN, AB, AT;
+    CCField qp[3], qm[3];
 #ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;
     std::shared_ptr<GridHalo<double>> dev;
@@ -333,14 +432,32 @@ class ScalarMG {
     /// advection.
     CCConst outflow;
     bool hasOutflow = false;
+    /// A2 (§6.7): steady with advection -> the V-cycle runs on the ADVECTIVE surrogate S_adv on
+    /// every level (band form). Level 0 = the operator's 7 bands with SAC as the diagonal; the
+    /// coarse levels add the summed positive parts of the sub-face fluxes `phi`; the mass carries
+    /// the open-face outflow `omegaOpen` (idt = 0) in place of `outflow`. The flag must be the same
+    /// on every rank (steady && the all-rank advecting flag).
+    bool advective = false;
+    CCField AW, AE, AS, AN, AB, AT;  ///< the operator's level-0 bands
+    CCConst phi[3];                  ///< F/V through the low a-face (st.phi, guarded)
+    CCConst omegaOpen;               ///< the open faces' implicit outflow per level-0 cell
   };
 
   /// Rebuild the surrogate on every level from the current operator (the level table is kept).
   void build(const Inputs& in) {
     singular_ = in.singular;
+    adv_ = in.advective;
     nUse_ = in.fullTable ? (int)lv_.size() : 1;
     Level& l0 = lv_[0];
     l0.AC = in.SAC;
+    if (adv_) {  // A2: the operator's bands, no new storage
+      l0.AW = in.AW;
+      l0.AE = in.AE;
+      l0.AS = in.AS;
+      l0.AN = in.AN;
+      l0.AB = in.AB;
+      l0.AT = in.AT;
+    }
     l0.unk = CCField();  // level 0's flag is the geometry's (const) view
     unk0_ = in.unknown;
     buildLevel0Faces(in);
@@ -385,6 +502,10 @@ class ScalarMG {
     fill(0, x);
     const C3 e = l0.ext;
     const int g = l0.g;
+    if (adv_) {  // A2: S_adv at level 0 = the operator's band matvec with SAC as the diagonal
+      applyCutcellOp(y, CCConst(x), l0.AC, l0.AW, l0.AE, l0.AS, l0.AN, l0.AB, l0.AT, e, g);
+      return;
+    }
     CCField AC = l0.AC, AFX = l0.AFX, AFY = l0.AFY, AFZ = l0.AFZ;
     CCConst xx = x;
     ccFor3(
@@ -467,8 +588,12 @@ class ScalarMG {
     for (int k = 0; k < kPre; ++k)
       sweep(L, true);
     fill(L, lv.x);  // the smoother leaves the ghosts one colour stale
-    smg::residualFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.ext,
-                      lv.g);
+    if (adv_)
+      smg::residualBand(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AW, lv.AE, lv.AS, lv.AN,
+                        lv.AB, lv.AT, lv.ext, lv.g);
+    else
+      smg::residualFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ,
+                        lv.ext, lv.g);
     Level& cs = lv_[L + 1];
     restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
     if (singular_)
@@ -488,6 +613,11 @@ class ScalarMG {
     Level& lv = lv_[L];
     fill(L, lv.x);
     const int kc = (rb + 3 * lv.g) & 1;
+    if (adv_) {
+      smg::sweepColorBand(lv.x, CCConst(lv.rhs), lv.AC, lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT,
+                          unkOf(L), lv.ext, lv.og, lv.g, kc);
+      return;
+    }
     cutcellSmoothColorFace(lv.x, CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.ext, lv.og,
                            lv.g, kc);
   }
@@ -762,8 +892,11 @@ class ScalarMG {
     }
     // mass
     if (L == 1) {
-      const smg::MassField m0{in.kappa, in.unknown, in.hasOutflow ? in.outflow : in.kappa, in.idt,
-                              in.hasOutflow};
+      // A2: on the advective path the mass carries the open-face outflow omega_open (the interior
+      // outflow is Q's); otherwise WO-5's lumped outflow, or nothing (WO-4) — those two verbatim
+      const bool hasOut = in.advective || in.hasOutflow;
+      const CCConst out = in.advective ? in.omegaOpen : (in.hasOutflow ? in.outflow : in.kappa);
+      const smg::MassField m0{in.kappa, in.unknown, out, in.idt, hasOut};
       CCField cm = c.mass;
       const C3 ce = c.ext, fe = fin.ext, ci = c.inner;
       const int gc = c.g, gf = fin.g;
@@ -781,6 +914,117 @@ class ScalarMG {
         coarsenPlane(L, f);
     // the operator
     assembleCoarse(in, L);
+    if (adv_) {  // A2: the coarse advection, then the 7 bands
+      coarsenAdvection(in, L);
+      assembleBands(L);
+    }
+  }
+
+  /// A2: Qp/Qm of level L from level L - 1 — level 1 from the guarded positive parts of the
+  /// level-0 flux, deeper levels from the finer level's Q — by coarsenOpenAvgCell's sum and
+  /// division in its fixed order, then one multiplication by 1/r_a (r_a the ratio on the face's
+  /// normal axis): Q = sum_sub max(+-phi, 0) V / V_L. Then the ghosts (exchange / wrap, 0 beyond a
+  /// non-periodic global face) and the low-face plane of every non-periodic axis zeroed, as the
+  /// face products are.
+  void coarsenAdvection(const Inputs& in, int L) {
+    Level& c = lv_[L];
+    Level& fin = lv_[L - 1];
+    if (c.qp[0].extent(0) != c.n)
+      for (int a = 0; a < 3; ++a) {
+        c.qp[a] = CCField("smg_qp", c.n);
+        c.qm[a] = CCField("smg_qm", c.n);
+      }
+    const C3 ratio = fin.ratio, ce = c.ext, fe = fin.ext;
+    const int gc = c.g, gf = fin.g;
+    const double ir[3] = {1.0 / (double)ratio.x, 1.0 / (double)ratio.y, 1.0 / (double)ratio.z};
+    for (int sgn = 0; sgn < 2; ++sgn) {
+      CCField qx = sgn == 0 ? c.qp[0] : c.qm[0], qy = sgn == 0 ? c.qp[1] : c.qm[1],
+              qz = sgn == 0 ? c.qp[2] : c.qm[2];
+      const double irx = ir[0], iry = ir[1], irz = ir[2];
+      if (L == 1) {
+        const long sy0 = fe.x, sz0 = (long)fe.x * fe.y;
+        const double sg = sgn == 0 ? 1.0 : -1.0;
+        const smg::GuardedPart fx{in.phi[0], in.unknown, 1, sg};
+        const smg::GuardedPart fy{in.phi[1], in.unknown, sy0, sg};
+        const smg::GuardedPart fz{in.phi[2], in.unknown, sz0, sg};
+        ccFor3(
+            "peclet::flow::smg_coarsen_adv", C3{0, 0, 0}, c.inner,
+            KOKKOS_LAMBDA(int icx, int icy, int icz) {
+              coarsenOpenAvgCell(qx, qy, qz, fx, fy, fz, ce, fe, gc, gf, ratio, icx, icy, icz);
+              const long ci =
+                  (long)(icx + gc) + (long)(icy + gc) * ce.x + (long)(icz + gc) * (long)ce.x * ce.y;
+              qx(ci) *= irx;
+              qy(ci) *= iry;
+              qz(ci) *= irz;
+            });
+      } else {
+        const CCConst fx = sgn == 0 ? fin.qp[0] : fin.qm[0], fy = sgn == 0 ? fin.qp[1] : fin.qm[1],
+                      fz = sgn == 0 ? fin.qp[2] : fin.qm[2];
+        ccFor3(
+            "peclet::flow::smg_coarsen_adv", C3{0, 0, 0}, c.inner,
+            KOKKOS_LAMBDA(int icx, int icy, int icz) {
+              coarsenOpenAvgCell(qx, qy, qz, fx, fy, fz, ce, fe, gc, gf, ratio, icx, icy, icz);
+              const long ci =
+                  (long)(icx + gc) + (long)(icy + gc) * ce.x + (long)(icz + gc) * (long)ce.x * ce.y;
+              qx(ci) *= irx;
+              qy(ci) *= iry;
+              qz(ci) *= irz;
+            });
+      }
+    }
+    for (int a = 0; a < 3; ++a) {
+      fill(L, c.qp[a]);
+      fill(L, c.qm[a]);
+    }
+    for (int a = 0; a < 3; ++a)
+      if (!per_[a] && touches(c, 2 * a)) {
+        smg::zeroPlanes(c.qp[a], c.ext, a, 0, c.g + 1);
+        smg::zeroPlanes(c.qm[a], c.ext, a, 0, c.g + 1);
+      }
+  }
+
+  /// A2: the coarse bands from the face form (assembleCoarse) and Q. Unknown inner cells:
+  ///   AC += ((Qm_x(i) + Qp_x(i+e_x)) + (Qm_y(i) + Qp_y(i+e_y))) + (Qm_z(i) + Qp_z(i+e_z)),
+  ///   AW = AFX(i) - Qp_x(i), AE = AFX(i+e_x) - Qm_x(i+e_x) (y, z alike);
+  /// pinned rows stay identity rows (AC = 1, bands 0).
+  void assembleBands(int L) {
+    Level& c = lv_[L];
+    if (c.AW.extent(0) != c.n) {
+      c.AW = CCField("smg_aw", c.n);
+      c.AE = CCField("smg_ae", c.n);
+      c.AS = CCField("smg_as", c.n);
+      c.AN = CCField("smg_an", c.n);
+      c.AB = CCField("smg_ab", c.n);
+      c.AT = CCField("smg_at", c.n);
+    }
+    const C3 e = c.ext;
+    const int g = c.g;
+    CCField AC = c.AC, AW = c.AW, AE = c.AE, AS = c.AS, AN = c.AN, AB = c.AB, AT = c.AT;
+    CCConst AFX = c.AFX, AFY = c.AFY, AFZ = c.AFZ, unk = c.unk;
+    CCConst qpx = c.qp[0], qpy = c.qp[1], qpz = c.qp[2], qmx = c.qm[0], qmy = c.qm[1],
+            qmz = c.qm[2];
+    Kokkos::deep_copy(CCExec(), AW, 0.0);
+    Kokkos::deep_copy(CCExec(), AE, 0.0);
+    Kokkos::deep_copy(CCExec(), AS, 0.0);
+    Kokkos::deep_copy(CCExec(), AN, 0.0);
+    Kokkos::deep_copy(CCExec(), AB, 0.0);
+    Kokkos::deep_copy(CCExec(), AT, 0.0);
+    ccFor3(
+        "peclet::flow::smg_coarse_bands", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          if (!(unk(i) > 0.5))
+            return;
+          AC(i) =
+              AC(i) + ((qmx(i) + qpx(i + sx)) + (qmy(i) + qpy(i + sy))) + (qmz(i) + qpz(i + sz));
+          AW(i) = AFX(i) - qpx(i);
+          AE(i) = AFX(i + sx) - qmx(i + sx);
+          AS(i) = AFY(i) - qpy(i);
+          AN(i) = AFY(i + sy) - qmy(i + sy);
+          AB(i) = AFZ(i) - qpz(i);
+          AT(i) = AFZ(i + sz) - qmz(i + sz);
+        });
   }
 
   void coarsenPlane(int L, int f) {
@@ -905,6 +1149,7 @@ class ScalarMG {
   bool per_[3] = {true, true, true};
   bool dirFace_[6] = {false, false, false, false, false, false};
   bool singular_ = false;
+  bool adv_ = false;  ///< A2: the advective (band-form) path of the last build
   int nUse_ = 1;
   bool distributed_ = false;
 #ifdef PECLET_FLOW_MPI

@@ -410,17 +410,21 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
     nFlux += n1;
     nGuard += n2;
   }
-  double mx[2] = {
-      sco::maxAbsFluxLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]), e_, G),
-      vmax};
+  // (the third entry: A2's census max_cell_peclet, max |phi_a| / (Lam' w_a) over interior faces)
+  double mx[3] = {
+      sco::maxAbsFluxLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]), e_, G), vmax,
+      sco::maxCellPecletLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]), unk,
+                              st.lam, u_.w, e_, G)};
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
-    double o[2] = {0.0, 0.0};
-    MPI_Allreduce(mx, o, 2, MPI_DOUBLE, MPI_MAX, comm_);
+    double o[3] = {0.0, 0.0, 0.0};
+    MPI_Allreduce(mx, o, 3, MPI_DOUBLE, MPI_MAX, comm_);
     mx[0] = o[0];
     mx[1] = o[1];
+    mx[2] = o[2];
   }
 #endif
+  st.maxCellPeclet = mx[2];
   // WO-5 (open, reported): without the cut-cell pressure operator no projection runs and no
   // openness exists (set_solid(..., cutcell_pressure=False)), so there is no discretely
   // divergence-free face flux to advect with (§6.1); a moving fluid is refused rather than left
@@ -654,12 +658,21 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
       sco::explicitAdvectionRhs(sc.b, CCConst(st.Phi[0]), CCConst(st.Phi[1]), CCConst(st.Phi[2]),
                                 unk, e_, G);
     }
-    // WO-5b: the open domain faces' rows (§1.4): inflow F_in g on the rhs, outflow F_out c_i
+    // WO-5b: the open domain faces' rows (§1.4): inflow F_in g on the rhs, outflow F_out c_i.
+    // A2: a steady solve also collects their implicit outflow in omega_open (the advective
+    // surrogate's coarse mass), clamped at 0.
+    if (steady) {
+      if (st.omegaOpen.extent(0) != n_)
+        st.omegaOpen = CCField(sc.name + "_cc_omega_open", n_);
+      Kokkos::deep_copy(CCExec(), st.omegaOpen, 0.0);
+    }
     for (int f = 0; f < 6; ++f)
       if (st.openFace[f])
         sco::openFaceAdvection(sc.AC, sc.b, st.outflow, CCConst(sc.cOld), CCConst(st.phi[f / 2]),
                                CCConst(st.small), unk, st.gFace[f], st.openInflow[f], f / 2, f % 2,
-                               steady, e_, G);
+                               steady, e_, G, st.omegaOpen, steady);
+    if (steady)
+      sco::clampNonNegative(st.omegaOpen, e_, G);
   }
   // the level-0 surrogate diagonal (§4.3)
   sco::surrogateDiagonal(st.SAC, CCConst(sc.AC), gm.fac, st.cw);
@@ -710,7 +723,21 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     in.facetW = st.cw;
     for (int f = 0; f < 6; ++f)
       in.dirFace[f] = st.dirFace[f];
-    if (st.advecting) {  // the lumped implicit outflow onto the coarse levels (§5.2)
+    if (steady && st.advecting) {
+      // A2 (§6.7): the advective surrogate — the operator's bands (SAC the diagonal), the face
+      // flux for the coarse advection, omega_open on the coarse mass. `st.advecting` is an
+      // all-rank MAX, so every rank takes this path.
+      in.advective = true;
+      in.AW = sc.AW;
+      in.AE = sc.AE;
+      in.AS = sc.AS;
+      in.AN = sc.AN;
+      in.AB = sc.AB;
+      in.AT = sc.AT;
+      for (int a = 0; a < 3; ++a)
+        in.phi[a] = CCConst(st.phi[a]);
+      in.omegaOpen = CCConst(st.omegaOpen);
+    } else if (st.advecting) {  // the lumped implicit outflow onto the coarse levels (§5.2)
       in.outflow = CCConst(st.outflow);
       in.hasOutflow = true;
     }

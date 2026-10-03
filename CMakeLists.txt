@@ -328,9 +328,9 @@ if(PECLET_FLOW_BUILD_TESTS)
   set_tests_properties(hydro_force_units PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
   # Cut-cell scalar transport (doc/scalar_ibm_design.md §11, WO-3): the accuracy gates G1, G2, G3a,
-  # G3b (+ its budget identity) and G7, one ctest each, and the API refusals; WO-5 G9, G9b, WO-5b G9c. The steady ones run on the two coarsest rungs
+  # G3b (+ its budget identity) and G7, one ctest each, and the API refusals; WO-5 G9, G9b, WO-5b G9c, WO-5c G-adv. The steady ones run on the two coarsest rungs
   # (ruling D-WO3-1: the level-0 preconditioner needs O(N) iterations until ScalarMG, WO-4).
-  foreach(g api g1 g2 g3a g3b g7 giter g9 g9b g9c)
+  foreach(g api g1 g2 g3a g3b g7 giter g9 g9b g9c gadv)
     add_test(NAME scalar_cutcell_${g}
              COMMAND ${Python_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_scalar_cutcell_gates.py ${g}

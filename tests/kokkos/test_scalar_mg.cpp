@@ -14,8 +14,16 @@
 //                  on box geometries (G1, G2, G3a at every rung), Neumann geometries (G5b's array
 //                  on multigrid-friendly n) and no-solid geometries; (C3) <= 0.75 on a periodic
 //                  box whose only sink is one Dirichlet sphere. Krylov counts stay the primary
-//                  gate (tests/python/test_scalar_cutcell_gates.py). WO-5 adds the C3 problem
-//                  advecting (steady implicit FOU, peak cell Peclet 1 and 10), under the same C3.
+//                  gate (tests/python/test_scalar_cutcell_gates.py);
+//   advective    — design Amendment A2 (WO-5c), the steady advective surrogate, rows u1-u6: (u1)
+//                  uniform flow: Qp_a = phi_a / cf_a exactly, Qm_a = 0, (2,2,1) levels included;
+//                  (u2) a divergence-free random field: advective row sums <= 1e-13 max Q, column
+//                  sums 0 to round-off, every level; (u3) the M-matrix on every level; (u4) the
+//                  level-0 advective applySurrogate == the operator's band matvec with SAC,
+//                  bitwise; (u5) Q = 0 on the domain-face planes of every non-periodic axis, open
+//                  faces included; (u6) C4: the C3 problem advecting at census Pe_h 0.1 / 1 / 10,
+//                  contraction < 1 and <= 0.90 (prov.). Prints the G-perf V-cycle time ratio.
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -312,53 +320,391 @@ void testContraction() {
     std::snprintf(tag, sizeof tag, "C3 periodic + Dirichlet sphere R/h=%d (%d^3)", n / 4, n);
     guardRow(s, tag, 3);
   }
-  // WO-5: the same C3 problem ADVECTING — a projected Stokes field through the periodic array
-  // (20 steps under a body force), rescaled to a peak cell Peclet number max|u| h / D of 1 and 10,
-  // steady: implicit FOU on every face (§6.7), its outflow lumped into the surrogate diagonal and
-  // restricted onto the coarse levels with the mass (§5.2). The A1 guard and the iteration count
-  // must not degrade against the row above.
-  for (const double pe : {1.0, 10.0}) {
-    const int n = 64;
-    IbmSolver s(n, n, n);
-    s.setRho(1.0);
-    s.setMu(1.0);
-    s.setDt(1.0);
-    s.setSolid(sphereSdf(n, 0.5 * n + 0.37, 0.5 * n - 0.22, 0.5 * n + 0.11, 0.25 * n), true);
-    s.setBodyForce(1e-3, 4e-4, 2e-4);
-    for (int k = 0; k < 20; ++k)
-      s.step();
-    double umax = 0.0;
-    std::vector<double> u[3] = {s.getField("u"), s.getField("v"), s.getField("w")};
-    for (const auto& f : u)
-      for (double v : f)
-        umax = std::fmax(umax, std::fabs(v));
-    const double D = 0.7, scale = pe * D / umax;
-    const char* nm[3] = {"u", "v", "w"};
-    for (int c = 0; c < 3; ++c) {
-      for (double& v : u[c])
-        v *= scale;
-      s.setField(nm[c], u[c]);
+}
+
+// ---- the advective surrogate (design Amendment A2, §6.7; WO-5c): rows u1-u6
+// ----------------------
+
+// Inner linear index of level `lv`.
+long inner(const ScalarMG::Level& lv, int x, int y, int z) {
+  return (long)(x + lv.g) + (long)(y + lv.g) * lv.ext.x + (long)(z + lv.g) * lv.ext.x * lv.ext.y;
+}
+
+// A periodic box without a solid (the cut-cell projection's all-open openness), cell units, a
+// cut-cell scalar D = 0.7 with a source; the caller sets the face velocities, then solves steady.
+void openBox(IbmSolver& s) {
+  s.setRho(1.0);
+  s.setMu(1.0);
+  s.setDt(1.0);
+  s.setSolid(std::vector<double>((std::size_t)s.nx() * s.ny() * s.nz(), 100.0), true);
+  s.addScalar("c", 0.7, 1, 50, true);
+  s.setScalarSource("c", 0.1);
+}
+
+// (u1) uniform flow along each axis, periodic box without a solid, on a grid whose table has
+// (2,2,2) and (2,2,1) levels: Qp_a = phi_a / cf_a exactly and Qm_a = 0 on every coarse level (the
+// velocity 0.75 makes every sub-face sum exact).
+void testAdvUniform() {
+  const int nn[2][3] = {{32, 32, 32}, {32, 32, 4}};
+  for (const auto& n : nn)
+    for (int ax = 0; ax < 3; ++ax) {
+      IbmSolver s(n[0], n[1], n[2]);
+      openBox(s);
+      const std::size_t nc = (std::size_t)n[0] * n[1] * n[2];
+      const char* nm[3] = {"u", "v", "w"};
+      for (int a = 0; a < 3; ++a)
+        s.setField(nm[a], std::vector<double>(nc, a == ax ? 0.75 : 0.0));
+      s.solveScalarSteady("c");
+      const auto& mg = *s.scalarField("c").cut->mg;
+      long bad = 0, cells = 0;
+      bool aniso = false;
+      for (int L = 1; L < mg.levels(); ++L) {
+        const auto& lv = mg.level(L);
+        aniso = aniso || (lv.cfac.x != lv.cfac.z);
+        const int cf[3] = {lv.cfac.x, lv.cfac.y, lv.cfac.z};
+        for (int a = 0; a < 3; ++a) {
+          const HV qp = host(lv.qp[a]), qm = host(lv.qm[a]);
+          const double want = a == ax ? 0.75 / (double)cf[a] : 0.0;
+          for (int z = 0; z < lv.inner.z; ++z)
+            for (int y = 0; y < lv.inner.y; ++y)
+              for (int x = 0; x < lv.inner.x; ++x) {
+                const long i = inner(lv, x, y, z);
+                bad += (qp(i) == want && qm(i) == 0.0) ? 0 : 1;
+                ++cells;
+              }
+        }
+      }
+      std::printf(
+          "(u1) uniform flow along %c, %dx%dx%d (%d levels%s): %ld of %ld Qp/Qm entries "
+          "differ from phi/cf_a, 0\n",
+          "xyz"[ax], n[0], n[1], n[2], mg.levels(), aniso ? ", (2,2,1) levels" : "", bad, cells);
+      CHECK(bad == 0 && cells > 0);
+      if (n[2] == 4)
+        CHECK(aniso);
     }
-    s.addScalar("c", D, 1, 50, true);
-    s.setScalarWall("c", 1, 1.0, 0.0, -1);
-    s.setScalarSource("c", -0.3);
-    std::snprintf(tag, sizeof tag, "C3 + advection, Pe_h=%g, R/h=%d (%d^3)", pe, n / 4, n);
-    guardRow(s, tag, 3);
-    const auto& st = *s.scalarField("c").cut;
-    std::printf("    advecting: %ld implicit faces of %ld carrying flux\n", st.numImplicitFaces,
-                st.numFluxFaces);
-    CHECK(st.advecting && st.numImplicitFaces == st.numFluxFaces && st.numFluxFaces > 0);
+}
+
+// (u2) a divergence-free random field (node stream-function differences, periodic): on every
+// level |sum out - sum in| <= 1e-13 max Q per row (level 0 from phi), and the column sums of the
+// band operator vanish to round-off (no solid, steady, no open face: the diffusion columns cancel
+// too, so the whole column sum is the advective one).
+void testAdvDivergenceFree() {
+  const int n = 32;
+  IbmSolver s(n, n, n);
+  openBox(s);
+  std::vector<double> psi[3];
+  unsigned long long st = 0x2545F4914F6CDD1Dull;
+  auto rnd = [&]() {
+    st ^= st << 13;
+    st ^= st >> 7;
+    st ^= st << 17;
+    return (double)(st >> 11) * (1.0 / 9007199254740992.0) - 0.5;
+  };
+  for (auto& p : psi) {
+    p.resize((std::size_t)n * n * n);
+    for (double& v : p)
+      v = rnd();
   }
+  auto P = [&](int c, int x, int y, int z) {
+    return psi[c][(std::size_t)((x + n) % n) + (std::size_t)((y + n) % n) * n +
+                  (std::size_t)((z + n) % n) * n * n];
+  };
+  std::vector<double> u((std::size_t)n * n * n), v(u.size()), w(u.size());
+  for (int z = 0; z < n; ++z)
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x) {
+        const std::size_t k = (std::size_t)x + (std::size_t)y * n + (std::size_t)z * n * n;
+        u[k] = (P(2, x, y + 1, z) - P(2, x, y, z)) - (P(1, x, y, z + 1) - P(1, x, y, z));
+        v[k] = (P(0, x, y, z + 1) - P(0, x, y, z)) - (P(2, x + 1, y, z) - P(2, x, y, z));
+        w[k] = (P(1, x + 1, y, z) - P(1, x, y, z)) - (P(0, x, y + 1, z) - P(0, x, y, z));
+      }
+  s.setField("u", u);
+  s.setField("v", v);
+  s.setField("w", w);
+  s.solveScalarSteady("c");
+  const auto& sc = s.scalarField("c");
+  const auto& mg = *sc.cut->mg;
+  CHECK(sc.cut->advecting && sc.cut->steady);
+  bool ok = true;
+  for (int L = 0; L < mg.levels(); ++L) {
+    const auto& lv = mg.level(L);
+    const long sx = 1, sy = lv.ext.x, sz = (long)lv.ext.x * lv.ext.y;
+    HV q[6];
+    if (L == 0) {  // level 0: the positive parts of phi (no solid: every face is a coupling)
+      for (int a = 0; a < 3; ++a) {
+        const HV ph = host(sc.cut->phi[a]);
+        q[a] = HV("qp", ph.extent(0));
+        q[3 + a] = HV("qm", ph.extent(0));
+        for (std::size_t k = 0; k < ph.extent(0); ++k) {
+          q[a](k) = std::fmax(ph(k), 0.0);
+          q[3 + a](k) = std::fmax(-ph(k), 0.0);
+        }
+      }
+    } else {
+      for (int a = 0; a < 3; ++a) {
+        q[a] = host(lv.qp[a]);
+        q[3 + a] = host(lv.qm[a]);
+      }
+    }
+    const HV AC = host(lv.AC), AW = host(lv.AW), AE = host(lv.AE), AS = host(lv.AS),
+             AN = host(lv.AN), AB = host(lv.AB), AT = host(lv.AT);
+    double maxQ = 0.0, maxAC = 0.0, row = 0.0, col = 0.0;
+    for (int z = 0; z < lv.inner.z; ++z)
+      for (int y = 0; y < lv.inner.y; ++y)
+        for (int x = 0; x < lv.inner.x; ++x) {
+          const long i = inner(lv, x, y, z);
+          for (int k = 0; k < 6; ++k)
+            maxQ = std::fmax(maxQ, q[k](i));
+          maxAC = std::fmax(maxAC, std::fabs(AC(i)));
+          const double out =
+              ((q[3](i) + q[0](i + sx)) + (q[4](i) + q[1](i + sy))) + (q[5](i) + q[2](i + sz));
+          const double in =
+              ((q[0](i) + q[3](i + sx)) + (q[1](i) + q[4](i + sy))) + (q[2](i) + q[5](i + sz));
+          row = std::fmax(row, std::fabs(out - in));
+          // column i: the diagonal plus each neighbour's coefficient on x_i (periodic: the
+          // neighbours of an inner cell are inner or wrapped ghosts; use the inner wrap)
+          auto I = [&](int dx, int dy, int dz) {
+            return inner(lv, (x + dx + lv.inner.x) % lv.inner.x, (y + dy + lv.inner.y) % lv.inner.y,
+                         (z + dz + lv.inner.z) % lv.inner.z);
+          };
+          const double cs = AC(i) + AW(I(1, 0, 0)) + AE(I(-1, 0, 0)) + AS(I(0, 1, 0)) +
+                            AN(I(0, -1, 0)) + AB(I(0, 0, 1)) + AT(I(0, 0, -1));
+          col = std::fmax(col, std::fabs(cs));
+        }
+    std::printf("(u2) level %d: max|out - in| = %.2e max Q, max|column sum| = %.2e max AC\n", L,
+                row / maxQ, col / maxAC);
+    ok = ok && row <= 1e-13 * maxQ && col <= 1e-13 * maxAC && maxQ > 0.0;
+  }
+  CHECK(ok);
+}
+
+// The C3 problem (periodic box 4R, a Dirichlet sphere R = n/4 with a source) with the projected
+// Stokes field of that geometry (20 steps under a body force: WO-5's harness), cell units. The
+// pressure PCG runs to 1e-14 so that the field is discretely divergence-free to round-off: the
+// advective rows of A2 are an M-matrix only up to the field's divergence, and (u3)'s 1e-13 AC is a
+// round-off bound (at the default 1e-10 the margin is -5.8e-13 AC at Pe_h 10).
+void c3Stokes(IbmSolver& s, int n) {
+  s.setRho(1.0);
+  s.setMu(1.0);
+  s.setDt(1.0);
+  s.setPressurePcg(true, 500, 1e-14);
+  s.setSolid(sphereSdf(n, 0.5 * n + 0.37, 0.5 * n - 0.22, 0.5 * n + 0.11, 0.25 * n), true);
+  s.setBodyForce(1e-3, 4e-4, 2e-4);
+  for (int k = 0; k < 20; ++k)
+    s.step();
+  s.addScalar("c", 0.7, 1, 50, true);
+  s.setScalarWall("c", 1, 1.0, 0.0, -1);
+  s.setScalarSource("c", -0.3);
+}
+
+// Rescale the face velocities so that the census max_cell_peclet of the next steady solve is `pe`
+// (G-adv's parametrization): one probe solve at the present field, then the field times
+// pe / measured.
+void rescalePeclet(IbmSolver& s, double pe) {
+  s.solveScalarSteady("c");
+  const double k = pe / s.scalarField("c").cut->maxCellPeclet;
+  for (const char* nm : {"u", "v", "w"}) {
+    std::vector<double> f = s.getField(nm);
+    for (double& v : f)
+      v *= k;
+    s.setField(nm, f);
+  }
+}
+
+// Seconds per V-cycle (z = M^-1 r) on the current build, r a fixed pseudo-random vector on the
+// unknowns (G-perf: the advective cycle against the symmetric one on the same block).
+double vcycleSeconds(IbmSolver& s, int reps) {
+  auto& st = *s.scalarField("c").cut;
+  const std::size_t n = st.SAC.extent(0);
+  CCField r("r", n), z("z", n);
+  const std::vector<double> unk = s.scalarGeometryField(4);
+  std::vector<double> rv(unk.size());
+  for (std::size_t k = 0; k < rv.size(); ++k)
+    rv[k] = unk[k] > 0.5 ? std::sin(0.37 * (double)k) : 0.0;
+  s.setField("c", rv);
+  Kokkos::deep_copy(r, s.scalarField("c").c);
+  st.mg->apply(z, r);  // warm-up
+  Kokkos::fence();
+  const auto t0 = std::chrono::steady_clock::now();
+  for (int k = 0; k < reps; ++k)
+    st.mg->apply(z, r);
+  Kokkos::fence();
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / reps;
+}
+
+// (u3) M-matrix on every level: bands <= 0, AC >= sum |bands| - 1e-13 AC on every inner row
+// (identity rows trivially). Returns the defect count; prints the smallest relative margin.
+long mMatrixDefects(const ScalarMG& mg, const char* tag) {
+  long bad = 0;
+  for (int L = 0; L < mg.levels(); ++L) {
+    const auto& lv = mg.level(L);
+    const HV AC = host(lv.AC),
+             B[6] = {host(lv.AW), host(lv.AE), host(lv.AS), host(lv.AN), host(lv.AB), host(lv.AT)};
+    double margin = 1e300;
+    long rows = 0;
+    for (int z = 0; z < lv.inner.z; ++z)
+      for (int y = 0; y < lv.inner.y; ++y)
+        for (int x = 0; x < lv.inner.x; ++x) {
+          const long i = inner(lv, x, y, z);
+          double sum = 0.0;
+          bool pos = false;
+          for (const HV& b : B) {
+            sum += std::fabs(b(i));
+            pos = pos || b(i) > 0.0;
+          }
+          margin = std::fmin(margin, (AC(i) - sum) / AC(i));
+          if (pos || !(AC(i) >= sum - 1e-13 * AC(i)))
+            ++bad;
+          ++rows;
+        }
+    std::printf("(u3) %s level %d: %ld rows, min (AC - sum|b|)/AC = %.3e\n", tag, L, rows, margin);
+  }
+  return bad;
+}
+
+// (u6) the C4 contraction rows (WO-5's "C3 + advection" rows, restated by A2): the C3 problem at
+// R/h 16 advecting at census Pe_h 0.1, 1, 10 — C1 (< 1) and <= 0.90 (prov.). On the Pe_h 10 row
+// also (u3) the M-matrix on every level and (u4) the level-0 advective applySurrogate == the
+// operator's band matvec with SAC as the diagonal, bitwise. G-perf: the advective V-cycle's time
+// against the symmetric one (the same problem at rest) on the same block.
+void testAdvective() {
+  const int n = 64;
+  double tRest = 0.0;
+  {
+    IbmSolver s(n, n, n);
+    c3Stokes(s, n);
+    for (const char* nm : {"u", "v", "w"})
+      s.setField(nm, std::vector<double>((std::size_t)n * n * n, 0.0));
+    s.solveScalarSteady("c");
+    CHECK(!s.scalarField("c").cut->advecting);
+    tRest = vcycleSeconds(s, 20);
+  }
+  for (const double pe : {0.1, 1.0, 10.0}) {
+    IbmSolver s(n, n, n);
+    c3Stokes(s, n);
+    rescalePeclet(s, pe);
+    const auto& st = *s.scalarField("c").cut;
+    char tag[96];
+    std::snprintf(tag, sizeof tag, "C4 C3 + advection, Pe_h=%.3g, R/h=%d (%d^3)", pe, n / 4, n);
+    s.solveScalarSteady("c");
+    std::printf("    census max_cell_peclet %.6g; %ld implicit faces of %ld carrying flux\n",
+                st.maxCellPeclet, st.numImplicitFaces, st.numFluxFaces);
+    CHECK(std::fabs(st.maxCellPeclet / pe - 1.0) <= 1e-12);
+    CHECK(st.advecting && st.numImplicitFaces == st.numFluxFaces && st.numFluxFaces > 0);
+    char t[160];
+    std::snprintf(t, sizeof t, "%-44s %2d it", tag, st.iterations);
+    const double rho = contraction(s, t);
+    CHECK(rho < 1.0);
+    CHECK(rho <= 0.90);
+    if (pe == 10.0) {
+      auto& sc = s.scalarField("c");
+      CHECK(mMatrixDefects(*st.mg, "Pe_h 10") == 0);
+      // (u4)
+      const std::size_t nn = st.SAC.extent(0);
+      CCField x("x", nn), y1("y1", nn), y2("y2", nn);
+      {
+        auto hx = Kokkos::create_mirror_view(x);
+        for (std::size_t k = 0; k < nn; ++k)
+          hx(k) = std::cos(1.3 * (double)k) * (1.0 + 0.1 * std::sin(0.01 * (double)k));
+        Kokkos::deep_copy(x, hx);
+      }
+      st.mg->applySurrogate(y1, x);  // fills x's ghosts (the solver's exchange)
+      peclet::flow::applyCutcellOp(y2, peclet::flow::CCConst(x), st.SAC, sc.AW, sc.AE, sc.AS, sc.AN,
+                                   sc.AB, sc.AT, st.mg->level(0).ext, IbmSolver::G);
+      const HV h1 = host(y1), h2 = host(y2);
+      const auto& l0 = st.mg->level(0);
+      long diff = 0;
+      for (int z = 0; z < l0.inner.z; ++z)
+        for (int yy = 0; yy < l0.inner.y; ++yy)
+          for (int xx = 0; xx < l0.inner.x; ++xx) {
+            const long i = inner(l0, xx, yy, z);
+            diff += std::memcmp(&h1(i), &h2(i), sizeof(double)) == 0 ? 0 : 1;
+          }
+      std::printf(
+          "(u4) level-0 advective applySurrogate vs the band matvec with SAC: %ld of %d "
+          "rows not bitwise\n",
+          diff, l0.inner.x * l0.inner.y * l0.inner.z);
+      CHECK(diff == 0);
+      const double tAdv = vcycleSeconds(s, 20);
+      std::printf(
+          "G-perf: V-cycle %d^3 (%d levels): advective %.2f ms, symmetric (at rest) "
+          "%.2f ms, ratio %.2f (expected ~1.5, red flag > 2)\n",
+          n, st.mgLevels, 1e3 * tAdv, 1e3 * tRest, tAdv / tRest);
+    }
+  }
+}
+
+// (u5) Q = 0 on both domain-face planes of every non-periodic axis on every coarse level, open
+// faces included: a channel along x (inflow -x, outflow +x), no-slip y and z walls, a sphere;
+// the flow developed by step() (which captures the open-face flux), then a steady solve.
+void testAdvOpenFaces() {
+  const int nx = 64, ny = 32, nz = 32;
+  IbmSolver s(nx, ny, nz);
+  s.setRho(1.0);
+  s.setMu(1.0);
+  s.setDt(2.0);
+  s.setDomainBc(0, 2, 0.05, 0.0, 0.0);  // -x inflow
+  s.setDomainBc(1, 3, 0.0, 0.0, 0.0);   // +x outflow
+  for (int f = 2; f < 6; ++f)
+    s.setDomainBc(f, 1, 0.0, 0.0, 0.0);
+  std::vector<double> sdf((std::size_t)nx * ny * nz);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < nx; ++x) {
+        const double dx = x + 0.5 - 27.3, dy = y + 0.5 - 15.6, dz = z + 0.5 - 16.9;
+        sdf[(std::size_t)x + (std::size_t)y * nx + (std::size_t)z * nx * ny] =
+            std::sqrt(dx * dx + dy * dy + dz * dz) - 7.4;
+      }
+  s.setSolid(sdf, true);
+  for (int k = 0; k < 10; ++k)
+    s.step();
+  s.addScalar("c", 0.4, 0, 50, true);
+  s.setScalarBc("c", 0, 2, 1.0);  // dirichlet inflow
+  for (int f = 1; f < 6; ++f)
+    s.setScalarBc("c", f, 1, 0.0);  // neumann
+  s.solveScalarSteady("c");
+  const auto& st = *s.scalarField("c").cut;
+  const auto& mg = *st.mg;
+  CHECK(st.advecting && st.converged);
+  long bad = 0, checked = 0;
+  for (int L = 1; L < mg.levels(); ++L) {
+    const auto& lv = mg.level(L);
+    const int ext[3] = {lv.ext.x, lv.ext.y, lv.ext.z};
+    const long sa[3] = {1, (long)lv.ext.x, (long)lv.ext.x * lv.ext.y};
+    for (int a = 0; a < 3; ++a) {
+      const HV qp = host(lv.qp[a]), qm = host(lv.qm[a]);
+      const int b = (a + 1) % 3, c = (a + 2) % 3;
+      for (const int pl : {lv.g, ext[a] - lv.g})  // the low and the high domain-face plane
+        for (int jb = lv.g; jb < ext[b] - lv.g; ++jb)
+          for (int jc = lv.g; jc < ext[c] - lv.g; ++jc) {
+            const long i = (long)pl * sa[a] + (long)jb * sa[b] + (long)jc * sa[c];
+            bad += (qp(i) == 0.0 && qm(i) == 0.0) ? 0 : 1;
+            ++checked;
+          }
+    }
+  }
+  std::printf(
+      "(u5) channel with open x faces, walls y z: %d levels, %ld domain-face entries, %ld "
+      "nonzero; steady %d iterations, census max_cell_peclet %.3g\n",
+      mg.levels(), checked, bad, st.iterations, st.maxCellPeclet);
+  CHECK(bad == 0 && checked > 0);
 }
 }  // namespace
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
-    testLevels();
-    testCoarse();
-    testLevelRule();
-    testContraction();
+    const bool advOnly = argc > 1 && std::strcmp(argv[argc - 1], "advective") == 0;
+    if (!advOnly) {  // (`test_scalar_mg advective` runs the A2 rows alone)
+      testLevels();
+      testCoarse();
+      testLevelRule();
+      testContraction();
+    }
+    testAdvUniform();
+    testAdvDivergenceFree();
+    testAdvective();
+    testAdvOpenFaces();
   }
   Kokkos::finalize();
   std::printf(failures ? "%d failure(s)\n" : "OK\n", failures);
