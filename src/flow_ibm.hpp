@@ -2708,6 +2708,9 @@ class Solver {
   // Assemble (bands, overlay coefficients, surrogate diagonal, rhs) and solve; the field's
   // non-unknown cells are zeroed first and its ghosts filled after.
   void scalarCutAssembleSolve(ScalarField& sc, bool steady);
+  // WO-8: the resolution warnings of §9 (thin solids, R2 > 1 % of the probes, sealed volume >
+  // 1e-6 of the fluid volume), stderr on rank 0, once per scalar at its first build.
+  void scalarCutWarnings(ScalarField& sc);
   // y = A x for the stored operator of `sc` (exchanges x's ghosts).
   void scalarCutMatvec(ScalarField& sc, CCField y, CCField x);
   // WO-7: the two-field y = A x of a conjugate scalar (exchanges both fields' ghosts).

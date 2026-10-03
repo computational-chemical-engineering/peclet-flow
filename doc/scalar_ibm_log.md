@@ -1358,3 +1358,99 @@ G5a / G6 restated per D-WO7-2.
 - (i) order ≥ 1.7 and (iii) the 2× regression bounds are unchanged.
 
 WO-7 state: bb039d1 + this. Battery 222/223 before this change, the 1 = g5a (ii), now passing.
+
+## 2026-10-04 — WO-8: contacts and thin features (§3, §9, §11 G13) — warnings and G13 built; Dirichlet rows and thin plate pass; stopped on the conjugate contact row (§13 Q4 trigger) and one gate clause
+
+**Built.**
+- §9 resolution warnings (deferred here by D-WO2-1's readings): `Solver::scalarCutWarnings`, called in
+  `scalarCutAssembleSolve` after the solid record, rank 0, stderr, once per scalar
+  (`ScalarCutState::warnedGeometry`). Three texts: `num_thin_solid > 0`; R2 > 1 % of the probes; sealed
+  volume > 1e-6 of the fluid volume. The census gained an internal `fluidVolume` (Σ κV over inner cells,
+  physical, MPI-summed, its own reduction; not a census key) as the sealed warning's reference.
+- G13 in `test_scalar_cutcell_gates.py` (`g13`, ctest `scalar_cutcell_g13`): two sphere instances R = 1
+  along x in a box (6R, 4R, 4R), R/h 8 / 16 / 32, 3 offsets, steady, D = 0.7.
+- No ladder change: R0/R1a/R1b/R2 are core's WO-1 `buildProbe` as the note specifies (the φ(p₀) < 0 →
+  R1b gap midpoint is in place and fires: 50–260 fluid facets per run).
+
+**Readings (for confirmation; none changes numerics).**
+- G13 set-up: the box faces are Dirichlet 0 ("far field 0"), the spheres Dirichlet 1; F = Σ
+  `scalar_wall_flux`. The conjugate pair (both instances conjugate, Λ_s/Λ_f = 100, K = 1) needs a drive —
+  far field 0 alone gives c ≡ 0 — so its box faces carry c = x − x_c and F is the heat entering through
+  the −x box face, Σ 2D(g − c₀)h (the operator's own boundary row; no solid reaches the box).
+- Self-convergence: order = log₂(|F₈ − F₁₆| / |F₁₆ − F₃₂|) on the mean over the 3 offsets.
+- R2 ≤ 1 %: over both phases' probes. The R2 warning fires per phase, against that phase's probes.
+- The thin plate: |x − x₀| − 0.2h with x₀ 0.05h off a cell-centre plane (a slab between two centre planes
+  leaves every PL sample positive and does not exist in the record); stderr captured at the fd.
+
+**Gates.**
+
+| row | R/h 8 / 16 / 32: mean F | order | iterations | R2 (max per run) | two-sided |
+|---|---|---|---|---|---|
+| gap R/32, Dirichlet | 25.0395 / 25.4616 / 25.5735 | 1.92 | 9–12 | 1 of 9429 | 2–12 / 20–24 / **0** |
+| contact R/64, Dirichlet | 24.8286 / 25.2459 / 25.3567 | 1.91 | 9–12 | 2 of 37 658 | 1–10 / 11–25 / 43–62 |
+| contact, conjugate 100 | −14.7845 / −14.7924 / −14.7358 | **−2.84** | 10–12 | 2 fluid, 0 solid | as contact |
+
+- thin plate 0.4h (16³): num_thin_solid 256, the warning printed. PASS.
+- Every run converged, ≤ 12 iterations (bound 50), finite.
+- **Clause "census two-sided > 0" cannot hold for the gap row at R/h 32**: the gap R/32 is then one cell
+  wide, and no cell holds both walls (0 in all 3 offsets). The gate prints it as info there and checks
+  it where the gap is under a cell. Question G13-a below.
+
+**The conjugate contact row fails, and the cause is not the probe.** Measurements (3 offsets each;
+`far` = the same conjugate pair separated by a gap of 0.5R, all R0):
+
+| R/h | contact | far | contact − far | conjugate pair at gap R/32 |
+|---|---|---|---|---|
+| 8 | −14.7845 | −13.6311 | −1.153 | −14.8388 |
+| 16 | −14.7924 | −13.7311 | −1.061 | −14.7126 |
+| 32 | −14.7358 | −13.7593 | −0.977 | −13.8582 |
+| 64 | −14.6775 | −13.7672 | −0.910 | — |
+
+- `far` converges at order 1.84 / 1.80; the contact's own contribution shrinks 0.092 / 0.084 / 0.067 per
+  doubling (order 0.1–0.3). The two errors have opposite signs, hence the non-monotone total.
+- At Λ_s = Λ_f the contact pair gives F = −11.2000 to ≤ 1e-6 (the homogeneous value) at every rung: the ladder,
+  including R1b, keeps the linear field. The probes are not the error.
+- **Mechanism: the discrete solid bridge is too wide.** The solid cross-section in the cell slab at the
+  contact plane, as an equivalent radius (true neck a = R/8 = 0.125): 0.377 / 0.285 / 0.222 / 0.181 at
+  R/h 8 / 16 / 32 / 64. That is ≈ √(a² + Rh). The exact geometry in the same slab would give √(a² + Rh/2):
+  0.280 / 0.217 / 0.177 / 0.153.
+  - The fluid wedge is thinner than a cell out to ρ ≈ √(a² + Rh). There, the PL record from cell-centred
+    SDF samples closes it (κ = 0), so the two bodies are joined by solid.
+  - Even with exact apertures, one solid DOF between two face planes h/2 off the neck plane carries the
+    cross-section π(a² + Rh), not πa².
+  - The constriction is resolved only when Rh ≪ a², i.e. R/h ≫ (R/a)² = 64. At R/h 8–32 the row is
+    pre-asymptotic for any one-DOF-per-cell FV, so order ≥ 1 is out of reach there.
+- **The same effect fuses a conducting gap.** Conjugate pair at gap R/32: the spheres conduct as if in
+  contact while the gap is under h/2. F jumps 6 % between R/h 16 and 32.
+  - The PL fluid volume within ρ < 0.2R of the axis is 1.7e-5 / 2.3e-3 / 6.1e-3 against an exact
+    6.4e-3; the cells on the axis at the gap have κ = 0 at R/h 8 and 16.
+  - The 2-D oracle (`packing2d.py`, round 8) used EXACT apertures and quadrature κ, so it never saw this.
+    Its P2Fg ≤ 3.5 % does not carry over to the 3-D SDF source.
+- **Pre-authorized fixes, not applied.**
+  - (1) The ladder is as specified.
+  - (2) The unsnapped-normal probe is for failures on anisotropic or corner facets. G13 has none: the
+    Dirichlet rows pass with R2 ≤ 2 facets.
+  - (3) Film conduction couples the two solid probes of a two-sided gap cell. The error sits where the
+    record has NO facet (fused solid), so the coupling cannot reach it.
+  - Any remedy needs a contact model or a body-aware geometry record. That is §13 Q4's trigger ("G13
+    self-convergence < 1 → design a contact model"), not a WO-8 fix.
+
+**Questions (stopped; nothing chosen).**
+- **G13-a.** The "two-sided > 0" clause on the gap row at R/h 32, where the gap equals h: keep it as info,
+  or move the gap to a sub-cell width at every rung?
+- **G13-b (Q4).** The conjugate contact row: (i) a contact model per Q4 (architect); (ii) restate the
+  row (e.g. a pre-asymptotic bound, or R/h ≥ 64); (iii) keep it failing as evidence. The fused conducting
+  gap belongs to the same question, though it is not a G13 row.
+- Q14 is not exercised: both instances carry one material, so the larger-area rule is inert.
+
+**Inert proof** (vs the unmodified 906fcd9 build, saved before any change): 722/722 arrays
+`np.array_equal`. The cases: the WO-7 single-phase harness (G1-like steady, transient Robin + source on
+both tables, the two-body scene, the singular closure, G-adv a/b/c, the G9 annulus) plus G13
+gap / contact / conj at R/h 8 (steady + 2 BE steps; solid field and solid rungs) and G4 at ratio 10.
+**G12:** 12/12 hashes = `doc/scalar_ibm_baseline_hashes.txt` at OMP_NUM_THREADS=1.
+**Battery** (`-LE bench`, 224 tests including the new `scalar_cutcell_g13`; OMP 4, -j4, load ~20, 3553 s):
+223/224 pass. The one failure is `scalar_cutcell_g13` on exactly its conjugate self-convergence clause
+(order −2.84 against 1.0), left failing as evidence, not loosened (G13-b).
+
+**Not changed:** core (the ladder), the probe direction, the operator, ScalarMG and every numerical
+path (bitwise above).

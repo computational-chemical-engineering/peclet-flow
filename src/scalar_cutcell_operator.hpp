@@ -91,6 +91,7 @@ struct ScalarCutState {
   double residual = 0.0;  ///< final TRUE residual max|b - A c| / ref
   bool converged = true;
   bool warnedNoConv = false;
+  bool warnedGeometry = false;  ///< the §9 resolution warnings were issued (WO-8; once per scalar)
   double incompatibility = 0.0;  ///< steady singular case: |sum b| / sum |b| before projection
   // ---- ScalarMG (§5.2): level table per geometry version / block, coefficients per build ----
   std::shared_ptr<ScalarMG> mg;

@@ -90,6 +90,9 @@ void Solver<Grid>::ensureScalarCutGeometry() {
     MPI_Allreduce(cnt, sum, 10, MPI_LONG, MPI_SUM, comm_);
     double v = c.sealedVolume, vs = 0.0;
     MPI_Allreduce(&v, &vs, 1, MPI_DOUBLE, MPI_SUM, comm_);
+    double vf = c.fluidVolume, vfs = 0.0;
+    MPI_Allreduce(&vf, &vfs, 1, MPI_DOUBLE, MPI_SUM, comm_);
+    c.fluidVolume = vfs;
     c.numUnknowns = sum[0];
     c.numCutCells = sum[1];
     c.numFacets = sum[2];
@@ -103,6 +106,7 @@ void Solver<Grid>::ensureScalarCutGeometry() {
 #endif
   const double l = u_.lenToPhys();
   c.sealedVolume *= l * l * l;
+  c.fluidVolume *= l * l * l;
   r.census = c;
   r.version = scgVersion_;
   scg_ = r;
@@ -945,6 +949,7 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     mt = scalarMaterialTable(sc, conjB);
     ensureScalarSolidRecord(sc, conjB);
   }
+  scalarCutWarnings(sc);
   // right-hand side: kappa (idt c^n + S') + the walls' rw
   if (st.sourceIsField && st.sourceField.extent(0) != n_)
     throw std::runtime_error("cut-cell scalar '" + sc.name +
@@ -1434,6 +1439,53 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
                    "kept -- see diagnostics.scalar_census (printed once)\n",
                    sc.name.c_str(), kr.iterations, st.residual, st.rtol);
   }
+}
+
+template <class Grid>
+void Solver<Grid>::scalarCutWarnings(ScalarField& sc) {
+  ScalarCutState& st = *sc.cut;
+  if (st.warnedGeometry)
+    return;
+  st.warnedGeometry = true;
+  bool root = true;
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    int r = 0;
+    MPI_Comm_rank(comm_, &r);
+    root = r == 0;
+  }
+#endif
+  if (!root)
+    return;
+  const scg::ScalarCutCensus& c = scg_.census;
+  const char* nm = sc.name.c_str();
+  if (c.numThinSolid > 0)
+    std::fprintf(
+        stderr,
+        "peclet.flow: cut-cell scalar '%s': %ld thin-solid cell(s) -- a solid thinner than "
+        "about a cell, so one fluid unknown spans both of its sides and the scalar passes "
+        "through it (a resolution warning; diagnostics.scalar_census 'num_thin_solid', "
+        "printed once)\n",
+        nm, c.numThinSolid);
+  const auto r2Warn = [&](const char* side, long r2, long total) {
+    if (total > 0 && 100 * r2 > total)
+      std::fprintf(stderr,
+                   "peclet.flow: cut-cell scalar '%s': %ld of %ld %s probes (%.2f %%, more than "
+                   "1 %%) fell back to the first-order last rung R2 -- contacts, thin gaps or "
+                   "corners under-resolved (diagnostics.scalar_census 'probe_rungs', printed "
+                   "once)\n",
+                   nm, r2, total, side, 100.0 * (double)r2 / (double)total);
+  };
+  r2Warn("fluid", c.rungs[3], c.rungs[0] + c.rungs[1] + c.rungs[2] + c.rungs[3]);
+  if (st.conj)
+    r2Warn("solid", st.solidRungs[3],
+           st.solidRungs[0] + st.solidRungs[1] + st.solidRungs[2] + st.solidRungs[3]);
+  if (c.numSealed > 0 && c.sealedVolume > 1e-6 * c.fluidVolume)
+    std::fprintf(stderr,
+                 "peclet.flow: cut-cell scalar '%s': %ld sealed cell(s) (fluid behind closed "
+                 "faces, not unknowns) hold %.2e of the fluid volume, more than 1e-6 "
+                 "(diagnostics.scalar_census 'num_sealed' / 'sealed_volume', printed once)\n",
+                 nm, c.numSealed, c.fluidVolume > 0.0 ? c.sealedVolume / c.fluidVolume : 0.0);
 }
 
 template <class Grid>

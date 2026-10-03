@@ -70,6 +70,9 @@ struct ScalarCutCensus {
        numSealed = 0;
   double sealedVolume = 0.0;
   long rungs[4] = {0, 0, 0, 0};  ///< fluid R0, R1a, R1b, R2
+  /// Sum kappa V over the inner cells (physical after ensureScalarCutGeometry): the reference of
+  /// the §9 sealed-volume warning (WO-8). Not a census key.
+  double fluidVolume = 0.0;
 };
 
 /// The whole record: per-cell fields on the extended block (kappa and unknown haloed; the
@@ -433,6 +436,17 @@ inline ScalarCutCensus localCensus(const ScalarFacetOverlay& fo, const CellPass&
   c.sealedVolume = vSealed;
   for (int k = 0; k < 4; ++k)
     c.rungs[k] = r[k];
+  // WO-8: the fluid volume, for the §9 sealed-volume warning (its own reduction: the counts
+  // above are untouched)
+  double vFluid = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::scg_census_volume",
+      MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& v) {
+        v += kappa((long)x + (long)y * sy + (long)z * sz) * vol;
+      },
+      vFluid);
+  c.fluidVolume = vFluid;
   return c;
 }
 

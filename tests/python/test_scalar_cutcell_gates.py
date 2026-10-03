@@ -50,6 +50,13 @@ conversions of §1.2 are on the path.
        steady problem on G5b's geometry (periodic simple-cubic array, c = 0.3, insulating + flux +
        source; <= 30, growth <= 5 per rung) on multigrid-friendly n.
 
+  g13  contacts (WO-8): two spheres R in a box (6R, 4R, 4R), R/h 8 / 16 / 32, steady: Dirichlet
+       spheres at a gap R/32 and in contact (overlap R/64), far field 0, and the contacting pair
+       conjugate at Lam_s/Lam_f = 100 under a far-field gradient: converged, <= 50 iterations,
+       census two-sided > 0 (where the gap is under a cell), R2 <= 1 % of the probes, total-flux
+       self-convergence order >= 1.0; the 0.4 h thin plate: num_thin_solid > 0 and the §9
+       warning printed.
+
 Every gate runs its FULL resolution ladder (WO-4; ruling D-WO3-1 had deferred the steady ones).
 "Order" is between successive rungs of the RMS error over 3 random grid offsets; every successive
 pair is gated. G-iter on g1/g2/g3a (Da = 1): <= 20 BiCGStab iterations at every rung, growth <= 3
@@ -1993,10 +2000,138 @@ def gate_api():
     check(s.diagnostics.scalar_census("c")["num_solid_unknowns"] == 0, "set_scalar_wall(instance=None) ends the conjugate path")
 
 
+# --------------------------------------------------------------------------------------- G13 ----
+G13_CASES = ("gap", "contact", "conj")
+
+
+def sphere_pair_scene(c1, c2, R):
+    """Two sphere instances (body ids 0 and 1) of radius R centred at c1, c2."""
+    ni = np.array([1, -1, -1], dtype=np.int32)
+    nr = np.zeros(16)
+    nr[0] = R
+    nr[14] = nr[15] = 1.0  # rotation w, scale
+    ii = np.array([0, -1, 0, -1], dtype=np.int32)
+    ir = np.zeros(2 * 18)
+    for k, c in enumerate((c1, c2)):
+        ir[18 * k:18 * k + 3] = c
+        ir[18 * k + 6] = 1.0
+        ir[18 * k + 7] = 1.0
+    return ni, nr, ii, ir
+
+
+def g13_case(Rh, off, case):
+    """§11 G13: two spheres R = 1 along x in a box (6R, 4R, 4R) with Dirichlet box faces, steady.
+    'gap' / 'contact': Dirichlet spheres c = 1 at a surface gap R/32 / an overlap R/64, far field 0;
+    the functional is the total wall flux into the fluid. 'conj': the contacting pair conjugate at
+    Lam_s/Lam_f = 100 (K = 1), the box faces at the far-field profile c = x - x_c (the pair alone at
+    rest would carry no flux); the functional is the heat entering through the -x box face,
+    Q = sum 2 D (g - c_0) h over its face cells (the operator's own boundary row; no solid touches
+    the box faces)."""
+    R, D = 1.0, 0.7
+    h = R / Rh
+    cells = (6 * Rh, 4 * Rh, 4 * Rh)
+    L = (6.0 * R, 4.0 * R, 4.0 * R)
+    s = walled(cells, L)
+    xc = np.array([0.5 * L[0], 0.5 * L[1], 0.5 * L[2]]) + np.asarray(off) * h
+    d = 2.0 * R + (R / 32.0 if case == "gap" else -R / 64.0)
+    c1, c2 = xc - [0.5 * d, 0.0, 0.0], xc + [0.5 * d, 0.0, 0.0]
+    s.set_scene(*sphere_pair_scene(c1, c2, R), periodic=False)
+    s.set_solid_from_scene(cutcell_pressure=False)
+    if case == "conj":
+        add_cc(s, D, box="neumann")
+        for f in FACES:
+            P = face_points(s, f)
+            s.set_scalar_bc("c", f, "dirichlet", P[0] - xc[0])
+        s.set_scalar_solid("c", diffusivity=100.0 * D)
+    else:
+        add_cc(s, D, box="dirichlet")
+        s.set_scalar_wall("c", "dirichlet", 1.0)
+    s.solve_scalar_steady("c")
+    cen = s.diagnostics.scalar_census("c")
+    if case == "conj":
+        P = face_points(s, "-x")
+        c = s.get_field("c")
+        F = float(np.sum(2.0 * D * ((P[0] - xc[0]) - c[0, :, :]) * h))
+    else:
+        F = float(np.sum(s.scalar_wall_flux("c")))
+    b = s.diagnostics.scalar_budget("c")
+    return dict(F=F, it=cen["krylov_iterations"], conv=cen["krylov_converged"], cen=cen, b=b,
+                finite=bool(np.all(np.isfinite(s.get_field("c")[s.diagnostics.scalar_geometry("c")["unknown"] > 0.5]))))
+
+
+def g13_rungs(cen):
+    """(R2 fraction, rungs) over both phases' probes (the solid tuple on a conjugate scalar)."""
+    pr = cen["probe_rungs"]
+    tot = sum(pr["fluid"]) + (sum(pr["solid"]) if "solid" in pr else 0)
+    r2 = pr["fluid"][3] + (pr["solid"][3] if "solid" in pr else 0)
+    return (r2 / tot if tot else 0.0), pr
+
+
+def g13_thin_plate():
+    """§11 G13 thin plate: a solid slab 0.4 h thick across the box, its mid-plane 0.05 h off a
+    cell-centre plane (a slab between two centre planes leaves every PL sample positive); the census
+    counts thin-solid cells and the §9 warning is printed (stderr, captured at the fd)."""
+    import os
+    import tempfile
+    n, L = 16, 1.0
+    h = L / n
+    s = walled((n, n, n), (L, L, L))
+    X, _, _ = grid(s)
+    x0 = (n // 2 + 0.5) * h + 0.05 * h
+    s.set_solid(np.asfortranarray(np.abs(X - x0) - 0.2 * h))
+    add_cc(s, 0.7, box="dirichlet")
+    s.set_scalar_wall("c", "dirichlet", 1.0)
+    with tempfile.TemporaryFile(mode="w+b") as tmp:
+        sys.stderr.flush()
+        fd = os.dup(2)
+        os.dup2(tmp.fileno(), 2)
+        try:
+            s.solve_scalar_steady("c")
+        finally:
+            os.dup2(fd, 2)
+            os.close(fd)
+        tmp.seek(0)
+        err = tmp.read().decode(errors="replace")
+    cen = s.diagnostics.scalar_census("c")
+    return cen, err
+
+
+def gate_g13(cases=G13_CASES, rungs=(8, 16, 32)):
+    print("G13 contacts: two spheres R = 1 in a box (6R, 4R, 4R), R/h in {8, 16, 32}, steady")
+    for case in cases:
+        F, its = {}, {}
+        for Rh in rungs:
+            rows = [g13_case(Rh, off, case) for off in OFFSETS]
+            F[Rh] = float(np.mean([r["F"] for r in rows]))
+            its[Rh] = [r["it"] for r in rows]
+            fr = [g13_rungs(r["cen"]) for r in rows]
+            print(f"  {case:7s} R/h={Rh:3d}  F = {[f'{r['F']:.6e}' for r in rows]} (mean {F[Rh]:.6e})  iters {its[Rh]}"
+                  f"  two-sided {[r['cen']['num_two_sided'] for r in rows]}  thin {[r['cen']['num_thin_solid'] for r in rows]}"
+                  f"  rungs {[p for _, p in fr]}")
+            for r, (r2, _) in zip(rows, fr):
+                check(r["conv"] and r["finite"], f"{case} R/h={Rh}: converged and finite ({r['it']} iterations)")
+                check(r["it"] <= 50, f"{case} R/h={Rh}: <= 50 iterations ({r['it']})")
+                if case == "gap" and Rh >= 32:  # gap R/32 >= h: no cell holds both walls (reading, WO-8)
+                    print(f"  info  gap R/h={Rh}: two-sided {r['cen']['num_two_sided']} (the gap is >= h)")
+                else:
+                    check(r["cen"]["num_two_sided"] > 0, f"{case} R/h={Rh}: census two-sided > 0 ({r['cen']['num_two_sided']})")
+                check(r2 <= 0.01, f"{case} R/h={Rh}: R2 <= 1 % of the probes ({100 * r2:.2f} %)")
+        if len(rungs) == 3:
+            a, b, c = (F[k] for k in rungs)
+            p = order(abs(a - b), abs(b - c))
+            check(p >= 1.0, f"{case}: total-flux self-convergence order {p:.2f} >= 1.0 "
+                            f"(|F8 - F16| {abs(a - b):.3e}, |F16 - F32| {abs(b - c):.3e})")
+    cen, err = g13_thin_plate()
+    print(f"  thin plate 0.4h: num_thin_solid {cen['num_thin_solid']}, two-sided {cen['num_two_sided']}, "
+          f"rungs {cen['probe_rungs']}; stderr: {err.strip()!r}")
+    check(cen["num_thin_solid"] > 0, f"thin plate: num_thin_solid > 0 ({cen['num_thin_solid']})")
+    check("thin" in err, "thin plate: the §9 thin-solid warning is printed")
+
+
 GATES = {"api": gate_api, "g1": gate_g1, "g2": gate_g2, "g3a": gate_g3a, "g3b": gate_g3b, "g7": gate_g7,
          "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b, "g9c": gate_g9c, "gadv": gate_gadv,
          "g8": gate_g8, "g5b": gate_g5b, "conj_unit": gate_conj_unit, "g4": gate_g4, "g5a": gate_g5a,
-         "g6": gate_g6, "gadv_conj": gate_gadv_conj}
+         "g6": gate_g6, "gadv_conj": gate_gadv_conj, "g13": gate_g13}
 for _ci in range(len(G6_CASES)):  # one ctest per G6 case (each runs the full ladder)
     GATES[f"g6_{_ci + 1}"] = (lambda c=_ci: gate_g6(cases=(c,)))
 
