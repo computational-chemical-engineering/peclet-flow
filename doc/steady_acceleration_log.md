@@ -1428,3 +1428,116 @@ Reported, not tuned.
 
 - host-openmp: serial **63/63** (471 s), MPI **130/130** (238 s);
 - CUDA: `march_to_steady`, `march_state` **2/2** (61 [ok] checks).
+
+---
+
+## 2026-10-03 — Pocket pressure: the aperture graph was read one cell off; what the pockets reach; option (iv)
+
+**Correction (§1.2, R-1 above).** `anderson_rev1_probes.py slowmode` read `get_ox[i]` as the face
+between cells i and i + 1. The binding (and every other reader in flow / pnm) has it as the face
+(i − 1, i). Checked on the A1 bed by `tests/study/pocket_pressure_probe.py`: over cut faces the
+|sdf at the face midpoint| is ≤ 0.69 h with the binding's reading and up to 1.19 h with the probe's
+(a cut face must be within ~0.71 h of the wall). The probe's old reading reproduces R-1 exactly
+(1,086 components, main 103,767, 1,085 pockets / 1,168 cells), so the R-1 connectivity numbers are
+an artefact. The probe now rolls the aperture (fix in this commit) and adds the pressure operator's
+own graph at aperture > 0, whose nodes also include the solid-centred cut cells (`get_*_proj`).
+
+Re-run, same command as R-1 (host-openmp, 8 threads, bed md5 832e9f09…, 550 s staggered):
+
+    $P slowmode --case bed --arrangement $BED --scheme staggered  --N 64 --steps 1500 --save 300,600,1000,1500
+    $P slowmode --case bed --arrangement $BED --scheme collocated --N 64 --steps 1500 --save 300,600,1000,1500
+
+**Staggered** — every residual column reproduces R-1 to the printed digit (W / velocity 7.852e-5 /
+1.334e-6 at 300, 9.432e-6 / 5.982e-8 at 1500; pressure share of W² 0.999712 / 0.999906 / 0.999946 /
+0.999960; 90 % of the P-energy in 105 / 66 / 50 / 41 cells). The connectivity, corrected:
+- operator graph, aperture > 0: 116 components; main 104,816 of 104,935 fluid-centred cells;
+  115 pockets of 126 cells (119 fluid-centred; 104 single cells, 11 pairs). Off-main share of the
+  late pressure-residual energy at r300 / r600 / r1000 / r1500: **0.001 / 0.004 / 0.008 / 0.011**.
+- fluid-centred graph: 206 / 207 / 230 / 257 / 317 components at aperture > 0 / 0.01 / 0.05 / 0.1 /
+  0.2; off-main share 0.176 / 0.235 / 0.266 / 0.310 at > 0, and **0.838 / 0.964 / 0.987 / 0.995**
+  at > 0.2 (R-1: 0.584 / 0.644 / 0.626 / 0.592 and 0.687 / 0.766 / 0.828 / 0.848).
+- So the slow pressure is the near-contact lubrication-film pressure behind small apertures, not the
+  sealed pockets (≤ 1.1 %). R-1's "per-component-constant share" line came from the scratch script and
+  was not re-measured; it rests on the same wrong graph.
+
+**Collocated** (5,545 s on the loaded box) — residuals reproduce R-1 (W / velocity 5.002e-5 /
+7.648e-7 at 300, 2.803e-6 / 6.624e-9 at 1500); pressure share of W² 0.999766 / 0.999928 / 0.999979
+/ 0.999994; 90 % of the P-energy in 35 / 12 / 41 / 161 cells. Off-main share at aperture > 0.2:
+**0.915 / 0.990 / 0.998 / 0.999** (R-1: 0.743 / 0.891 / 0.984 / 0.999). The projection's own
+(binary) graph has 217 components, 216 single-cell pockets — the solver's "205 fluid components;
+decoupled 216 pocket cells" — and those pockets hold 0.001 / 0.016 / 0.108 / 0.322 of the energy.
+That share is the probe's fluid-mean centring, not pocket pressure: the ghost scheme pins the pocket
+pressure to exactly 0 (pocket_pressure_probe reads 0 in a converged run), so the pocket residual is
+0 and the centred residual there is −mean(r), which dominates once the main-space residual is small
+(r1500's 90 % count rises to 161 cells).
+
+**Other readers of `get_ox/oy/oz`** (grep of flow tests/study, scripts, doc; coupling; amr; pnm):
+`collocated_neutral_probe.py`, `collocated_longmarch.py`, `collocated_s1_reconciliation.py` (pair
+`get_ox[i]` with ½(u_{i−1} + u_i) and the divergence roll(flux, −1) − flux), `zh_wallband_diff.py`
+(½(sdf_{i−1} + sdf_i)), `flatwall_displacement.py` and pnm `verify_network_flow.py` /
+`demo_network_flow_packing.py` (pair `ox[i]` with the staggered `u[i]`, the same face) all use
+(i − 1, i). coupling and amr do not call them. `anderson_rev1_probes.py` was the only off-by-one.
+
+**Does a rev-1 conclusion change? No.** The velocity-only metric (R1/D3) rests on (a) the pressure
+share of W² ≥ 0.9997, reproduced to the digit above, (b) that pressure sitting in 41–105
+near-contact cells whose equilibration does not move ⟨u_x⟩ (unchanged: the plain ⟨u_x⟩ error column
+is a velocity measurement), and (c) the measured step ratios 3.49× / 2.29× (325 / 93, 190 / 83),
+which are step counts independent of any connectivity analysis. What changes is the attribution
+inside (b): lubrication films behind small apertures, not gauge modes of sealed pockets. The rejection
+of per-component gauge removal gets stronger (it would remove ≤ 1.1 %, not 58–64 %). Note §1.2 / R1
+/ Q17 amended in place with a dated marker; the R-1 entry above is history and is left as written.
+
+**What the pocket pressure reaches** (`tests/study/pocket_pressure_probe.py --graph dof
+--per-pocket --check-sdf`, CUDA, bed as an analytic scene — apertures equal to the `set_solid(array)`
+bed to 1.6e-14; production march certified at 93 steps, K 98.91435851). Perturbation p → p + c on
+pocket cells, c = 1× / 1000× the main-space range; max change relative to each output's scale,
+instantly / after one step:
+- reaction F per body: ≤ 8e-16 instantly (it never reads a pocket cell); after one step, all pockets
+  1.2e-7 / 1.2e-4, ΣFx 3.5e-9 / 3.5e-6. A single pocket stays at the 3.4e-10 / 1.5e-7 floor that
+  every single pocket shows identically (nonlinear in c; probably the momentum stopping test's
+  max|b|, not checked).
+- ⟨u_x⟩ / K: all pockets 3.2e-8 / 3.2e-5; worst single pocket 2.7e-5 at 1000×.
+- u, v, w: all pockets 5.2e-4 / 0.52 of max|u|. **Mechanism:** 41 staggered velocity points are fluid
+  to the momentum mask (sdf > 0 at the face) while their projection aperture is exactly 0; the
+  predictor's −∇P acts on them and the projection cannot correct them. 9 of the 115 pockets touch one
+  (13 / 14 / 14 per component; converged |u| there up to 5.2e-3 max|u|).
+- traction F per body: 0 for single-cell pockets (zero wall-area vector); a 2-cell pocket 2.4e-4 /
+  0.24, all pockets 3.5e-4 / 0.35; traction ΣFx unchanged instantly (a closed pocket's area vectors
+  telescope). Collocated: traction per body 8.3e-3 / 8.25 for one pocket, ΣFx 1.0e-4 / 0.1 — the
+  geometric apertures it integrates do not close the binary-sealed pocket.
+- get_p readouts: fluid mean 1.1e-3, x-plane means 3.9e-3 of the range per main-range offset (all
+  pockets); the main-space pressure itself moves ≤ 4.2e-7.
+- Converged pocket pressures span 0.59 of the main range (max |p − ⟨p_main⟩| 0.34 range), set in the
+  transient, frozen after (8e-3 of the range in 500 further steps). Collocated ghost: exactly 0.
+
+**Option (iv): mask every staggered velocity point whose projection aperture is exactly 0.**
+Register first (`../docs/decisions/flow.md`): "Velocity masking must be OFF with the cut-cell
+pressure operator" rejects masking that "zeros partially-open solid faces post-projection" — (iv)
+masks only aperture-0 points, so its reason does not apply, but it is the nearest entry; "Exact-crossing
+openness overrides must be masked to 0 at solid velocity points" and the order-2 aperture's centre gate
+("ungated MS opens masked-DOF staggered faces") enforce the converse direction (mask ⇒ aperture 0);
+(iv) would add aperture 0 ⇒ mask. "Free-variable fix: pin phi=0 at decoupled cells" (ghost
+projection) is the same family on the pressure side. No entry decides (iv).
+
+Study build only: `tests/study/pocket_mask_closed.patch` (macro `PECLET_FLOW_STUDY_MASK_CLOSED`,
+after `setSolidBuildOpenness`, then `maskVelocity`), `build_mask` CUDA tree; `tests/study/
+pocket_mask_probe.py run/compare` against `build_cuda`:
+
+| case | points masked | \|ΔK/K\| | reaction F per body (/max) | ΣFx | max\|Δu\| off pinned | steps |
+|---|---|---|---|---|---|---|
+| bed, tight (PCG 1e-12, rtol 1e-10) | 41 | **2.0e-8** | 1.8e-3 (per-body \|ΔF\|/\|F\| max 3.0e-3, median 2.6e-5) | −1.24e-4 = 13 f h³ | 3.0e-6 | 785 → 1090 |
+| bed, production, m = 5 | 41 | 1.6e-7 | 1.8e-3 | — | 1.1e-4 | 93 → 92 |
+| bed, production, plain | 41 | 1.5e-6 | 1.8e-3 | — | 3.0e-6 | 325 → 325 |
+| Z&H φ 0.216, N 24, vertex, tight | 0 | 0 | 1e-15 | 0 | 0 | 90 → 90 |
+| Z&H φ 0.216, shifted (0.3, 0.2, 0.1) h | 0 | 0 | 8e-16 | 0 | 0 | 505 → 505 |
+| Z&H φ 0.45, shifted | 0 | 0 | 1e-15 | 0 | 0 | 689 → 689 |
+
+- K moves 2.0e-8 at a tight stop (the production rows carry each run's own certification error).
+- The per-body reaction moves at 1e-3: the reaction budget counts the body force at every live
+  velocity point, so masking 13 x-points removes exactly 13 f h³ (13.0000000002) from ΣFx and
+  from the owners of those points. A bookkeeping change of the counted fluid volume (1.2e-4), not a
+  flow change.
+- Z&H (the hydro_force_units setup, also off-vertex and at φ 0.45): no aperture-0 live point exists,
+  so (iv) is bit-identical there.
+- The tight accelerated march took 39 % more steps with (iv) (785 → 1090); the plain and production
+  marches did not change. Not investigated.

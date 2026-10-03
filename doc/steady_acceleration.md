@@ -103,14 +103,19 @@ proved on the oracle before it was written here (`tests/study/anderson_oracle.py
 now `--rev 1`; `--rev 0` reproduces WO-1 bit for bit — collocated N = 16, m = 5: 112 steps).
 
 **What the slow bed mode is (measured, §1.2).** Pressure in fluid cells at sphere near-contacts. On
-the A1 bed (φ 0.6, N = 64, staggered) 1,168 fluid cells sit in 1,085 pockets sealed by zero face
-apertures (almost all single cells), beside the main pore space of 103,767 cells. In the plain
-march, from step 300 to 1500, 99.97–99.996 % of the W-residual energy is pressure, and 90 % of that
-pressure energy sits in 41–105 cells. Sealed pockets carry 58–64 % of it, and cells behind faces of
-aperture ≤ 0.2 carry another 10–25 %. A sealed cell's pressure is a gauge mode with no coupling to
-any velocity. Behind a small aperture the pressure equilibrates through the tiny face flux (a
-lubrication-film mode, rate 1 − O(aperture)). Together they give the continuum of Ritz values
-0.9998–0.99999 and the power-law tail of the W-residual. Neither moves ⟨u_x⟩: the plain march
+the A1 bed (φ 0.6, N = 64, staggered) the cut-cell pressure operator seals 126 cells in 115 pockets
+(104 single cells, 11 pairs) off the main pore space; 217 cells in 205 pockets if only fluid-centred
+cells count as graph nodes. In the plain march, from step 300 to 1500, 99.97–99.996 % of the
+W-residual energy is pressure, and 90 % of that pressure energy sits in 41–105 cells. The sealed
+pockets carry only 0.1–1.1 % of it (18–31 % on the fluid-centred graph); cells behind faces of
+aperture ≤ 0.2 carry 84–99.5 % in all. The slow mode is therefore the pressure behind small
+apertures: it equilibrates through the tiny face flux (a lubrication-film mode, rate
+1 − O(aperture)), giving the continuum of Ritz values 0.9998–0.99999 and the power-law tail of the
+W-residual. A sealed cell's pressure is a gauge mode, coupled to velocity only through a few
+velocity points the momentum mask keeps live behind a zero aperture (§1.2).
+*Corrected 2026-10-03:* ~~1,168 fluid cells in 1,085 sealed pockets; sealed pockets carry 58–64 %,
+apertures ≤ 0.2 another 10–25 %~~ — the probe read `get_ox[i]` one cell off (log, entry
+"2026-10-03 — Pocket pressure"). Neither moves ⟨u_x⟩: the plain march
 certifies at step 325 with its W-residual at 7.1e-5 and its velocity residual at 1.1e-6. The
 collocated bed shows the same structure.
 
@@ -251,8 +256,9 @@ residual (§3.2).
   (68 vs 104 steps, 58 vs 74). The checkerboard argument made for it in revision 0 does not hold:
   the velocity metric reaches the collocated N = 16 handover sooner, 39 steps against 48.
 - *Rejected:* gauge removal per fluid component, i.e. keeping c_P and removing each sealed pocket's
-  constant. It removes only the sealed pockets (58–64 % of the late pressure energy), not the cells
-  behind small apertures, and it needs a distributed connected-component labelling.
+  constant. It removes only the sealed pockets (0.1–1.1 % of the late pressure energy;
+  *corrected 2026-10-03,* ~~58–64 %~~), not the cells behind small apertures, and it needs a
+  distributed connected-component labelling.
 - *Rejected:* the unweighted Euclidean norm of (u, P), which depends on the unit system; and a metric
   on the face gradient of P, which needs ghost-consistent history and depends on the partition.
 - *Reason:* the velocity residual measures a pressure error by the velocity it drives at the next
@@ -462,32 +468,50 @@ time to 1e-4 error is 5.4 s plain against 0.69 s accelerated.
 φ 0.6, 64 spheres, seed 0, N = 64, Δt = 6h², PCG(200, 1e-8). It ran for 1500 steps, recording
 the per-field residual every step and the full residual field at steps 300, 600, 1000 and 1500.
 Fluid connectivity is taken from the face apertures `get_ox/oy/oz` (two fluid-centred cells are
-connected when the shared face's aperture is > threshold). Script and commands: log, entry
-"Revision 1".
+connected when the shared face's aperture is > threshold; `get_ox[i]` is the face between cells i − 1
+and i). "Sealed" is read on the pressure operator's own graph at aperture > 0, whose nodes also
+include the solid-centred cut cells. Script and commands: log, entries "Revision 1" and
+"2026-10-03 — Pocket pressure".
 
 **Staggered bed:**
 
 | step | W-residual | velocity residual | pressure share of W² | cells holding 90 % of P-energy | in sealed pockets | behind apertures ≤ 0.2 | plain ⟨u_x⟩ error |
 |---|---|---|---|---|---|---|---|
-| 300 | 7.9e-5 | 1.3e-6 | 0.9997 | 105 | 58 % | 69 % | 5.6e-5 |
-| 600 | 3.2e-5 | 3.1e-7 | 0.9999 | 66 | 64 % | 77 % | 1.7e-5 |
-| 1000 | 1.6e-5 | 1.2e-7 | 0.99995 | 50 | 63 % | 83 % | 7.3e-6 |
-| 1500 | 9.4e-6 | 6.0e-8 | 0.99996 | 41 | 59 % | 85 % | 3.7e-6 |
+| 300 | 7.9e-5 | 1.3e-6 | 0.9997 | 105 | 0.1 % | 84 % | 5.6e-5 |
+| 600 | 3.2e-5 | 3.1e-7 | 0.9999 | 66 | 0.4 % | 96 % | 1.7e-5 |
+| 1000 | 1.6e-5 | 1.2e-7 | 0.99995 | 50 | 0.8 % | 98.7 % | 7.3e-6 |
+| 1500 | 9.4e-6 | 6.0e-8 | 0.99996 | 41 | 1.1 % | 99.5 % | 3.7e-6 |
 
-- **Connectivity:** 1,086 fluid components. One main component of 103,767 cells; 1,085 pockets
-  holding 1,168 cells, nearly all single cells at sphere near-contacts, sealed by zero apertures.
+*Corrected 2026-10-03* (the two connectivity columns; every other column re-measured identical):
+~~in sealed pockets 58 / 64 / 63 / 59 %, behind apertures ≤ 0.2 69 / 77 / 83 / 85 %~~. On the
+fluid-centred graph the sealed share is 18 / 24 / 27 / 31 %.
+
+- **Connectivity:** the pressure operator's graph has 116 components: a main one holding 104,816 of
+  the 104,935 fluid-centred cells, and 115 pockets of 126 cells (119 fluid-centred), 104 single cells
+  and 11 pairs at sphere near-contacts, sealed by zero apertures. On the fluid-centred graph, 205
+  pockets of 217 cells; 230 / 257 / 317 components at apertures > 0.05 / 0.1 / 0.2.
+  *Corrected 2026-10-03:* ~~1,086 fluid components; main 103,767 cells; 1,085 pockets holding
+  1,168 cells~~.
 - **Decay:** the W-residual's per-step rate creeps from 0.991 (steps 100–200) to 0.999 (steps
   1200–1500), a power-law tail rather than one eigenvalue. Successive late residuals are
   only partly aligned (cos 0.87 → 0.96), and the velocity residual is equally localized (90 % of
   its energy in 37–119 entries after step 1000).
 - **Collocated bed:** the same structure. The ghost scheme already decouples 216 cells in 205
-  components from its projection. The late pressure-residual energy is 74–99.9 % behind apertures
-  ≤ 0.2, and the pressure share of W² is 0.9998.
+  components from its projection and pins their pressure to 0. The late pressure-residual energy is
+  91.5–99.9 % behind apertures ≤ 0.2 (*corrected 2026-10-03,* ~~74–99.9 %~~), and the pressure share
+  of W² is 0.9998.
 
 **Physical reading.**
-- A sealed cell's pressure is a gauge mode with no coupling to any velocity. Each pocket adds a
-  null vector of the pressure operator, while the metric removes only the global constant, and the
-  value drifts with whatever the projection solve writes into the decoupled row.
+- A sealed cell's pressure is a gauge mode. Each pocket adds a null vector of the pressure operator,
+  while the metric removes only the global constant, and the value is whatever the projection
+  solve writes into the decoupled row. It is set in the transient and then frozen: in a converged
+  production run the pockets span 0.59 of the main-space pressure range and move 8e-3 of it in 500
+  further steps. *Added 2026-10-03:* it is not quite uncoupled from velocity. 9 of the 115 pockets
+  border one of the 41 staggered velocity points that the momentum mask keeps live (fluid at the
+  face) although its projection aperture is exactly 0; the predictor's −∇P acts there and the
+  projection cannot correct it. Offsetting every pocket by 1000× the main range moves the velocity
+  by 0.52 max|u| locally and K by 3.2e-5 after one step; realistic offsets move K by ≤ 1e-7
+  (`tests/study/pocket_pressure_probe.py`, log entry "2026-10-03 — Pocket pressure").
 - A cell behind a face of small aperture a equilibrates through that face's flux at a rate
   1 − O(a): a lubrication-film pressure.
 - Neither moves ⟨u_x⟩, and both dominate a pressure-weighted residual. That is why revision 0's
@@ -597,7 +621,7 @@ settings, and → 0 at a tight stop. Gate G1 tests the tight form at ≤ 1e-8.
 
 **Gauge.** In a periodic (or wall-only) box, g(x + c·1_P) = g(x) + c·1_P. The constant P mode is
 neutral: it affects neither u nor K nor the certificate. The same holds per sealed fluid pocket
-(§1.2). Since rev 1 the metric does not measure P at all (§3.2), so none of these modes needs
+(§1.2), up to the few live velocity points behind zero apertures (§1.2, added 2026-10-03). Since rev 1 the metric does not measure P at all (§3.2), so none of these modes needs
 special treatment. They are carried along by the mix and otherwise left alone.
 
 ### 2.4 What the argument does not cover (stability), and how the design handles it
@@ -1485,7 +1509,7 @@ and has a default that work proceeds with.
 | Q14 | Delete the core's Pressure role, `sdf`, `cP`, `gauged` and pass 1 (WO-3b part 2)? | preference (a tested core interface) | **yes**, as a separate commit, before the core tag. It has no consumer after rev 1, and removing it after the tag would be a breaking change | user / core owner |
 | Q15 | Is `kRitzFloorFactor = 1000` right on other configurations (GPU, MPI, large D)? | fact | **CLOSED by rev 2** — answered no by WO-5 (false "unstable" at tight settings); the guard and the constant are removed | — |
 | Q16 | Is the certification budget 2·(num_passes + 3) enough at production resolution (N = 128 beds, CUDA)? | fact | as stated. Measured passes within 5–10 blocks; one run (collocated bed, m = 3) used 12 and resumed once | G2 at WO-5; if a case needs > 12 blocks routinely, report the d/R traces to the architect, do not raise the budget |
-| Q17 | The 1,168 sealed single-cell pockets on the A1 bed: their pressure is never converged by either march (§1.2) and `get_p()` returns arbitrary values there. Act on it? | preference (outside this campaign) | **no action here**; note it for the A1 owner. It touches neither velocity nor K. A pressure post-processing user should mask pockets | user |
+| Q17 | The 126 sealed cells in 115 pockets on the A1 bed (*corrected 2026-10-03,* ~~1,168~~): their pressure is never converged by either march (§1.2) and `get_p()` returns arbitrary values there. Act on it? | preference (outside this campaign) | **no action here**; note it for the A1 owner. It touches neither velocity nor K. A pressure post-processing user should mask pockets | user |
 | Q18 | **(rev 2)** What does `converged=True` from an accelerated march promise: stationarity at this Δt over the certification's plain steps, or also that the plain march from the initial state would arrive there (dynamic stability)? | preference | **stationarity**, documented in the docstring, CLAUDE.md and §2.4 item 3. Reasons: it is exactly what the instrument certifies on the plain march too; in the supported scope the fixed point is unique (§2.3), so the certificate names THE discrete steady solution; for the numerical kind of instability (Δt beyond the explicit-advection limit) that solution is the right answer. A user who needs the stronger statement runs the plain march (`accelerate=False`) from the initial state — at its cost, the only test a slowly growing mode cannot pass; continuing plain from the accelerated result watches the same short horizon and adds little | user. If the user wants a built-in stability statement, it needs its own design pass: a plain verification tail whose horizon the user sets (detecting per-step growth 1 + ε needs ≳ 1/ε steps); a Ritz-type a-priori test is not that mechanism (rev 2) |
 | Q19 | **(rev 2)** Does WO-3c reduce the measured G8 overhead? | fact | expected: little — WO-5 measured latency (~26 synchronising calls), and WO-3c removes traffic, not calls | WO-8 re-measures G8 after WO-3c and the fusion |
 
