@@ -145,6 +145,40 @@ inline auto vofListCount(const Tab& T, LField start, LField end) {
   return [=](int k) { return end(T.base + k) - start(T.base + k); };
 }
 
+// The host x loops of the region kernels carry `omp simd` where `ccFor3`'s contract holds (an
+// iteration writes only its own cell and reads no cell another iteration of the row writes); with
+// the host's -ffp-contract=off that is bit-identical to the scalar loop. Same definition as
+// `mac_cutcell.hpp`'s.
+#ifndef PECLET_FLOW_OMP_SIMD
+#if defined(_OPENMP)
+#define PECLET_FLOW_OMP_SIMD _Pragma("omp simd")
+#else
+#define PECLET_FLOW_OMP_SIMD
+#endif
+#endif
+
+/// The row offsets of a host region launch: job k's rows are [off[k], off[k + 1]).
+struct VofRowTable {
+  long off[kVofBlockBatch + 1];
+};
+
+/// H-4(b): a host region kernel over ROWS -- `rows(k)` x-runs for job k, `row(k, r)` handling job
+/// k's local row r with the x loop inside -- so the job search and the index math run once per row,
+/// not once per cell. Static schedule: the rows are uniform, as in `ccFor3`.
+template <class Exec, class Rows, class F>
+inline void vofHostRowFor(const char* name, int nj, Rows rows, F row) {
+  VofRowTable R;
+  R.off[0] = 0;
+  for (int k = 0; k < nj; ++k)
+    R.off[k + 1] = R.off[k] + rows(k);
+  for (int k = nj; k < kVofBlockBatch; ++k)
+    R.off[k + 1] = R.off[nj];
+  Kokkos::parallel_for(name, Kokkos::RangePolicy<Exec>(Exec(), 0, R.off[nj]), [=](const long t) {
+    const int k = vofJobOf(R.off, t);
+    row(k, t - R.off[k]);
+  });
+}
+
 // ---- stage 1: the Courant numbers ---------------------------------------------------------------
 
 /// One team per job: `WyAdvector::maxCourant` or `maxCourantInterface` (per the job's
@@ -206,7 +240,24 @@ inline void vofBatchCfl(const VofBlockTable& T, SField out) {
 // ---- stage 2: the frozen dilation flag ----------------------------------------------------------
 
 /// `WyAdvector::freezeDilationFlag` over every job's extended block. `T.off` = extended lengths.
+/// Host: the extended block's rows (H-4b).
+template <class Exec = SExec>
 inline void vofBatchFreeze(const VofBlockTable& T) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_freeze", T.nj,
+        [&](const int k) { return static_cast<long>(T.job[k].e.y) * T.job[k].e.z; },
+        [=](const int k, const long r) {
+          const VofBlockJob& J = T.job[k];
+          const long i0 = r * J.e.x;  // extended row r = (r % e.y, r / e.y)
+          const double* c = J.c;
+          unsigned char* cc = J.cc;
+          PECLET_FLOW_OMP_SIMD
+          for (int x = 0; x < J.e.x; ++x)
+            cc[i0 + x] = c[i0 + x] > 0.5 ? 1u : 0u;
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_freeze", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -288,9 +339,44 @@ inline long vofJobFaces(const VofBlockJob& J, int d) {
   return static_cast<long>(J.n.x + (d == 0)) * (J.n.y + (d == 1)) * (J.n.z + (d == 2));
 }
 
+/// The flux of `d`-face `p` of job `J` (the per-cell body of `vofBatchFlux`, both launch forms).
+KOKKOS_INLINE_FUNCTION void vofBatchFluxCell(const VofBlockJob& J, int d, long p) {
+  const I3 e = J.e;
+  const long sd = d == 0 ? 1 : (d == 1 ? static_cast<long>(e.x) : static_cast<long>(e.x) * e.y);
+  const VofRawField c{J.c}, mx{J.mx}, my{J.my}, mz{J.mz}, al{J.al}, u{J.u[d]};
+  if (J.outside != nullptr) {
+    J.fl[p] =
+        wyFaceFluxBc(u(p) * J.dth, p, sd, d, c, mx, my, mz, al, VofRawMask{J.outside}, J.weps);
+    return;
+  }
+  J.fl[p] = wyFaceFlux(u(p) * J.dth, p, sd, d, c, mx, my, mz, al, J.weps);
+}
+
 /// `WyAdvector::computeFluxesImpl` (uncut): one flux per `d`-face, `wyFaceFlux` (or, for a job
-/// carrying the WO-R mask, `wyFaceFluxBc`). `T.off` = `vofJobFaces(d)`.
+/// carrying the WO-R mask, `wyFaceFluxBc`). `T.off` = `vofJobFaces(d)`. Host: the face range's
+/// rows (H-4b).
+template <class Exec = SExec>
 inline void vofBatchFlux(const VofBlockTable& T, int d) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_flux", T.nj,
+        [&](const int k) {
+          const VofBlockJob& J = T.job[k];
+          return static_cast<long>(J.n.y + (d == 1)) * (J.n.z + (d == 2));
+        },
+        [=](const int k, const long r) {
+          const VofBlockJob& J = T.job[k];
+          const int ay = J.n.y + (d == 1), g = J.g;
+          const int y = static_cast<int>(r % ay) + g - (d == 1);
+          const int z = static_cast<int>(r / ay) + g - (d == 2);
+          const long i0 = L3(0, y, z, J.e);
+          const int x0 = g - (d == 0), x1 = g + J.n.x;
+          PECLET_FLOW_OMP_SIMD
+          for (int x = x0; x < x1; ++x)
+            vofBatchFluxCell(J, d, i0 + x);
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_flux", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -302,17 +388,7 @@ inline void vofBatchFlux(const VofBlockTable& T, int d) {
         const int x = static_cast<int>(r % ax) + g - (d == 0);
         const int y = static_cast<int>((r / ax) % ay) + g - (d == 1);
         const int z = static_cast<int>(r / (static_cast<long>(ax) * ay)) + g - (d == 2);
-        const I3 e = J.e;
-        const long sd =
-            d == 0 ? 1 : (d == 1 ? static_cast<long>(e.x) : static_cast<long>(e.x) * e.y);
-        const long p = L3(x, y, z, e);
-        const VofRawField c{J.c}, mx{J.mx}, my{J.my}, mz{J.mz}, al{J.al}, u{J.u[d]};
-        if (J.outside != nullptr) {
-          J.fl[p] = wyFaceFluxBc(u(p) * J.dth, p, sd, d, c, mx, my, mz, al, VofRawMask{J.outside},
-                                 J.weps);
-          return;
-        }
-        J.fl[p] = wyFaceFlux(u(p) * J.dth, p, sd, d, c, mx, my, mz, al, J.weps);
+        vofBatchFluxCell(J, d, L3(x, y, z, J.e));
       });
 }
 
@@ -346,9 +422,39 @@ inline void vofBatchBcLedger(const VofBlockTable& T, int d, SField out, int stri
       });
 }
 
+/// The sweep update of inner cell `i` of job `J` (the per-cell body of `vofBatchUpdate`).
+KOKKOS_INLINE_FUNCTION void vofBatchUpdateCell(const VofBlockJob& J, int d, long i) {
+  const I3 e = J.e;
+  const long sd = d == 0 ? 1 : (d == 1 ? static_cast<long>(e.x) : static_cast<long>(e.x) * e.y);
+  const double dth = J.dth;
+  const VofRawField c{J.c}, fl{J.fl}, u{J.u[d]};
+  const unsigned char* cc = J.cc;
+  // The dilation term must scale the SAME uf by the SAME dt/h as the flux, or the exact
+  // cancellation in full cells (advect_wy.hpp header) is lost to rounding.
+  const double aP = u(i) * dth, aM = u(i - sd) * dth;
+  const double dil = cc[i] ? (aP - aM) : 0.0;
+  c(i) = c(i) + (fl(i - sd) - fl(i)) + dil;
+}
+
 /// `WyAdvector::applySweepImpl` (uncut) over the inner regions (`T.off` = `vofJobInner`); the
-/// expression verbatim.
+/// expression verbatim. Host: the inner rows (H-4b).
+template <class Exec = SExec>
 inline void vofBatchUpdate(const VofBlockTable& T, int d) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_update", T.nj,
+        [&](const int k) { return static_cast<long>(T.job[k].n.y) * T.job[k].n.z; },
+        [=](const int k, const long r) {
+          const VofBlockJob& J = T.job[k];
+          const int g = J.g;
+          const long i0 =
+              L3(0, static_cast<int>(r % J.n.y) + g, static_cast<int>(r / J.n.y) + g, J.e);
+          PECLET_FLOW_OMP_SIMD
+          for (int x = g; x < g + J.n.x; ++x)
+            vofBatchUpdateCell(J, d, i0 + x);
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_update", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -360,24 +466,62 @@ inline void vofBatchUpdate(const VofBlockTable& T, int d) {
         const int x = static_cast<int>(r % n.x) + g;
         const int y = static_cast<int>((r / n.x) % n.y) + g;
         const int z = static_cast<int>(r / (static_cast<long>(n.x) * n.y)) + g;
-        const long sd =
-            d == 0 ? 1 : (d == 1 ? static_cast<long>(e.x) : static_cast<long>(e.x) * e.y);
-        const double dth = J.dth;
-        const VofRawField c{J.c}, fl{J.fl}, u{J.u[d]};
-        const unsigned char* cc = J.cc;
-        const long i = L3(x, y, z, e);
-        // The dilation term must scale the SAME uf by the SAME dt/h as the flux, or the exact
-        // cancellation in full cells (advect_wy.hpp header) is lost to rounding.
-        const double aP = u(i) * dth, aM = u(i - sd) * dth;
-        const double dil = cc[i] ? (aP - aM) : 0.0;
-        c(i) = c(i) + (fl(i - sd) - fl(i)) + dil;
+        vofBatchUpdateCell(J, d, L3(x, y, z, e));
       });
 }
 
 // ---- stage 3e: the block ghost policy (`VofBlockSet::fillBlockGhosts`), pass by pass ------------
 
-/// Pass 1: every ghost cell of every job -> 0. `T.off` = extended lengths.
+/// Pass 1: every ghost cell of every job -> 0. `T.off` = extended lengths. Host: only the ghost
+/// shell's rows, in `CutcellMG::fillWrap`'s three-slab split (H-4b) -- the z-ghost planes (every
+/// y), the y-ghost rows of the inner z range, then the two x-ghost runs of each inner row.
+template <class Exec = SExec>
 inline void vofBatchGhostZero(const VofBlockTable& T) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_ghost_zero", T.nj,
+        [&](const int k) {
+          const VofBlockJob& J = T.job[k];
+          return static_cast<long>(J.e.z - J.n.z) * J.e.y +
+                 static_cast<long>(J.n.z) * (J.e.y - J.n.y) + static_cast<long>(J.n.z) * J.n.y;
+        },
+        [=](const int k, const long r) {
+          const VofBlockJob& J = T.job[k];
+          const I3 e = J.e, n = J.n;
+          const int g = J.g;
+          const long rZ = static_cast<long>(e.z - n.z) * e.y,
+                     rY = static_cast<long>(n.z) * (e.y - n.y);
+          double* c = J.c;
+          if (r < rZ + rY) {  // a whole ghost row
+            int y, z;
+            if (r < rZ) {  // z-ghost plane row
+              const int l = static_cast<int>(r / e.y);
+              y = static_cast<int>(r - static_cast<long>(l) * e.y);
+              z = l < g ? l : n.z + l;
+            } else {  // y-ghost row of the inner z range
+              const long t2 = r - rZ;
+              const int zi = static_cast<int>(t2 / (e.y - n.y));
+              const int l = static_cast<int>(t2 - static_cast<long>(zi) * (e.y - n.y));
+              y = l < g ? l : n.y + l;
+              z = g + zi;
+            }
+            const long i0 = L3(0, y, z, e);
+            PECLET_FLOW_OMP_SIMD
+            for (int x = 0; x < e.x; ++x)
+              c[i0 + x] = 0.0;
+            return;
+          }
+          const long t3 = r - rZ - rY;  // the x-ghost runs of inner row (yi, zi)
+          const int zi = static_cast<int>(t3 / n.y),
+                    yi = static_cast<int>(t3 - static_cast<long>(zi) * n.y);
+          const long i0 = L3(0, g + yi, g + zi, e);
+          for (int x = 0; x < g; ++x)
+            c[i0 + x] = 0.0;
+          for (int x = g + n.x; x < e.x; ++x)
+            c[i0 + x] = 0.0;
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_ghost_zero", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -397,7 +541,54 @@ inline void vofBatchGhostZero(const VofBlockTable& T) {
 
 /// Pass 2 on axis `a` (`colour_field.hpp::periodicFill`, one axis): only the jobs whose block spans
 /// the periodic axis `a` are in `T`; `T.off` = the transverse plane sizes `dims[b] * dims[c]`.
+/// Host: only the rows of the two `a`-ghost slabs (H-4b) -- for `a` = x the `g` cells at each end
+/// of every extended row, for `a` = y or z whole x-rows. Each ghost cell is written once, from a
+/// cell inside along `a`, as in the device form.
+template <class Exec = SExec>
 inline void vofBatchPeriodic(const VofBlockTable& T, int a) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_periodic", T.nj,
+        [&](const int k) {
+          const I3 e = T.job[k].e;
+          const int g = T.job[k].g;
+          return a == 0 ? static_cast<long>(e.y) * e.z
+                        : (a == 1 ? 2L * g * e.z : static_cast<long>(e.y) * 2 * g);
+        },
+        [=](const int k, const long r) {
+          const VofBlockJob& J = T.job[k];
+          const I3 e = J.e;
+          const int g = J.g;
+          double* f = J.c;
+          if (a == 0) {  // extended row r: the g x-ghosts at each end
+            const int N = e.x - 2 * g;
+            const long base = r * e.x;
+            for (int gl = 0; gl < g; ++gl) {
+              f[base + gl] = f[base + gl + N];
+              f[base + g + N + gl] = f[base + g + gl];
+            }
+            return;
+          }
+          long dst, src;
+          if (a == 1) {  // ghost row (l, z): y = l (low) or g + N + (l - g) (high)
+            const int N = e.y - 2 * g;
+            const int z = static_cast<int>(r / (2 * g)), l = static_cast<int>(r % (2 * g));
+            const int y = l < g ? l : N + l, sy = l < g ? l + N : l;  // high: y - N = g + (l - g)
+            dst = L3(0, y, z, e);
+            src = L3(0, sy, z, e);
+          } else {  // ghost row (y, l)
+            const int N = e.z - 2 * g;
+            const int l = static_cast<int>(r / e.y), y = static_cast<int>(r % e.y);
+            const int z = l < g ? l : N + l, sz = l < g ? l + N : l;
+            dst = L3(0, y, z, e);
+            src = L3(0, y, sz, e);
+          }
+          PECLET_FLOW_OMP_SIMD
+          for (int x = 0; x < e.x; ++x)
+            f[dst + x] = f[src + x];
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_periodic", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -422,28 +613,56 @@ inline void vofBatchPeriodic(const VofBlockTable& T, int a) {
       });
 }
 
+/// The clamp of extended cell (x, y, z) of job `J` (the per-cell body of `vofBatchClamp`).
+KOKKOS_INLINE_FUNCTION void vofBatchClampCell(const VofBlockJob& J, int x, int y, int z, int q0,
+                                              int q1, int q2, bool p0, bool p1, bool p2) {
+  const I3 e = J.e, o = J.o;
+  const int g = J.g;
+  const int gx = x - g + o.x, gy = y - g + o.y, gz = z - g + o.z;
+  const int cx = p0 ? gx : (gx < 0 ? 0 : (gx >= q0 ? q0 - 1 : gx));
+  const int cy = p1 ? gy : (gy < 0 ? 0 : (gy >= q1 ? q1 - 1 : gy));
+  const int cz = p2 ? gz : (gz < 0 ? 0 : (gz >= q2 ? q2 - 1 : gz));
+  if (cx != gx || cy != gy || cz != gz)
+    J.c[L3(x, y, z, e)] = J.c[L3(cx - o.x + g, cy - o.y + g, cz - o.z + g, e)];
+}
+
 /// Pass 3 (`colour_field.hpp::clampFill`, `skip = 0`): the part of each extended block outside a
-/// NON-periodic domain takes the globally clamped value. `T.off` = extended lengths.
+/// NON-periodic domain takes the globally clamped value. `T.off` = extended lengths. Host: the
+/// extended rows, skipping a row inside the domain on every non-periodic axis -- no cell of it
+/// writes (H-4b). A source cell is inside on every non-periodic axis, so it is never written.
+template <class Exec = SExec>
 inline void vofBatchClamp(const VofBlockTable& T, I3 gs, bool px, bool py, bool pz) {
   const bool p0 = px, p1 = py, p2 = pz;
   const int q0 = gs.x, q1 = gs.y, q2 = gs.z;
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_clamp", T.nj,
+        [&](const int k) { return static_cast<long>(T.job[k].e.y) * T.job[k].e.z; },
+        [=](const int k, const long r) {
+          const VofBlockJob& J = T.job[k];
+          const I3 e = J.e, o = J.o;
+          const int g = J.g;
+          const int y = static_cast<int>(r % e.y), z = static_cast<int>(r / e.y);
+          const int gy = y - g + o.y, gz = z - g + o.z, gx0 = o.x - g, gx1 = o.x - g + e.x;
+          if ((p1 || (gy >= 0 && gy < q1)) && (p2 || (gz >= 0 && gz < q2)) &&
+              (p0 || (gx0 >= 0 && gx1 <= q0)))
+            return;  // inside on every non-periodic axis: nothing in this row writes
+          for (int x = 0; x < e.x; ++x)
+            vofBatchClampCell(J, x, y, z, q0, q1, q2, p0, p1, p2);
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_clamp", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
         const int k = vofJobOf(T.off, t);
         const VofBlockJob& J = T.job[k];
         const long i = t - T.off[k];
-        const I3 e = J.e, o = J.o;
-        const int g = J.g;
+        const I3 e = J.e;
         const int x = static_cast<int>(i % e.x);
         const int y = static_cast<int>((i / e.x) % e.y);
         const int z = static_cast<int>(i / (static_cast<long>(e.x) * e.y));
-        const int gx = x - g + o.x, gy = y - g + o.y, gz = z - g + o.z;
-        const int cx = p0 ? gx : (gx < 0 ? 0 : (gx >= q0 ? q0 - 1 : gx));
-        const int cy = p1 ? gy : (gy < 0 ? 0 : (gy >= q1 ? q1 - 1 : gy));
-        const int cz = p2 ? gz : (gz < 0 ? 0 : (gz >= q2 ? q2 - 1 : gz));
-        if (cx != gx || cy != gy || cz != gz)
-          J.c[L3(x, y, z, e)] = J.c[L3(cx - o.x + g, cy - o.y + g, cz - o.z + g, e)];
+        vofBatchClampCell(J, x, y, z, q0, q1, q2, p0, p1, p2);
       });
 }
 
@@ -816,8 +1035,43 @@ inline void vofCurvCompact(const VofCurvTable& T, bool grown, LField list, LFiel
       });
 }
 
+/// Rows of job `J`'s grown (`grown`) or inner region, for the host row forms (H-4b).
+inline long vofCurvRows(const VofCurvJob& J, bool grown) {
+  const int gr = grown ? kPvHalf : 0;
+  return static_cast<long>(J.n.y + 2 * gr) * (J.n.z + 2 * gr);
+}
+
+/// The first cell of row `r` of job `J`'s grown or inner region, and the region's x range.
+inline long vofCurvRow(const VofCurvJob& J, long r, bool grown, int& x0, int& x1) {
+  const int gr = grown ? kPvHalf : 0;
+  const int ry = J.n.y + 2 * gr;
+  x0 = J.g - gr;
+  x1 = J.g + J.n.x + gr;
+  return L3(0, J.g - gr + static_cast<int>(r % ry), J.g - gr + static_cast<int>(r / ry), J.e);
+}
+
 /// `reconstructPlanes` (worklist mode), part 1: zero the four plane fields over the grown region.
+/// Host: the grown rows (H-4b).
+template <class Exec = SExec>
 inline void vofCurvPlanesZero(const VofCurvTable& T) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_curv_planes_zero", T.nj,
+        [&](const int k) { return vofCurvRows(T.job[k], true); },
+        [=](const int k, const long r) {
+          const VofCurvJob& J = T.job[k];
+          int x0, x1;
+          const long i0 = vofCurvRow(J, r, true, x0, x1);
+          PECLET_FLOW_OMP_SIMD
+          for (int x = x0; x < x1; ++x) {
+            J.mx[i0 + x] = 0.0;
+            J.my[i0 + x] = 0.0;
+            J.mz[i0 + x] = 0.0;
+            J.al[i0 + x] = 0.0;
+          }
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_curv_planes_zero", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -861,8 +1115,26 @@ inline void vofCurvPlanesList(const VofCurvTable& T, LField list, LField start, 
       });
 }
 
-/// `heightPass` (worklist mode), part 1: every inner cell to kappa = 0, branch = kCurvNone.
+/// `heightPass` (worklist mode), part 1: every inner cell to kappa = 0, branch = kCurvNone. Host:
+/// the inner rows (H-4b).
+template <class Exec = SExec>
 inline void vofCurvHfReset(const VofCurvTable& T) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_curv_hf_reset", T.nj,
+        [&](const int k) { return vofCurvRows(T.job[k], false); },
+        [=](const int k, const long r) {
+          const VofCurvJob& J = T.job[k];
+          int x0, x1;
+          const long i0 = vofCurvRow(J, r, false, x0, x1);
+          PECLET_FLOW_OMP_SIMD
+          for (int x = x0; x < x1; ++x) {
+            J.kap[i0 + x] = 0.0;
+            J.br[i0 + x] = static_cast<double>(kCurvNone);
+          }
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_curv_hf_reset", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -996,29 +1268,50 @@ inline void vofCurvListPass(const VofCurvTable& T, int pass, LField list, LField
       });
 }
 
+/// The three CSF face-force components at the low faces of inner cell `i` of job `J` (the
+/// per-cell body of `vofCsfForceBatch`).
+KOKKOS_INLINE_FUNCTION void vofCsfForceCell(const VofCurvJob& J, long i, double sig, double w0,
+                                            double w1, double w2) {
+  const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+  const VofRawField cv{J.c}, kp{J.kap}, kb{J.br};
+  for (int cc = 0; cc < 3; ++cc) {
+    const double wc = cc == 0 ? w0 : (cc == 1 ? w1 : w2);
+    const long strd = (cc == 0) ? 1 : (cc == 1 ? sy : sz);
+    const double dC = cv(i) - cv(i - strd);
+    double f = 0.0;
+    if (dC != 0.0) {
+      double kf = 0.0;
+      vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
+      f = vof::csfFaceForce(sig, kf, dC, wc);
+    }
+    J.f[cc][i] = f;
+  }
+}
+
 /// `VofBlockSet::buildCsfForce` for every job, the three components per cell: the V4 balanced-force
-/// CSF at the LOW face of each inner cell, the per-block kernel's expressions verbatim.
+/// CSF at the LOW face of each inner cell, the per-block kernel's expressions verbatim. Host: the
+/// inner rows (H-4b).
+template <class Exec = SExec>
 inline void vofCsfForceBatch(const VofCurvTable& T, double sig, double w0, double w1, double w2) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostRowFor<Exec>(
+        "vof::block::batch_csf_force", T.nj,
+        [&](const int k) { return vofCurvRows(T.job[k], false); },
+        [=](const int k, const long r) {
+          const VofCurvJob& J = T.job[k];
+          int x0, x1;
+          const long i0 = vofCurvRow(J, r, false, x0, x1);
+          PECLET_FLOW_OMP_SIMD
+          for (int x = x0; x < x1; ++x)
+            vofCsfForceCell(J, i0 + x, sig, w0, w1, w2);
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_csf_force", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
         const int k = vofJobOf(T.off, t);
-        const VofCurvJob& J = T.job[k];
-        const long i = vofCurvCell(J, t - T.off[k], false);
-        const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
-        const VofRawField cv{J.c}, kp{J.kap}, kb{J.br};
-        for (int cc = 0; cc < 3; ++cc) {
-          const double wc = cc == 0 ? w0 : (cc == 1 ? w1 : w2);
-          const long strd = (cc == 0) ? 1 : (cc == 1 ? sy : sz);
-          const double dC = cv(i) - cv(i - strd);
-          double f = 0.0;
-          if (dC != 0.0) {
-            double kf = 0.0;
-            vof::csfFaceCurvature(kp(i - strd), kb(i - strd), kp(i), kb(i), kf);
-            f = vof::csfFaceForce(sig, kf, dC, wc);
-          }
-          J.f[cc][i] = f;
-        }
+        vofCsfForceCell(T.job[k], vofCurvCell(T.job[k], t - T.off[k], false), sig, w0, w1, w2);
       });
 }
 
