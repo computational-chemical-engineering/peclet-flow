@@ -344,3 +344,22 @@ With the restated asserts `scalar_cutcell_geometry` passes, as do `_mpi_np{1,2,4
 3. Possible WO-8 refinement, held: for conducting contacts with gap < ~h, a film-conduction coupling
    of the two solid probes through the gap, k_f/δ_n in series; equivalent in spirit to Peters'
    very-close formula. Only if the G13 gate demands it.
+
+## 2026-10-03 — WO-3 start: orchestrator rulings
+
+The handoff is in `doc/scalar_ibm_wo3_handoff.md` (untracked by repo convention).
+
+**Merged tree verified** (184ae9f): build clean; `units_|scalar_cutcell_geometry` 14/14; G12 12/12.
+
+**Units (design §1.2 amended by Q6).**
+- Reuse `diffToInt()` (D), `divToInt()` (S), `volToPhys()·divToPhys()` (body flux) and
+  `areaToPhys()`.
+- Append only `speedToInt()` = tRef/hRef, for Robin k and Neumann q.
+- `resistToInt` → WO-7.
+
+**Rulings.**
+- **D-WO3-1.** Steady gates G1/G2/G3a/G7 run on the two coarsest rungs with maxit 3000 in WO-3; the
+  full ladder reruns with WO-4.
+- **D-WO3-2.** `scalar_geometry`/`scalar_census` reject non-cut-cell names.
+- **D-WO3-3.** Rebuild the operator every advance; caching → WO-9.
+- **D-WO3-4.** A no-op guard for faces toward non-unknown cells is allowed.
