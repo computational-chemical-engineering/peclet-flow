@@ -271,6 +271,14 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(colocated_open_boundary PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # The HIGH-side domain face of a MAC face field survives the ghost fills (doc/uf_outlet_fix.md):
+  # the backflow census equals the divergence-consistent outlet flux, a c = 1 scalar stays 1 in the
+  # outlet column, and a high-side inflow is not handed the outlet's plane. Both grids.
+  add_test(NAME open_face_plane
+           COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_open_face_plane.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(open_face_plane PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # A scalar enters through a Dirichlet inflow face with the prescribed flux u_n * v: the inlet
   # column of a c = 1 field stays 1, and a 1-D plug's inventory is exactly U t (doc/uf_outlet_fix.md
   # section B: stale cOld ghosts, and the reflection ghost that carried u_n (2v - c_inner)).
