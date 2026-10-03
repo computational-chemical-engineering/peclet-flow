@@ -33,6 +33,7 @@ that depends on the normal. It is committed with this note.
 | D14 | Container-free kernels in **core** (`scheme/cut_cell_geometry.hpp`, `scheme/probe_flux.hpp`); driver, storage, operators, ScalarMG and Krylov in flow | everything in flow; a core Krylov | §7 |
 | D15 | Closure problems by a **mean-gradient mode** (c = G·x + θ, θ periodic, moving frame) and a steady solve | user-assembled sources | §1.5, §8 |
 | D16 | Opt-in per scalar: `add_scalar(..., cutcell=True)`; physical units on the new path (DEFAULT-PENDING-USER: spelling) | a second entry point; switching the legacy path | §8 |
+| D17 | Steady mode with advection: the V-cycle runs on the **advective surrogate**: the level-0 bands (FOU couplings included) with the lumped wall, and coarse advection = the summed positive parts of the sub-face fluxes (piecewise-constant Galerkin), band-form RB-GS. Transient mode and steady mode at rest keep the symmetric surrogate, bitwise (Amendment A2) | the symmetric surrogate with lumped outflow (fails beyond Pe_h ≈ 0.3); advection at level 0 only; pseudo-transient continuation; GraphAMG; defect correction; VelocityMG's restricted-velocity coarse upwinding; downstream/line smoothers; F/W-cycles as the default | §6.7 (A2) |
 
 ---
 
@@ -562,6 +563,9 @@ Level 0, per phase:
 
 - S is symmetric positive definite: an M-matrix, and the 2×2 coupling blocks are PSD.
 - It is singular only in the steady pure-Neumann case (§5.1).
+- *Amendment A2:* S, with its lumped outflow, is the preconditioner in transient mode and in steady
+  mode at rest. In **steady mode with advection** the surrogate also keeps the FOU off-diagonals
+  (S_adv: the true bands with SAC as the diagonal; §6.7, A2).
 - Measured (2-D, exact surrogate solve): BiCGStab takes 8–9 iterations for Dirichlet and 2–5 for
   Robin, mesh-independent from ND 32 to 128. The centroid-distance surrogate needed 59–87 (ρ = 0.995).
   That is why the lumped wall term uses the **probe** distance.
@@ -655,6 +659,9 @@ cut-cell scalar.
     the coarse problem drifts toward a stiff Dirichlet wall that the fine problem does not have.
   - Rediscretizing s keeps the ratio level-independent. That is the consistent coarse surrogate.
 - **Lumped outflow:** `restrictAvg` of the level-0 per-cell field, every step (one kernel per level).
+  *Amendment A2:* this holds in transient mode only. In steady mode with advection the coarse levels
+  carry the summed sub-face fluxes as band couplings, and only the open-face outflow ω_open rides on
+  the mass (§6.7, A2).
 - **Pins:** a coarse cell is pinned for phase p iff all its children are pinned (restrict flags with
   max). Pinned rows are identity rows with zero correction.
 - **Dirichlet domain faces on level L:** 2Λ w_a(L) a_bf,C, using `touchesGlobalFace` on the level.
@@ -936,13 +943,300 @@ the moving bodies' band is possible. Two rules would then be needed:
 The geometric conservation law needs the wall-velocity flux that flow already has for moving bodies.
 Not designed further here.
 
-### 6.7 Steady mode with advection (v1)
+### 6.7 Steady mode with advection (v1; preconditioner superseded by Amendment A2)
 
-- Implicit FOU on all faces, with the outflow lumped onto the surrogate: first order in advection,
-  documented.
+- Implicit FOU on all faces: first order in advection, documented. The discretization stands.
 - Deferred-correction Koren (flow's momentum precedent: implicit FOU plus lagged (Koren − FOU)) is
   WO-11, optional.
-- The v1 gates G7b and G8 involve no transport across the gradient, so v1 is sufficient for them.
+- *Refuted by WO-5 (log, Q-H):* "the outflow lumped onto the surrogate suffices, because G7b and G8
+  involve no transport across the gradient". The Krylov method meets every error component, not
+  only the solution's, so the preconditioner must carry advection wherever the operator does.
+  Amendment A2 replaces the steady preconditioner.
+
+#### Amendment A2 (WO-5 Q-H, 2026-10-03) — steady advection: the upwind couplings enter the surrogate
+
+**Problem.** WO-5 measured the steady solve on the C3 problem (64³ periodic box, Dirichlet sphere
+R = 16h, a source, the projected Stokes field rescaled to peak cell Péclet Pe_h = |u|h/D):
+
+| Pe_h | 0 | 0.1 | 0.3 | 1 | 3, 10 |
+|---|---|---|---|---|---|
+| BiCGStab iterations | 13 | 40 | 89 | 200, not converged (1.7e-4) | 127, 200 (residual ≥ 1) |
+
+Transient mode is unaffected: 5–6 per step advecting, the same as at rest. The first scientific use
+of this code (dispersion closure problems in periodic beds, paper A4) needs steady solves up to
+Pe_h ≈ 10.
+
+**Cause (first principles).**
+- Split A = S + K′, where S is the symmetric surrogate and K′ is essentially the skew (central)
+  part of the FOU operator. For a Fourier mode of wavenumber k along the flow, S⁻¹K′ ≈ iUk/(Dk²).
+- The preconditioned spectrum therefore lies on a vertical segment 1 ± iβ with
+  β ≈ U/(D k_min) = Pe_h N/(2π), where N is the number of cells across the period.
+- An optimal Krylov polynomial on such a segment contracts by σ = β/(1 + √(1 + β²)) per degree:
+  about 23β degrees for 1e-10.
+  - A BiCGStab iteration adds about one useful degree here. Its real-ω minimal-residual half-step
+    barely damps eigenvalues near 1 ± iβ: |1 − ω(1 + iμ)|² ≥ μ²/(1 + μ²).
+  - At 64³, β = 1.0 / 3.1 / 10 for Pe_h 0.1 / 0.3 / 1. Predicted ≈ 25 / 70 / 230 iterations;
+    measured 40 / 89 / > 200.
+  - The 2-D prototype shows the predicted β ∝ Pe_h·N directly: 18 / 36 / 82 iterations at Pe_h 0.1
+    for N = 64 / 128 / 256 (table below).
+- **The modes at fault are the low modes** (wavelengths of the period). Only the coarse levels see
+  them, so advection in the level-0 smoother alone cannot help (measured: 35 / 119 / 222 iterations
+  at N = 128). The coarse operators must carry it.
+- **No symmetric surrogate can carry it.** Even with the upwind scheme's numerical diffusion added
+  (S = sym(A)), β ≈ Pe_h N/(2π(1 + Pe_h/2)) → N/π at large Pe_h, which is 20 at N = 64.
+- **Transient mode is genuinely different.** There, only the small-cell faces are implicit (≤ 1 %
+  of the flux faces); every other face's advection is on the right-hand side. The advective
+  coupling inside A is local, and nothing needs fixing.
+
+**Decision.**
+1. In **steady mode with advection** the V-cycle runs on the **advective surrogate**
+   S_adv = S + the implicit-FOU couplings, on every level.
+   - **Level 0** is exactly the true operator's 7 bands, with the diagonal replaced by SAC (the
+     bands' diagonal plus the lumped wall term, §4.3). There is no new storage. The probe overlay
+     stays lumped, as it is at rest.
+   - **Coarse levels** keep everything of §5.2 and A1: rediscretized faces, the averaged wall term,
+     the Dirichlet planes and the pins. They add the coarse advective couplings defined below, and
+     the level is assembled into 7 bands.
+   - **The path flag is global:** `advective = steady ∧ st.advecting`. `st.advecting` is already
+     an all-rank MAX. Every rank takes the same path, so the extra exchanges below cannot deadlock.
+2. **Transient mode, and steady mode at rest, are unchanged and stay bitwise.** They keep the WO-4
+   face-form path; in transient mode WO-5's lumped outflow still rides on the coarse mass.
+3. **Unchanged in every mode:**
+   - BiCGStab on the true operator, the stop rule, maxit 200;
+   - the level table and the level rule (steady = the full table);
+   - RB-GS with global-parity colours in the symmetric order: pre 2 sweeps R→B, post 2 B→R, bottom
+     8 R→B + 8 B→R;
+   - `restrictAvg`, trilinear `prolongAdd` with pinned cells re-zeroed, the singular mean removal;
+   - one V-cycle per preconditioner application.
+
+**Coarse advection: the summed positive parts of the sub-face fluxes.** This is the
+piecewise-constant Galerkin value.
+
+The level-0 input is φ_a(i) = F/V through the LOW a-face of cell i (§6.1, `st.phi[a]`; signed,
+positive along +a, internal 1/T). Per level L and axis a, two non-negative arrays live on the LOW
+a-face of each cell, both per unit level-L cell volume:
+- Qp_a(i): the flow toward +a, i.e. from cell i − e_a into i;
+- Qm_a(i): the flow toward −a, i.e. from i into i − e_a.
+
+Level 1 from level 0:
+
+    Qp_a(C) = (1/r_a) · avg over the sub-faces f of C's low a-face of P₊(f)
+    P₊(i)   = max(+φ_a(i), 0)   if cell i and cell i − e_a are both fluid unknowns, else 0
+    (Qm_a and P₋ the same with −φ_a)
+
+- "avg over the sub-faces" is exactly `coarsenOpenAvgCell`'s sum and division, in its fixed order,
+  applied to the functor P (the `GuardedProduct` pattern). It is followed by one multiplication by
+  1/r_a, with r_a ∈ {1, 2} the level's ratio on the face's normal axis.
+  - Every division is by a power of two, hence exact. The only rounding is the fixed-order sum.
+  - Together: Q_C = Σ_sub max(±φ, 0) · V/V_C, the summed sub-face flux per unit coarse volume. On a
+    (2,2,1) level this is Σ over 2 sub-faces / 4 on x and y, and Σ over 4 / 4 on z.
+- The guard is `advectionBands`' implicit-coupling predicate, so level-1 Q coarsens exactly the
+  couplings present in the level-0 bands.
+- Q is 0 on every non-periodic global face, because the ghost beyond it is not an unknown. That
+  includes open (inflow/outflow) faces; their outflow is carried by the mass (below).
+
+Level L ≥ 2 from level L − 1: the same, with P replaced by level L − 1's stored Qp/Qm.
+
+After coarsening a level:
+- `fill` each of the 6 arrays (exchange, or the single-rank periodic wrap);
+- zero the low-face plane of every non-periodic axis, exactly as the face products are
+  (`zeroPlanes(…, 0, g + 1)`).
+
+Why this value:
+- **It is variational.** It equals R A P on the FOU part for piecewise-constant P and
+  R = Pᵀ/N_L (`restrictAvg`).
+  - A sub-face interior to a coarse cell cancels exactly: it appears once as outflow of its upwind
+    child and once as inflow of its downwind child.
+  - Each boundary sub-face contributes its own upwind direction.
+  - So the coarse level keeps the fine operator's symmetric part (the numerical diffusion Σ|F|/2
+    per coarse face) in full. A1's failure mode was a coarse operator softer than the fine one on
+    the coarse space, and this construction cannot have it. A1's wall term is the same kind of
+    value.
+- **Conservation and divergence.**
+  - Every level is a conservative M-matrix with zero column sums: each coarse face flux enters the
+    upwind diagonal and the downwind off-diagonal with the same value.
+  - Row sums are zero up to the children's summed divergence, since the coarse divergence is
+    exactly the sum of the children's.
+  - Constants stay in the right null space, and ones in the left. So in the singular closure
+    problem the mean removal on each level remains the exact compatibility projection.
+- **It is also the rediscretized FOU, with the coarse face velocity taken as the sub-face average.**
+  For a uniform flow, Qp_a = φ_a / cf_a exactly (a unit-test identity).
+
+**Open domain faces (ruling D-WO5-3; the inflow/outflow rows of §1.4).**
+- Outflow through an open global face is a diagonal-only term of the boundary cells. Inflow is
+  right-hand side only.
+- The operator keeps the outflow as its own level-0 cell field **ω_open**: the implicit outflow
+  coefficient that the open-face rows add to AC, summed over the cell's open faces, and 0 elsewhere.
+  - It is kept alongside `outflow`, which stays the transient path's input.
+  - If an open-face row ever adds a negative diagonal (implicit backflow), ω_open takes max(·, 0).
+    Report that case; it is a §6.5 question, not A2's.
+- On the coarse levels ω_open rides on the mass, m = κ·idt + ω_open (idt = 0 when steady), and is
+  `restrictAvg`ed per level exactly as `MassField` does today.
+- This is exact. ω_open is nonzero only on the children next to the face, so the child average
+  equals Σ_sub F_out · V/V_C.
+  - The transient `outflow` average is not exact: it counts the faces interior to the coarse cell.
+  - The transient path keeps it anyway: it is measured adequate there, and it is bitwise frozen.
+
+**Assembly (coarse level L).** Pinned rows stay identity rows (AC = 1, bands 0). For an unknown
+cell i:
+- **Diagonal:**
+
+      AC_L(i) = [AC as built today: mass (incl. ω_open) + Σ faces + wall + Dirichlet folds]
+              + ((Qm_x(i) + Qp_x(i+e_x)) + (Qm_y(i) + Qp_y(i+e_y))) + (Qm_z(i) + Qp_z(i+e_z))
+
+  - The face-form AC of the advective path must NOT contain the interior lumped outflow; Q carries
+    it.
+- **Off-diagonals:**
+  - AW(i) = AFX(i) − Qp_x(i) and AE(i) = AFX(i+e_x) − Qm_x(i+e_x);
+  - AS/AN use AFY, Qp_y, Qm_y in the same way, and AB/AT use the z arrays.
+  - AF is the stored negative face coefficient −w_a(L)⟨Λa⟩ of §5.2.
+- **Band convention** (the operator's): row(i) = AC x_i + AW x_{i−e_x} + AE x_{i+e_x} + AS x_{i−e_y}
+  + AN x_{i+e_y} + AB x_{i−e_z} + AT x_{i+e_z}.
+
+**Kernels (advective path, every level; AC = SAC at level 0).**
+- **Colour sweep**, on the unknown cells of the colour:
+
+      x_i ← (rhs_i − (((AW x_W + AE x_E) + (AS x_S + AN x_N)) + (AB x_B + AT x_T))) / AC_i
+
+- **Residual:** r_i = rhs_i − (AC_i x_i + (((AW x_W + AE x_E) + (AS x_S + AN x_N)) + (AB x_B +
+  AT x_T))).
+- `applySurrogate` and `contraction()` use the band form, so the contraction instrument measures
+  ρ(I − M⁻¹S_adv). WO-5's `scalar_mg` rows "C3 + advection" become the C4 rows of §11.
+- Exchanges: one x exchange per colour and per residual on every level, as today.
+
+**Storage and cost.**
+- **Level 0:** nothing new in ScalarMG; one per-cell field ω_open in the operator.
+- **Each coarse level:** Qp/Qm (6 arrays) and the bands AW…AT (6). They are allocated on the first
+  advective build and kept: ≈ (12/7)·N doubles ≈ 14 B/cell over the hierarchy.
+- **Per sweep:** 7 coefficient arrays instead of 4 (plus x and rhs). That is ≈ 1.5× the level-0
+  sweep traffic, and ≈ 1.4× per BiCGStab iteration once the matvecs are counted.
+- **Build:** per steady solve, one coarsening and 6 exchanges per coarse level.
+
+**Envelope.**
+- The gated range is Pe_h ≤ 10 (G-adv).
+- Beyond it the solve degrades gracefully: in 2-D at n = 128, Pe_h 30 takes 12–24 iterations and
+  Pe_h 100 takes 18–35.
+- There is no refusal and no warning; non-convergence is already flagged (§5.1). FOU accuracy at
+  high Pe_h is Q11's business.
+- The census reports **`max_cell_peclet`**, the maximum over interior flux faces and axes of
+  |φ_a| / (D′ w_a), where D′ is the fluid's internal Λ (`Inputs::lam`) and w_a = 1/h′_a² the
+  metric weight of §5.2's level rule. It is the aperture-weighted face Péclet number |u_a| a h_a/D.
+  - It costs one more entry in the existing MAX reduction of the advance.
+  - G-adv rows are parametrized by it.
+
+**Evidence: 2-D prototype `tests/study/scalar_ibm/mg_advection.py`.**
+- Set-up:
+  - A = aperture FV diffusion + the lumped Dirichlet wall (A1's level-0 term) + conservative FOU;
+  - a discretely divergence-free node-stream-function flow, at angle atan 0.3 to the grid, no-slip
+    at the discs;
+  - periodic box; BiCGStab to 1e-10, random right-hand side;
+  - the 3-D code's cycle: RB-GS 2 + 2 from global parity, average restriction, bilinear
+    prolongation, A1 coarse wall; exact 4×4 bottom.
+- A = S here. The probe off-diagonals are the same advection-independent gap as at rest; that is
+  why the 3-D C3 count at rest is 13 against the prototype's 5.
+- Entries: iterations at Pe_h 0 / 0.1 / 1 / 10, with [ρ(I − M⁻¹A)] at Pe_h 10; n.c. = not
+  converged in 300.
+
+| case | n | WO-5 symmetric surrogate | A2 advective surrogate |
+|---|---|---|---|
+| P1 periodic + Dirichlet disc R = L/4 (the C3 analogue) | 64 | 5 / 18 / 81 / n.c. | 5 / 6 / 8 / 13 [0.59] |
+| | 128 | 6 / 36 / 194 / n.c. | 6 / 7 / 11 / 17 [0.74] |
+| | 256 | 6 / 82 / n.c. / n.c. | 6 / 8 / 13 / 26 [0.84] |
+| P2 Neumann 2×2 disc array, ε = 0.50 (closure, singular) | 64 | 4 / 19 / 68 / n.c. | 4 / 5 / 7 / 8 [0.29] |
+| | 128 | 4 / 34 / 145 / n.c. | 4 / 6 / 7 / 9 [0.41] |
+| | 256 | 5 / 74 / n.c. / n.c. | 5 / 7 / 8 / 13 [0.53] |
+| P3 the same array, Dirichlet (reactive bed) | 64 | 5 / 7 / 23 / 151 | 5 / 5 / 6 / 7 [0.32] |
+| | 128 | 5 / 10 / 52 / n.c. | 5 / 5 / 7 / 11 [0.49] |
+| | 256 | 6 / 18 / 130 / n.c. | 6 / 6 / 10 / 14 [0.64] |
+| P4 closed-streamline eddies (5× the mean flow), no solid, singular | 64 | 4 / 21 / 104 / n.c. | 4 / 5 / 7 / 13 [0.65] |
+| | 128 | 4 / 46 / 260 / n.c. | 4 / 6 / 9 / 18 [0.78] |
+| | 256 | 4 / 114 / n.c. / n.c. | 4 / 6 / 11 / 26 [0.87] |
+
+Variants and probes. Entries are iterations at n = 256, Pe_h = 10, for P1 / P2 / P3 / P4, unless
+the row says otherwise.
+
+| variant | iterations |
+|---|---|
+| **A2 as specified** (summed positive parts, trilinear, 2 + 2) | 26 / 13 / 14 / 26 |
+| coarse flux = summed **signed** flux, then upwinded ("net") | 26 / 13 / 14 / 26 (ρ within 0.01 everywhere) |
+| piecewise-constant prolongation | 24 / 11 / 13 / 23 |
+| 3 + 3 sweeps | 21 / 10 / 11 / 20 |
+| F-cycle | 13 / – / – / 14 |
+| W-cycle | 12 / – / – / 10 |
+| advection at level 0 only (coarse = the WO-5 levels); n = 128, Pe_h 0.1 / 1 / 10 | P1 35 / 119 / 222; P2 33 / 91 / 176 |
+| 16-sweep bottom on a 16×16 bottom grid; n = 128, Pe_h 0 / 1 / 10 | P1 6 / 10 / 16, P2 6 / 8 / 11, P4 4 / 9 / 16 (exact 4×4 bottom: 6 / 11 / 17, 4 / 7 / 9, 4 / 9 / 18) |
+| beyond the envelope; n = 128, Pe_h 30 / 100 | P1 19 / 26, P2 12 / 18, P4 24 / 35 |
+| fixed physics: P1 with U L/D = 640, i.e. Pe_h 10 / 5 / 2.5 at n = 64 / 128 / 256 | 13 / 15 / 18 |
+| full GMRES (matvecs); P1 and P2, Pe_h 1 / 10 | P1 21 / 38, P2 16 / 23 (BiCGStab: 26 / 52 and 16 / 26 matvecs) |
+
+Readings:
+1. The advective surrogate removes the failure. Counts grow mildly with Pe_h and with depth at
+   fixed Pe_h (×1.1–1.6 per doubling), and only ×1.15–1.2 per doubling at fixed physics.
+2. Closed streamlines (P4) are no worse than open ones.
+3. The coarse advection is what matters (the level-0-only row). How it is coarsened does not (the
+   net row).
+4. F- and W-cycles halve the count at depth. They are the recorded escalation (§13 Q18), not the
+   default.
+5. A 16-sweep bottom on a large bottom grid, as at np > 1, costs nothing measurable.
+
+**Alternatives rejected, and why.**
+- **(b) Pseudo-transient continuation.**
+  - Each pseudo-step is a transient solve, whose preconditioned spread is β_t = Pe_h √Fo / 2
+    (Fo = DΔt/h²).
+  - Reaching the steady state needs Δt·λ_min ≫ 1, where λ_min ≈ D(2π/L)² (the slowest periodic
+    mode). That means Fo ≳ (N/2π)², and at that Fo, β_t ≈ Pe_h N/(4π): the steady solve's own
+    ill-conditioning, now paid on every step.
+  - A smaller Δt trades it for O(N²) steps. Either way it is strictly dominated.
+- **(c) GraphAMG on the assembled FOU operator.**
+  - It is built for SPD operators: smoothed-aggregation prolongation (energy minimization) and a
+    4th-kind Chebyshev smoother (register, voro). Chebyshev needs a real spectrum, which FOU at
+    Pe_h ~ 10 does not have.
+  - It has no MPI path, and it is a second, assembled operator representation rebuilt per solve.
+  - A nonsymmetric AMG (AIR-type) is the route only if Pe_h ≫ 10 becomes a requirement (§13 Q19).
+- **(d) Defect correction around a stronger solver.** This is a stationary iteration around the
+  same inner preconditioner, and Krylov acceleration of that preconditioner is never worse (the
+  register also rejects undamped DC as a fallback). The only stronger solver available is this
+  advective MG, so (d) is A2 with a worse outer loop.
+- **(e) Restricting Pe_h.** Kept only as the documented, gated envelope; not a refusal.
+- **Advection at level 0 only.** It fails (35 / 119 / 222): the failing modes are the low modes.
+- **A symmetric surrogate with the upwind numerical diffusion, sym(A).** β → N/π (theory above).
+- **VelocityMG's construction** (`buildAdvCoarse`: restricted cell velocities, upwinded on the
+  coarse grid).
+  - It is conservative but not divergence-free on the coarse grid: its row sums are nonzero, which
+    act as spurious coarse sources.
+  - It needs a cell-velocity field the scalar path does not have.
+  - The summed flux is free, exact, and built from the field the operator already holds.
+- **Net (signed-sum) coarse flux.** Measured identical, so rejected on principle: it drops the
+  exchange part Σ|F| − |ΣF| of the coarse symmetric part, which is A1's softer-than-fine failure
+  mode. The positive-part construction costs only 3 more arrays per coarse level.
+- **Downstream-ordered or line smoothers.**
+  - A periodic torus with wrapping or closed streamlines has no downstream order.
+  - Neither smoother is parallel inside a GPU block, and a line solve crosses MPI blocks.
+  - They are not needed: point RB-GS degrades gracefully to Pe_h 100.
+- **F-/W-cycles, 3 + 3 sweeps, piecewise-constant prolongation.**
+  - Each lowers the count (table above), but each changes the cycle.
+  - The V-cycle meets the requirement, keeps one cycle structure, and keeps the communication
+    profile at scale: an F-cycle visits level L L+1 times, a W-cycle 2^L times.
+- **GMRES.** It needs 12–27 % fewer matvecs at Pe_h 10, but costs restart storage and k reductions
+  per iteration. BiCGStab stays (D9).
+
+**Interactions.**
+- **A1.** Unchanged: the wall gather is the same and enters AC as before. The C1–C3 rows carry no
+  advection, so they are unchanged.
+- **WO-6.** G8 (Taylor–Aris at Pe = 10, R/h = 32, peak Pe_h 0.3–0.6) is a steady, advecting,
+  singular solve. WO-6 therefore depends on WO-5c, and its G-iter row is the singular-steady ≤ 30.
+- **WO-7 (conjugate).** The solid never advects, so the solid phase keeps the face form.
+  - In two-phase cells, the 2×2 block update takes the fluid neighbour sum from the bands on the
+    advective path, and from the faces otherwise. That is one template parameter of the block
+    kernel, and its face-form instantiation is the bitwise at-rest/transient path.
+  - The W coarsening is A1's, unchanged.
+- **WO-11 (deferred-correction Koren).** Every outer iteration solves the FOU system with this
+  preconditioner. The outer rate is set by the Koren − FOU difference, not by A2.
+- **MPI.** The V-cycle stays decomposition-independent: in-place coarsening keeps children
+  rank-local, the bands are pointwise, and the colours come from global parity. G10 therefore holds
+  by construction. The build adds 6 exchanges per coarse level per steady solve.
+
+**Work order:** WO-5c (§10). **Gates:** G-adv, C4 and a G10 row (§11). **Open:** §13 Q18–Q21.
 
 ---
 
@@ -1181,10 +1475,71 @@ General rules for every WO:
 - Gate: G9, G9b, G12; G10 on G9.
 - Must not touch: projection/advection code, `ufAdvVelocity`.
 
+**WO-5c — steady advective surrogate (Amendment A2, §6.7).**
+- Depends on WO-5 and on the open-face follow-up of ruling D-WO5-3 (called `WO-5b` in the code:
+  the open-face rows and G9c). It comes before WO-6.
+- Files:
+  - `src/scalar_mg.hpp`: the advective path — `Inputs` gains `advective`, the level-0 band views
+    AW…AT, `phi[3]` and ω_open; lazy coarse Qp/Qm and band arrays; the Q coarsening; the band
+    assembly; the band-form sweep, residual, `applySurrogate` and `contraction`;
+  - `src/scalar_cutcell_operator.hpp`: the ω_open field, written by the open-face rows; the local
+    max of |φ_a|/(D′ w_a);
+  - `src/flow_ibm_scalars_cutcell.hpp`: wiring (`in.advective = steady && st.advecting`, the views,
+    ω_open on the mass in place of `outflow`); `max_cell_peclet` through the existing MAX
+    reduction;
+  - `src/flow_bindings.cpp`: the census key `max_cell_peclet`;
+  - tests: `tests/kokkos/test_scalar_mg.cpp` (rows u1–u6 below);
+    `tests/kokkos_mpi/test_scalar_cutcell_solve_mpi.cpp` (problem `steady_adv`, plus the z = M⁻¹r
+    bitwise check); `tests/python/test_scalar_cutcell_gates.py` (G-adv, as ctest
+    `scalar_cutcell_gadv`).
+- Steps:
+  1. **Before any change**, save the references from the current build:
+     - G-adv(a) at R/h 16, Pe_h 0.1, rtol 1e-13 (the steady field);
+     - WO-5's zero-velocity inert arrays;
+     - the transient advecting arrays: G9 at R_o/h 16, `fou` and `koren` at C 0.5, 50 steps; the
+       annulus rows with D at dt·D/h² = 3 and 30.
+  2. Operator: ω_open and the Péclet maximum.
+  3. ScalarMG advective path, exactly per A2: the formulas, the summation orders, pins and ghosts.
+  4. `scalar_mg` unit rows:
+     - (u1) uniform flow along each axis, periodic box without a solid, including an anisotropic
+       (2,2,1) level: Qp_a = φ_a/cf_a exactly and Qm_a = 0 on every level;
+     - (u2) a divergence-free random field (node stream-function differences): on every level the
+       advective row sums satisfy |Σ out − Σ in| ≤ 1e-13·max Q, and the column sums are 0 to
+       round-off;
+     - (u3) M-matrix: bands ≤ 0 and AC ≥ Σ|bands| − 1e-13·AC on every unknown row of every level
+       (steady, Dirichlet sphere);
+     - (u4) the level-0 advective `applySurrogate` of a random x equals the operator's band matvec
+       with SAC as the diagonal, bitwise;
+     - (u5) Q = 0 on both domain-face planes of a non-periodic axis on every level, open faces
+       included;
+     - (u6) the C4 contraction rows (WO-5's "C3 + advection" rows, restated).
+  5. Run G-adv, the G10 row, the inert proof, G12, and the battery. Log every number.
+- Gate:
+  - G-adv (i)–(vi);
+  - G10 (the G-adv row);
+  - **inert, bitwise against step 1:** the zero-velocity arrays, and the transient advecting
+    arrays (fields, iteration counts, census);
+  - `scalar_mg` C1–C3 unchanged;
+  - G12; the battery.
+- Must not touch:
+  - ScalarMG's transient and at-rest steady paths (the face form, `hasOutflow` on the mass);
+  - CutcellMG / VelocityMG; A1's wall gather; the probe operator; the Krylov driver; the
+    discretization.
+- **Stop rules.** Stop and report with the numbers if:
+  - any G-adv (i) row fails;
+  - any inert array differs;
+  - any provisional bound is exceeded.
+
+  Do not tune: no extra sweeps, no cycle change, no Pe_h-dependent switch. The orchestrator's
+  default next step is §13 Q18.
+
 **WO-6 — mean gradient and closures.**
 - Files: the operator/RHS θ terms, the steady moving frame, `scalar_mean_flux`, the binding
   `set_scalar_mean_gradient`.
 - Gate: G8, G5b, the no-solid identity (k* = 1 to 1e-12); G10 on G8.
+- *A2:* depends on WO-5c. G8 is a steady advecting singular solve, and its iteration count falls
+  under G-iter's singular-steady row (≤ 30). Re-run G-adv(b) with the mean-gradient mode (θ,
+  G = e_x) in place of the u_x − ⟨u_x⟩ source, with the same bounds.
 
 **WO-7 — conjugate.**
 - Files:
@@ -1193,6 +1548,12 @@ General rules for every WO:
     coupling, the solid ladder, ScalarMG with two phases (W, 2×2 smoother), `set_scalar_solid`,
     `get_scalar_solid`, the census/budget solid terms.
 - Gate: G4, G5a, G6; G10 on G6; G-iter (conjugate rows); G12.
+- *A2:* on the advective path the fluid phase is in band form and the solid stays in face form.
+  - The 2×2 block update takes the fluid neighbour sum from the bands. Make that one template
+    parameter of the block kernel; its face-form instantiation is the at-rest/transient path and
+    stays bitwise.
+  - Extra gate row: G-adv(b) with conducting spheres (Λ_s/Λ_f = 10, K = 1) at Pe_h 1 and 10. It
+    must converge, in ≤ 1.5× the insulating (b) count.
 
 **WO-8 — contacts and thin features.**
 - Gate: G13; the warnings of §9 fire on the thin-plate case.
@@ -1203,12 +1564,15 @@ General rules for every WO:
 
 **WO-10 — documentation.**
 - `CLAUDE.md` (a scalar section: the opt-in, refusals, traps), the register entries of §12,
-  `../docs/NAMING.md` rows for the new names, the flow `doc/README.md` index.
+  `../docs/NAMING.md` rows for the new names (including A2's diagnostics key `max_cell_peclet`),
+  the flow `doc/README.md` index.
 - Gate: review only.
 
 **WO-11 (optional, later) — steady deferred-correction Koren.**
 - Gate: a 2-D-like periodic cylinder-array closure at Pe = 10, 100. Self-convergence order ≥ 1.7
   against FOU's ~1.
+- *A2:* every outer correction solves the FOU system with the A2 preconditioner; nothing in ScalarMG
+  changes. Record the outer iteration count; its rate is the Koren − FOU contrast, not A2's.
 
 ---
 
@@ -1363,9 +1727,45 @@ Rules:
   - 50 steps.
 - Gate: max|c − 1| ≤ 1e-6 (wrong openness gives about 1e-2).
 
+**G-adv steady advection** (Amendment A2; WO-5c).
+- Pe_h is the census `max_cell_peclet` of the solve. Each row rescales its face velocity field so
+  that Pe_h = 0.1, 1 and 10.
+- Setups:
+  - **(a)** WO-5's C3 problem: a periodic box 4R, a Dirichlet sphere (c = 1) with a source, and the
+    projected Stokes field of that geometry (WO-5's harness); R/h = 16 (64³) and 32 (128³).
+  - **(b)** Closure:
+    - the periodic simple-cubic sphere array, c = 0.3 (G9b's geometry), with the Stokes field from
+      `step()` (G9b's body force);
+    - Neumann spheres; steady and singular;
+    - per-cell source s = u_x − ⟨u_x⟩ over the fluid, which is the B-field source for G = e_x
+      until WO-6's mean-gradient mode replaces it;
+    - 32³ and 64³ cells per period.
+  - **(b′)** The same with Dirichlet spheres (a reactive bed).
+  - **(c)** G9c's channel (open inflow/outflow faces plus a solid), steady, Pe_h 1 and 10.
+- Gate:
+  - **(i)** Every row converges: rtol 1e-10 within maxit 200, with no census non-convergence flag.
+    This is the falsifiable statement that Q-H is fixed.
+  - **(ii)** Iterations *(prov.)*, at Pe_h 0.1 / 1 / 10:
+    - (a) ≤ 20 / 25 / 40 at R/h 16, and ≤ 25 / 35 / 55 at R/h 32;
+    - (b), (b′) ≤ 15 / 20 / 30 at both resolutions;
+    - (c) ≤ 40.
+  - **(iii)** Growth per doubling at fixed Pe_h ≤ 1.7× (2-D: ≤ 1.6×).
+  - **(iv) C4**, the stand-alone contraction ρ(I − M⁻¹S_adv) on (a) at R/h 16: < 1 at every Pe_h
+    (C1), and ≤ 0.90 at Pe_h ≤ 10 *(prov.)*. In 2-D it is 0.34–0.59 at n = 64 and up to 0.87 at
+    n = 256.
+  - **(v)** The steady budget identity holds to ≤ 1e-12 relative; for (c) it includes the open
+    faces' advective fluxes.
+  - **(vi)** The discrete solution is unchanged. At (a), R/h 16, Pe_h 0.1, where the WO-5
+    preconditioner also converges: max|c_A2 − c_WO5| ≤ 1e-9·max|c|, both at rtol 1e-13, against
+    WO-5c's saved reference. This is a one-time check, logged.
+
 **G10 MPI.**
 - Configurations: G1 (R/h = 16), G3b (Bi = 10, 20 steps), G6 case 1 (20 steps), G9 (`koren`,
   50 steps), G8, at np ∈ {1, 2, 4}.
+- *A2 row:* G-adv(a) at R/h 16, Pe_h 1, with D-WO4-2's form.
+  - np = 1 bitwise; np = 2, 4 within 1e-10·max|c₁| at rtol 1e-13; iterations ±1.
+  - The advective V-cycle's z = M⁻¹r, for a fixed global-index r, is bitwise equal at
+    np = 1, 2, 4.
 - Gate:
   - np = 1 bitwise against the single-rank build;
   - np > 1: max|c − c₁| ≤ 1e-9·max|c₁|, iterations within ±1 per solve;
@@ -1404,11 +1804,15 @@ Rules:
 - V-cycle contraction on the surrogate: *restated by Amendment A1* as C1 (< 1 everywhere), C2
   (≤ 0.35 on box, Neumann and no-solid geometries) and C3 (≤ 0.75 on periodic isolated-sink
   geometries). Krylov counts are the primary gate.
+- Steady with advection: G-adv (Amendment A2), including its C4 contraction row. The transient
+  advecting counts of WO-5 are frozen bitwise by WO-5c's inert gate.
 
 **G-perf** (recorded; red flags rather than failures).
 - Matvec effective bandwidth ≥ 50 % of measured STREAM.
 - Memory ≤ 300 B/cell per single-phase scalar.
 - Scalar advance ≤ the pressure projection time of the same step on a 128³ bed at Δt·D/h² ≤ 1.
+- *A2:* the advective V-cycle's time against the symmetric one on the same block (expected ≈ 1.5×;
+  red flag above 2×), and the steady G-adv(b) solve time at 64³.
 - Any red flag opens §13 Q9.
 
 ---
@@ -1474,6 +1878,25 @@ Rules:
 12. *(core)* **Cut-cell geometry and probe kernels are container-free core headers
     (`scheme/cut_cell_geometry.hpp`, `scheme/probe_flux.hpp`).** Rejected: flow-private copies
     (amr and VoF would fork them).
+13. *(A2, 2026-10-03)* **Steady advection is preconditioned by a V-cycle on the ADVECTIVE
+    surrogate.** That is the level-0 bands, FOU couplings included, with the lumped wall; coarse
+    advection is the summed positive parts of the sub-face fluxes (the piecewise-constant Galerkin
+    value), swept by band-form RB-GS. Transient mode keeps the symmetric surrogate. Rejected:
+    - the symmetric lumped surrogate (with lumped outflow) for steady advection. Its preconditioned
+      spread is β ≈ Pe_h N/2π; in 3-D it took 13 → 40 → 89 iterations at Pe_h 0 / 0.1 / 0.3 and
+      did not converge at 1 (log WO-5, Q-H);
+    - advection at level 0 only: 2-D 35 / 119 / 222 iterations at Pe_h 0.1 / 1 / 10. The modes at
+      fault are the low ones;
+    - pseudo-transient continuation: the same spread on every step, or O(N²) steps;
+    - GraphAMG on the assembled operator: an SPD design (Chebyshev smoother), and no MPI path;
+    - defect correction around the same preconditioner;
+    - VelocityMG's restricted-velocity coarse upwinding: not divergence-free on the coarse grid;
+    - downstream or line smoothers: no order exists on a periodic torus, and they are not parallel
+      on a GPU block or across MPI blocks;
+    - the net (signed-sum) coarse flux: measured identical, but it drops the coarse exchange
+      diffusion;
+    - F- or W-cycles as the default: they halve the count but change the cycle. They are the
+      recorded escalation (§13 Q18).
 
 ---
 
@@ -1498,6 +1921,10 @@ Rules:
 | Q15 | Thin solids (< ~2h) leak through one fluid DOF | **fact** (resolution) | census + warning | — (a user resolution requirement) |
 | Q16 | Moving geometry (DEM) and VoF species | **user preference** (scope) | hooks only (§6.6, §7.4) | their own packages |
 | Q17 | Solid volumetric sources (reaction heat in particles) | **user preference** (scope) | fluid sources only in v1 | add `set_scalar_source(..., phase='solid')` when asked |
+| Q18 | Is the V-cycle enough for steady advection in 3-D, at depth and at scale? (A2) | **fact** | the V-cycle of A2 | Any of: a G-adv bound exceeded; growth > 1.7× per doubling; a production closure at Pe_h ≤ 10 needing > 60 iterations. Then switch the steady advective path to the **F-cycle**: F(L) = pre-smooth, restrict, F(L+1) from 0, then one V(L+1) on the coarse defect, prolong, post-smooth; the bottom as now; mean removal on both coarse right-hand sides when singular. In 2-D at n = 256, Pe_h 10, it halves the count (26 → 13, 26 → 14). Level L is visited L + 1 times. This is a recorded decision, not a setter. |
+| Q19 | Steady advection at Pe_h ≫ 10 | **user preference** (scope) | ungated and graceful (2-D: Pe_h 100 → ≤ 35 iterations at n = 128); the accuracy of FOU there is Q11's question | A study that needs Pe_h ≥ 30 routinely: first measure G-adv at 30 and 100. If the counts exceed 2× the Pe_h 10 row, a nonsymmetric AMG (AIR-type) is a new design. |
+| Q20 | 3-D iteration and contraction bounds of G-adv (A2) | **fact** | the *(prov.)* numbers of §11 | first passing run; tighten to 2× measured |
+| Q21 | Should transient mode use the advective surrogate too? (A2) | **fact** | No. Its FOU is local (small-cell faces only), and measured at 5–6 per step it equals the count at rest. | a transient row whose iterations grow with Pe_h (e.g. many small cells with a large implicit outflow) |
 
 **What would make me revisit the design itself:**
 - **(i)** G1 or G3 order < 1.7 in 3-D while the 2-D oracle stays at 2. Suspect the PL centroid or the
