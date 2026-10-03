@@ -17,6 +17,7 @@ namespace peclet::flow {
 template <class Grid>
 void Solver<Grid>::invalidateScalarCutGeometry() {
   ++scgVersion_;
+  scalarOpenValid_ = false;  // WO-5b: the captured open-face planes belong to the old block
 }
 
 template <class Grid>
@@ -271,8 +272,10 @@ void Solver<Grid>::scalarCutRefusals(const ScalarField& sc) const {
     throw std::runtime_error(
         who + "the ghost projection ('ghost' collocated scheme, or diagnostics." +
         "set_ghost_projection) leaves no discretely divergence-free face flux to advect with " +
-        "(doc/scalar_ibm_design.md §6.1, gate G9b); select set_collocated_scheme('gauge-exact'), " +
-        "'plain' or 'embed' before set_solid");
+        "(doc/scalar_ibm_design.md §6.1, gate G9b); the accepted projections are the collocated " +
+        "schemes 'gauge-exact', 'plain' and 'embed' (set_collocated_scheme, before set_solid) "
+        "and " +
+        "the staggered Solver without set_ghost_projection");
   static const char* kFace[6] = {"-x", "+x", "-y", "+y", "-z", "+z"};
   for (int f = 0; f < 6; ++f) {
     const bool flowPeriodic = bc_[f] == 0, scalarPeriodic = sc.bc[f] == 0;
@@ -284,14 +287,19 @@ void Solver<Grid>::scalarCutRefusals(const ScalarField& sc) const {
     if (bc_[f] == 2 && sc.bc[f] != 2)
       throw std::runtime_error(who + "the inflow face " + kFace[f] +
                                " needs a scalar 'dirichlet' value (set_scalar_bc)");
-    // WO-5 (open, reported): the advective rows of an inflow/outflow domain face (§1.4, §6.5) need
-    // the projection's flux through the HIGH boundary face, which advanceScalars' periodic ghost
-    // fill overwrites with the opposite face's value before this path runs. Refused until decided.
-    if (bc_[f] == 2 || bc_[f] == 3)
-      throw std::runtime_error(who + "face " + kFace[f] + " is a flow " +
-                               (bc_[f] == 2 ? "inflow" : "outflow") +
-                               " face: advection through open domain faces is not supported yet "
-                               "(doc/scalar_ibm_design.md §6.5, open after WO-5)");
+    // WO-5b (open, reported): on the collocated grid the projected face field does not keep the
+    // flux the projection constrained on a high-side open face -- projectCorrectVelocities' plain
+    // ghost fill of uf_/vf_/wf_ wraps that plane from the opposite face before the outflow
+    // correction is added to it -- so there is no divergence-free boundary flux to capture (a
+    // constant drifted by 0.48 in the outlet column in one step). Refused until decided.
+    if constexpr (Grid::collocated)
+      if (bc_[f] == 2 || bc_[f] == 3)
+        throw std::runtime_error(
+            who + "face " + kFace[f] + " is a flow " + (bc_[f] == 2 ? "inflow" : "outflow") +
+            " face: on the collocated grid the projected face field does not keep the boundary "
+            "flux the projection constrained, so open domain faces are not supported for a "
+            "cut-cell scalar there yet -- use the staggered Solver (doc/scalar_ibm_design.md "
+            "§6.5)");
   }
 }
 
@@ -321,6 +329,50 @@ typename Solver<Grid>::ScalarFaceFlux Solver<Grid>::scalarFaceFlux(int a) const 
 }
 
 template <class Grid>
+void Solver<Grid>::scalarCaptureOpenFaceFlux() {
+  // WO-5b (§6.5, ruling D-WO5-3). Called right after the projection: the high-side boundary face
+  // is the first GHOST index, which the next plain ghost fill (advanceScalars' own, the VoF
+  // bridge's) wraps from the opposite face, so the flux the projection constrained there is read
+  // now. The plane spans the full transverse extent: the transverse ghost rows are what the small
+  // flags of ghost layer 1 read (§6.3), with the values the neighbour holds for its own rows.
+  if (!hasBc_)
+    return;
+  // Captured whether or not a cut-cell scalar exists yet (one plane copy per open face), so a
+  // scalar added to a developed flow can be solved before the next step.
+  bool anyOpen = false;
+  for (int f = 0; f < 6; ++f)
+    anyOpen = anyOpen || bc_[f] == 2 || bc_[f] == 3;
+  if (!anyOpen)
+    return;
+  const int ext[3] = {e_.x, e_.y, e_.z};
+  const long st[3] = {1, (long)e_.x, (long)e_.x * e_.y};
+  for (int f = 0; f < 6; ++f) {
+    if (!(bc_[f] == 2 || bc_[f] == 3) || !touchesGlobalFace(f))
+      continue;
+    const int a = f / 2, side = f % 2;
+    int t1, t2;
+    sco::faceTangents(a, t1, t2);
+    const int m1 = ext[t1], m2 = ext[t2];
+    if (scalarOpenFlux_[f].extent(0) != (std::size_t)m1 * m2)
+      scalarOpenFlux_[f] = CCField("peclet::flow::scalar_open_flux", (std::size_t)m1 * m2);
+    const ScalarFaceFlux ff = scalarFaceFlux(a);
+    const CCConst open(ff.open), vel(ff.vel);
+    CCField pl = scalarOpenFlux_[f];
+    const long sa = st[a], s1 = st[t1], s2 = st[t2];
+    const long bfa = side == 0 ? G : ext[a] - G;
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::scalar_capture_open_flux", MDRange2<CCExec>(space, {0, 0}, {m1, m2}),
+        KOKKOS_LAMBDA(int j1, int j2) {
+          const long bf = bfa * sa + (long)j1 * s1 + (long)j2 * s2;
+          pl((long)j1 + (long)j2 * m1) = open(bf) * vel(bf);
+        });
+    space.fence();
+  }
+  scalarOpenValid_ = true;
+}
+
+template <class Grid>
 void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
   ScalarCutState& st = *sc.cut;
   const scg::ScalarCutGeometry& gm = scg_;
@@ -331,6 +383,16 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
   // the face flux of the projection in force, guarded (sco::faceFluxes). A steady solve is called
   // outside step(), so it fills the face velocity's ghosts itself (advanceScalars did for an
   // advance).
+  // WO-5b (§6.5): the open (inflow/outflow) global faces this rank touches take the boundary-face
+  // flux the last projection constrained (scalarCaptureOpenFaceFlux), written over the guard's 0.
+  bool anyOpen = false, openHere[6];
+  for (int f = 0; f < 6; ++f) {
+    const bool o = bc_[f] == 2 || bc_[f] == 3;
+    anyOpen = anyOpen || o;
+    openHere[f] = o && scalarOpenValid_ && touchesGlobalFace(f);
+    st.openFace[f] = false;
+    st.openInflow[f] = bc_[f] == 2;
+  }
   long nFlux = 0, nGuard = 0;
   double vmax = 0.0;
   for (int a = 0; a < 3; ++a) {
@@ -339,6 +401,9 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
       fillGhosts(ff.vel);
     vmax = std::fmax(vmax, sco::maxabsLocal(CCConst(ff.vel), e_, G));
     sco::faceFluxes(st.phi[a], CCConst(ff.vel), CCConst(ff.open), unk, a, e_);
+    for (int side = 0; side < 2; ++side)
+      if (openHere[2 * a + side])
+        sco::openFaceFluxes(st.phi[a], CCConst(scalarOpenFlux_[2 * a + side]), unk, a, side, e_, G);
     long n1 = 0, n2 = 0;
     sco::faceFluxCountsLocal(CCConst(st.phi[a]), CCConst(ff.vel), CCConst(ff.open), a, e_, G, n1,
                              n2);
@@ -365,6 +430,13 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
                              "': the fluid moves but no cut-cell projection exists to advect "
                              "with -- use set_solid(..., cutcell_pressure=True) or "
                              "set_pressure_geometry (doc/scalar_ibm_design.md §6.1)");
+  // WO-5b: the flux of an open domain face is the one the projection constrained, captured by
+  // step(); before the first projection there is none to advect with.
+  if (anyOpen && !scalarOpenValid_ && mx[1] > 0.0)
+    throw std::runtime_error("cut-cell scalar '" + sc.name +
+                             "': the fluid moves and the domain has an inflow/outflow face, but no "
+                             "projection has supplied that face's flux yet -- advance with step() "
+                             "(doc/scalar_ibm_design.md §6.5)");
   st.advecting = mx[0] > 0.0;
   st.numSmall = 0;
   st.numImplicitFaces = 0;
@@ -407,7 +479,17 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
   }
   long cnt[4] = {sco::countSmallLocal(CCConst(st.small), e_, G), 0, nFlux, nGuard};
   for (int a = 0; a < 3; ++a)
-    cnt[1] += sco::countImplicitLocal(CCConst(st.phi[a]), CCConst(st.small), a, steady, e_, G);
+    cnt[1] += sco::countImplicitLocal(CCConst(st.phi[a]), CCConst(st.small), unk, a, steady, e_, G);
+  for (int f = 0; f < 6; ++f) {
+    st.openFace[f] = openHere[f];
+    if (!openHere[f])
+      continue;
+    long n1 = 0, n2 = 0;
+    sco::openFaceCountsLocal(CCConst(st.phi[f / 2]), CCConst(st.small), unk, st.openInflow[f],
+                             f / 2, f % 2, steady, e_, G, n1, n2);
+    cnt[2] += n1;
+    cnt[1] += n2;
+  }
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
     long o[4];
@@ -572,6 +654,12 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
       sco::explicitAdvectionRhs(sc.b, CCConst(st.Phi[0]), CCConst(st.Phi[1]), CCConst(st.Phi[2]),
                                 unk, e_, G);
     }
+    // WO-5b: the open domain faces' rows (§1.4): inflow F_in g on the rhs, outflow F_out c_i
+    for (int f = 0; f < 6; ++f)
+      if (st.openFace[f])
+        sco::openFaceAdvection(sc.AC, sc.b, st.outflow, CCConst(sc.cOld), CCConst(st.phi[f / 2]),
+                               CCConst(st.small), unk, st.gFace[f], st.openInflow[f], f / 2, f % 2,
+                               steady, e_, G);
   }
   // the level-0 surrogate diagonal (§4.3)
   sco::surrogateDiagonal(st.SAC, CCConst(sc.AC), gm.fac, st.cw);
@@ -806,6 +894,11 @@ typename Solver<Grid>::ScalarCutBudget Solver<Grid>::scalarBudget(const std::str
   if (st.advecting)  // the implicit faces' outflow (the explicit faces' sits in b)
     sco::advectionResidual(st.kt, CCConst(sc.c), CCConst(st.phi[0]), CCConst(st.phi[1]),
                            CCConst(st.phi[2]), CCConst(st.small), unk, st.steady, e_, G);
+  if (st.advecting)  // WO-5b: the open faces' implicit outflow
+    for (int f = 0; f < 6; ++f)
+      if (st.openFace[f])
+        sco::openFaceResidual(st.kt, CCConst(sc.c), CCConst(st.phi[f / 2]), CCConst(st.small), unk,
+                              st.openInflow[f], f / 2, f % 2, st.steady, e_, G);
   {
     const CCField saAx[3] = {gm.sax, gm.say, gm.saz};
     for (int f = 0; f < 6; ++f)
@@ -840,6 +933,12 @@ typename Solver<Grid>::ScalarCutBudget Solver<Grid>::scalarBudget(const std::str
       if (st.dirFace[f])
         bsum += sco::dirichletFaceInflux(CCConst(sc.c), unk, CCConst(saAx[f / 2]), st.gFace[f],
                                          st.lam * u_.w[f / 2], 1.0, f / 2, f % 2, e_, G);
+    if (st.advecting)  // WO-5b: the advective flux through the open faces
+      for (int f = 0; f < 6; ++f)
+        if (st.openFace[f])
+          bsum += sco::openFaceInflux(CCConst(sc.c), CCConst(sc.cOld), CCConst(st.phi[f / 2]),
+                                      CCConst(st.small), unk, st.gFace[f], st.openInflow[f], 1.0,
+                                      f / 2, f % 2, st.steady, e_, G);
     v[4] = bsum;
   }
   {

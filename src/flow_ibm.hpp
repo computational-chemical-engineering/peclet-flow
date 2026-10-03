@@ -2695,6 +2695,13 @@ class Solver {
     CCField open;  ///< the projection's openness of that face
   };
   ScalarFaceFlux scalarFaceFlux(int a) const;
+  // WO-5b (§6.5, ruling D-WO5-3): capture, on every flow inflow/outflow global face this rank
+  // touches, the boundary-face flux open * vel the projection constrained (through
+  // `scalarFaceFlux`), over the face plane's full transverse extent. Called by step() right after
+  // the projection and the domain-BC re-imposition, before any ghost fill overwrites the high-side
+  // plane (the first ghost index, which a fill wraps from the opposite face). No-op without an
+  // open face; numerically inert for the flow (it only copies a plane).
+  void scalarCaptureOpenFaceFlux();
   // WO-5 (§6): the face fluxes, the small-cell classification and the census of one advance or
   // steady solve, into `sc.cut` (st.advecting false: no face carries flux, nothing else is built).
   void scalarCutAdvection(ScalarField& sc, bool steady);
@@ -5033,6 +5040,10 @@ class Solver {
   // when scg_.version differs. scg_.version starts at -1, so nothing is built until first use.
   scg::ScalarCutGeometry scg_;
   long scgVersion_ = 0;
+  // WO-5b: the captured open-face flux planes (scalarCaptureOpenFaceFlux), per global face, and
+  // whether they belong to this block and geometry (cleared by every geometry build).
+  CCField scalarOpenFlux_[6];
+  bool scalarOpenValid_ = false;
   // --- phase change (WO-P01) -------------------------------------------------------------------
   bool pcEnabled_ = false, pcThermal_ = false, pcHasUser_ = false;
   double pcRhoG_ = 1.0, pcRhoL_ = 1.0, pcHlv_ = 1.0;  // INTERNAL (pcRefreshUnits)

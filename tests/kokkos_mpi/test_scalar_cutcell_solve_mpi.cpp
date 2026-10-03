@@ -1,5 +1,5 @@
 // Cut-cell scalar solve under MPI (doc/scalar_ibm_design.md §5.1, §5.2, §5.4, §6; WO-3, WO-4,
-// WO-5).
+// WO-5, WO-5b).
 //
 // np = 1, 2, 4 on the production ORB. Each problem is solved on the distributed solver and on a
 // single-rank reference of the same problem; the parallel contract of §5.4 (G10) is checked at
@@ -20,11 +20,15 @@
 //               singular case of §5.1 (mean projection on every ScalarMG level, gauge kept);
 //   g9        — G9 (WO-5): an annulus carrying a Gaussian blob by solid-body rotation, koren,
 //               50 backward-Euler steps with the explicit-implicit split of §6.3 (the small-cell
-//               counts compared exactly across decompositions).
+//               counts compared exactly across decompositions);
+//   g9c       — G9c (WO-5b): a channel with inflow / walls / outflow, a sphere and a cap cutting
+//               the outflow face across the rank boundaries, the scalar advected by the full NS
+//               step on the captured open-face flux, fou, 30 steps (small-cell counts exact).
 //
 // Plus the level table: ScalarMG's distributed table equals VelocityMG::initMpi's (in place).
 #include <mpi.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -402,6 +406,86 @@ int main(int argc, char** argv) {
               std::printf("  [g9] C_bulk %.3f, small cells %ld, implicit faces %ld of %ld\n",
                           st.bulkCourant, st.numSmall, st.numImplicitFaces, st.numFluxFaces);
             CHECK(st.numSmall > 0 && st.numImplicitFaces > 0);
+            return r;
+          },
+          false, true, true);
+    }
+    // ---- G10 on G9c (WO-5b): open domain faces, the scalar on flow's own projection ----
+    {
+      // A channel along z in a 32^3 box: inflow w = 1 on -z, outflow on +z, no-slip x and y walls;
+      // a sphere off the axis and a cap (a sphere centred just outside the outlet, cutting the
+      // outflow face) whose slivers straddle the rank boundaries of np = 2 and 4 (the ORB splits x
+      // first, then y), so the captured outflow plane's transverse ghost rows enter the small flags
+      // of ghost layer 1 (§6.3). fou at bulk Courant ~1.1 (small cells occur, in the outlet layer
+      // too: the cap was chosen for it by a scan of its centre and radius), D = 0.3, c0 = 0.2,
+      // Dirichlet 1 at the inlet, zero-gradient exit; 30 steps of the full NS step.
+      const int N = 32;
+      std::vector<double> gsdf((std::size_t)N * N * N);
+      for (int z = 0; z < N; ++z)
+        for (int y = 0; y < N; ++y)
+          for (int x = 0; x < N; ++x) {
+            const double a = std::sqrt((x - 13.3) * (x - 13.3) + (y - 17.1) * (y - 17.1) +
+                                       (z - 11.4) * (z - 11.4)) -
+                             7.3;
+            const double b = std::sqrt((x - 15.6) * (x - 15.6) + (y - 16.5) * (y - 16.5) +
+                                       (z - 34.6) * (z - 34.6)) -
+                             8.1;
+            gsdf[(std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * N] = std::fmin(a, b);
+          }
+      auto flowG9c = [](IbmSolver& s) {
+        s.setRho(1.0);
+        s.setMu(1.6);
+        s.setDt(0.45);
+        for (int f = 0; f < 4; ++f)
+          s.setDomainBc(f, 1, 0.0, 0.0, 0.0);
+        s.setDomainBc(4, 2, 0.0, 0.0, 1.0);  // -z inflow
+        s.setDomainBc(5, 3, 0.0, 0.0, 0.0);  // +z outflow
+      };
+      int call = 0;  // compare() solves the distributed run first, then the single-rank reference
+      compare(
+          "g9c", N, gsdf, flowG9c,
+          [&](IbmSolver& s, const Block& B) {
+            s.addScalar("c", 0.3, 0, 50, true);  // fou
+            for (int f = 0; f < 4; ++f)
+              s.setScalarBc("c", f, 1, 0.0);  // neumann
+            s.setScalarBc("c", 4, 2, 1.0);    // dirichlet inflow
+            s.setScalarBc("c", 5, 1, 0.0);    // zero-gradient exit
+            const std::vector<double> unk = s.scalarGeometryField(4);
+            std::vector<double> c(unk.size());
+            for (std::size_t k = 0; k < c.size(); ++k)
+              c[k] = unk[k] > 0.5 ? 0.2 : 0.0;
+            (void)B;
+            s.setField("c", c);
+          },
+          [&](IbmSolver& s) {
+            const bool ref = call++ == 1;
+            Run r;
+            long outletSmall = 0, small = 0, impl = 0;
+            for (int k = 0; k < 30; ++k) {
+              s.step();
+              const auto& st = *s.scalarField("c").cut;
+              small = std::max(small, st.numSmall);
+              impl = std::max(impl, st.numImplicitFaces);
+              r.iters.push_back(st.iterations);
+              r.flux.push_back((double)st.numSmall + 1e4 * (double)st.numImplicitFaces);
+              const auto b = s.scalarBudget("c");
+              r.identity.push_back(b.identityError / b.mass);
+              // small cells in the outlet layer (the implicit open-face rows of §1.4 are exercised)
+              auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), st.small);
+              const int lx = s.nx(), ly = s.ny(), lz = s.nz();
+              const long sy = lx + 2 * G, sz = sy * (ly + 2 * G);
+              for (int y = 0; y < ly; ++y)
+                for (int x = 0; x < lx; ++x)
+                  outletSmall += h((x + G) + (y + G) * sy + (lz - 1 + G) * sz) > 0.5 ? 1 : 0;
+            }
+            if (rank_ == 0)
+              std::printf(
+                  "  [g9c %s] small cells <= %ld (in the outlet layer, summed over the "
+                  "steps, rank 0: %ld), implicit faces <= %ld\n",
+                  ref ? "single" : "np", small, outletSmall, impl);
+            CHECK(small > 0 && impl > 0);
+            if (ref)  // the implicit open-face rows (an outflow face of a small cell) are exercised
+              CHECK(outletSmall > 0);
             return r;
           },
           false, true, true);

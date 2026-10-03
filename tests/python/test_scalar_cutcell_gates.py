@@ -19,7 +19,12 @@ conversions of §1.2 are on the path.
        solve_scalar_steady (G7a, G7b).
   g9   advection in an annulus (WO-5): solid-body rotation carrying a Gaussian blob one revolution,
        fou / koren at bulk Courant 0.5 / 0.9: per-step budget identity, conservation against the
-       accounted defects, positivity, finiteness, slivers (min kappa < 1e-2).
+       accounted defects, positivity (koren gated at bulk Courant <= 1/2, ruling D-WO5-1; its 0.9
+       row is information), finiteness, slivers (min kappa < 1e-2).
+  g9c  open domain faces (WO-5b, ruling D-WO5-3): a channel with a solid sphere, inflow / walls /
+       outflow, the scalar carried by flow's own projection: the per-step budget, boundary
+       advective and diffusive fluxes included, closes to <= 1e-13 of the mass change; constant
+       preservation; boundedness; a steady row; the collocated grid is refused (open question).
   g9b  constant preservation under flow's own projection (Stokes through an SC array, c = 1):
        staggered and the collocated 'gauge-exact', 'plain', 'embed' pass; the ghost projection
        is refused (§13 Q13).
@@ -788,11 +793,14 @@ def gate_g9():
                 check(st["cons"] <= 1e-12, f"{tag}: (ii) |M_end - M0 + sum defect| = {st['cons']:.1e} M0 <= 1e-12")
                 if scheme == "fou":
                     check(st["min"] >= -1e-12 * st["cmax0"], f"{tag}: (iii) min c {st['min']:.1e} >= -1e-12 max c0")
-                else:  # C = 0.9 HELD failing (WO-5 report): forward Euler + the legacy Koren
-                    # reconstruction is TVD only to C <= 1/2 — it fails in the bulk with no solid at all
-                    # (koren_bulk_control below), so no small-cell treatment can meet it.
+                elif cr <= 0.5:  # ruling D-WO5-1: koren's (iii) is gated at bulk Courant <= 1/2
                     check(st["min"] >= -1e-3 * st["cmax0"] and st["max"] <= (1 + 1e-3) * st["cmax0"],
                           f"{tag}: (iii) min c {st['min']:.1e} >= -1e-3, max c {st['max']:.6f} <= 1.001 max c0")
+                else:  # information only (D-WO5-1): forward Euler + the legacy Koren reconstruction is
+                    # TVD only to C <= 1/2 — it fails in the bulk with no solid at all
+                    # (koren_bulk_control above), so no small-cell treatment can meet it.
+                    print(f"    INFO {tag}: (iii) not gated above bulk Courant 1/2 (D-WO5-1): min c "
+                          f"{st['min']:.1e}, max c {st['max']:.6f} (max c0 {st['cmax0']:.6f})")
                 check(st["finite"], f"{tag}: (iv) finite throughout")
                 check(st["minkap"] < 1e-2, f"{tag}: (v) min kappa {st['minkap']:.1e} < 1e-2")
                 check(abs(st["cb"] - cr) <= 0.02 * cr, f"{tag}: bulk Courant {st['cb']:.3f} ~ {cr}")
@@ -845,12 +853,161 @@ def gate_g9b():
                f"{kind} {scheme}: refused for a cut-cell scalar (Q13: no divergence-free face flux)")
 
 
+# --------------------------------------------------------------------------------------- G9c ----
+def channel_case(kind="staggered", n=24, dt=0.008, D=0.01, scheme="koren", out_bc="neumann",
+                 c0=0.2, cin=1.0, cap=True):
+    """A 2 x 1 x 1 channel (2n x n x n cells): inflow U = 1 on -x, outflow on +x, no-slip walls on y
+    and z, mu 0.05; a solid sphere (R 0.23) off the axis and, with `cap`, a second one (R 0.2)
+    centred just outside the outlet, cutting the outflow face (slivers in the outlet column). The
+    cut-cell scalar: Dirichlet `cin` on the inflow face, `out_bc` on the outflow face (Dirichlet
+    0.5), Neumann on the walls and the solids; `c0` in the fluid."""
+    cls = pf.Solver if kind == "staggered" else pf.SolverColocated
+    s = cls((2 * n, n, n), extent=(2.0, 1.0, 1.0))
+    if kind != "staggered":
+        s.set_collocated_scheme("gauge-exact")  # not the refused 'ghost' (D-WO5-4)
+    s.set_rho(1.0)
+    s.set_mu(0.05)
+    s.set_dt(dt)
+    s.set_domain_bc("-x", "inflow", velocity=(1.0, 0.0, 0.0))
+    s.set_domain_bc("+x", "outflow")
+    for f in FACES[2:]:
+        s.set_domain_bc(f, "wall")
+    X, Y, Z = grid(s)
+    sdf = np.sqrt((X - 0.71) ** 2 + (Y - 0.48) ** 2 + (Z - 0.53) ** 2) - 0.23
+    if cap:
+        sdf = np.minimum(sdf, np.sqrt((X - 2.07) ** 2 + (Y - 0.31) ** 2 + (Z - 0.64) ** 2) - 0.2)
+    s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
+    s.add_scalar("c", diffusivity=D, scheme=scheme, cutcell=True)
+    s.set_scalar_bc("c", "-x", "dirichlet", cin)
+    if out_bc == "dirichlet":
+        s.set_scalar_bc("c", "+x", "dirichlet", 0.5)
+    else:
+        s.set_scalar_bc("c", "+x", "neumann")
+    for f in FACES[2:]:
+        s.set_scalar_bc("c", f, "neumann")
+    geo = s.diagnostics.scalar_geometry("c")
+    unk = geo["unknown"] > 0.5
+    s.set_field("c", np.asfortranarray(np.where(unk, c0, 0.0)))
+    return s, unk, geo["kappa"], dt, (1.0 / n) ** 3
+
+
+def g9c_run(nsteps, **kw):
+    """Step the channel; per step the budget identity with the mass change summed exactly
+    (math.fsum of kappa V (c - c^n) over the unknowns: the budget's own d_mass differences two
+    O(M) reductions whose round-off, ~1e-14 M, is ~1e-12 of a step's change in a long channel),
+    and the run's conservation, bounds and census."""
+    s, unk, kap, dt, V = channel_case(**kw)
+    cp = s.get_field("c")
+    m0 = V * math.fsum((kap * cp)[unk].ravel())
+    st = dict(ident=0.0, internal=0.0, flows=0.0, defects=0.0, min=float(cp[unk].min()),
+              max=float(cp[unk].max()), finite=True, small=0, impl=0, cb=0.0, its=0, steps=0)
+    for _ in range(nsteps):
+        s.step()
+        b = s.diagnostics.scalar_budget("c")
+        c = s.get_field("c")
+        dm = V * math.fsum((kap * (c - cp))[unk].ravel())
+        flows = dt * (b["wall_in"] + b["boundary_in"] + b["source_in"])
+        if dm != 0.0:  # (the constant run changes nothing)
+            st["ident"] = max(st["ident"], abs(dm - flows + b["defect"]) / abs(dm))
+        st["internal"] = max(st["internal"], abs(b["identity_error"]) / b["mass"])
+        st["flows"] += flows
+        st["defects"] += b["defect"]
+        cu = c[unk]
+        st["finite"] = st["finite"] and bool(np.all(np.isfinite(cu)))
+        st["min"] = min(st["min"], float(cu.min()))
+        st["max"] = max(st["max"], float(cu.max()))
+        cen = s.diagnostics.scalar_census("c")
+        st["small"] = max(st["small"], cen["num_small_cells"])
+        st["impl"] = max(st["impl"], cen["num_implicit_faces"])
+        st["cb"] = max(st["cb"], cen["bulk_courant"])
+        st["its"] = max(st["its"], cen["krylov_iterations"])
+        st["steps"] += 1
+        cp = c
+    m1 = V * math.fsum((kap * cp)[unk].ravel())
+    st["cons"] = abs(m1 - m0 - st["flows"] + st["defects"]) / m0
+    last = unk[-1]
+    st["outlet"] = float(np.sum((kap * cp)[-1][last]) / np.sum(kap[-1][last]))
+    st["s"] = s
+    return st
+
+
+def gate_g9c():
+    print("G9c: open domain faces (WO-5b, D-WO5-3): a 2 x 1 x 1 channel, inflow U = 1 / no-slip walls "
+          "/ outflow, a sphere + a cap cutting the outlet, the scalar on flow's own projection")
+    # (tag, settings, steps (t ~ 2, one flow-through, for the bounded rows), bounded, small cells)
+    rows = (("koren C<=1/2", dict(scheme="koren", dt=0.007), 286, True, False),
+            ("fou C~0.9", dict(scheme="fou", dt=0.0135), 148, True, True),
+            ("koren, Dirichlet outlet", dict(scheme="koren", dt=0.007, out_bc="dirichlet"), 40, False,
+             False))
+    for tag, kw, nsteps, bounded, small in rows:
+        t0 = time.time()
+        st = g9c_run(nsteps, **kw)
+        print(f"  {tag}: {st['steps']} steps, C_bulk <= {st['cb']:.3f}, small cells <= {st['small']}, "
+              f"implicit faces <= {st['impl']}, BiCGStab <= {st['its']}; identity <= {st['ident']:.1e} "
+              f"|dM| (internal identity_error <= {st['internal']:.1e} M), run conservation "
+              f"{st['cons']:.1e} M0; c - [0.2, 1] in [{st['min'] - 0.2:.1e}, {st['max'] - 1.0:.1e}]; outlet mean "
+              f"{st['outlet']:.3f} [{time.time() - t0:.0f} s]")
+        check(st["ident"] <= 1e-13, f"{tag}: per-step budget identity {st['ident']:.1e} |dM| <= 1e-13")
+        check(st["internal"] <= 1e-12, f"{tag}: identity_error {st['internal']:.1e} M <= 1e-12 (sanity)")
+        check(st["cons"] <= 1e-12, f"{tag}: |M_end - M0 - sum dt flows + sum defects| {st['cons']:.1e} M0 <= 1e-12")
+        check(st["finite"], f"{tag}: finite throughout")
+        if small:
+            check(st["small"] > 0 and st["impl"] > 0, f"{tag}: small cells and implicit faces occur")
+        if bounded:  # fou: to the solve's tolerance (rtol 1e-10, implicit diffusion); koren: G9's 1e-3
+            tol = 1e-10 if kw["scheme"] == "fou" else 1e-3
+            check(st["min"] >= 0.2 - tol and st["max"] <= 1.0 + tol,
+                  f"{tag}: bounded by the data, c in [{st['min']:.6f}, {st['max']:.6f}] within {tol:.0e}")
+            check(st["outlet"] > 0.3, f"{tag}: the front reached the outlet (mean {st['outlet']:.3f})")
+        if kw["scheme"] == "koren":
+            check(st["cb"] <= 0.5, f"{tag}: bulk Courant {st['cb']:.3f} <= 1/2 (D-WO5-1)")
+    # constant preservation: c = cin = 1
+    st = g9c_run(20, scheme="koren", dt=0.008, c0=1.0, cin=1.0)
+    dev = max(abs(st["min"] - 1.0), abs(st["max"] - 1.0))
+    print(f"  constant c = 1 (inflow 1): max|c - 1| = {dev:.2e}")
+    check(dev <= 1e-6, f"constant preservation through the open faces: max|c - 1| = {dev:.1e} <= 1e-6")
+    # steady (implicit FOU everywhere, §6.7) at a low cell Peclet number: the rate balance
+    s = st["s"]  # the developed flow of the last run; a second scalar, solved in place
+    s.add_scalar("d", diffusivity=0.5, cutcell=True)
+    s.set_scalar_bc("d", "-x", "dirichlet", 1.0)
+    for f in FACES[1:]:
+        s.set_scalar_bc("d", f, "neumann")
+    s.solve_scalar_steady("d")
+    b = s.diagnostics.scalar_budget("d")
+    cen = s.diagnostics.scalar_census("d")
+    rate = 1.0  # the inflow's advective rate Q cin = U A cin
+    print(f"  steady, D = 0.5 (Pe_h {1.0 / 24 / 0.5:.3f}): {cen['krylov_iterations']} iterations, "
+          f"boundary_in {b['boundary_in']:.3e}, identity_error {b['identity_error']:.1e} (rate {rate})")
+    check(cen["krylov_converged"], "steady with open faces converges")
+    check(abs(b["identity_error"]) <= 1e-12 * rate, f"steady rate balance {abs(b['identity_error']):.1e} <= 1e-12 Q cin")
+    # the collocated grid is refused (open after WO-5b: no constrained high-side face flux to capture)
+    raises(RuntimeError, lambda: channel_case(kind="collocated")[0].step(),
+           "collocated: an open domain face is refused for a cut-cell scalar (open after WO-5b)")
+    # before any projection there is no open-face flux to advect with: refused, naming step()
+    s, unk, _k, _dt, _V = channel_case(n=12)
+    s.set_field("u", np.asfortranarray(np.full(unk.shape, 1.0)))
+    raises(RuntimeError, s.advance_scalars, "open faces, a moving fluid and no projection yet: refused")
+
+
 # --------------------------------------------------------------------------------------- API ----
 def raises(exc, fn, msg):
     try:
         fn()
     except exc:
         check(True, msg)
+        return
+    except Exception as e:  # noqa: BLE001 - report the wrong type
+        check(False, f"{msg} (raised {type(e).__name__}: {e})")
+        return
+    check(False, msg + " (did not raise)")
+
+
+def raises_naming(exc, fn, needles, msg):
+    """`raises`, and the message names every one of `needles` (the remedy)."""
+    try:
+        fn()
+    except exc as e:
+        missing = [w for w in needles if w not in str(e)]
+        check(not missing, f"{msg}" + (f" (message lacks {missing}: {e})" if missing else ""))
         return
     except Exception as e:  # noqa: BLE001 - report the wrong type
         check(False, f"{msg} (raised {type(e).__name__}: {e})")
@@ -896,23 +1053,35 @@ def gate_api():
     s.set_scalar_bc("c", "-x", "periodic")
     s.set_porous_continuity(True)
     raises(RuntimeError, s.advance_scalars, "porous continuity is refused")
-    # WO-5: advection through an open domain face is refused until §6.5's high-face flux is decided
+    # ruling D-WO5-2: a moving fluid without the cut-cell projection is refused, naming the remedy
+    # (a fluid at rest keeps WO-3/WO-4's behaviour: the periodic box above stepped)
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_dt(0.1)
-    s.set_domain_bc("-x", "inflow", velocity=(1.0, 0.0, 0.0))
-    s.set_domain_bc("+x", "outflow")
     X, Y, Z = grid(s)
     s.set_solid(np.asfortranarray(np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2) - 0.2))
     s.add_scalar("c", 1.0, cutcell=True)
-    s.set_scalar_bc("c", "-x", "dirichlet", 1.0)
-    s.set_scalar_bc("c", "+x", "neumann")
-    raises(RuntimeError, s.advance_scalars, "an inflow/outflow domain face is refused (WO-5, open)")
+    s.set_field("u", np.asfortranarray(np.full((n, n, n), 0.5)))
+    raises_naming(RuntimeError, s.advance_scalars, ("cutcell_pressure=True", "set_pressure_geometry"),
+                  "a moving fluid without cutcell_pressure is refused, naming the remedy (D-WO5-2)")
+    # ruling D-WO5-4: the ghost projection is refused, the message listing the accepted ones
+    s = pf.SolverColocated((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    s.set_dt(0.1)
+    s.set_collocated_scheme("ghost")
+    s.set_solid(np.asfortranarray(np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2) - 0.2),
+                cutcell_pressure=True)
+    s.add_scalar("c", 1.0, cutcell=True)
+    raises_naming(RuntimeError, s.advance_scalars,
+                  ("'gauge-exact'", "'plain'", "'embed'", "staggered Solver"),
+                  "the 'ghost' scheme is refused, listing gauge-exact, plain, embed and the staggered "
+                  "Solver (D-WO5-4)")
 
 
 GATES = {"api": gate_api, "g1": gate_g1, "g2": gate_g2, "g3a": gate_g3a, "g3b": gate_g3b, "g7": gate_g7,
-         "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b}
+         "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b, "g9c": gate_g9c}
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(GATES)

@@ -92,6 +92,8 @@ struct ScalarCutState {
   CCField Phi[3];   ///< explicit face fluxes phi c*(c^n), 0 on implicit faces (§6.2)
   CCField small;    ///< 1 on a small cell (§6.3), inner cells + ghost layer 1
   CCField outflow;  ///< lumped implicit outflow per cell (inside SAC; ScalarMG coarse mass, §5.2)
+  bool openFace[6] = {false, false, false, false, false, false};  ///< open face rows built (WO-5b)
+  bool openInflow[6] = {false, false, false, false, false, false};  ///< ... and it is an inflow
   bool advecting = false;     ///< some face carried flux: else every advection kernel was skipped
   long numSmall = 0;          ///< census `num_small_cells`
   long numImplicitFaces = 0;  ///< census `num_implicit_faces` (faces carrying flux, implicit)
@@ -672,8 +674,10 @@ inline long countSmallLocal(CCConst small, C3 e, int g) {
 }
 
 /// Faces carrying flux that are implicit, over the low faces of the inner cells (census
-/// `num_implicit_faces`): steady, or either adjacent cell small.
-inline long countImplicitLocal(CCConst phi, CCConst small, int a, bool steady, C3 e, int g) {
+/// `num_implicit_faces`): steady, or either adjacent cell small. A face toward a non-unknown (an
+/// open domain face, WO-5b) is counted by openFaceCountsLocal instead.
+inline long countImplicitLocal(CCConst phi, CCConst small, CCConst unk, int a, bool steady, C3 e,
+                               int g) {
   const long st[3] = {1, (long)e.x, (long)e.x * e.y};
   const long s = st[a];
   long n = 0;
@@ -681,7 +685,8 @@ inline long countImplicitLocal(CCConst phi, CCConst small, int a, bool steady, C
       "peclet::flow::sco_count_implicit", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-        if (phi(i) != 0.0 && (steady || small(i) > 0.5 || small(i - s) > 0.5))
+        if (phi(i) != 0.0 && unk(i) > 0.5 && unk(i - s) > 0.5 &&
+            (steady || small(i) > 0.5 || small(i - s) > 0.5))
           ++acc;
       },
       n);
@@ -693,7 +698,8 @@ inline long countImplicitLocal(CCConst phi, CCConst small, int a, bool steady, C
 /// max(F_out, 0) and the band toward the neighbour += min(F_out, 0); `outflow` = the sum of the
 /// max(F_out, 0) added (the surrogate's lumped outflow, §4.3), 0 on every other inner cell. A face
 /// flux is one number read by both cells, so the face's two contributions are exact negatives
-/// (conservation).
+/// (conservation). A face toward a non-unknown is skipped: its flux is 0 by the guard of
+/// faceFluxes except on an open domain face, whose row is openFaceAdvection's (WO-5b).
 inline void advectionBands(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN, CCField AB,
                            CCField AT, CCField outflow, CCConst phx, CCConst phy, CCConst phz,
                            CCConst small, CCConst unk, bool steady, C3 e, int g) {
@@ -712,7 +718,7 @@ inline void advectionBands(CCField AC, CCField AW, CCField AE, CCField AS, CCFie
         const long nb[6] = {i - sx, i + sx, i - sy, i + sy, i - sz, i + sz};
         double d[6], o[6];
         for (int f = 0; f < 6; ++f) {
-          const bool imp = steady || si || small(nb[f]) > 0.5;
+          const bool imp = (steady || si || small(nb[f]) > 0.5) && unk(nb[f]) > 0.5;
           d[f] = imp ? Kokkos::fmax(F[f], 0.0) : 0.0;
           o[f] = imp ? Kokkos::fmin(F[f], 0.0) : 0.0;
         }
@@ -732,7 +738,9 @@ inline void advectionBands(CCField AC, CCField AW, CCField AE, CCField AS, CCFie
 /// of the last inner cell included), transverse inner: 0 on an implicit face (steady, or either
 /// cell small); else Phi = phi c*(c^n) with the legacy reconstruction (`sadv`: 0 fou, 1 koren, 2
 /// sou), first-order upwind when any cell of the stencil (two upwind, one downwind) is not a fluid
-/// unknown — the ghosts beyond a non-periodic global face included (their flags are cleared).
+/// unknown — the ghosts beyond a non-periodic global face included (their flags are cleared). A
+/// face toward a non-unknown is skipped (0 by the guard of faceFluxes, or an open domain face,
+/// whose flux openFaceAdvection carries; WO-5b).
 inline void explicitFaceFluxes(CCField Phi, CCConst phi, CCConst c, CCConst unk, CCConst small,
                                int a, int scheme, bool steady, C3 e, int g) {
   const long st[3] = {1, (long)e.x, (long)e.x * e.y};
@@ -744,7 +752,8 @@ inline void explicitFaceFluxes(CCField Phi, CCConst phi, CCConst c, CCConst unk,
       "peclet::flow::sco_explicit_flux", C3{g, g, g}, hi, KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const double v = phi(i);
-        if (v == 0.0 || steady || small(i) > 0.5 || small(i - s) > 0.5)
+        if (v == 0.0 || steady || small(i) > 0.5 || small(i - s) > 0.5 || !(unk(i) > 0.5) ||
+            !(unk(i - s) > 0.5))
           return;
         const double cLL = c(i - 2 * s), cL = c(i - s), cR = c(i), cRR = c(i + s);
         bool fou = scheme == 0;
@@ -773,7 +782,7 @@ inline void explicitAdvectionRhs(CCField b, CCConst Px, CCConst Py, CCConst Pz, 
 
 /// r(i) -= the implicit faces' net outflow sum F_out c_up at c (the budget's flux-form residual,
 /// §9): per face exactly the `advectionBands` terms, so a face's two contributions are exact
-/// negatives.
+/// negatives (an open domain face's: openFaceResidual).
 inline void advectionResidual(CCField r, CCConst c, CCConst phx, CCConst phy, CCConst phz,
                               CCConst small, CCConst unk, bool steady, C3 e, int g) {
   ccFor3(
@@ -789,11 +798,175 @@ inline void advectionResidual(CCField r, CCConst c, CCConst phx, CCConst phy, CC
         const double ci = c(i);
         double q[6];
         for (int f = 0; f < 6; ++f) {
-          const bool imp = steady || si || small(nb[f]) > 0.5;
+          const bool imp = (steady || si || small(nb[f]) > 0.5) && unk(nb[f]) > 0.5;
           q[f] = imp ? (F[f] > 0.0 ? F[f] * ci : F[f] * c(nb[f])) : 0.0;
         }
         r(i) -= ((q[0] + q[1]) + (q[2] + q[3])) + (q[4] + q[5]);
       });
+}
+
+// ---- open domain faces (WO-5b; §1.4 B_i, §6.5, ruling D-WO5-3) ---------------------------------
+//
+// A flow inflow / outflow global face carries the boundary-face flux the projection constrained,
+// open * vel at the boundary face (the low face of the first inner cell, or the first GHOST index
+// on the high side), captured right after the projection (Solver::scalarCaptureOpenFaceFlux) as a
+// plane over the block's FULL transverse extent, index j1 + j2 * ext[t1] (faceTangents order).
+// openFaceFluxes writes it into phi_a at the boundary face, so Out_i, C_bulk and the small flags
+// of §6.3 see it; the interior kernels above skip every face toward a non-unknown, so its row is
+// carried here alone, per §1.4's domain-face table:
+//   inflow   b_i += F_in g_bf (g_bf the scalar's Dirichlet value; always on the rhs);
+//   outflow  F_out c_i (upwind on the inner cell: the zero-gradient exit), explicit at c^n on the
+//            rhs, or implicit (AC += F_out) when the inner cell is small, and always when steady.
+// F_out is the volume flux per unit V out of the inner cell through that face: -phi on the low
+// side, +phi on the high side.
+
+/// phi(bf) = plane value on the boundary face of (a, side), over the full transverse extent, where
+/// the inner-side cell is an unknown; 0 elsewhere on that plane.
+inline void openFaceFluxes(CCField phi, Kokkos::View<const double*, CCMem> plane, CCConst unk,
+                           int a, int side, C3 e, int g) {
+  int t1, t2;
+  faceTangents(a, t1, t2);
+  const int ext[3] = {e.x, e.y, e.z};
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const long sa = st[a], s1 = st[t1], s2 = st[t2];
+  const int m1 = ext[t1], m2 = ext[t2];
+  const long bfa = side == 0 ? g : ext[a] - g;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_open_face_flux", MDRange2<CCExec>(space, {0, 0}, {m1, m2}),
+      KOKKOS_LAMBDA(int j1, int j2) {
+        const long bf = bfa * sa + (long)j1 * s1 + (long)j2 * s2;
+        const long in = side == 0 ? bf : bf - sa;
+        phi(bf) = unk(in) > 0.5 ? plane((long)j1 + (long)j2 * m1) : 0.0;
+      });
+  space.fence();
+}
+
+/// The open face's row terms on the unknown inner boundary cells of (a, side) (table above):
+/// inflow b += F_in g (gv over the inner tangential range, j1 + j2 n1, as dirichletFaceFold);
+/// outflow implicit (steady or small) AC += F_out and outflow += F_out (the surrogate's lumped
+/// outflow, as advectionBands), explicit b -= F_out c^n. Runs after advectionBands.
+inline void openFaceAdvection(CCField AC, CCField b, CCField outflow, CCConst cOld, CCConst phi,
+                              CCConst small, CCConst unk, Kokkos::View<const double*, CCMem> gv,
+                              bool inflow, int a, int side, bool steady, C3 e, int g) {
+  int t1, t2;
+  faceTangents(a, t1, t2);
+  const int ext[3] = {e.x, e.y, e.z};
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int n1 = ext[t1] - 2 * g, n2 = ext[t2] - 2 * g;
+  const long sa = st[a], s1 = st[t1], s2 = st[t2];
+  const int aInner = side == 0 ? g : ext[a] - g - 1;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_open_face_adv", MDRange2<CCExec>(space, {0, 0}, {n1, n2}),
+      KOKKOS_LAMBDA(int j1, int j2) {
+        const long i = (long)aInner * sa + (long)(j1 + g) * s1 + (long)(j2 + g) * s2;
+        if (!(unk(i) > 0.5))
+          return;
+        const double Fout = side == 0 ? -phi(i) : phi(i + sa);
+        if (inflow) {
+          b(i) -= Fout * gv((long)j1 + (long)j2 * n1);
+        } else if (steady || small(i) > 0.5) {
+          AC(i) += Fout;
+          outflow(i) += Fout;
+        } else {
+          b(i) -= Fout * cOld(i);
+        }
+      });
+  space.fence();
+}
+
+/// r(i) -= F_out c_i on the implicit outflow faces of (a, side) (the budget's flux-form residual;
+/// the inflow and explicit terms sit in b).
+inline void openFaceResidual(CCField r, CCConst c, CCConst phi, CCConst small, CCConst unk,
+                             bool inflow, int a, int side, bool steady, C3 e, int g) {
+  if (inflow)
+    return;
+  int t1, t2;
+  faceTangents(a, t1, t2);
+  const int ext[3] = {e.x, e.y, e.z};
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int n1 = ext[t1] - 2 * g, n2 = ext[t2] - 2 * g;
+  const long sa = st[a], s1 = st[t1], s2 = st[t2];
+  const int aInner = side == 0 ? g : ext[a] - g - 1;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_open_face_residual", MDRange2<CCExec>(space, {0, 0}, {n1, n2}),
+      KOKKOS_LAMBDA(int j1, int j2) {
+        const long i = (long)aInner * sa + (long)(j1 + g) * s1 + (long)(j2 + g) * s2;
+        if (!(unk(i) > 0.5) || !(steady || small(i) > 0.5))
+          return;
+        const double Fout = side == 0 ? -phi(i) : phi(i + sa);
+        r(i) -= Fout * c(i);
+      });
+  space.fence();
+}
+
+/// Sum over one open face of V times the advective flux INTO the domain through it, per internal
+/// time (budget `boundary_in`): inflow F_in g; outflow -F_out c_i at c (implicit) or c^n
+/// (explicit). Summed in a fixed (j1, j2) order on the host.
+inline double openFaceInflux(CCConst c, CCConst cOld, CCConst phi, CCConst small, CCConst unk,
+                             Kokkos::View<const double*, CCMem> gv, bool inflow, double vol, int a,
+                             int side, bool steady, C3 e, int g) {
+  int t1, t2;
+  faceTangents(a, t1, t2);
+  const int ext[3] = {e.x, e.y, e.z};
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int n1 = ext[t1] - 2 * g, n2 = ext[t2] - 2 * g;
+  const long sa = st[a], s1 = st[t1], s2 = st[t2];
+  const int aInner = side == 0 ? g : ext[a] - g - 1;
+  Kokkos::View<double*, CCMem> q("peclet::flow::sco_open_face_influx", (long)n1 * n2);
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_open_face_influx", MDRange2<CCExec>(space, {0, 0}, {n1, n2}),
+      KOKKOS_LAMBDA(int j1, int j2) {
+        const long i = (long)aInner * sa + (long)(j1 + g) * s1 + (long)(j2 + g) * s2;
+        const long k = (long)j1 + (long)j2 * n1;
+        if (!(unk(i) > 0.5)) {
+          q(k) = 0.0;
+          return;
+        }
+        const double Fout = side == 0 ? -phi(i) : phi(i + sa);
+        const double cv = inflow ? gv(k) : ((steady || small(i) > 0.5) ? c(i) : cOld(i));
+        q(k) = -vol * (Fout * cv);
+      });
+  space.fence();
+  auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), q);
+  double s = 0.0;
+  for (long k = 0; k < (long)h.extent(0); ++k)
+    s += h(k);
+  return s;
+}
+
+/// The census counts of one open face over this rank's inner boundary cells: (faces carrying flux
+/// on the HIGH side — faceFluxCountsLocal already counts the low side's —, the implicit ones of
+/// either side: outflow with steady or a small inner cell).
+inline void openFaceCountsLocal(CCConst phi, CCConst small, CCConst unk, bool inflow, int a,
+                                int side, bool steady, C3 e, int g, long& nFlux, long& nImpl) {
+  int t1, t2;
+  faceTangents(a, t1, t2);
+  const int ext[3] = {e.x, e.y, e.z};
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int n1 = ext[t1] - 2 * g, n2 = ext[t2] - 2 * g;
+  const long sa = st[a], s1 = st[t1], s2 = st[t2];
+  const int aInner = side == 0 ? g : ext[a] - g - 1;
+  CCExec space;
+  long p = 0, q = 0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_open_face_counts", MDRange2<CCExec>(space, {0, 0}, {n1, n2}),
+      KOKKOS_LAMBDA(int j1, int j2, long& c1, long& c2) {
+        const long i = (long)aInner * sa + (long)(j1 + g) * s1 + (long)(j2 + g) * s2;
+        const double v = side == 0 ? phi(i) : phi(i + sa);
+        if (!(unk(i) > 0.5) || v == 0.0)
+          return;
+        if (side == 1)
+          ++c1;
+        if (!inflow && (steady || small(i) > 0.5))
+          ++c2;
+      },
+      p, q);
+  nFlux = p;
+  nImpl = q;
 }
 
 /// max over facets of cw (0 when there is no Dirichlet/Robin facet: the steady singular test).

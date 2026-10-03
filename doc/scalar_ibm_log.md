@@ -799,3 +799,85 @@ advanceScalars, CutcellMG/VelocityMG.
   or embed.
 - **Q-H → architect (brief `doc/scalar_ibm_brief_A2.md`).** Steady advection-diffusion is not
   preconditioned by the symmetric surrogate: 13 → 40 → 89 → no convergence at Pe_h 0 / 0.1 / 0.3 / 1.
+
+## 2026-10-03 — WO-5b: the follow-ups to WO-5 (rulings D-WO5-1..4) — staggered open faces done, collocated held (one question)
+
+**D-WO5-1.** G9 (iii) for koren is gated at bulk Courant ≤ ½; the koren C = 0.9 rows print (iii) as
+`INFO` (min −0.20 / −0.23 / −40 at R_o/h 16 / 32 / 64, as WO-5); their (i), (ii), (iv), (v) stay
+gated and pass. Every G9 number is unchanged from WO-5 (periodic: the inert proof below).
+**D-WO5-2.** Kept; the message already names `set_solid(..., cutcell_pressure=True)` and
+`set_pressure_geometry`; the api gate now checks both are named. **D-WO5-4.** Kept; the message lists
+'gauge-exact', 'plain', 'embed' and "the staggered Solver without set_ghost_projection" (api gate).
+
+**D-WO5-3, built (staggered).**
+- `Solver::scalarCaptureOpenFaceFlux` (flow_ibm_scalars_cutcell.hpp), called by `step()` right after
+  `project()` and the domain-BC re-imposition (keeps outflow), inside the Picard loop (the last
+  iteration wins), before any ghost fill: per inflow/outflow global face this rank touches, the plane
+  `open * vel` at the boundary face (low: index G; high: the first ghost index) read through
+  `scalarFaceFlux`, over the FULL transverse extent (the transverse ghost rows feed ghost layer 1's
+  small flags, §6.3). Taken whether or not a cut-cell scalar exists (a plane copy; inert for the
+  flow), so a scalar added to a developed flow can be solved at once; cleared by every geometry
+  build.
+- scalar_cutcell_operator.hpp: `openFaceFluxes` writes the plane into `phi_a` at the boundary face
+  (where the inner cell is an unknown), so Out_i, C_bulk and the small flags see it. §1.4's rows in
+  `openFaceAdvection`: inflow b += F_in g_bf (the scalar's Dirichlet value, never implicit); outflow
+  F_out c_i (zero-gradient exit), explicit at c^n, implicit (AC and the lumped `outflow` += F_out)
+  for a small inner cell or steady. `openFaceResidual` / `openFaceInflux` carry them into the budget:
+  `boundary_in` now = the Dirichlet faces' diffusive flux + the open faces' advective flux (§1.6.1's
+  "domain terms"; docstring updated). Census: the open faces are counted in `num_flux_faces` /
+  `num_implicit_faces` (`openFaceCountsLocal`).
+- The interior kernels (`advectionBands`, `explicitFaceFluxes`, `advectionResidual`,
+  `countImplicitLocal`) now skip a face toward a non-unknown — inert elsewhere, where the guard
+  already makes that flux 0.
+- Refusals: the WO-5 open-face refusal is gone on the staggered grid. NEW (not in the rulings; a
+  refusal, reversible): an open face with a moving fluid and no projection yet (e.g.
+  `advance_scalars` after `set_field` only) raises, naming `step()`.
+
+**Inert proof** (vs the pre-WO-5b build, 26e917f): 198/198 arrays `np.array_equal` — G1-like
+steady with Dirichlet faces, transient Robin + source at level 0 and on the full table (3 steps
+each), the periodic annulus (fou C 0.9, koren C 0.5, 25 steps: fields, budgets, census), G9b
+staggered + collocated gauge-exact (8 steps), and a periodic projected-Stokes steady + transient
+advecting solve. **G12:** 12/12 hashes = `doc/scalar_ibm_baseline_hashes.txt` at OMP_NUM_THREADS=1
+(the `channel` and `colocated_advect_bc` cases run the capture).
+
+**G9c** (ctest `scalar_cutcell_g9c`): channel 2 × 1 × 1 (48 × 24 × 24), inflow U = 1 / no-slip y, z /
+outflow, μ 0.05, a sphere R 0.23 + a cap (R 0.2, centred outside the outlet, cutting it); D = 0.01,
+c0 = 0.2, Dirichlet 1 at the inlet, Neumann exit; one flow-through (t ≈ 2). The per-step identity
+is measured with the mass change summed exactly (`math.fsum` of κV(c − c^n)): the budget's own
+`d_mass` differences two O(M) reductions, whose round-off (≤ 1e-13 M) is ~1e-12 of one step's change
+in a long channel. `identity_error / M` is gated at ≤ 1e-12 as a sanity check.
+
+| row | steps | C_bulk | small / impl. faces | identity / \|dM\| | identity_error / M | run cons. / M0 | c − [0.2, 1] |
+|---|---|---|---|---|---|---|---|
+| koren | 286 | 0.461 | 0 / 0 | 4.6e-14 | 7.0e-14 | 5.8e-14 | [−1.4e-12, +2.0e-11] |
+| fou | 148 | 0.888 | 27 / 79 | 3.4e-14 | 6.3e-14 | 4.9e-14 | [−3.5e-12, −1.6e-10] |
+| koren, Dirichlet outlet 0.5 | 40 | 0.413 | 0 / 0 | 1.4e-14 | 8.1e-14 | 7.7e-15 | — |
+
+Outlet mean c at the end 0.60 (the front crossed the outflow face). Constant c = 1 with inflow 1:
+max|c − 1| = 0 (20 steps). Steady (implicit FOU, D = 0.5, Pe_h 0.083): 17 iterations, rate balance
+1.6e-14 of Q c_in. fou is bounded to the solve's rtol (1e-10, implicit diffusion), not 1e-12.
+
+**G10 row g9c** (`scalar_cutcell_solve_mpi`): 32³ channel along z, inflow −z / walls x, y / outflow
++z, a sphere and a cap cutting the outlet across the np = 2 (x) and np = 4 (y) rank boundaries, fou
+at C_bulk ~1.1, 30 NS steps. np 1 bitwise; np 2 / 4: max|c − c₁| = 7.8e-16 / 6.7e-16, iterations
+identical (5, 3, …), small cells (≤ 75; 10 in the outlet layer of the single-rank run, chosen by a
+scan of the cap) and implicit faces (≤ 253) equal per step on every decomposition; identity ≤ 1.8e-13
+M. G9b unchanged (0 on all four projections). **Battery** (`-LE bench`, OMP 4, -j4, 809 s): 209/209,
+plus `scalar_cutcell_g9c` registered after it and passing.
+
+**Question (stopped; the collocated grid keeps a refusal):**
+- **Q-I** (§6.5 on `SolverColocated`): the projected face field does NOT hold the flux the
+  projection constrained on a high-side open face. `projectCorrectVelocities` runs a plain
+  `fillGhosts(uf_/vf_/wf_)` (which wraps that first-ghost plane from the opposite face) and then adds
+  `bcCorrectOutflow`'s correction to the wrapped value. Measured: a constant c = 1 drops by 0.48 in
+  the outlet column in one step (interior ≤ 2e-11). There is nothing correct to capture after
+  `project()`. Options: (a) capture inside `projectCorrectVelocities`, before that fill, as
+  uf*(bf) − w(φ(bf) − φ(bf−1)) (projection code); (b) fix the flow side by saving and restoring the
+  plane around that fill, as `fillVelGhostsTo(..., doOutflow=false)` does for the staggered grid.
+  This may move the collocated outflow numerics; `colocated_advect_bc` is a G12 hash. (c) keep the
+  refusal. Refused for now with a named error (api gate + G9c).
+- Noted, not decided: backflow on an outflow face uses §1.4's signed F_out c_i literally. Implicit,
+  this gives AC += F_out < 0. No gate exercises it.
+
+**Not changed:** the projection, ufAdvVelocity, the legacy scalar path, ScalarMG / the
+preconditioner, steady mode (Q-H / A2), the design note.
