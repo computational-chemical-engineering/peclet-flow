@@ -46,6 +46,18 @@ D1 rerun on main (a0afc9b): same pattern — rtol 1e-8: iterations 13.93 -> 10.5
 drift 5.2e-12 / 2000 steps; 1e-6: 7.49, 1.5e-9. USER decision pending: published case rtol (now 1e-10).
 E2(a) PARKED (register 43c78cb; branches vof-e2, vof-e2-e23-stopped2 on origin).
 
+**CPU §14 (2026-10-04, architect; branch cpu14 = 8e5fc53, worktree flow-cpu14):** Snellius kernel
+profile (job 27519212): 1x24 kernel 121 ms over 2104 launches + ~25 ms host GraphAMG bottom (serial,
+1.5 ms/V-cycle). FINDINGS: the Snellius np=1 runs took the DISTRIBUTED path (init_mpi at size 1) —
+single-rank fusions never ran; container kernels serial per block on host (static schedule); 8x3
+imbalance = CCD-straddling placement. Plan -> 1x24 ~69 ms (60-78; TBF 46); <50 needs user options
+(rtol 1e-6, float V-cycle). DECISIONS: Q-H1 'direct' bottom on host YES (recorded numerics change);
+Q-H2 NO (np=1 keeps the distributed path; script fix only). Running: WO-H0..H3 (flow-cpu14),
+WO-H4 container (flow-cpu14-h4), WO-12/9/10 (vof-perf3; told to fold Q-H4's 4-lane order into WO-10
+if not committed). Then S-1 Snellius (needs user OK: budget low), WO-H5..H8, S-2.
+Production column at case rtol 1e-8 running (peclet-examples worktree peclet-examples-rtol, branch
+rtol-1e8; frozen module scratchpad/flow_prod6 = a0afc9b) -> page update.
+
 **Next.** Snellius same-node rerun (bubble_cpu.slurm) + update the page's cost table; host MG launch
 structure (CPU still ~4x TBF); WO-9/10/12; E2(a) per the user's answer.
 
