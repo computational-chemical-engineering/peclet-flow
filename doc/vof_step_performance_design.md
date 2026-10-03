@@ -1762,3 +1762,410 @@ Each item carries a label and a default, so work can proceed unattended.
    `startup_steps=0` on restart.** Rejected: storing Pⁿ⁻¹; `set_field` hooks.
 7. **The split solve is MG-PCG on A0, independent of the driver selection;** the setter is
    order-independent of the rho closure. Rejected: following `useChebyshev_`/`useFcg_`.
+
+---
+
+## 13. Addendum (2026-10-03): the device bottom solve, redesigned (B1's premise measured false)
+
+**Status:** DESIGN. Branch `vof-b1` (worktree `suite/flow-vof-b1`), on top of WO-6, E3 and WO-11.
+§13 **supersedes** §4.1, §5.7's preconditioner, kernel, sub-hierarchy, eligibility condition 7 and
+unit gate, and the B1 row of §0. It keeps §5.7's selector, flag plumbing and FCG skeleton, and it
+keeps §5.14's component labels. Numbers marked [meas] are from the quiet RTX 5080 run quoted below.
+Numbers marked [inf] are inferred from those measurements. Numbers marked [model] are derived here.
+
+### 13.0 Decisions at a glance
+
+| # | decision | rejected |
+|---|---|---|
+| D-1 | The device bottom is a **block-tridiagonal direct factorization** of the bottom operator in FP32. Planes run along one axis, and each plane's Schur complement is inverted explicitly (block Thomas). It is the preconditioner of B1's existing **FP64 FCG**, which runs to the same τ = 1e-5. There are two launches: a factor launch once per operator change, and one solve launch per V-cycle. | B1's V-cycle preconditioner (measured +5.3 ms/step); a dense 1536² factor or inverse; all-SM Krylov; Chebyshev to τ; a deeper or factor-3 bottom; an unrefined FP32 bottom; a vendor dense solver |
+| D-2 | The null space is handled by **exact plane-local augmentation**: per component, a rank-1 term on its cells in its last-eliminated plane. The augmented solve is exact for compatible right-hand sides. | a diagonal shift (costs accuracy); pinning one cell (raises κ by about n) |
+| D-3 | A float factor is admissible. Every quantity that carries the identity stays FP64: the stored operator, the A·1 = 0 projection, and the residual that decides convergence. Float changes only the iteration count, and failure is loud. | float anywhere the identity is asserted (the register's float-storage failure mode) |
+| D-4 | **B1's V-cycle preconditioner and `sub_` are deleted** once the direct engine passes its gates. History keeps them at `ba8f769`. | keeping `'geometric'` as an option |
+| D-5 | Selector: `diagnostics.set_pressure_bottom_solver('auto' \| 'direct' \| 'algebraic')`. `'auto'` selects `'direct'` where eligible. Host backends keep GraphAMG, bitwise. | — |
+
+### 13.1 Problem, evidence, scope
+
+**Measured** [meas] (2026-10-03, quiet RTX 5080, bubble column 128×96×64, rtol 1e-10, 300 steps
+from `ckpt_t43`, `prof.py --bottom-solver`):
+- `'algebraic'` (host GraphAMG): step 42.8 / 43.2 ms, projection 23.7 / 24.0 ms.
+- `'geometric'` (B1, τ 1e-5): step 48.1 / 48.2 ms, projection 29.1 ms.
+- Both engines: 13.32 PCG iterations per step, so 13.32 bottom solves per step.
+- Bottom: 16×12×8 = 1536 cells, rebuilt every step (variable ρ).
+- E1 (WO-0): an exact bottom one or two levels deeper costs +8.5 / +9.05 outer iterations per step.
+
+**Split of the projection** [inf]. With G = the B1 bottom, A = the GraphAMG bottom and N = the rest
+of the projection: G − A = 5.3 ms is measured. The single-SM `GeoBottomKernel` measured 18.9 ms/step
+at τ 1e-5 on a shared GPU, and a one-SM kernel is barely slowed by co-tenants. That gives G ≈ 18,
+A ≈ 13 and N ≈ 11 ms (each ±1). This is consistent with §3.2's ≈ 0.85 ms per outer iteration after
+WO-2/3/5. WO-D0 confirms it.
+
+**Why B1 is slow** (from the WO-6 measurements and the kernel source):
+- Each FCG iteration is ≈ 112 dependent team phases. The in-kernel V-cycle accounts for ≈ 102 of
+  them, 48 of which are the 12 coarsest sweeps on a 12-cell level. At 10–12 iterations that is
+  ≈ 1250 phases per solve.
+- 1.35 ms per solve divided by ≈ 1250 phases gives **≈ 1.0 µs per dependent phase**. That is the
+  calibration constant used below.
+- About a third of the cost is FP64 work on one SM: ≈ 2 M DP instructions per solve at the 5080's
+  2 DP lanes/clk/SM.
+- So B1 is *phase-bound* on every GPU, not only FP64-bound on this one. H100 would not rescue it.
+
+**Scope:** single rank, device backends, the singular agglomerated bottom (the B1/B1b eligibility),
+bubble column first.
+
+**Out of scope:**
+- the host bottom (GraphAMG, bitwise);
+- MPI (see §13.9 Q-D7);
+- better coarse operators (S3);
+- an FP64 factor on FP64-strong GPUs (Q-D2).
+
+### 13.2 Constraints and invariants
+
+- **FP64 operator.** The FCG applies the bottom level's own stored operator (AC, AFX, AFY, AFZ),
+  through the A0 cell body, exactly as B1 does. A·1 = 0, the per-component mean projections and the
+  stopping residual all stay FP64.
+- **Same bottom semantics.** Relative ∞-norm residual ≤ τ = 1e-5 (E3, recorded) and cap 100. On a
+  non-finite scalar: x = 0 plus the device flag that rides the A6 packet (unchanged).
+- **Solids (B1b).** Solid cells (comp < 0) keep x = 0 and enter r as 0. There are 1–64 components;
+  more go to GraphAMG.
+- **Reproducibility.**
+  - The factor and M are **bitwise independent of the team size T**. Every stored or output scalar
+    is computed by one thread, in a summation order fixed by the algorithm and the compile-time tile
+    size, never by T. There are no team reductions inside the factor or M.
+  - The FCG's dots stay team reductions, as in B1: deterministic for a fixed T and GPU.
+  - Runs are bitwise run-to-run.
+- **No transfers.** No D↔H copy inside `step()` on the eligible path. The factor launch is decided
+  by a host flag, not by a read.
+- **Unchanged elsewhere.** Host results, the distributed path and the `'algebraic'` engine stay
+  bitwise.
+
+### 13.3 The decision, and why the alternatives lose
+
+The bottom needs about 13 exact-to-1e-5 solves per step with an operator that changes every step,
+on a GPU where one SM delivers ≈ 5 G FP64 FMA/s and where each dependent in-kernel phase costs
+≈ 1 µs. So the cost of a candidate is roughly (dependent phases per solve) × 1 µs + (FP64 work on
+one SM). A direct method attacks both terms:
+- it needs 2P ≈ 24–34 phases per application instead of ≈ 112 per FCG iteration;
+- it needs 2 applications per solve instead of 11;
+- its heavy arithmetic moves to FP32, which runs at 64× the FP64 rate on this card.
+
+The structured sparsity is what makes the direct method cheap. With the longest suitable axis
+slowest, b = cells per plane ≤ 128. Then:
+- the factor is P·b³/2 ≈ 13 M FMA, against the dense n³/3 ≈ 1.2 G;
+- an application reads 2·P·b² FP32 values ≈ 1.6 MB, against 9.4 MB for a dense factor.
+
+| candidate | why it loses (5080 unless stated) |
+|---|---|
+| (a) dense Cholesky or inverse of the 1536² matrix | FP64 factor ≈ 1.4 ms/step even at full-GPU peak, through a tiled multi-launch library. In one team, each solve streams 9–19 MB, ≥ 60–120 µs. An FP32 dense factor with FP64 refinement fixes the factor but still moves 6× the block-tridiagonal traffic per application. It also needs cuSOLVER/rocSOLVER plus host LAPACK, or Kokkos-Kernels: a new dependency per backend, buying nothing once the sparsity is used. The primitives D-1 needs are b×b ≤ 192² team kernels (≈ 300 lines). |
+| (b) all-SM Krylov with device scalars | Every dependent step becomes a launch (≈ 4–5 µs). A V-cycle-preconditioned iteration is ≥ 110 launches. Unpreconditioned CG needs ≈ √κ·ln(1/τ) ≈ 20–60 iterations × ≈ 4 launches. Both cost ≥ 0.4 ms per solve. |
+| (c) Chebyshev or block-Jacobi to τ | Degree ≈ √κ·ln(2/τ) ≈ 240 matvecs per solve (scaled κ ≈ 400): ≈ 1 ms in one team, 240 launches across all SMs. |
+| (d) factor-3 / deeper coarsening, bottom ≈ 3³–6³ | E1 measured +8.5 outer iterations ≈ +7 ms/step: more than the whole bottom. It is blocked on S3. If S3 ever allows a smaller bottom, D-1 only gets cheaper (∝ n·b²). |
+| (e) FP32 bottom used *unrefined* in the FP64 V-cycle | Its error ≈ ε32·κ is unverified and grows silently with contrast. That is exactly the register's float-storage failure mode ("Float MReal operator storage silently breaks A·1=0"). D-3 is admissible under the register's precision rule ("identity-bearing quantities stored in the precision the identity is asserted") precisely because it is refined in FP64 to τ. |
+| B1 with an FP32, shared-memory V-cycle | It is still ≈ 112 phases × 11 iterations ≥ 0.5 ms per solve. |
+| FP64 factor everywhere | On the 5080 the factor runs on one SM in FP64: ≈ 13 M / 5.2 G ≈ 2.5 ms/step. On H100 it saves one FCG iteration (Q-D2). |
+
+### 13.4 The scheme (normative)
+
+**13.4.1 Matrix, scaling, ordering.**
+- **Diagonal.** On fluid cells, d_i = −Σ over the six faces of AF, resummed in FP64 as GraphAMG
+  does, so the factored matrix has A·1 = 0 exactly per component.
+- **Scaling.** s_i = 1/√d_i in FP64. Set s_i = 0 where comp(i) < 0 or d_i ≤ 0.
+- **Scaled matrix.** Ã = S·A·S, assembled in FP64 and cast to FacReal (= `float`) when stored.
+  - Diagonal 1 on fluid cells. Rows with s_i = 0 are identity rows.
+  - Off-diagonal Ã_ij = s_i·AF_face·s_j, **accumulated over each cell's six faces in the order
+    −x, +x, −y, +y, −z, +z**. Periodic axes of length 1 or 2 therefore need no special case.
+- **Slow axis s, decided at hierarchy build from the domain BC flags.**
+  - The candidates are the non-periodic axes; if there are none, all three axes.
+  - Choose the longest candidate; on a tie the higher index wins (z > y > x).
+  - If its plane size b = n/n_s exceeds `kBottomMaxPlane = 192`, try the remaining axes in
+    decreasing length. If none fits, the bottom is ineligible.
+- **Indexing.** Plane k is the coordinate along s, and P = n_s. The in-plane index is
+  q = (lower other axis) + n_lower·(higher other axis). The factor-order index is k·b + q.
+- **Block structure.**
+  - Â_k: the dense b×b in-plane block.
+  - e_k ∈ R^b: the diagonal coupling of (q,k) to (q,k−1). For P ≥ 3 with a periodic slow axis,
+    e_0 is the wrap coupling of plane 0 to plane P−1.
+  - With P = 2 and a periodic slow axis, both faces accumulate into e_1, and the problem is treated
+    as non-periodic.
+
+**13.4.2 Null space: plane-local augmentation (exact).**
+- For each component c, let k_c = the largest plane index among its cells, and m_c = the number of
+  its cells in plane k_c. The label kernel computes both (§5.14 extended; geometry time).
+- Add 1/m_c to Â_{k_c}(i,j) for every pair i, j ∈ c ∩ plane k_c.
+- **Why this is exact.** The augmented matrix is A′ = A + Σ_c σ_c·w_c·w_cᵀ, with
+  w_c = S⁻¹·1_{c∩k_c} > 0 supported on c. For a compatible r (1_cᵀ r = 0) we have
+  1_cᵀ A′x = σ_c (1_cᵀ w_c)(w_cᵀ x) = 0, so w_cᵀ x = 0 and A x = r **exactly**.
+- **Why it is well conditioned.** The lifted eigenvalue is ≈ m_c/|c| ≈ 1/P, above the smallest
+  nonzero eigenvalue of Ã (≈ 0.006–0.025), so κ is not inflated.
+- M's output is then made fluid-mean-free per component in FP64 (`removeMeanBottom`, unchanged).
+
+**13.4.3 Factor (one team, FacReal arithmetic, at the first bottom solve after each `setOpenness`).**
+
+*Non-periodic slow axis* (block Thomas with explicit inverses):
+```
+Σ_0 = Â_0;                          Q_0 = Σ_0⁻¹
+Σ_k = Â_k − diag(e_k) Q_{k−1} diag(e_k);  Q_k = Σ_k⁻¹      k = 1..P−1
+```
+
+*Periodic slow axis, P ≥ 3:*
+- T = planes 0..P−2, factored as above (Q_0..Q_{P−2}).
+- Y = T⁻¹·B, where B has block 0 = diag(e_0), block P−2 = diag(e_{P−1}), and zeros elsewhere.
+  It is computed as a matrix recurrence: one phase per plane, forward then backward, the same
+  arithmetic per column as the solve.
+- Σ_B = Â_{P−1} − diag(e_0)·Y_0 − diag(e_{P−1})·Y_{P−2}; Q_B = Σ_B⁻¹, stored as block P−1.
+
+*Dense SPD inverse* Q = Σ⁻¹. Only the lower triangle of Σ is read. Tile Bt = 16 (constexpr). For
+each tile t:
+1. **Diagonal tile.** One thread does an unblocked column Cholesky. For each column j:
+   - pivot p = Σ_jj − Σ_{m<j, m∈t} L_jm² (ascending m);
+   - fail if !(p > τ_piv = 1e-6);
+   - L_jj = √p;
+   - for each i > j in the tile: L_ij = (Σ_ij − Σ_m L_im L_jm) / L_jj.
+2. **Panel.** One thread per row below the tile, with the same formula over the tile's columns in
+   ascending order.
+3. **Trailing update.** For i ≥ j below the tile: Σ_ij −= (Σ_{m∈t} L_im L_jm), as one partial sum
+   in ascending m.
+
+Barriers separate 1 / 2 / 3. After all tiles:
+- **W = L⁻¹**, one thread per column j: W_jj = 1/L_jj; for i > j in ascending order,
+  W_ij = −(Σ_{m=j}^{i−1} L_im W_mj) / L_ii.
+- **Q = WᵀW**, with Q_ij = Q_ji = Σ_{m=max(i,j)}^{b−1} W_mi W_mj (ascending m). Q is
+  therefore bitwise symmetric.
+
+*Failure handling:*
+- On a pivot failure or a non-finite value, restart the whole factor with δ added to every scaled
+  diagonal: δ = 1e-4, then 1e-2.
+- A third failure can only come from non-finite input. Then `facOk = 0`, the solve kernel takes
+  B1's failure path (x = 0 plus the flag), and the result is `solveFailed_`.
+- The restart count goes to `info` and into the `[mg]` debug trace.
+
+**13.4.4 M(r) (inside the solve kernel; r and z FP64 in the level's ext layout).**
+1. Cast phase: r̃ = FacReal(s ∘ r) in factor order. B1's z → zp copy is fused into this phase.
+2. Forward, one phase per plane:
+   - g_0[i] = Σ_j Q_0[j][i]·r̃_0[j];
+   - g_k[i] = Σ_j Q_k[j][i]·(r̃_k[j] − e_k[j]·g_{k−1}[j]).
+   The bracket is evaluated inline by each thread. Ascending j, a single accumulator, one thread per
+   output i.
+3. Backward: x̃_{P−1} = g_{P−1}; x̃_k[i] = g_k[i] − Σ_j Q_k[j][i]·(e_{k+1}[j]·x̃_{k+1}[j]).
+4. Border (periodic, P ≥ 3):
+   - run steps 2–3 over T to get u;
+   - x̃_B = Q_B·(r̃_B − e_0 ∘ u_0 − e_{P−1} ∘ u_{P−2});
+   - one phase: x̃_k = u_k − Y_k·x̃_B.
+5. Uncast phase: z = s ∘ double(x̃) on fluid cells, 0 elsewhere. Then `removeMeanBottom(z)`.
+
+**13.4.5 FCG.** B1's loop (§5.7 pseudocode, `GeoBottomKernel::operator()`) is unchanged except that
+`vcycle(t, r, z, cnt, &zp)` becomes M (§13.4.4). τ, the cap, Polak–Ribière, the masking, the
+per-component means and the flag are all unchanged. The expected iteration count is 2, because
+M's relative error is ≈ c·ε32·κ(Ã) ≈ 1e-5–1e-3.
+
+**13.4.6 Eligibility.** §5.7 conditions 1–6 (6 = B1b's 1–64 components), plus:
+- n ≤ 8192 (unchanged);
+- a slow axis with b ≤ 192 exists.
+
+Condition 7 (a sub-level exists) is dropped. Otherwise GraphAMG runs, unchanged.
+
+**13.4.7 Layout and placement.**
+- **Device storage** (allocated with the hierarchy; ≈ 1.5–1.8 MB for the case):
+
+  | name | type and shape | contents |
+  |---|---|---|
+  | `Q` | `View<FacReal***>` [P][b][b], LayoutRight | read as Q(k, j, i), so thread i's reads are coalesced; it equals row i by symmetry |
+  | `Y` | [P−1][b][b] | stored transposed, Y(k, j, i) = Y_k(i, j) |
+  | `e` | [P][b] | the slow-axis couplings |
+  | `s` | `View<double*>` [n] | the scaling |
+  | `g`, `u` | [n] FacReal | substitution vectors |
+  | Σ, L, W scratch | 3 × b² | global memory; level-0 scratch is a permitted, bitwise-neutral optimisation |
+  | `kc`, `aug` | [64] | the per-component augmentation |
+  | `facOk`, `restarts` | | factor status |
+
+- **New header `src/mg_bottom_direct.hpp`.** Container-free: the factor functor
+  `BottomFactorKernel<FacReal>` and the M device function, taking Views. It is included by
+  `mac_cutcell_mg.hpp`.
+- FacReal is a template parameter; `float` is the only production instantiation. The unit test also
+  instantiates `double`.
+
+### 13.5 Cost model, checked against the measurements
+
+Calibration from B1 [inf]:
+- ≈ 1.0 µs per dependent single-team phase;
+- FP64 ≈ 5.2 G FMA/s per SM; FP32 ≈ 333 G FMA/s per SM;
+- L2 → one SM ≈ 160 GB/s.
+
+The case's BCs decide the shape:
+- walls in y: s = y, P = 12, b = 128, no border;
+- fully periodic: s = x, P = 16, b = 96, with border.
+
+| item (5080, quiet) | phases | [model] |
+|---|---|---|
+| M | 2P + 4 (≈ 28; border case ≈ 38) | 28–45 µs (memory ≈ 10 µs, hidden under latency) |
+| FCG iteration excluding M (FP64 matvec ≈ 4 µs, 4 reductions, mean) | ≈ 10 | ≈ 14 µs |
+| one bottom solve (2 iterations) | ≈ 90 | 85–125 µs |
+| solves per step (× 13.32) | | 1.1–1.7 ms |
+| factor (≈ 25 phases + ≈ 10 µs serial chains per plane; border adds Y ≈ 30 phases) | | 0.35–0.55 ms |
+| **direct bottom per step** | | **1.5–2.2 ms** |
+| B1 / GraphAMG today | | 18 / 13 [inf] |
+
+Expected result:
+- projection ≈ 11 + 1.9 ≈ **13 ms** (23.7 today);
+- step ≈ **32 ms** (42.8 today; −11 ms);
+- per bottom solve, ≈ 90 phases instead of B1's ≈ 1250, and ≈ 50 k DP instructions instead of
+  ≈ 2 M.
+
+**H100** [model]:
+- FP32 factor: ≈ 1.2–1.8 ms/step, with the same phase latency.
+- An FP64 factor would need 1 FCG iteration: ≈ 0.8–1.2 ms/step.
+- So the FP64 factor saves ≈ 0.4–0.6 ms/step there and costs ≈ +2 ms/step on the 5080 (Q-D2).
+
+If WO-D0 finds A much smaller than 13 ms, the design stands: it removes the transfers, and saves
+A − 2 ms. Only the expected step time changes.
+
+### 13.6 What happens to B1
+
+| part | fate |
+|---|---|
+| `GeoLabelKernel` | **kept**, extended with `kc` and `aug` |
+| eligibility skeleton | **kept** |
+| FCG loop | **kept** |
+| flag through the A6 packet | **kept** |
+| `info` / team-size trace | **kept** |
+| selector | **kept** |
+| in-kernel V-cycle (`smooth`/`residual`/`restrictZero`/`prolong`/`fill`/`neumannCell`/`prolongGhosts`/`vcycle`) | **deleted** in WO-D3 |
+| `sub_`, `buildGeoSub`, the lazy sub-level coarsening | **deleted** in WO-D3 |
+| `kGeoPre/Post/Sweeps`, `neu[]` | **deleted** in WO-D3 |
+| `'geometric'` selector value | **deleted** in WO-D3 |
+| `Geo*` / `kGeo*` identifiers | renamed `Bottom*` / `kBottom*` in WO-D3; they no longer name what the code is |
+
+The P3 handoff's open items:
+1. The bitwise-M unit gate is **moot**.
+2. `'auto'` selects `'direct'`.
+3. The spelling question becomes Q-D4.
+4. The register text is in §13.10.
+
+### 13.7 Work orders
+
+- **WO-D0 (no code, about 20 min on a quiet GPU).**
+  - Run the P3 handoff's `xfer.sh quiet …/frozen_w11/cuda --flux device --fixdt 1.5e-3`.
+  - Record `GeoBottomKernel` ms/step = G, then N = 29.1 − G and A = 23.85 − N.
+  - Record the bubble column's BC per axis, and hence s, P and b.
+  - *Accept:* the numbers are in the log, and G-PERF's targets are fixed from them.
+- **WO-D1: factor and M, not wired.**
+  - `mg_bottom_direct.hpp` and the label-kernel extension.
+  - The host-side slow-axis rule and caps.
+  - Storage, and test hooks to run the kernels on a host backend.
+  - The new ctest `bottom_direct` (CUDA and host).
+  - *Accept:* U1–U7 pass; both batteries are green; host and CUDA `state_hash` are unchanged
+    (nothing selects the engine yet).
+- **WO-D2: wire M into the FCG kernel** (a `precond` member: V-cycle | direct).
+  - Selector value `'direct'`; `'auto'` → direct.
+  - Lazy factor launch keyed on a host stale flag set by `setOpenness`.
+  - *Accept:* §13.8 B, C, D and E. This is the recorded numerics change; the reference is
+    `'algebraic'` on the same build.
+- **WO-D3: retire B1's preconditioner** (§13.6 deletions and renames; drop `'geometric'`).
+  - *Accept:* the CUDA 50-step bubble-column dump is bitwise identical to WO-D2's (all arrays);
+    host G-BIT holds; batteries are green; clang-format 18.1.8 is clean.
+- **WO-D4: log, register text, NAMING row text, handoff.**
+- *(Not main line)* **WO-D5: `FacReal = double` on FP64-strong architectures.** Only after Q-D2.
+
+### 13.8 Verification gates
+
+**A. Unit (`bottom_direct`, CUDA and host).** The problems are: periodic with border (P ≥ 3);
+periodic with P = 2; walls-y (no border); the B1b solid sheet with 3 components, periodic and
+walls-y; a 1-cell pocket. All at coefficient ratio 50.
+
+| id | check | threshold |
+|---|---|---|
+| U1 | FP64 exactness: one M on a compatible r, `double` instantiation | ‖Ax − r‖∞/‖r‖∞ ≤ 1e-12; per-component mean of x ≤ 1e-15·max\|x\| |
+| U2 | float accuracy: one M | relative residual ≤ 1e-3 |
+| U3 | T-independence: factor storage and M(r) | **bitwise** identical for T ∈ {32, 64, 128, 256, T_max} (CUDA) and {1, 2, 4} (OpenMP) |
+| U4 | FCG convergence to τ | ≤ 3 iterations; x = 0 exactly on solids; per-component mean ≤ 4e-16·max\|x\| |
+| U5 | shift path: test hook sets τ_piv = 1e30 for the first attempt | restarts = 1; FCG reaches τ; no flag |
+| U6 | non-finite coefficient | flag set → `lastSolveFailed()`; x = 0 |
+| U7 | float M against a host FP64 dense solve of A′ (16×12×8) | max relative difference ≤ 1e-3 |
+
+**B. Numerics (bubble column, CUDA, 50 steps from `ckpt_t43`, against `'algebraic'` on the same
+build).**
+- N50: max relative difference over u, v, w, p, C ≤ **1.499e-11** (WO-0 N50; B1 reached 2.0e-14;
+  expect ≤ 1e-13).
+- Outer iterations **identical on every step** (653 total); fallback per §8 G-NUM 2.
+- Divergence ratio ≤ 2 (expect ≤ 1.001).
+- §8 G-NUM 4 physics (static drop, Hysing 1).
+- Over 300 steps: inner FCG iterations max ≤ 3 and mean ≤ 2.5; shift restarts 0; flag never set.
+- Two runs bitwise identical.
+
+**C. Solids battery** (`p3/solids.py`: slab1, slab2, cyl, rings, pack; constant and variable ρ).
+- Outer iterations identical on every step against `'algebraic'`.
+- Velocities within each case's rtol×10 floor.
+- `'algebraic'` bitwise to origin/main.
+
+**D. Bitwise, transfers, batteries.**
+- Host `state_hash` + np2, and the bubble column 1×8: identical / bitwise.
+- `ctest -LE bench` green on host, CUDA and the `PECLET_FLOW_OPERATOR_DOUBLE=OFF` tree. CUDA
+  `state_hash` is identical, or re-baselined in the commit with the old → new table if a case newly
+  qualifies.
+- Transfer gate:
+  - bubble column, ≥ 1 KiB per step: H→D 0, D→H 2 (the WO-8 packets);
+  - `pack:slab`: 0 / 0;
+  - small reads per step unchanged from WO-11.
+
+**E. G-PERF** (quiet 5080, the brief's harness, 300 steps; nsys kernel sums).
+- Factor plus solve kernels ≤ **2.5 ms/step**; factor launch ≤ 0.6 ms.
+- Projection ≤ N + 2.5 ms.
+- Step ≤ 43.0 − (A − 2.5) ms. With the [inf] split: projection ≤ 13.5 ms and step ≤ 32.5 ms.
+- Report the measured values against §13.5.
+
+### 13.9 Risks and open questions (each has a default)
+
+- **Q-D1 [fact]: the N / A / G split.** WO-D0 measures it. *Default:* N ≈ 11, A ≈ 13, G ≈ 18. The
+  design does not depend on it.
+- **Q-D2 [fact, needs billed H100 time → user]: FP32 or FP64 factor on FP64-strong GPUs.**
+  *Default:* `float` everywhere. A per-architecture compile-time choice of `double` would be a new
+  recorded decision, taken after measurement (WO-D5).
+- **Q-D3 [pref]: delete B1's preconditioner.** It is dominated: slower than GraphAMG on the 5080,
+  phase-bound on every GPU, and selected by nothing. *Default:* delete (WO-D3).
+- **Q-D4 [pref]: spelling `'direct'`.** *Default:* `'direct'`. The implementer checks
+  `../docs/NAMING.md` and drafts the row (umbrella file, for the caller).
+- **Q-D5 [fact]: the caps b ≤ 192, n ≤ 8192.** *Default:* as stated. When a 16³ bottom (b = 256)
+  first matters, measure direct against GraphAMG before raising the cap.
+- **Q-D6 [pref]: the direct engine on host backends.** *Default:* no. GraphAMG stays and host
+  results stay bitwise; the CPU projection is a separate question.
+- **Q-D7 [pref]: MPI.** *Default:* not in this package; eligibility stays single-rank. What would
+  change:
+  1. Allgatherv the bottom face form once per operator change, and the rhs once per V-cycle, on
+     device buffers. CUDA-aware MPI is needed to honour the no-transfer directive.
+  2. Every rank factors and solves redundantly, as GraphAMG does today. Bitwise agreement across
+     ranks needs the same GPU model and the same T (check T with an Allreduce min/max; on mismatch,
+     use GraphAMG).
+  3. Each rank extracts its own block.
+- **Q-D8 [pref]: promote `mg_bottom_direct.hpp` to `core::solver`.** *Default:* not now; it is
+  container-free so it can move later.
+- **Risk R-D1: per-phase cost.** If the FP32 gemv phases are memory-bound above 1 µs, M rises to
+  ≈ 45–55 µs and the bottom to ≈ 2.5 ms/step. Even then it saves ≥ 8 ms if A ≈ 13. *Levers, in
+  order:*
+  1. level-0 scratch for the current Q_k (bitwise-neutral);
+  2. a FIXED 2–4-way split of each dot (a new fixed order: re-run U1–U3 and B; it is not
+     T-dependent);
+  3. Y on many teams as a separate launch (bitwise-neutral: the same per-column arithmetic).
+- **Risk R-D2: high contrast with ε32·κ ≳ 1** (cut-cell beds at ρ ratio 1e4). FCG iterations rise
+  or the shift restarts. Correctness is held by the FP64 τ, and the cost shows in the trace. Gate C
+  covers it.
+- **Risk R-D3: the stored AC differs from the resummed d** (float-storage tree). M then
+  preconditions an exactly singular neighbour of the stored operator, and the FCG still converges on
+  the stored operator. Gate D's OFF tree covers it.
+
+### 13.10 Register entries this section creates (for the caller to add)
+
+1. **Device pressure bottom = block-tridiagonal FP32 direct factor (explicit Schur-complement
+   inverses) preconditioning FP64 FCG to τ = 1e-5; one factor launch per operator change, one solve
+   launch per V-cycle.**
+   - Rejected: B1's single-team V-cycle preconditioner (measured +5.3 ms/step on the 5080; ≈ 1250
+     dependent phases per solve); dense 1536² Cholesky or inverse; all-SM Krylov; Chebyshev to τ;
+     a deeper or factor-3 bottom (E1: +8.5 iterations); a vendor solver dependency.
+2. **Singular bottom handled by exact plane-local augmentation (rank-1 per component on its
+   last-eliminated plane).** Rejected: a diagonal shift (accuracy), single-cell pinning
+   (κ × ≈ n).
+3. **A float factor is admissible inside an FP64-verified bottom; an unrefined float bottom is
+   not.** This is the precision-policy rule applied: A·1 = 0, the projection and the stopping
+   residual stay FP64.
+4. **B1's V-cycle preconditioner and sub-hierarchy are retired** (code at `ba8f769`). The component
+   labels, FCG, flag and selector carry over.
+5. **Selector spelling** `set_pressure_bottom_solver('auto'|'direct'|'algebraic')` (pending
+   Q-D4).
