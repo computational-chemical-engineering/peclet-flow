@@ -661,3 +661,77 @@ OMP_NUM_THREADS=4 OMP_PROC_BIND=false ctest --test-dir build_cuda -LE bench -j4 
 ```
 Untracked in the worktree (not for commit): `data/packing_ring.vti` (symlink to `../flow/data`,
 used by `p3/solids.py`'s `pack` geometry).
+
+## 2026-10-03 — §13 WO-D0 … WO-D4: the direct bottom (block-tridiagonal FP32 factor + FP64 FCG)
+
+Branch `vof-b1`, NOT pushed. Commits: WO-D1 factor + M (not wired), WO-D2 `'direct'` (recorded
+numerics change; its message carries gates B-E), WO-D3 B1's V-cycle retired + `Geo*` -> `Bottom*`,
+WO-D2 G-PERF part 1 (bitwise-neutral), this entry. Raw artifacts: `~/Codes/bubble_column_perf/d/`
+(`g*/` gate outputs, `xfer/` nsys censuses, `perf/` 300-step timings, `frozen_*` modules,
+`bench_bottom_direct.cpp` + `mg_bottom_direct.profiled.hpp` = the clock64 phase profiler, not in
+the tree).
+
+**WO-D0 (quiet RTX 5080, no other GPU process; `xfer.sh … --flux device --fixdt 1.5e-3`).**
+B1's `GeoBottomKernel` = **G = 19.06 ms/step** (13.05 launches, 1.46 ms per solve; 19.02 with one
+co-tenant: a one-SM kernel is indeed barely slowed). Hence N = 29.1 − G = **10.0 ms**, A = 23.85 − N
+= **13.8 ms**. BCs of the column: x periodic (16), **y walls (12)**, z periodic (8) -> slow axis y,
+P = 12, b = 128, no border; team sizes factor 1024, solve 896. G-PERF targets from these:
+factor + solve <= 2.5 ms/step, factor <= 0.6 ms, projection <= 12.5 ms, step <= 31.7 ms.
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| A, `bottom_direct` (U1-U7; periodic+border P=16 b=96, periodic P=2, walls-y, B1b sheet periodic + walls-y, two-cell pocket with m_c = 1), CUDA + host | PASS. U1 FP64 residual 4e-15 .. 7e-15 (<= 1e-12), component means <= 3.5e-17 max\|x\|; U2 FP32 2e-7 .. 5e-6 (<= 1e-3); U3 bitwise over T = 32 64 128 256 896 (CUDA) and 1 2 4 (OpenMP); U4 1 FCG iteration everywhere, means <= 3.5e-17 (<= 4e-16); U5 restarts 1, 2-3 iterations; U6 flag + x = 0; U7 FP32 M vs dense FP64 A'^-1 <= 1.2e-6 |
+| B, column 50 steps vs `'algebraic'` | 2.67e-14 (<= 1.499e-11); iterations identical (653); div ratio 1.0000; two runs bitwise; `'auto'` = `'direct'` bitwise |
+| B, 300 steps | inner FCG 1 (3968x) / 2 (94x): max 2, mean 1.02; restarts 0 in 305 factors; no flag |
+| C, solids (10 cases) | iterations identical every step; u v w within the rtol x10 floor; `'algebraic'` bitwise to pre-§13 |
+| D | host state_hash + np2 + host column bitwise; CUDA state_hash unchanged; transfers: column 0 / 2 bulk, pack:slab 0 / 0, small reads = WO-11 |
+| WO-D3 | CUDA column dump bitwise to WO-D2's (all arrays); host G-BIT holds |
+| G-PERF part 1 | factor storage + M bitwise to WO-D1's kernel (bench dump); CUDA column dump bitwise to WO-D3's |
+| E, G-PERF | **MISSED** (below) |
+
+**Performance (quiet 5080, 300 steps, `prof.py --pcg --timing`, OMP 8).**
+
+| | `'algebraic'` | `'direct'` (after part 1) | target |
+|---|---|---|---|
+| step (`s.step()`) ms | 42.6 / 42.6 | 36.1 / 37.4 | <= 31.7 |
+| projection ms | 23.7 / 23.7 | 17.2 / 17.8 | <= 12.5 |
+| factor kernel ms (1 per step) | — | 6.55 -> **3.08** | <= 0.6 |
+| solve kernels ms/step (13.05) | — | 3.13 -> 3.10 (0.24 ms per solve) | factor + solve <= 2.5 |
+
+N (projection minus the two bottom kernels) = 17.2 − 6.2 = 11.0 ms, consistent with WO-D0.
+
+**Why G-PERF misses (profiled with clock64 per phase, `bench_bottom_direct`).** The §13.5 model's
+1 µs per dependent phase holds only for phases whose work is short; every long dependent chain
+here is L2-latency-bound (~50-100 cycles per step of a dot, with only b = 128 active threads).
+Factor after part 1 (9.2 M cycles ~ 3.2 ms): W 31 %, diagonal tiles 26 % (now barrier-bound, 17
+barriers per tile x 96 tiles), Q = W^T W 17 %, panel 10 %, trailing 9 %, assembly 8 %. M: forward
+57 % / backward 40 %, ~4 µs per plane phase (128-term dots streaming Q_k from L2), ~80 µs per M
+against 28-45 [model]; the FCG skeleton's ~8 team reductions add ~100 µs per solve. Dead ends
+measured: a diagonal-major layout for L and W (coalesced in theory) was SLOWER (W 3.8 -> 6.1 M
+cycles, Q 1.4 -> 2.1 M) and was reverted; `#pragma unroll 16` alone moved M by 20 % and the factor
+by nothing. Kokkos caps team scratch at sharedMemPerBlock minus 8 KB (~40 KB on the 5080), so
+staging a whole Q_k (64 KB at b = 128) — R-D1 lever 1 — is not available through Kokkos.
+
+**Open for the note's owner (not decided here).**
+1. G-PERF is missed by ~2.5x on the bottom (6.2 vs 2.5 ms/step) though the engine already saves
+   6.5 ms/step of projection against GraphAMG and 13 against B1. Remaining bitwise-neutral levers
+   (estimated): Q on the row-major W with idle threads prefetching; the M bracket (u − e g) and
+   (e x) formed once by their owner thread into scratch; idle threads prefetching Q_{k+1} into L1
+   during plane k. Numerics-changing levers the note lists: R-D1 lever 2 (a fixed 2-4-way split of
+   each dot: more threads in flight in M and W). Whether to take lever 2, or relax the target, is
+   the owner's call.
+2. Readings taken where §13 was not explicit (each documented in the code): "the remaining axes"
+   of the slow-axis fallback = the two axes other than the first choice, longest first, tie to the
+   higher index; non-periodic boundary-crossing faces are excluded from the re-summed diagonal and
+   the couplings exactly as GraphAMG excludes them; the assembled entry is 1 (diagonal) + faces in
+   order + 1/m_c + delta, then cast; U1 measures the residual against the operator M factors (the
+   re-summed diagonal); U3 compares M before the FCG's component-mean removal (a team reduction,
+   §13.2); the test's "1-cell pocket" is a two-cell pocket whose last plane holds one cell (a
+   one-cell component cannot exist: all faces closed => AC = 0 => solid).
+3. NAMING row (umbrella `docs/NAMING.md` history, for the caller): "2026-10-03 — flow
+   `diagnostics.set_pressure_bottom_solver('auto' | 'direct' | 'algebraic')`: `'direct'` replaces
+   the never-released `'geometric'` (B1, branch-only); additive on the release line, no alias owed."
+4. Register entries: §13.10 text, items 1-4 as written there; item 5's spelling `'direct'` checked
+   against NAMING.md (no conflict).
