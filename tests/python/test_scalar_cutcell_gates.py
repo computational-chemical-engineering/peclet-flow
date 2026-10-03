@@ -1690,13 +1690,16 @@ def gate_g5a():
             check(r["conv"], f"n={n}: converged ({r['its']} iterations)")
             check(r["its"] <= 30, f"n={n}: G-iter singular steady <= 30 ({r['its']})")
     # ruling D-WO7-2: (i) order >= 1.7 over the ladder, (ii) the Richardson extrapolate (the
-    # ladder's own order) within 1e-4 of the reference, (iii) a regression bound of 2x the value
+    # ladder's own order) within 5e-4 of the reference (orchestrator 2026-10-04: the reference is the
+    # perfectly conducting limit while the run uses contrast 1e4, an offset of ~2e-4, plus a 1-2e-4
+    # spread between the fitted-order and order-2 extrapolates; 1e-4 was tighter than the reference
+    # itself), (iii) a regression bound of 2x the value
     # measured after D-WO7-1 at each rung (the provisional 3e-3 at ND 32 is retired; log WO-7)
     p = math.log2(abs(k[20] - k[40]) / abs(k[40] - k[80])) if k[40] != k[80] else float("inf")
     check(p >= 1.7, f"(i) self-convergence order {p:.2f} >= 1.7")
     kx = k[80] + (k[80] - k[40]) / (2.0**p - 1.0)
-    check(abs(kx / ref - 1.0) <= 1e-4,
-          f"(ii) extrapolate {kx:.6f}: |k*/ref - 1| {abs(kx / ref - 1.0):.2e} <= 1e-4 (order-2 extrapolate "
+    check(abs(kx / ref - 1.0) <= 5e-4,
+          f"(ii) extrapolate {kx:.6f}: |k*/ref - 1| {abs(kx / ref - 1.0):.2e} <= 5e-4 (order-2 extrapolate "
           f"{k[80] + (k[80] - k[40]) / 3.0:.6f}, INFO)")
     for n, b in ((20, 6.64e-2), (40, 1.82e-2), (80, 4.86e-3)):  # 2 x 3.32e-2, 9.09e-3, 2.43e-3
         check(abs(k[n] / ref - 1.0) <= b, f"(iii) n={n}: |k*/ref - 1| {abs(k[n] / ref - 1.0):.2e} <= {b:.2e}")

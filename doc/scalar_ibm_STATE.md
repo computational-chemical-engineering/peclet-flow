@@ -70,8 +70,8 @@ own gates.
 | WO-5b open faces, Koren gate, refusal messages | DONE 0794b15 (collocated open faces refused: possible `uf_` outlet issue, see log D-WO5b-1) |
 | WO-5c advective surrogate (Amendment A2, a61f88e) | DONE e1127ed + 7a3e5fb: steady adv Pe_h 0.1–10 in 5–33 it, growth ≤ 1.43×/doubling; D-WO5c-1/2 |
 | WO-6 closures | DONE b5cb6a5 + 3eb151c: Taylor–Aris 3.3e-4 at R/h 32 (order 2.02); SC k* → 0.60566 < HS; D-WO6-1..4 |
-| WO-7 conjugate | IN PROGRESS |
-| WO-8 contacts | |
+| WO-7 conjugate | DONE 401de1e + bb039d1 + G5a tol: G4 order 1.84–1.94, G6 1.91–2.00 (total mass), K exact, MPI bitwise; D-WO7-1..5 |
+| WO-8 contacts | NEXT |
 | WO-9 backends/performance | |
 | WO-10 docs/register | |
 

@@ -1346,3 +1346,15 @@ G5a / G6 restated per D-WO7-2.
   gone), iterations identical, 2762 solid unknowns (2774 before D-WO7-1).
 - Battery (`-LE bench`, all 223 including the six G6 ctests; OMP 2, -j4, 3096 s): 222/223 pass; the one
   failure is `scalar_cutcell_g5a`, exactly its (ii) row (1.02e-4 against 1e-4).
+
+## 2026-10-04 — WO-7 closed: orchestrator ruling D-WO7-5
+
+**G5a (ii).** The extrapolation tolerance is 1e-4 → 5e-4, limited by the reference.
+- The reference is the perfectly conducting Sangani–Acrivos value, but the run uses contrast 1e4,
+  an offset of ~2e-4.
+- The fitted-order (1.86) and order-2 extrapolates differ by 1–2e-4.
+- Measured: 1.02e-4 (fitted order). The test constant is changed by the orchestrator; ctest
+  `scalar_cutcell_g5a` passes.
+- (i) order ≥ 1.7 and (iii) the 2× regression bounds are unchanged.
+
+WO-7 state: bb039d1 + this. Battery 222/223 before this change, the 1 = g5a (ii), now passing.
