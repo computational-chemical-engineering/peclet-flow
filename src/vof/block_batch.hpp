@@ -920,7 +920,54 @@ inline void vofBatchDebrisLost(const VofBlockTable& T, LField sA0, LField eA0, S
 /// frame (`bubbleBox`'s six Min/Max reductions; order-free). Written as doubles (exact integers)
 /// to `out(stride (base + k) + slot0 + {0..5})` = lo x, y, z, hi x, y, z; an empty block reads
 /// hi < lo (the reducers' identities), exactly as `bubbleBox` tests it.
+///
+/// Host (H-4c): `TeamPolicy(nj, AUTO)` is one thread per block there. Instead one row-parallel pass
+/// over every job's inner rows: a row takes its six extrema over x, then integer atomic min/max
+/// into the job's slots, which start at the same identities. Order-free, so bitwise.
+template <class Exec = SExec>
 inline void vofBatchBox(const VofBlockTable& T, double eps, SField out, int stride, int slot0) {
+  if constexpr (kVofHostExec<Exec>) {
+    int box[6 * kVofBlockBatch];
+    for (int k = 0; k < T.nj; ++k)
+      for (int a = 0; a < 6; ++a)
+        box[6 * k + a] =
+            a < 3 ? Kokkos::reduction_identity<int>::min() : Kokkos::reduction_identity<int>::max();
+    int* bx = box;
+    vofHostRowFor<Exec>(
+        "vof::block::batch_bbox", T.nj,
+        [&](const int k) { return static_cast<long>(T.job[k].n.y) * T.job[k].n.z; },
+        [=](const int k, const long r) {
+          const VofBlockJob& J = T.job[k];
+          const I3 e = J.e, n = J.n;
+          const int g = J.g;
+          const int py = static_cast<int>(r % n.y), pz = static_cast<int>(r / n.y);
+          const long i0 = L3(g, py + g, pz + g, e);
+          const VofRawField c{J.c};
+          int lo = -1, hi = -1;
+          for (int px = 0; px < n.x; ++px)
+            if (Kokkos::fabs(c(i0 + px)) > eps) {
+              if (lo < 0)
+                lo = px;
+              hi = px;
+            }
+          if (lo < 0)
+            return;  // no cell of the row is in the box
+          int* s = bx + 6 * k;
+          Kokkos::atomic_min(&s[0], lo);
+          Kokkos::atomic_min(&s[1], py);
+          Kokkos::atomic_min(&s[2], pz);
+          Kokkos::atomic_max(&s[3], hi);
+          Kokkos::atomic_max(&s[4], py);
+          Kokkos::atomic_max(&s[5], pz);
+        });
+    Exec().fence();
+    for (int k = 0; k < T.nj; ++k) {
+      const long ob = static_cast<long>(stride) * (T.base + k) + slot0;
+      for (int a = 0; a < 6; ++a)
+        out(ob + a) = static_cast<double>(box[6 * k + a]);
+    }
+    return;
+  }
   using Team = Kokkos::TeamPolicy<SExec>;
   Kokkos::parallel_for(
       "vof::block::batch_bbox", Team(SExec(), T.nj, Kokkos::AUTO),
