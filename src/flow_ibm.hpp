@@ -2415,7 +2415,9 @@ class Solver {
   // the LOW boundary's face -- on an inflow/outflow channel the inlet plane on the outlet
   // (doc/uf_outlet_fix.md). The plane is saved and restored over the INNER transverse range only
   // (the transverse ghost rows are legitimately the neighbour's; SCALING_ISSUES #8), and only on
-  // an axis whose high global face is an OUTFLOW this rank owns; otherwise it IS fillGhosts.
+  // a NON-PERIODIC axis whose high global face this rank owns; otherwise it IS fillGhosts. Every
+  // non-periodic type, not just outflow: a high-side INFLOW face got the low (outlet) plane the
+  // same way, and collocated momentum read that one (openFaceView replaces outflow faces only).
   void fillFaceGhostsKeepBoundary(CCField f, int a);
 
 

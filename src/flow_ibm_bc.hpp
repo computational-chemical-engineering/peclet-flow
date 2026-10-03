@@ -230,7 +230,7 @@ void Solver<Grid>::fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow
 template <class Grid>
 void Solver<Grid>::fillFaceGhostsKeepBoundary(CCField f, int a) {
   const bool keep =
-      hasBc_ && a >= 0 && a < 3 && bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1);
+      hasBc_ && a >= 0 && a < 3 && bc_[2 * a + 1] != 0 && touchesGlobalFace(2 * a + 1);
   B3 eb{e_.x, e_.y, e_.z};
   if (keep) {
     const int b = (a + 1) % 3, c = (a + 2) % 3;
