@@ -1993,7 +1993,11 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "The physical cell-center coordinates of THIS rank's inner block as three 1-D float64 "
           "arrays (x, y, z), i.e. origin + (i + 1/2) * spacing per axis. "
           "np.meshgrid(*s.cell_centers(), indexing='ij') is the grid an SDF for set_solid is "
-          "sampled on. Under MPI these are the LOCAL block's centers in GLOBAL coordinates.")
+          "sampled on. Under MPI these are the LOCAL block's centers in GLOBAL coordinates. "
+          "CELL-UNIT TRAP: without an extent this is i + 1/2, while set_scene puts cell i's centre "
+          "at i -- the same body given as a scene and as an SDF sampled here lands half a cell "
+          "apart. With an extent both use origin + (i + 1/2) * spacing. Unifying the cell-unit "
+          "convention changes results; deferred to 2.0.0.")
       .def("set_rho", &S::setRho, nb::arg("rho"),
            "Set the fluid density rho (the caller's units). Under a physical domain the FIRST call "
            "pins the reference density the internal scales are built on; a later change rebuilds "
@@ -2289,7 +2293,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "records are accepted, reading an all-zero centre as 'follows the body'). Coordinates are "
           "the caller's own PHYSICAL ones when the solver was given an extent -- so ONE scene "
           "serves flow, dem and voro unchanged -- and CELL UNITS on the global inner grid "
-          "otherwise (cell (i,j,k)'s centre at (i,j,k)). The scene is replicated on every rank, so scene-derived geometry needs no "
+          "otherwise (cell (i,j,k)'s centre at (i,j,k) -- half a cell from cell_centers(), which "
+          "returns i + 1/2 in cell units). The scene is replicated on every rank, so scene-derived geometry needs no "
           "communication and -- unlike diagnostics.set_exact_crossings -- is NOT single-rank only. "
           "periodic=True treats the scene as min-image periodic over the global grid (one "
           "instance per body, no images); periodic=False leaves images to the caller.")
