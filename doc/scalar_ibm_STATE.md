@@ -64,8 +64,8 @@ own gates.
 |---|---|
 | WO-1 core kernels (core worktree `suite/core-scalar-ibm`, branch `scalar-ibm`) | DONE: core a031c6f + b1fcb6a |
 | WO-2 flow geometry record | DONE: 9a445cb, 88f0214 (gate restated D-WO2-1/2) |
-| WO-3 operator + Krylov | IN PROGRESS (scalar-units merged 184ae9f; §1.2 amended by Q6: reuse its factors) |
-| WO-4 ScalarMG | |
+| WO-3 operator + Krylov | DONE f0fc80a: G1 1.93, G2 1.89, G3a 1.93–2.00, G3b 1.76–2.34, G7 1.97–2.02; budget 2.8e-14; 205/205 |
+| WO-4 ScalarMG | IN PROGRESS |
 | WO-5 advection/small cells | |
 | WO-6 closures | |
 | WO-7 conjugate | |
