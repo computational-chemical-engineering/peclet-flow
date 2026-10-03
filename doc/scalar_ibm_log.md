@@ -1618,3 +1618,115 @@ upwind or upwind-upwind state? **No.**
 | G9 koren integral, both backends | ident ≤ 1.3e-14, cons ≤ 4.7e-16, finite; Cr 0.5 min −4.1e-10, max = max c₀ | | |
 
 - Every other row is as in WO-9a. **G11: PASS** (19/19).
+
+## 2026-10-04 — WO-9b: performance (§13 Q9) — the synchronization-bound GPU path removed, bitwise; GPU advance ≈ projection under contention; host 1.4 — stopped on the host target
+
+**Changes** (each bitwise-inert; commits on `scalar-ibm`):
+- `ec620e2` **ScalarMG launches and fences.**
+  - A coarse-level fill is ONE launch (`smg::fillShell`) instead of 3 `wrapAxis` and up to 6
+    `zeroPlanes`, each of which was followed by a fence.
+  - On a single rank with even inner dimensions, the colour passes and the residual read the
+    periodic neighbour through the wrapped index (flow's A3, per axis; level 0 declares that its
+    injected fill wraps all three axes).
+  - `assembleCoarse`'s wall gather visits only the cut rows under each coarse cell, in the former
+    (dz, dy, dx) order (a per-level CSR built once per overlay).
+  - No fence in the overlay matvec pass or in the per-build plane kernels.
+- `2cc10cd` **Device-resident Krylov scalars** (single rank, non-singular; flow's A6 pattern).
+  - The dots reduce into device slots through the same policy and functor (`sco::*Reduce`).
+  - One-thread kernels form the coefficients and run the breakdown tests.
+  - The host reads one packet {stop, max|r|} per half-step: 2 per iteration instead of 5.
+  - New ctest `scalar_krylov` checks resident against host-scalar, one and two fields, the healthy
+    solve and every breakdown exit, with restarts. Bitwise on host and CUDA.
+- `312b26a` **The gathered coarse wall terms are reused** while their inputs are bitwise unchanged
+  (cut lists, unknown view, mode, levels, every cw/cc). This is D-WO3-3's caching, keyed on content
+  and not on dirty flags. One reduction per build; +1.3 B/cell.
+- `9f5c85d` The coarse iterate is zeroed inside the restriction (A5, single rank).
+- `8b58e5a` **Fused reads on device backends only.**
+  - On host the per-cell wrapped index kept the x row from vectorizing. Measured with the 1-thread
+    kernel timer per advance: smoother 700 → 1131 ms and residual 80 → 124 ms, against 44 ms of
+    fills saved.
+  - Host passes fill first again, with the plain i ± s as a compile-time constant
+    (`smg::nbrsOn`): smoother 664 ms, residual 74 ms.
+  - Flow's CutcellMG A3 uses the same per-cell pattern on host; not investigated here.
+
+**Bitwise proofs.**
+- The G11 dump of every gate case (291 arrays: geometry, rungs, c and c_s, facet flux and wall
+  value, and **every solve's BiCGStab count**) is `np.array_equal` to the pre-change build after
+  every commit: host-openmp at OMP_NUM_THREADS=4, and CUDA. Both builds reproduce themselves run to
+  run.
+- A full-table run that switches the wall from Dirichlet to Robin and then changes dt between
+  advances is bitwise equal to the pre-change build on both backends. This is the gather-reuse
+  invalidation check.
+- `scalar_krylov` passes on host and CUDA.
+- **G12 12/12** at OMP_NUM_THREADS=1.
+- **G11 PASS** on the final builds.
+- Iteration counts are unchanged; they are inside the dump.
+
+**nsys, CUDA** (the RTX 5080 shared, 83–99 % busy from other sessions throughout; counts are exact):
+
+| run | stream syncs | launches | kernel time | wall |
+|---|---|---|---|---|
+| G6 case 1, R/h 8, 3 steps (whole run) | 40 769 → 922 | 47 705 → 9 015 | 70.9 → 35.2 ms | 9.22 → 0.67 s |
+| 128³ bed, 3 advances | 13 704 → 321 (+149 device) | 20 819 → 6 723 | 222.6 → 126.9 ms | — |
+
+In the bed run, `assembleCoarse` drops from 91.5 ms (one serial thread per deep coarse cell) to 0
+(the gather is reused). The smoother is now 50 % of the kernel time.
+
+**G-perf**, pre → post. "Quiet" means host load 8–10 with the GPU idle (20:03). "Busy" means GPU
+89–99 % from other sessions and host load 20–97. The pre and post runs were interleaved
+pre/post/pre/post.
+
+| item | OpenMP | CUDA | bound |
+|---|---|---|---|
+| triad | 52.6 GB/s (quiet) | 844 GB/s (quiet); 658–784 busy | — |
+| matvec 128³ | 68 % (quiet pre); 66 % post (busy) | 97 % (quiet pre); busy 26–102 % both, noise | ≥ 50 % |
+| memory, one scalar | 239 → 237 B/cell | 239 → 237 | ≤ 300 |
+| advance ÷ projection, 128³ bed, dt D/h² = 1, koren | quiet pre 1.69; OMP 4 at load 20–30: pre 1.44 / 1.61, post 1.39 / 1.40; OMP 2 at load 36–68: pre 1.35 / 1.40, post 1.37 / 1.44 | quiet pre 2.58 (106 / 41 ms); **busy pre 15.9 / 25.2 (1194 / 1670 ms), post 0.96 / 0.98 (71 / 85 ms)** | ≤ 1 |
+| advective ÷ symmetric V-cycle 64³ | quiet pre 1.11; post 0.72–1.03 (noisy) | quiet pre 0.99; busy pre 40–88 ms per cycle, post 0.52–0.66 ms (ratio 1.09 / 1.14) | ≤ 2 |
+| steady G-adv(b) 64³, Pe_h 1 / 10 | quiet pre 0.096 / 0.147 s | quiet pre 0.050 / 0.082 s; busy pre 0.99–1.82 / 1.49–3.17 s, post 0.084–0.106 / 0.155–0.168 s | recorded |
+
+- On the GPU the advance is no longer synchronization-bound. Under contention it went from 16–25×
+  the projection to 0.96–0.98×.
+- The quiet post value is not yet measured: the GPU was never idle after 20:30. After the first two
+  commits it was 49–50 ms against 41 ms. The later commits removed `assembleCoarse` (≈ 5 ms per
+  advance) and most syncs.
+- **Host: not met.** The host path was never sync-bound, and WO-9b moves it by only a few percent.
+
+**Where the host advance goes** (Kokkos simple kernel timer, 1 thread, per advance; 9 BiCGStab
+iterations means 18 V-cycles on the full 7-level table, since κ_A = 13 at dt D/h² = 1):
+- smoother 664 ms (38 %);
+- trilinear prolongation 277 ms (16 %; flow's shared `prolongAdd`, about 15 ms per level-0 call);
+- matvec 189 ms (bands 97, overlay 49, the fill 43);
+- residual 74 ms and restriction 68 ms;
+- Krylov updates and reductions ≈ 200 ms;
+- per-advance assembly ≈ 150 ms.
+
+The level-0 RB-GS passes are bandwidth-bound: each colour pass streams AC, AFX/Y/Z, rhs and x.
+
+**Stopped (Q9 → design).** Advance ÷ projection ≤ 1 on host cannot be met by the inert measures.
+Options, for the orchestrator:
+- (a) **Bitwise, host only:**
+  - a two-colour (wavefront) RB-GS sweep that streams memory once per sweep instead of twice
+    (smoother ≈ −40 %);
+  - a vectorized trilinear prolongation. This one is flow-wide, because the kernel is shared with
+    the pressure MG.
+  - Estimate: ratio 1.1–1.2. Probably still above 1.
+- (b) **Numerics:**
+  - The transient level rule's threshold sits exactly at G-perf's condition (κ_A = 13). Using level
+    0 alone there drops prolongation, restriction and the coarse levels (≈ 25 %) but raises
+    iterations. Cheap to measure.
+  - Single-precision storage of the SURROGATE only (the true operator stays double) cuts smoother
+    and residual traffic by a third. It needs double on the singular steady path, where the register
+    has float storage rejected for A·1 = 0.
+  - 1 + 1 sweeps.
+- My recommendation: measure (b)'s level-rule variant first, then decide.
+
+**Not done:**
+- The O(N²) per-advance plane kernels still use MDRange2 on host; they are not hot.
+- `sco::dot2Local` keeps its default MDRange tiling on host. Changing the policy changes the
+  reduction order, so it is not bitwise.
+- The distributed and singular Krylov solves keep host scalars.
+
+**Battery** (build_dev, final tree, `-LE bench`, OMP_NUM_THREADS=2, -j4, OMP_WAIT_POLICY=passive,
+host load 30): **225/225 pass** in 3917 s. The count is 224 plus the new `scalar_krylov`. The six G6
+ctests ran 1072–1886 s each under the load.
