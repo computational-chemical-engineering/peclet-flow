@@ -11,12 +11,15 @@ Subcommands (all on the module on PYTHONPATH; bound the OpenMP pool):
   run      G1 / G2 / G6 / G7: march_to_steady per window (0 = accelerate=False), recording steps,
            accelerated steps, converged / reason, K, wall time, pressure iterations per step by
            phase (mixed vs plain), accelerator seconds, memory; with window 0 among the windows,
-           the G7c line per case: plain converged vs accelerated converged per window.
+           the G7c line per case: plain converged vs accelerated converged per window. The tight
+           staggered bed also prints the G1 bed line: |K_acc/K_inf - 1| <= |K_plain/K_inf - 1| +
+           1e-8, K_plain from window 0 of the same run or --k-plain (the logged certificate).
   g3       G3: --steps (400) unconditional acc.step(True) per dt (--betas), tight; status,
            restarts, running-min residual, final residual and K. With --extend-to N (WO-8): past
            --steps, keep stepping until the running-min residual reaches the depth bar (sphere
-           1e-9; bed 5e-11, review R3) or N steps in total; every criterion is evaluated at the
-           end of the run. K is sampled after the last call that did not restart (review R3).
+           1e-9) or N steps in total; every criterion is evaluated at the end of the run. The bed
+           has no depth bar: run it with --steps 3000 (a fixed 3000 calls per dt). K is sampled
+           after the last call that did not restart (review R3).
   g5       G5: interrupt an accelerated march at step --at (25), checkpoint get_field u,v,w,p (or
            set_state, velocity only), restore into a fresh solver, march again; against the
            uninterrupted accelerated march.
@@ -177,7 +180,7 @@ def cmd_run(flow, a):
     if a.max_steps:
         st["max_steps"] = a.max_steps
     case = Case(a)
-    conv = {}
+    conv, Ks = {}, {}
     for w in a.window:
         s = case.build(flow, a.scheme, st)
         holder = {}
@@ -228,8 +231,10 @@ def cmd_run(flow, a):
               flush=True)
         emit(a, rec)
         conv[w] = res.converged
+        Ks[w] = rec["K"]
         del s, acc
         holder.clear()
+    g1_bed(a, case, conv, Ks)
     if 0 in conv and len(conv) > 1:  # G7c (rev 2): plain converged vs accelerated converged
         accw = {w: c for w, c in conv.items() if w > 0}
         ok = (not conv[0]) or all(accw.values())
@@ -239,6 +244,36 @@ def cmd_run(flow, a):
         rec = common_rec(a, case)
         rec.update(gate="g7c", plain_converged=conv[0],
                    accelerated_converged={str(w): c for w, c in accw.items()}, ok=ok)
+        emit(a, rec)
+
+
+# G1 on the dense bed (orchestrator decision, 2026-10-03): at tight rtol the stop instrument
+# certifies early on this bed for BOTH paths (its tail is ~0.9999, the instrument assumes 0.997), so
+# the accelerated K is compared with K_inf, the extrapolation of the 60 000-step plain march (log
+# WO-8), allowing the plain march's own certificate error at the SAME dt:
+#     pass iff |K_acc / K_inf - 1| <= |K_plain / K_inf - 1| + 1e-8   at both ends of K_inf.
+# K_plain is the plain tight certificate (window 0 in the same run, or --k-plain from the log).
+BED_K_INF = (98.9156994, 98.9156995)
+
+
+def g1_bed(a, case, conv, Ks):
+    if a.case != "bed" or a.scheme != "staggered" or a.settings != "tight":
+        return
+    kp = Ks.get(0, a.k_plain)
+    if kp is None or not (0 in conv or a.k_plain is not None):
+        return
+    for w, K in Ks.items():
+        if w == 0:
+            continue
+        ends = [(abs(K / ki - 1.0), abs(kp / ki - 1.0)) for ki in BED_K_INF]
+        ok = conv[w] and all(ea <= ep + 1e-8 for ea, ep in ends)
+        print(f"G1 bed staggered dt={case.dt():.6g} m={w}: |K_acc/K_inf-1| "
+              f"{ends[0][0]:.2e}..{ends[1][0]:.2e}, |K_plain/K_inf-1| {ends[0][1]:.2e}.."
+              f"{ends[1][1]:.2e} (K_plain {kp!r}) -> {'PASS' if ok else 'FAIL'} "
+              f"(acc <= plain + 1e-8)", flush=True)
+        rec = common_rec(a, case)
+        rec.update(gate="g1_bed", window=w, K_acc=K, K_plain=kp, K_inf=list(BED_K_INF),
+                   err_acc=[e[0] for e in ends], err_plain=[e[1] for e in ends], ok=ok)
         emit(a, rec)
 
 
@@ -284,10 +319,11 @@ def cmd_oracle(flow, a):
 
 
 # ---------------------------------------------------------------------------------------------- g3
-# §8 G3: the running-min residual must reach this. The dense bed's bar is set from its measured
-# K-error / velocity-residual ratio (37 - 170 along the nu dt / h^2 = 60 trajectory, review R3):
-# 5e-11 pins K to the 1e-8 agreement bar; the sphere keeps 1e-9.
-G3_DEPTH = {"sphere": 1e-9, "bed": 5e-11}
+# §8 G3: the running-min residual must reach this (sphere). The dense bed has no depth bar
+# (orchestrator decision 2026-10-03): it runs a fixed 3000 accelerated calls per dt (--steps 3000),
+# because no residual depth pins its K to 1e-8 at every dt (measured K-error / residual ratio
+# 37 - 830, log "Review fixes").
+G3_DEPTH = {"sphere": 1e-9, "bed": None}
 
 
 def cmd_g3(flow, a):
@@ -302,7 +338,7 @@ def cmd_g3(flow, a):
         u, u_call = math.nan, 0  # <u_x> sampled after the last NON-restart call (review R3)
         t0 = time.perf_counter()
         for k in range(max(a.steps, a.extend_to)):
-            if k >= a.steps and rmin <= depth:
+            if k >= a.steps and depth is not None and rmin <= depth:
                 break  # --extend-to: the depth bar is reached
             r0 = acc.num_restarts
             acc.step(True)
@@ -319,10 +355,12 @@ def cmd_g3(flow, a):
         Ks[beta] = K
         per100 = max([sum(1 for q in rst_steps if lo < q <= lo + 100)
                       for lo in range(0, len(res), 100)] or [0])
-        ok = (acc.status == "active" and per100 <= 1 and rmin <= depth and res[-1] <= 10 * rmin)
+        deep = depth is None or rmin <= depth
+        ok = (acc.status == "active" and per100 <= 1 and deep and res[-1] <= 10 * rmin)
         print(f"g3 {a.case} {a.scheme} N={a.N} beta={beta:g} m={a.window[0]}: status={acc.status} "
               f"({acc.reason}) steps={len(res)} restarts={acc.num_restarts} (max/100 {per100}) "
-              f"min_res={rmin:.3e} (bar {depth:g}) final_res={res[-1]:.3e} K={K:.12f} "
+              f"min_res={rmin:.3e} (bar {depth if depth is not None else 'none'}) "
+              f"final_res={res[-1]:.3e} K={K:.12f} "
               f"(at call {u_call}) wall={wall:.1f}s -> {'PASS' if ok else 'FAIL'}",
               flush=True)
         rec = common_rec(a, case)
@@ -505,12 +543,15 @@ def main():
     ap.add_argument("--settings", choices=("production", "tight"), default="production")
     ap.add_argument("--window", type=int, nargs="+", default=[0, 5])
     ap.add_argument("--max-steps", type=int, default=None)
+    ap.add_argument("--k-plain", type=float, default=None,
+                    help="run, tight staggered bed: the plain tight certificate's K at this dt "
+                         "(from the log) for the G1 bed criterion, when window 0 is not run")
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--at", type=int, default=25)
     ap.add_argument("--warmup", type=int, default=100, help="g8: plain steps before timing")
     ap.add_argument("--extend-to", type=int, default=0,
                     help="g3: past --steps, continue until the running-min residual reaches the "
-                         "depth bar (sphere 1e-9, bed 5e-11) "
+                         "depth bar (sphere 1e-9; the bed has none) "
                          "or this many steps in total (0 = no extension)")
     ap.add_argument("--serial", action="store_true")
     ap.add_argument("--hash", action="store_true")
