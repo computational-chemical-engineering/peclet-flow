@@ -2770,10 +2770,16 @@ class CutcellMG {
         if (const char* why = geoBottomIneligible())
           throw std::runtime_error(
               std::string("set_pressure_bottom_solver('geometric'): not eligible here: ") + why);
+      } else if (bottomSolver_ == kBottomDirect) {
+        if (const char* why = directBottomIneligible())
+          throw std::runtime_error(
+              std::string("set_pressure_bottom_solver('direct'): not eligible here: ") + why);
       }
       if (agglomerateBottom()) {
-        if (bottomSolver_ != kBottomAlgebraic && geoBottomIneligible() == nullptr)
+        if (bottomSolver_ == kBottomGeometric)
           geoBottomSolve(lv);  // B1: the single-team geometric-Krylov bottom (device, one launch)
+        else if (bottomSolver_ != kBottomAlgebraic && directBottomIneligible() == nullptr)
+          directBottomSolve();  // §13: FCG + the FP32 direct factor (device, one launch)
         else
           graphAmgSolveBottom(
               lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
@@ -3266,10 +3272,20 @@ class CutcellMG {
   }
 
   // --- §13: the direct preconditioner of the device bottom (mg_bottom_direct.hpp) ---------------
-  // The factor launch: one team, T = min(1024, team_size_max) unless `team` > 0 (the U3 hook; the
-  // factor is bitwise independent of T). Returns the team size used.
+  // A launch's team size: min(1024, team_size_max) when team <= 0, else `team` clamped to it; with
+  // `probe` false a positive `team` (a size this kernel already ran with) is used as is.
+  template <class K>
+  static int directTeam(const K& k, int team, bool probe) {
+    if (team > 0 && !probe)
+      return team;
+    Kokkos::TeamPolicy<CCExec> pol(CCExec(), 1, 1);
+    const int tmax = std::min(1024, pol.team_size_max(k, Kokkos::ParallelForTag()));
+    return (team > 0) ? std::min(team, tmax) : tmax;
+  }
+  // The factor launch: one team, T = directTeam(team) (the U3 hook passes T; the factor is bitwise
+  // independent of it). Returns the team size used.
   template <class FR>
-  int launchDirectFactor(const BottomDirect<FR>& D, int team, double tauPiv0) {
+  int launchDirectFactor(const BottomDirect<FR>& D, int team, double tauPiv0, bool probe = true) {
     const Level& bt = lv_.back();
     BottomFactorKernel<FR, FPC> k;
     k.D = D;
@@ -3280,9 +3296,7 @@ class CutcellMG {
     k.kc = dirKc_;
     k.aug = dirAug_;
     k.tauPiv0 = tauPiv0;
-    Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
-    const int tmax = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
-    const int T = (team > 0) ? std::min(team, tmax) : tmax;
+    const int T = directTeam(k, team, probe);
     Kokkos::parallel_for("peclet::flow::mg_bottom_factor",
                          Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
     return T;
@@ -3291,7 +3305,7 @@ class CutcellMG {
   // for the tests, z = M(lv.rhs) alone. Returns the team size used.
   template <class FR>
   int launchDirectKernel(const BottomDirect<FR>& D, bool precondOnly, int team, bool noMean,
-                         CCField zOut = CCField(), CCField rIn = CCField()) {
+                         CCField zOut = CCField(), CCField rIn = CCField(), bool probe = true) {
     Level& bt = lv_.back();
     GeoBottomKernel<FR, kPrecondDirect> k = makeGeoKernel<FR, kPrecondDirect>(bt, precondOnly);
     k.nl = 1;  // the direct preconditioner reads no sub-level
@@ -3301,9 +3315,7 @@ class CutcellMG {
       k.z = zOut;
       k.b = rIn;
     }
-    Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
-    const int tmax = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
-    const int T = (team > 0) ? std::min(team, tmax) : tmax;
+    const int T = directTeam(k, team, probe);
     Kokkos::parallel_for("peclet::flow::mg_bottom_direct",
                          Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
     return T;
@@ -3312,19 +3324,26 @@ class CutcellMG {
   // preconditioned by the FP32 factor, refactored first if setOpenness changed the operator (a
   // host flag, not a device read).
   void directBottomSolve() {
+    const bool first = dirTeam_ == 0;
     if (facStale_) {
-      dirFacTeam_ = launchDirectFactor(dir_, 0, dirPivotTol_);
+      dirFacTeam_ = launchDirectFactor(dir_, dirFacTeam_, dirPivotTol_, /*probe=*/false);
       facStale_ = false;
       if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
-        int st[2] = {0, 0};
         auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dir_.stat);
-        st[0] = h(0);
-        st[1] = h(1);
-        printf("[mg]     direct bottom factor: ok %d, restarts %d (team %d)\n", st[0], st[1],
+        printf("[mg]     direct bottom factor: ok %d, restarts %d (team %d)\n", h(0), h(1),
                dirFacTeam_);
       }
     }
-    dirTeam_ = launchDirectKernel(dir_, false, dirTeam_, false);
+    dirTeam_ =
+        launchDirectKernel(dir_, false, dirTeam_, false, CCField(), CCField(), /*probe=*/false);
+    if (first && mgDebugLevel()) {
+      printf(
+          "[mg] direct bottom: %dx%dx%d, slow axis %d, P = %d, b = %d, border %d; team sizes "
+          "factor %d, solve %d\n",
+          lv_.back().inner.x, lv_.back().inner.y, lv_.back().inner.z, dirPlanes_.s, dirPlanes_.P,
+          dirPlanes_.b, dirPlanes_.border, dirFacTeam_, dirTeam_);
+      fflush(stdout);
+    }
     geoFlagPending_ = true;
     if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
       int it = 0;
@@ -4396,7 +4415,7 @@ class CutcellMG {
   Kokkos::View<long*, CCMem> geoCompCnt_;             // cells per component
   CCField geoCompMean_;                               // the kernel's per-component means
   bool geoFlagPending_ = false;  // a geometric solve ran since the device flag was last read
-  int bottomSolver_ = 0;         // kBottomAuto / kBottomGeometric / kBottomAlgebraic
+  int bottomSolver_ = 0;  // kBottomAuto / kBottomGeometric / kBottomAlgebraic / kBottomDirect
   // §13, the direct preconditioner: the bottom storage exists (single rank, <= 8192 cells, device
   // or forced by a hook), the plane ordering, the FP32 factor, the per-component augmentation, the
   // factor's staleness (set by setOpenness), the two kernels' team sizes, the first attempt's
@@ -4689,11 +4708,12 @@ class CutcellMG {
     agglomMode_ = on ? 1 : 0;
     amg_.reset();
   }
-  // B1 engine selection for an agglomerated bottom (§5.7): kBottomAuto = the geometric-Krylov
-  // bottom wherever geoBottomIneligible() is null (device backends only), GraphAMG otherwise;
-  // kBottomGeometric = the geometric bottom or a raise naming the failed condition;
+  // Engine selection for an agglomerated bottom (§5.7, §13 D-5): kBottomAuto = the device bottom
+  // preconditioned by the direct factor wherever directBottomIneligible() is null (device backends
+  // only), GraphAMG otherwise; kBottomDirect = that engine or a raise naming the failed condition;
+  // kBottomGeometric = B1's V-cycle-preconditioned engine or a raise;
   // kBottomAlgebraic = GraphAMG always (the A/B instrument).
-  enum : int { kBottomAuto = 0, kBottomGeometric = 1, kBottomAlgebraic = 2 };
+  enum : int { kBottomAuto = 0, kBottomGeometric = 1, kBottomAlgebraic = 2, kBottomDirect = 3 };
   void setBottomSolver(int m) { bottomSolver_ = m; }
   int bottomSolver() const { return bottomSolver_; }
   // Test hooks (tests/kokkos/test_geo_bottom.cpp). `geoBottomPrecondForTest`: z = M r on the

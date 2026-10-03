@@ -21,8 +21,8 @@ Usage:
                 VoF block's colour array (col<id>) -- compare two dumps with cmp.py (G-BIT item 2)
     --timing    per-stage breakdown from diagnostics.vof_timing()
     --levels L  pressure multigrid depth; --bottom MODE = set_pressure_bottom(MODE) (E1)
-    --bottom-solver ENGINE  diagnostics.set_pressure_bottom_solver(ENGINE): auto | geometric |
-                algebraic (B1, WO-6: the A/B of the two bottom engines on one build)
+    --bottom-solver ENGINE  diagnostics.set_pressure_bottom_solver(ENGINE): auto | direct |
+                algebraic (§13: the A/B of the two bottom engines on one build)
     --div       with --dump: also store each timed step's max_open_divergence_projected() (div),
                 read after the step (G-NUM item 3)
 """
