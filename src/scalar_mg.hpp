@@ -970,10 +970,9 @@ class ScalarMG {
       smg::residualFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ,
                         lv.ext, lv.g, lv.inner, wr < 0 ? 0 : wr);
     Level& cs = lv_[L + 1];
-    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+    restrictZeroX(cs, lv, cs.rhs, lv.res, cs.x);
     if (singular_)
       removeMean(L + 1, cs.rhs);
-    Kokkos::deep_copy(CCExec(), cs.x, 0.0);
     vcycle(L + 1);
     fill(L + 1, cs.x);  // coarse ghosts: exchanged, 0 beyond a non-periodic global face
     prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
@@ -1015,12 +1014,10 @@ class ScalarMG {
                               CCConst(lv.rhss), lv.ACs, lv.AFXs, lv.AFYs, lv.AFZs, lv.W, lv.ext,
                               lv.g, lv.inner, w);
     Level& cs = lv_[L + 1];
-    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
-    restrictAvg(cs.rhss, CCConst(lv.ress), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+    restrictZeroX(cs, lv, cs.rhs, lv.res, cs.x);
+    restrictZeroX(cs, lv, cs.rhss, lv.ress, cs.xs);
     if (singular_)
       removeMeanTwo(L + 1, cs.rhs, cs.rhss);
-    Kokkos::deep_copy(CCExec(), cs.x, 0.0);
-    Kokkos::deep_copy(CCExec(), cs.xs, 0.0);
     vcycleTwo(L + 1);
     fill(L + 1, cs.x);
     fill(L + 1, cs.xs);
@@ -1030,6 +1027,20 @@ class ScalarMG {
     smg::zeroPinned(lv.xs, unkSOf(L), lv.ext, lv.g);
     for (int k = 0; k < kPost; ++k)
       sweep(L, false);
+  }
+
+  /// The coarse rhs = restrictAvg of the fine residual, and the coarse iterate x = 0. Single rank
+  /// (WO-9b; flow's A5): in ONE kernel over the coarse inner cells (restrictAvgZeroX) — the coarse
+  /// ghosts are not zeroed, and need not be: every pass fills before reading them or reads the
+  /// periodic wrap instead, and a non-periodic ghost of x is 0 already (zero-initialized, and
+  /// `fill` only ever writes 0 there). Distributed: the plain restriction and the full zero fill.
+  void restrictZeroX(Level& cs, Level& lv, CCField crhs, CCField fres, CCField cx) {
+    if (!distributed_) {
+      restrictAvgZeroX(crhs, cx, CCConst(fres), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+      return;
+    }
+    restrictAvg(crhs, CCConst(fres), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+    Kokkos::deep_copy(CCExec(), cx, 0.0);
   }
 
   /// One colour of red-black Gauss-Seidel on level L: `rb` = 0 red (global (gx+gy+gz) even), 1
