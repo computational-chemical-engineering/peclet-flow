@@ -95,6 +95,56 @@ inline long vofJobGrown1(const VofBlockJob& J) {
   return static_cast<long>(J.n.x + 2) * (J.n.y + 2) * (J.n.z + 2);
 }
 
+// ---- H-4: the host launch forms (`doc/vof_step_performance_design.md` §14.3) --------------------
+//
+// On a host backend GCC compiles a static `RangePolicy` to `schedule(static)`: one contiguous block
+// of the flat index per thread. The device forms above therefore serialise on a host -- a list
+// kernel launched over the upper bound has each block's active entries at the head of its range,
+// on one thread -- and every region kernel pays 64-bit div/mod per cell. The launchers below are
+// the host branches; each batched launcher selects them at compile time on its execution space's
+// memory space (as `ccdetail::ccRows3` does), so a device build never instantiates them and its
+// launches are untouched. Every host form visits the same cells with the same per-cell body, and
+// every body writes only its own cell(s) or adds integers atomically, so the state is bitwise the
+// device form's on the same host.
+
+/// The host branches select on this (§14.2).
+template <class Exec>
+inline constexpr bool kVofHostExec = std::is_same_v<typename Exec::memory_space, Kokkos::HostSpace>;
+
+/// The exact offset table of a host list launch: job k's entries are [o[k], o[k + 1]).
+struct VofCountTable {
+  long o[kVofBlockBatch + 1];
+};
+
+/// H-4(a): a host list kernel over the EXACT entry counts, `cnt(k)` (read directly: the count
+/// Views are HostSpace), with a dynamic schedule in chunks of 16 -- so the active entries spread
+/// over every thread instead of sitting at the head of one block's static share. `body(k, t)` is
+/// entry t (0-based) of job k: the device form's entry `q = start + t`, which exits for `t >= cnt`.
+template <class Exec, class Cnt, class F>
+inline void vofHostListFor(const char* name, int nj, Cnt cnt, F body) {
+  Exec().fence();  // the counts were written by an earlier launch
+  VofCountTable C;
+  C.o[0] = 0;
+  for (int k = 0; k < nj; ++k) {
+    const long n = cnt(k);
+    C.o[k + 1] = C.o[k] + (n > 0 ? n : 0);
+  }
+  for (int k = nj; k < kVofBlockBatch; ++k)
+    C.o[k + 1] = C.o[nj];
+  Kokkos::RangePolicy<Exec, Kokkos::Schedule<Kokkos::Dynamic>> pol(Exec(), 0, C.o[nj]);
+  pol.set_chunk_size(16);
+  Kokkos::parallel_for(name, pol, [=](const long t) {
+    const int k = vofJobOf(C.o, t);
+    body(k, t - C.o[k]);
+  });
+}
+
+/// The `[start, end)` count of job k of a list launch.
+template <class Tab>
+inline auto vofListCount(const Tab& T, LField start, LField end) {
+  return [=](int k) { return end(T.base + k) - start(T.base + k); };
+}
+
 // ---- stage 1: the Courant numbers ---------------------------------------------------------------
 
 /// One team per job: `WyAdvector::maxCourant` or `maxCourantInterface` (per the job's
@@ -201,8 +251,21 @@ inline void vofBatchWorklist(const VofBlockTable& T, LField list, LField start, 
 }
 
 /// `wyReconstructCell` over each job's compacted list: launched over the upper bound (the job's
-/// region), a thread past its job's count exits.
+/// region), a thread past its job's count exits. Host: the exact counts (H-4a).
+template <class Exec = SExec>
 inline void vofBatchPlic(const VofBlockTable& T, LField list, LField start, LField end) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostListFor<Exec>("vof::block::batch_plic", T.nj, vofListCount(T, start, end),
+                         [=](const int k, const long t) {
+                           const long q = start(T.base + k) + t;
+                           const VofBlockJob& J = T.job[k];
+                           const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+                           wyReconstructCell(VofRawField{J.c}, list(q), sy, sz, VofRawField{J.mx},
+                                             VofRawField{J.my}, VofRawField{J.mz},
+                                             VofRawField{J.al});
+                         });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_plic", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -524,52 +587,88 @@ inline void vofBatchDebrisSums(const VofBlockTable& T, VofDebrisFlags F, LField 
       });
 }
 
+/// The number of act entries of job `j` (its `D` removed, then `R`, then `A`), 0 when it did not
+/// act: the per-block write kernel's range.
+KOKKOS_INLINE_FUNCTION long vofDebrisActCount(const VofDebrisFlags& F, LField sA0, LField eA0,
+                                              SField out, long ob, int j) {
+  if (out(ob + kDbActed) == 0.0)
+    return 0;
+  const long nD = static_cast<long>(out(ob + kDbND)), nR = static_cast<long>(out(ob + kDbNR));
+  const bool removeD = F.doDebris && F.remove && nD > 0;
+  const long nDr = removeD ? nD : 0, nA = eA0(j) - sA0(j);
+  return nDr + nR + nA;
+}
+
+/// Act entry `t` of job `k` (the per-block write kernel's expressions verbatim); `t` past the job's
+/// count, or a job that did not act, is a no-op.
+KOKKOS_INLINE_FUNCTION void vofDebrisActEntry(const VofBlockTable& T, const VofDebrisFlags& F,
+                                              int k, long t, LField listD, LField listR,
+                                              LField listA, LField sD0, LField sR0, LField sA0,
+                                              LField eA0, SField out, int stride, int slot0,
+                                              SField ex, Kokkos::View<int*, SMem> capf) {
+  const int j = T.base + k;
+  const long ob = static_cast<long>(stride) * j + slot0;
+  if (out(ob + kDbActed) == 0.0)
+    return;
+  const long nD = static_cast<long>(out(ob + kDbND)), nR = static_cast<long>(out(ob + kDbNR));
+  const bool removeD = F.doDebris && F.remove && nD > 0;
+  const long nDr = removeD ? nD : 0, nA = eA0(j) - sA0(j);
+  const long nZ = nDr + nR, nTot = nZ + nA;
+  if (t >= nTot)
+    return;
+  const VofRawField c{T.job[k].c};
+  if (t < nDr) {
+    c(listD(sD0(j) + t)) = 0.0;
+    return;
+  }
+  if (t < nZ) {
+    c(listR(sR0(j) + t - nDr)) = 0.0;
+    return;
+  }
+  const double dV = out(ob + kDbDV), W = out(ob + kDbW);
+  const long ta = t - nZ;
+  const long i = listA(sA0(j) + ta);
+  const double ca = c(i);
+  const double d = dV * (ca * (1.0 - ca)) / W;
+  double cn = ca + d;
+  double e = 0.0;
+  if (cn > 1.0) {
+    e = cn - 1.0;
+    cn = 1.0;
+    Kokkos::atomic_max(&capf(j), 1);
+  }
+  ex(T.off[k] + ta) = e;
+  c(i) = cn;
+}
+
 /// Step 4, the act: removed cells -> 0, attached `C += dV C(1-C)/W` capped at 1 (the per-block
 /// write kernel's expressions verbatim). Over the upper bound (the inner region: D, R and A are
 /// disjoint subsets of it); a job that did not act, or a thread past its count, exits. `capf(j)`
-/// is raised when some cell of job j was capped.
+/// is raised when some cell of job j was capped. Host: the exact counts (H-4a).
+template <class Exec = SExec>
 inline void vofBatchDebrisWrite(const VofBlockTable& T, VofDebrisFlags F, LField listD,
                                 LField listR, LField listA, LField sD0, LField sR0, LField sA0,
                                 LField eA0, SField out, int stride, int slot0, SField ex,
                                 Kokkos::View<int*, SMem> capf) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostListFor<Exec>(
+        "vof::block::batch_debris_write", T.nj,
+        [&](const int k) {
+          const int j = T.base + k;
+          return vofDebrisActCount(F, sA0, eA0, out, static_cast<long>(stride) * j + slot0, j);
+        },
+        [=](const int k, const long t) {
+          vofDebrisActEntry(T, F, k, t, listD, listR, listA, sD0, sR0, sA0, eA0, out, stride, slot0,
+                            ex, capf);
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_debris_write", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long tt) {
         const int k = vofJobOf(T.off, tt);
-        const int j = T.base + k;
-        const long ob = static_cast<long>(stride) * j + slot0;
-        if (out(ob + kDbActed) == 0.0)
-          return;
-        const long t = tt - T.off[k];
-        const long nD = static_cast<long>(out(ob + kDbND)), nR = static_cast<long>(out(ob + kDbNR));
-        const bool removeD = F.doDebris && F.remove && nD > 0;
-        const long nDr = removeD ? nD : 0, nA = eA0(j) - sA0(j);
-        const long nZ = nDr + nR, nTot = nZ + nA;
-        if (t >= nTot)
-          return;
-        const VofRawField c{T.job[k].c};
-        if (t < nDr) {
-          c(listD(sD0(j) + t)) = 0.0;
-          return;
-        }
-        if (t < nZ) {
-          c(listR(sR0(j) + t - nDr)) = 0.0;
-          return;
-        }
-        const double dV = out(ob + kDbDV), W = out(ob + kDbW);
-        const long ta = t - nZ;
-        const long i = listA(sA0(j) + ta);
-        const double ca = c(i);
-        const double d = dV * (ca * (1.0 - ca)) / W;
-        double cn = ca + d;
-        double e = 0.0;
-        if (cn > 1.0) {
-          e = cn - 1.0;
-          cn = 1.0;
-          Kokkos::atomic_max(&capf(j), 1);
-        }
-        ex(T.off[k] + ta) = e;
-        c(i) = cn;
+        vofDebrisActEntry(T, F, k, tt - T.off[k], listD, listR, listA, sD0, sR0, sA0, eA0, out,
+                          stride, slot0, ex, capf);
       });
 }
 
@@ -733,7 +832,21 @@ inline void vofCurvPlanesZero(const VofCurvTable& T) {
 }
 
 /// Part 2: `wyReconstructCell` over the grown interfacial list (upper bound: the grown region).
+/// Host: the exact counts (H-4a).
+template <class Exec = SExec>
 inline void vofCurvPlanesList(const VofCurvTable& T, LField list, LField start, LField end) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofHostListFor<Exec>("vof::block::batch_curv_planes", T.nj, vofListCount(T, start, end),
+                         [=](const int k, const long t) {
+                           const long q = start(T.base + k) + t;
+                           const VofCurvJob& J = T.job[k];
+                           const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+                           wyReconstructCell(VofRawField{J.c}, list(q), sy, sz, VofRawField{J.mx},
+                                             VofRawField{J.my}, VofRawField{J.mz},
+                                             VofRawField{J.al});
+                         });
+    return;
+  }
   Kokkos::parallel_for(
       "vof::block::batch_curv_planes", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -803,13 +916,69 @@ inline void vofCurvFallbackTeams(const VofCurvTable& T, LField list, LField star
       });
 }
 
+/// Entry `q` (an absolute list position) of job `k` of a cascade list pass (see below): the body
+/// shared by the device and host launch forms.
+KOKKOS_INLINE_FUNCTION void vofCurvListEntry(const VofCurvTable& T, int pass, int k, long q,
+                                             LField list, LField cnt) {
+  const VofCurvJob& J = T.job[k];
+  const long i = list(q);
+  const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+  const VofRawField c{J.c}, mx{J.mx}, my{J.my}, mz{J.mz}, al{J.al}, kap{J.kap}, br{J.br};
+  if (pass == 0) {
+    curvHeightCell(i, c, mx, my, mz, al, kap, br, 1L, sy, sz, J.mtol, J.ptW, J.ieps, J.forceFb,
+                   J.oneDir, J.useFit, J.gm, J.peps);
+    return;
+  }
+  if (pass == 1) {
+    curvFallbackCell(i, c, mx, my, mz, al, kap, br, sy, sz, kPvHalf, J.dW, J.cmin, J.ieps, J.gm);
+    return;
+  }
+  long* ct = &cnt(8 * (T.base + k));
+  if (pass == 2) {
+    const double km = J.km;
+    if (!(km > 0.0))
+      return;  // this cascade's clip is off (VofCurvature::clipPass returns 0)
+    // `!(|k| <= km)` rather than `|k| > km`: a NaN curvature is clipped (to +km, the sign of
+    // a NaN is meaningless) and counted, never silently kept.
+    if (csfKappaDefined(br(i)) && !(Kokkos::fabs(kap(i)) <= km)) {
+      kap(i) = (kap(i) == kap(i)) ? Kokkos::copysign(km, kap(i)) : km;
+      Kokkos::atomic_add(&ct[7], 1L);
+    }
+    return;
+  }
+  const int b = static_cast<int>(br(i));
+  if (b == kCurvNone)
+    return;
+  Kokkos::atomic_add(&ct[0], 1L);
+  if (b == kCurvHf)
+    Kokkos::atomic_add(&ct[1], 1L);
+  else if (b == kCurvHfMixed)
+    Kokkos::atomic_add(&ct[2], 1L);
+  else if (b == kCurvHfFit)
+    Kokkos::atomic_add(&ct[3], 1L);
+  else if (b == kCurvPv)
+    Kokkos::atomic_add(&ct[4], 1L);
+  else if (b == kCurvPvReduced)
+    Kokkos::atomic_add(&ct[5], 1L);
+  else
+    Kokkos::atomic_add(&ct[6], 1L);
+}
+
 /// The per-list-cell passes of the cascade over the inner interfacial list (upper bound: the inner
 /// region): `pass` 0 = tiers 1-2 (`curvHeightCell`), 1 = tier 3 (`curvFallbackCell`), 2 = the
 /// admissibility clip (its count into `cnt(8 (base + k) + 7)`), 3 = the branch census (its seven
 /// counters into `cnt(8 (base + k) + 0..6)`, in `VofCurvature::census`'s order). The counts are
-/// integer atomics: exact whatever the order.
+/// integer atomics: exact whatever the order. Host: the exact counts (H-4a).
+template <class Exec = SExec>
 inline void vofCurvListPass(const VofCurvTable& T, int pass, LField list, LField start, LField end,
                             LField cnt) {
+  if constexpr (kVofHostExec<Exec>) {  // tier 3 included: the host keeps the loop
+    vofHostListFor<Exec>("vof::block::batch_curv_list", T.nj, vofListCount(T, start, end),
+                         [=](const int k, const long t) {
+                           vofCurvListEntry(T, pass, k, start(T.base + k) + t, list, cnt);
+                         });
+    return;
+  }
   if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, SField::memory_space>::accessible) {
     if (pass == 1) {  // tier 3 on a device: persistent warp-teams (C3); the host keeps the loop
       vofCurvFallbackTeams(T, list, start, end);
@@ -823,49 +992,7 @@ inline void vofCurvListPass(const VofCurvTable& T, int pass, LField list, LField
         const long q = start(T.base + k) + (t - T.off[k]);
         if (q >= end(T.base + k))
           return;
-        const VofCurvJob& J = T.job[k];
-        const long i = list(q);
-        const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
-        const VofRawField c{J.c}, mx{J.mx}, my{J.my}, mz{J.mz}, al{J.al}, kap{J.kap}, br{J.br};
-        if (pass == 0) {
-          curvHeightCell(i, c, mx, my, mz, al, kap, br, 1L, sy, sz, J.mtol, J.ptW, J.ieps,
-                         J.forceFb, J.oneDir, J.useFit, J.gm, J.peps);
-          return;
-        }
-        if (pass == 1) {
-          curvFallbackCell(i, c, mx, my, mz, al, kap, br, sy, sz, kPvHalf, J.dW, J.cmin, J.ieps,
-                           J.gm);
-          return;
-        }
-        long* ct = &cnt(8 * (T.base + k));
-        if (pass == 2) {
-          const double km = J.km;
-          if (!(km > 0.0))
-            return;  // this cascade's clip is off (VofCurvature::clipPass returns 0)
-          // `!(|k| <= km)` rather than `|k| > km`: a NaN curvature is clipped (to +km, the sign of
-          // a NaN is meaningless) and counted, never silently kept.
-          if (csfKappaDefined(br(i)) && !(Kokkos::fabs(kap(i)) <= km)) {
-            kap(i) = (kap(i) == kap(i)) ? Kokkos::copysign(km, kap(i)) : km;
-            Kokkos::atomic_add(&ct[7], 1L);
-          }
-          return;
-        }
-        const int b = static_cast<int>(br(i));
-        if (b == kCurvNone)
-          return;
-        Kokkos::atomic_add(&ct[0], 1L);
-        if (b == kCurvHf)
-          Kokkos::atomic_add(&ct[1], 1L);
-        else if (b == kCurvHfMixed)
-          Kokkos::atomic_add(&ct[2], 1L);
-        else if (b == kCurvHfFit)
-          Kokkos::atomic_add(&ct[3], 1L);
-        else if (b == kCurvPv)
-          Kokkos::atomic_add(&ct[4], 1L);
-        else if (b == kCurvPvReduced)
-          Kokkos::atomic_add(&ct[5], 1L);
-        else
-          Kokkos::atomic_add(&ct[6], 1L);
+        vofCurvListEntry(T, pass, k, q, list, cnt);
       });
 }
 
