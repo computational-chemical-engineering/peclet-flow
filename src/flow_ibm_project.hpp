@@ -1419,6 +1419,10 @@ long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
       warm = chebWarmOk_ && mg_.eigenWarmReady();
       mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, warm ? 5 : 15, 2, 2, 12,
                               warm ? ES::Warm : ES::ColdKeep);
+      if (warm && !mg_.eigenWarmReady()) {  // the warm estimate came out degenerate: cold one
+        warm = false;
+        mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12, ES::ColdKeep);
+      }
       chebBoundsSet_ = true;
     }
     if (!warm) {

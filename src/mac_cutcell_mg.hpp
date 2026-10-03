@@ -3746,19 +3746,20 @@ class CutcellMG {
       double nr = std::sqrt(dot(l0, x, x));
       if (nr > 0)
         scale(x, 1.0 / nr);
+      return nr;
     };
     auto seedf = [&](CCField x, CCField src) {
       Kokkos::deep_copy(CCExec(), x, src);
       removeMean(l0, x);
       maskSolid(l0, x);
-      normalize(x);
+      return normalize(x);
     };
     auto keepf = [&](CCField& dst, CCField x, const char* label) {
       if (dst.extent(0) != n)
         dst = CCField(label, n);
       Kokkos::deep_copy(CCExec(), dst, x);
     };
-    seedf(v, warm ? eigVmax_ : srhs);
+    const double nrMax = seedf(v, warm ? eigVmax_ : srhs);
     lmax = 1.0;
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
@@ -3768,7 +3769,7 @@ class CutcellMG {
     }
     if (keep)
       keepf(eigVmax_, v, "ev_vmax");
-    seedf(v, warm ? eigVmin_ : srhs);
+    const double nrMin = seedf(v, warm ? eigVmin_ : srhs);
     double mu = 0.0;
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
@@ -3779,7 +3780,11 @@ class CutcellMG {
     }
     if (keep) {
       keepf(eigVmin_, v, "ev_vmin");
-      eigWarm_ = true;
+      // Only a non-degenerate estimate may seed a warm one: a zero seed (a zero right-hand side,
+      // e.g. a fluid at rest) leaves zero iterates and lmax = 0, from which a warm estimate would
+      // return zero bounds -- and a Chebyshev solve on them NaN, which maxabs cannot see.
+      eigWarm_ =
+          nrMax > 0.0 && nrMin > 0.0 && std::isfinite(lmax) && lmax > 0.0 && std::isfinite(mu);
     }
     double e_hi = lmax, e_lo = lmax - mu;  // direct (max) + shifted (min) Rayleigh estimates
     lmin = e_lo < e_hi ? e_lo : e_hi;
