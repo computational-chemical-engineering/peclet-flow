@@ -68,8 +68,8 @@ own gates.
 | WO-4 ScalarMG | DONE 35e183d (+Amendment A1 03435df: coarse wall term averaged at the fine probe distance; RAP removed): G1 10/10/11 it, contraction ≤ 0.27, MPI parity 1e-13; 207/207 |
 | WO-5 advection/small cells | DONE a12106a (rulings D-WO5-1..4; collocated 'ghost' refused) |
 | WO-5b open faces, Koren gate, refusal messages | DONE 0794b15 (collocated open faces refused: possible `uf_` outlet issue, see log D-WO5b-1) |
-| WO-5c advective surrogate (Amendment A2, a61f88e) | IN PROGRESS |
-| WO-6 closures | |
+| WO-5c advective surrogate (Amendment A2, a61f88e) | DONE e1127ed + 7a3e5fb: steady adv Pe_h 0.1–10 in 5–33 it, growth ≤ 1.43×/doubling; D-WO5c-1/2 |
+| WO-6 closures | IN PROGRESS |
 | WO-7 conjugate | |
 | WO-8 contacts | |
 | WO-9 backends/performance | |
