@@ -98,7 +98,8 @@ using Post = std::function<void(IbmSolver&, IbmSolver&, const Block&)>;
 
 static void compare(const char* tag, int n, const std::vector<double>& gsdf, FlowSetup flow,
                     ScalarSetup scalar, Solve solve, bool checkLevels = false, bool gated = true,
-                    bool cutcellPressure = false, Post post = nullptr) {
+                    bool cutcellPressure = false, Post post = nullptr,
+                    double identityBound = 1e-12) {
   peclet::core::decomp::BlockDecomposer<3> dec =
       peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size_), n, n, n);
   const auto blk = dec.block(rank_);
@@ -170,8 +171,8 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
     return;
   CHECK(D.iters.size() == R.iters.size());
   for (std::size_t k = 0; k < D.identity.size(); ++k) {
-    CHECK(std::fabs(D.identity[k]) <= 1e-12);
-    CHECK(std::fabs(R.identity[k]) <= 1e-12);
+    CHECK(std::fabs(D.identity[k]) <= identityBound);
+    CHECK(std::fabs(R.identity[k]) <= identityBound);
   }
   if (size_ == 1) {
     CHECK(ns == 0);
@@ -554,6 +555,12 @@ int main(int argc, char** argv) {
             Run r;
             s.solveScalarSteady("c");
             record(s, r, false);
+            // ruling D-WO5c-1: the steady identity relative to the GROSS budget (the sum of the
+            // terms' absolute values; the source is uniform, so its gross is |source_in|),
+            // bound 1e-11 (compare()'s identityBound below)
+            const auto b = s.scalarBudget("c");
+            r.identity.back() = b.identityError / (std::fabs(b.wallIn) + std::fabs(b.sourceIn) +
+                                                   std::fabs(b.boundaryIn));
             const auto& st = *s.scalarField("c").cut;
             if (rank_ == 0)
               std::printf("  [steady_adv] census max_cell_peclet %.6g, %d levels, %d iterations\n",
@@ -609,7 +616,8 @@ int main(int argc, char** argv) {
                   "bitwise vs single rank\n",
                   tt[0], tt[1]);
             CHECK(tt[0] == 0 && tt[1] == (long)N * N * N);
-          });
+          },
+          1e-11);
     }
   }
   Kokkos::finalize();

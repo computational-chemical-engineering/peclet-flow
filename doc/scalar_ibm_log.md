@@ -1032,3 +1032,17 @@ wall gather, the probe operator, the Krylov driver, CutcellMG / VelocityMG, the 
 **Implication for the cut-cell path:** check in WO-10 / the review that the cut-cell path has neither the stale-`cOld` pattern nor the inflow-ghost pattern. Its boundary flux is the projection's capture (WO-5b), but `advanceScalars`' fill runs first.
 
 **Merge consequence:** if `uf-outlet-diag` lands before `scalar-ibm`, G12's `scalar` baseline hash changes to 438db94e.
+
+**WO-5c rulings (orchestrator) and their rerun.**
+- **D-WO5c-1 (Q-J).** The steady budget identity of G-adv (v) and of `compare()`'s `steady_adv`
+  is normalized by the GROSS budget — the sum of the terms' absolute values, the source taken gross
+  (V Σκ|s| for a per-cell source, |source_in| for a uniform one) — and bounded by 1e-11. No
+  compensated summation (`scalar_budget` digits unchanged). The ratio against the largest net
+  term stays printed as INFO. (c) keeps its normalization by the inflow rate Q c_in, a lower bound
+  of its gross budget (in + out), so it is the stricter test.
+- **D-WO5c-2.** Q20's tightening of the provisional bounds to 2× measured is deferred to WO-9 (an
+  unloaded host). The readings logged above are accepted.
+- **Rerun:** `scalar_cutcell_gadv` PASS — (v) 1.0e-17 … 9.4e-13 of the gross budget over all rows
+  (iterations unchanged); `scalar_cutcell_solve_mpi_np{1,2,4}` PASS, `steady_adv` identity 5.7e-13
+  of the gross budget at every rank count (bound 1e-11); G12 12/12 at OMP_NUM_THREADS=1.
+  **WO-5c done.**

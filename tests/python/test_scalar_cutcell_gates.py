@@ -34,7 +34,7 @@ conversions of §1.2 are on the path.
        (b) the closure on G9b's SC array (Neumann spheres, singular, source u_x - <u_x>) and (b')
        the same with Dirichlet spheres, 32^3 and 64^3; (c) G9c's channel (open faces), Pe_h 1 and
        10 (set through D). (i) converged, (ii) iteration bounds (prov.), (iii) growth per
-       doubling <= 1.7x, (v) the steady budget identity <= 1e-12 relative. (iv) C4 is in the
+       doubling <= 1.7x, (v) the steady budget identity <= 1e-11 of the gross budget (D-WO5c-1). (iv) C4 is in the
        `scalar_mg` ctest, (vi) a one-time logged check.
   giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 10 per step,
        the cold first step included — ruling of WO-4, restating the provisional 8) and the singular
@@ -1007,20 +1007,22 @@ def rescale_peclet(s, name, target):
 
 
 def gadv_budget(s, name):
-    """(v): the steady rate balance relative to the largest of its terms (wall, source, boundary);
-    and, for information, relative to the gross source V sum kappa |s| — the only O(1) scale of a
-    mean-free closure source, whose net terms are all round-off (the normalization of "relative"
-    is OPEN, reported to the orchestrator: WO-5c)."""
+    """(v), ruling D-WO5c-1: the steady rate balance relative to the GROSS budget — the sum of the
+    terms' absolute values, the source taken gross (V sum kappa |s| for a per-cell source,
+    |source_in| for a uniform one) — bound 1e-11. Returns (that ratio, the ratio against the
+    largest NET term: INFO, O(1) for the mean-free closure source of (b) / (b'))."""
     b = s.diagnostics.scalar_budget(name)
-    scale = max(abs(b["wall_in"]), abs(b["source_in"]), abs(b["boundary_in"]))
-    geo = s.diagnostics.scalar_geometry(name)
-    unk = geo["unknown"] > 0.5
-    x, y, z = s.cell_centers()
-    V = (x[1] - x[0]) * (y[1] - y[0]) * (z[1] - z[0])
-    gross = None
+    net = max(abs(b["wall_in"]), abs(b["source_in"]), abs(b["boundary_in"]))
+    src = abs(b["source_in"])
     if name in GADV_SRC:
-        gross = V * math.fsum((geo["kappa"] * np.abs(GADV_SRC[name]))[unk].ravel())
-    return abs(b["identity_error"]) / scale, (abs(b["identity_error"]) / gross if gross else None)
+        geo = s.diagnostics.scalar_geometry(name)
+        unk = geo["unknown"] > 0.5
+        x, y, z = s.cell_centers()
+        V = (x[1] - x[0]) * (y[1] - y[0]) * (z[1] - z[0])
+        src = V * math.fsum((geo["kappa"] * np.abs(GADV_SRC[name]))[unk].ravel())
+    gross = abs(b["wall_in"]) + src + abs(b["boundary_in"])
+    ie = abs(b["identity_error"])
+    return ie / gross, ie / net
 
 
 def gadv_a_case(Rh, pe):
@@ -1130,19 +1132,19 @@ def gadv_row(tag, s, name, pe, bound, rate=None):
     c = s.diagnostics.scalar_census(name)
     its = c["krylov_iterations"]
     b = s.diagnostics.scalar_budget(name)
-    gross = None
-    if rate:
+    netr = None
+    if rate:  # (c): the inflow rate Q c_in, a lower bound of the gross budget (in + out)
         ident = abs(b["identity_error"]) / rate
     else:
-        ident, gross = gadv_budget(s, name)
-    extra = f" (INFO: {gross:.1e} of the gross source)" if gross is not None else ""
+        ident, netr = gadv_budget(s, name)
+    extra = f" (INFO: {netr:.1e} of the largest net term)" if netr is not None else ""
     print(f"  {tag} Pe_h {c['max_cell_peclet']:.4g}: {its} iterations (<= {bound}), residual "
           f"{c['krylov_residual']:.1e}, {c['mg_levels']} levels; budget identity {ident:.1e}{extra}")
     check(abs(c["max_cell_peclet"] / pe - 1.0) <= 1e-9, f"{tag}: census Pe_h {c['max_cell_peclet']:.6g} = {pe}")
     check(c["krylov_converged"] and c["krylov_residual"] <= 1e-10,
           f"{tag} Pe_h {pe}: (i) converged to rtol 1e-10 within 200 ({its} iterations)")
     check(its <= bound, f"{tag} Pe_h {pe}: (ii) {its} <= {bound} iterations (prov.)")
-    check(ident <= 1e-12, f"{tag} Pe_h {pe}: (v) steady budget identity {ident:.1e} <= 1e-12")
+    check(ident <= 1e-11, f"{tag} Pe_h {pe}: (v) steady budget identity {ident:.1e} <= 1e-11 of the gross budget")
     return its
 
 
