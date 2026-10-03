@@ -366,7 +366,15 @@ typename Solver<Grid>::MarchState Solver<Grid>::marchState() {
   }
   ms.e = e_;
   ms.G = G;
-  ms.signature = {dt_, rho_, mu_, f_[0], f_[1], f_[2]};
+  ms.signature = {dt_,
+                  rho_,
+                  mu_,
+                  f_[0],
+                  f_[1],
+                  f_[2],
+                  advect_ ? 1.0 : 0.0,
+                  static_cast<double>(advScheme_),
+                  implicitFou_ ? 1.0 : 0.0};
 #ifdef PECLET_FLOW_MPI
   ms.comm = comm_;
   ms.distributed = distributed_;

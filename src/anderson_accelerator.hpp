@@ -6,7 +6,8 @@
 /// the reductions, the least squares, the safeguards and the lazy mix; this adapter supplies the
 /// solver's march state (`Solver::marchState()`: the velocity, P and, collocated with projected-
 /// face advection, the face field), re-checks the refusals of §5.3 at every call, detects a change
-/// of the parameter signature (internal dt, rho, mu, F) and calls the solver's step() unchanged.
+/// of the parameter signature (internal dt, rho, mu, F and the advection settings: on, scheme,
+/// implicit) and calls the solver's step() unchanged.
 /// The control path (phases, the stop instrument) is the pure-Python `peclet.flow.march_to_steady`.
 ///
 /// One call of step(accelerate) is §4.3: the refusal re-check, the signature check, core.prepare
@@ -80,7 +81,7 @@ class AndersonAccelerator {
   static double now();
 
   Solver<Grid>& s_;
-  std::array<double, 6> sig_;
+  std::array<double, 9> sig_;
   Core core_;
   double seconds_ = 0.0;
 };
@@ -144,7 +145,8 @@ void AndersonAccelerator<Grid>::step(bool accelerate) {
     throw std::logic_error(
         "AndersonAccelerator: the solver's state buffers were reallocated (a redistribute or a "
         "rebalance since construction); construct a new accelerator");
-  // §4.3 step 0, the signature half: a parameter change is a new map.
+  // §4.3 step 0, the signature half: a parameter change is a new map (dt, rho, mu, F, and since
+  // review R5 the advection settings, so staggered set_advection between calls resets too).
   if (core_.status() == Core::Status::Active && ms.signature != sig_) {
     core_.invalidate();
     sig_ = ms.signature;

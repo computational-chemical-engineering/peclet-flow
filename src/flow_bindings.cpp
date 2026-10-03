@@ -218,7 +218,8 @@ static void bind_accelerator(nb::module_& m, const char* name) {
       .def_prop_ro("reason", &A::reason, "Why the status is not 'active' ('' while active).")
       .def_prop_ro("num_restarts", &A::numRestarts, "History restarts so far.")
       .def_prop_ro("num_resets", &A::numResets,
-                   "History resets because the state or the parameters (dt, rho, mu, body force) "
+                   "History resets because the state or the parameters (dt, rho, mu, body force, "
+                   "advection on / scheme / implicit) "
                    "were changed from outside.")
       .def_prop_ro("num_columns", &A::numColumns, "Window columns in use.")
       .def_prop_ro("window", &A::window, "The window m.")

@@ -8,7 +8,7 @@
 ///     AUTO scheme and through set_uf_advection(False)); collocated 'ghost' with advection and the
 ///     projected face field (+ uf, vf, wf Carried) — each field ALIASING the solver's own buffer
 ///     over the full padded box;
-///   * the internal signature (dt, rho, mu, F);
+///   * the internal signature (dt, rho, mu, F, advection on / scheme / implicit);
 ///   * that each §5.3 refusal throws std::runtime_error with its own message.
 #include <algorithm>
 #include <array>
@@ -96,6 +96,13 @@ void gateRows() {
     check(ms.signature[0] == 6.0 && ms.signature[1] == 1.0 && ms.signature[2] == 1.0 &&
               ms.signature[3] == 1e-3 && ms.signature[4] == 0.0 && ms.signature[5] == 0.0,
           "staggered: signature (dt, rho, mu, F) in cell units");
+    check(ms.signature[6] == 1.0 && ms.signature[7] == 0.0 && ms.signature[8] == 0.0,
+          "staggered: signature advection (on, scheme SOU, explicit)");
+    s.setAdvectionScheme(1);
+    s.setImplicitAdvection(true);
+    const auto ms2 = s.marchState();
+    check(ms2.signature[7] == 1.0 && ms2.signature[8] == 1.0,
+          "staggered: signature follows set_advection_scheme / set_implicit_advection");
   }
   {
     Colo s(N, N, N);  // AUTO scheme, Stokes: resolves to 'ghost' at set_solid

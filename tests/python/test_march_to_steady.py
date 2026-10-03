@@ -16,7 +16,8 @@
   certification expose the growth).
 * the adapter (review R4, R5), N = 12 production, both grids: `set_dt` between calls resets the
   history (`num_resets` + 1) and that call does not mix (bitwise the plain step of a twin solver,
-  while without `set_dt` a mix was pending); a refused feature enabled after construction
+  while without `set_dt` a mix was pending); the same for staggered `set_advection(True)` (the
+  advection settings are in the signature, review R5); a refused feature enabled after construction
   (`set_pressure_warmstart(True)`) is refused at the next call; collocated `set_advection(True)`
   after construction (4 -> 7 state fields) is reported as a configuration change and resets.
 * four pure-Python tests of the driver's certification (`peclet.flow.steady._certify`) on scripted
@@ -173,11 +174,11 @@ def accelerated(Cls, calls):
 def gate_adapter():
     print("adapter: signature reset, refusal re-check, configuration change (review R4, R5)",
           flush=True)
-    for name, Cls in SCHEMES:
-        # set_dt between calls: num_resets + 1 and NO mix on that call. Twins: four identical
-        # solvers take the same 10 accelerated calls (bit-identical trajectories). C (True) and
-        # D (False) without a dt change differ, so a mix is pending (the check is not vacuous);
-        # A (True) and B (False) after set_dt are bitwise equal, so A's call did not mix.
+    def no_mix_after(Cls, change, what):
+        """`change(solver)` between calls: num_resets + 1 and NO mix on that call. Twins: four
+        identical solvers take the same 10 accelerated calls (bit-identical trajectories). C (True)
+        and D (False) without the change differ, so a mix is pending (the check is not vacuous);
+        A (True) and B (False) after the change are bitwise equal, so A's call did not mix."""
         sa, aa = accelerated(Cls, 10)
         sb, ab = accelerated(Cls, 10)
         sc, ac = accelerated(Cls, 10)
@@ -186,15 +187,20 @@ def gate_adapter():
         ad.step(False)
         pending = any(not np.array_equal(x, y) for x, y in zip(state_of(sc), state_of(sd)))
         r0 = aa.num_resets
-        dt2 = 2.0 * 6.0 * (L / 12) ** 2
-        sa.set_dt(dt2)
-        sb.set_dt(dt2)
+        change(sa)
+        change(sb)
         aa.step(True)
         ab.step(False)
         plain = all(np.array_equal(x, y) for x, y in zip(state_of(sa), state_of(sb)))
         check(pending and plain and aa.num_resets == r0 + 1 and aa.status == "active",
-              f"{name}: set_dt between calls -> num_resets {r0} -> {aa.num_resets}, the call is "
-              f"bitwise the plain step {plain} (a mix was pending without set_dt: {pending})")
+              f"{what}: num_resets {r0} -> {aa.num_resets}, the call is bitwise the plain step "
+              f"{plain} (a mix was pending without the change: {pending})")
+
+    dt2 = 2.0 * 6.0 * (L / 12) ** 2
+    # staggered set_advection between calls: the advection settings are in the signature (R5)
+    no_mix_after(pf.Solver, lambda s: s.set_advection(True), "staggered: set_advection(True)")
+    for name, Cls in SCHEMES:
+        no_mix_after(Cls, lambda s: s.set_dt(dt2), f"{name}: set_dt between calls")
         # the refusals are re-checked at every call: a refused feature enabled after construction
         s, acc = accelerated(Cls, 3)
         s.diagnostics.set_pressure_warmstart(True)
