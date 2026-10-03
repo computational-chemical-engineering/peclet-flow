@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Cut-cell scalar transport: the accuracy and iteration gates of WO-3/WO-4 (doc/scalar_ibm_design.md §11).
+"""Cut-cell scalar transport: the accuracy and iteration gates of WO-3/WO-4/WO-5 (doc/scalar_ibm_design.md §11).
 
-Single phase, diffusion only, BiCGStab preconditioned by one ScalarMG V-cycle (WO-4; level 0 alone
+Single phase; diffusion, and advection by the projection's face flux (WO-5); BiCGStab preconditioned by one ScalarMG V-cycle (WO-4; level 0 alone
 under the transient level rule). Every case is in PHYSICAL units (an extent), so the unit
 conversions of §1.2 are on the path.
 
@@ -17,6 +17,12 @@ conversions of §1.2 are on the path.
   g7   pipe (an SDF along z, nz = 4 periodic): Dirichlet decay j01^2 and Neumann dipole decay
        j'11^2 (BE ratio), and the Graetz number Nu_T = 3.656793 by inverse iteration with
        solve_scalar_steady (G7a, G7b).
+  g9   advection in an annulus (WO-5): solid-body rotation carrying a Gaussian blob one revolution,
+       fou / koren at bulk Courant 0.5 / 0.9: per-step budget identity, conservation against the
+       accounted defects, positivity, finiteness, slivers (min kappa < 1e-2).
+  g9b  constant preservation under flow's own projection (Stokes through an SC array, c = 1):
+       staggered and the collocated 'gauge-exact', 'plain', 'embed' pass; the ghost projection
+       is refused (§13 Q13).
   giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 10 per step,
        the cold first step included — ruling of WO-4, restating the provisional 8) and the singular
        steady problem on G5b's geometry (periodic simple-cubic array, c = 0.3, insulating + flux +
@@ -594,6 +600,251 @@ def gate_giter():
     check(all(g <= 5 for g in gr), f"singular: growth <= 5 per doubling ({gr})")
 
 
+# ---------------------------------------------------------------------------------------- G9 ----
+R_I, R_O = 0.4, 1.0
+
+
+def psi_node(X, Y):
+    """Stream function of solid-body rotation (Omega = 1, u = d psi/dy, v = -d psi/dx), clamped to
+    its wall values inside the solids."""
+    r = np.clip(np.hypot(X, Y), R_I, R_O)
+    return -0.5 * r * r
+
+
+def annulus_case(Rh, off, scheme="koren"):
+    """Coaxial cylinders R_i = 0.4 < r < R_o = 1, an SDF along z, nz = 4, every face periodic."""
+    h = R_O / Rh
+    n = 2 * Rh + 4
+    L = n * h
+    s = pf.Solver((n, n, 4), extent=(L, L, 4 * h), origin=(-0.5 * L + off[0] * h,
+                                                           -0.5 * L + off[1] * h, 0.0))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    X, Y, Z = grid(s)
+    r = np.hypot(X, Y)
+    s.set_solid(np.asfortranarray(np.minimum(r - R_I, R_O - r)), cutcell_pressure=True)
+    s.add_scalar("c", diffusivity=0.0, scheme=scheme, cutcell=True)
+    return s, h
+
+
+def annulus_fluxes(s, h):
+    """Physical F/V through the low x and y faces of every cell: the differences of a NODE
+    potential (round 6's exact stream-function fluxes), so every cell's net flux telescopes to zero.
+    The potential is the clamped psi, set to its wall value on both nodes of every face the
+    projection closes (openness 0): the field is then discretely divergence-free in the openness
+    the predicate reads (the solver's gated cut-cell openness), as a projected field is."""
+    x, y, _ = s.cell_centers()
+    xl, yl = np.asarray(x) - 0.5 * h, np.asarray(y) - 0.5 * h
+    Xn, Yn = np.meshgrid(xl, yl, indexing="ij")  # node (x_lo, y_lo) of cell (i, j)
+    P = psi_node(Xn, Yn)
+    rn = np.hypot(Xn, Yn)
+    wall = np.where(rn < 0.5 * (R_I + R_O), -0.5 * R_I * R_I, -0.5 * R_O * R_O)
+    shut_x = s.get_ox_proj()[:, :, 0] <= 0.0  # x face (i, j): nodes (i, j), (i, j + 1)
+    shut_y = s.get_oy_proj()[:, :, 0] <= 0.0  # y face (i, j): nodes (i, j), (i + 1, j)
+    mark = shut_x | np.roll(shut_x, 1, axis=1) | shut_y | np.roll(shut_y, 1, axis=0)
+    P = np.where(mark, wall, P)
+    fx = (np.roll(P, -1, axis=1) - P) / (h * h)     # int u dy over the low x face, per volume
+    fy = -(np.roll(P, -1, axis=0) - P) / (h * h)
+    return fx[:, :, None] * np.ones(4), fy[:, :, None] * np.ones(4)
+
+
+def set_annulus_velocity(s, fx, fy):
+    """Face velocities (internal index velocity) with open * vel = F/V * tRef, the openness the
+    projection conserves; returns max |F| on faces whose openness is 0 (lost) over max |F|."""
+    tref = s.unit_scales["t_ref"]
+    ox, oy = s.get_ox_proj(), s.get_oy_proj()
+    vx = np.where(ox > 0.0, fx * tref / np.where(ox > 0.0, ox, 1.0), 0.0)
+    vy = np.where(oy > 0.0, fy * tref / np.where(oy > 0.0, oy, 1.0), 0.0)
+    s.set_field("u", np.asfortranarray(vx))
+    s.set_field("v", np.asfortranarray(vy))
+    s.set_field("w", np.asfortranarray(np.zeros_like(vx)))
+    lost = max(float(np.max(np.abs(np.where(ox > 0.0, 0.0, fx)))),
+               float(np.max(np.abs(np.where(oy > 0.0, 0.0, fy)))))
+    return lost / max(float(np.max(np.abs(fx))), float(np.max(np.abs(fy))))
+
+
+def g9_case(Rh, off, scheme, cr, rtol=None, nsteps=None):
+    s, h = annulus_case(Rh, off, scheme)
+    geo = s.diagnostics.scalar_geometry("c")
+    unk = geo["unknown"] > 0.5
+    kap = geo["kappa"]
+    ax, ay, az = geo["aperture_x"], geo["aperture_y"], geo["aperture_z"]
+    full = unk & (kap >= 1.0)
+    for a, ap in ((0, ax), (1, ay), (2, az)):
+        full &= (ap >= 1.0) & (np.roll(ap, -1, axis=a) >= 1.0)
+    fx, fy = annulus_fluxes(s, h)
+    out = (np.maximum(np.roll(fx, -1, axis=0), 0) + np.maximum(-fx, 0) +
+           np.maximum(np.roll(fy, -1, axis=1), 0) + np.maximum(-fy, 0))
+    T = 2.0 * math.pi
+    nrev = int(math.ceil(T * float(np.max(out[full])) / cr))
+    dt = T / nrev
+    s.set_dt(dt)
+    lost = set_annulus_velocity(s, fx, fy)
+    X, Y, _ = grid(s)
+    c0 = np.where(unk, np.exp(-((X - 0.7) ** 2 + Y * Y) / (2 * 0.08**2)), 0.0)
+    s.set_field("c", np.asfortranarray(c0))
+    if rtol is not None:
+        s.set_scalar_tolerance("c", rtol)
+    m0 = float(np.sum(kap * c0) * h**3)
+    cmax0 = float(c0.max())
+    st = dict(min=0.0, max=cmax0, ident=0.0, defects=0.0, finite=True, small=0, impl=0.0,
+              cb=0.0, its=0, lost=lost, minkap=float(kap[unk].min()), steps=0)
+    nst = nrev if nsteps is None else nsteps
+    for k in range(nst):
+        s.advance_scalars()
+        b = s.diagnostics.scalar_budget("c")
+        st["ident"] = max(st["ident"], abs(b["identity_error"]) / m0)
+        st["defects"] += b["defect"]
+        c = s.get_field("c")[unk]
+        st["finite"] = st["finite"] and bool(np.all(np.isfinite(c)))
+        st["min"] = min(st["min"], float(c.min()))
+        st["max"] = max(st["max"], float(c.max()))
+        cen = s.diagnostics.scalar_census("c")
+        st["small"] = max(st["small"], cen["num_small_cells"])
+        st["impl"] = max(st["impl"], cen["num_implicit_faces"] / max(1, cen["num_flux_faces"]))
+        st["cb"] = max(st["cb"], cen["bulk_courant"])
+        st["its"] = max(st["its"], cen["krylov_iterations"])
+        st["guarded"] = cen["num_guarded_flux_faces"]
+        st["steps"] += 1
+    c = s.get_field("c")
+    m1 = float(np.sum(kap * c) * h**3)
+    st["m0"], st["m1"], st["cmax0"] = m0, m1, cmax0
+    st["cons"] = abs(m1 - m0 + st["defects"]) / m0  # d_mass = -defect per step (scalar_budget)
+    st["drift"] = abs(m1 - m0) / m0
+    err = np.where(unk, kap * np.abs(c - c0), 0.0)
+    st["L1"] = float(err.sum() / np.sum(kap * c0))
+    cut = unk & (kap < 1.0)
+    band = cut.copy()
+    for a in (0, 1):
+        band |= np.roll(cut, 1, axis=a) | np.roll(cut, -1, axis=a)
+    band &= unk
+    st["cutshare"] = float(err[cut].sum() / err.sum())
+    st["bandshare"] = float(err[band].sum() / err.sum())
+    return st
+
+
+def g9_offsets(Rh, want=3):
+    """Grid offsets from a fixed sequence whose geometry carries a sliver (min kappa < 1e-2, gate
+    (v)); the first `want` that do."""
+    rng = np.random.default_rng(9000 + Rh)
+    found = []
+    for _ in range(40):
+        off = rng.uniform(-0.5, 0.5, size=2)
+        s, _h = annulus_case(Rh, off)
+        geo = s.diagnostics.scalar_geometry("c")
+        if float(geo["kappa"][geo["unknown"] > 0.5].min()) < 1e-2:
+            found.append(off)
+            if len(found) == want:
+                break
+    return found
+
+
+def koren_bulk_control(cr, n=32):
+    """No solid: a periodic box, uniform translation (1, 0.5) for one x-period, Koren at bulk Courant
+    cr. Returns (min c, C_bulk) — the bulk scheme's own boundedness, for G9 (iii)'s reading."""
+    s = pf.Solver((n, n, 4), extent=(1.0, 1.0, 4.0 / n))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    s.set_pressure_geometry(np.asfortranarray(np.ones((n, n, 4))))
+    s.add_scalar("c", diffusivity=0.0, scheme="koren", cutcell=True)
+    h, U = 1.0 / n, (1.0, 0.5)
+    dt = cr * h / (U[0] + U[1])
+    s.set_dt(dt)
+    tr = s.unit_scales["t_ref"]
+    s.set_field("u", np.asfortranarray(np.full((n, n, 4), U[0] * tr / h)))
+    s.set_field("v", np.asfortranarray(np.full((n, n, 4), U[1] * tr / h)))
+    X, Y, _ = grid(s)
+    s.set_field("c", np.asfortranarray(np.exp(-((X - 0.5) ** 2 + (Y - 0.5) ** 2) / (2 * 0.08**2))))
+    mn = 0.0
+    for _ in range(int(round(1.0 / (U[0] * dt)))):
+        s.advance_scalars()
+        mn = min(mn, float(s.get_field("c").min()))
+    return mn, s.diagnostics.scalar_census("c")["bulk_courant"]
+
+
+def gate_g9():
+    print("G9: advection in an annulus (R_i 0.4, R_o 1, nz 4), solid-body rotation, a Gaussian blob "
+          "carried one revolution, D = 0 (round 6's set-up)")
+    for cr in (0.5, 0.9):
+        mn, cb = koren_bulk_control(cr)
+        print(f"  control, NO solid, uniform translation, koren at C_bulk {cb:.3f}: min c = {mn:.2e} "
+              f"(max c0 = 1)")
+    for Rh in (16, 32, 64):
+        off = g9_offsets(Rh, 1)
+        check(len(off) == 1, f"R_o/h={Rh}: an offset with a sliver (min kappa < 1e-2) exists")
+        off = off[0]
+        for scheme in ("fou", "koren"):
+            for cr in (0.5, 0.9):
+                t0 = time.time()
+                st = g9_case(Rh, off, scheme, cr)
+                tag = f"R_o/h={Rh} {scheme:5s} C={cr}"
+                print(f"  {tag}: {st['steps']} steps, C_bulk {st['cb']:.3f}, small cells <= {st['small']}, "
+                      f"implicit faces <= {100 * st['impl']:.2f} %, BiCGStab <= {st['its']}, min kappa "
+                      f"{st['minkap']:.1e}, lost flux {st['lost']:.1e}, guarded faces {st['guarded']}, "
+                      f"L1 {st['L1']:.3e} (cut cells {100 * st['cutshare']:.1f} %, cut band "
+                      f"{100 * st['bandshare']:.1f} %), min {st['min']:.2e}, max {st['max']:.6f} "
+                      f"[{time.time() - t0:.0f} s]")
+                check(st["ident"] <= 1e-13, f"{tag}: (i) budget identity per step {st['ident']:.1e} M0 <= 1e-13")
+                check(st["cons"] <= 1e-12, f"{tag}: (ii) |M_end - M0 + sum defect| = {st['cons']:.1e} M0 <= 1e-12")
+                if scheme == "fou":
+                    check(st["min"] >= -1e-12 * st["cmax0"], f"{tag}: (iii) min c {st['min']:.1e} >= -1e-12 max c0")
+                else:  # C = 0.9 HELD failing (WO-5 report): forward Euler + the legacy Koren
+                    # reconstruction is TVD only to C <= 1/2 — it fails in the bulk with no solid at all
+                    # (koren_bulk_control below), so no small-cell treatment can meet it.
+                    check(st["min"] >= -1e-3 * st["cmax0"] and st["max"] <= (1 + 1e-3) * st["cmax0"],
+                          f"{tag}: (iii) min c {st['min']:.1e} >= -1e-3, max c {st['max']:.6f} <= 1.001 max c0")
+                check(st["finite"], f"{tag}: (iv) finite throughout")
+                check(st["minkap"] < 1e-2, f"{tag}: (v) min kappa {st['minkap']:.1e} < 1e-2")
+                check(abs(st["cb"] - cr) <= 0.02 * cr, f"{tag}: bulk Courant {st['cb']:.3f} ~ {cr}")
+        st = g9_case(Rh, off, "fou", 0.9, rtol=1e-13)
+        print(f"  R_o/h={Rh} fou C=0.9 rtol 1e-13: |dM|/M0 = {st['drift']:.1e}, "
+              f"|dM + sum defect| = {st['cons']:.1e} M0")
+        check(st["drift"] <= 1e-8, f"R_o/h={Rh}: (ii) sanity: raw drift {st['drift']:.1e} <= 1e-8 at rtol 1e-13")
+
+
+# --------------------------------------------------------------------------------------- G9b ----
+def g9b_case(kind, scheme, n=32, nsteps=50):
+    cls = pf.Solver if kind == "staggered" else pf.SolverColocated
+    s = cls((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    s.set_dt(0.01)
+    if scheme == "staggered-ghost":
+        s.diagnostics.set_ghost_projection(True)
+    elif scheme is not None:
+        s.set_collocated_scheme(scheme)
+    R = (0.3 * 3.0 / (4.0 * math.pi)) ** (1.0 / 3.0)  # SC array, solid fraction 0.3
+    X, Y, Z = grid(s)
+    s.set_solid(np.asfortranarray(np.sqrt((X - 0.513) ** 2 + (Y - 0.479) ** 2 + (Z - 0.507) ** 2) - R),
+                cutcell_pressure=True)
+    s.set_body_force((30.0, 9.0, 0.0))  # Stokes (advection off): bulk Courant ~0.47 at step 50
+    s.add_scalar("c", diffusivity=0.0, cutcell=True)
+    unk = s.diagnostics.scalar_geometry("c")["unknown"] > 0.5
+    s.set_field("c", np.asfortranarray(np.where(unk, 1.0, 0.0)))
+    dev = 0.0
+    for _ in range(nsteps):
+        s.step()
+        dev = max(dev, float(np.max(np.abs(s.get_field("c")[unk] - 1.0))))
+    return dev, s.diagnostics.scalar_census("c")
+
+
+def gate_g9b():
+    print("G9b: constant preservation under flow's own projection (Stokes through an SC sphere "
+          "array, c = 1, 50 steps, D = 0)")
+    for kind, scheme in (("staggered", None), ("collocated", "gauge-exact"), ("collocated", "plain"),
+                         ("collocated", "embed")):
+        dev, cen = g9b_case(kind, scheme)
+        tag = f"{kind} {scheme or ''}".strip()
+        print(f"  {tag}: max|c - 1| = {dev:.2e}; C_bulk {cen['bulk_courant']:.3f}, flux faces "
+              f"{cen['num_flux_faces']}, implicit {cen['num_implicit_faces']}, guarded "
+              f"{cen['num_guarded_flux_faces']}")
+        check(dev <= 1e-6, f"{tag}: max|c - 1| = {dev:.1e} <= 1e-6")
+        check(cen["bulk_courant"] > 0.3, f"{tag}: the flow advects (C_bulk {cen['bulk_courant']:.3f})")
+    for kind, scheme in (("collocated", "ghost"), ("staggered", "staggered-ghost")):
+        raises(RuntimeError, lambda k=kind, sc=scheme: g9b_case(k, sc, nsteps=1),
+               f"{kind} {scheme}: refused for a cut-cell scalar (Q13: no divergence-free face flux)")
+
+
 # --------------------------------------------------------------------------------------- API ----
 def raises(exc, fn, msg):
     try:
@@ -645,10 +896,23 @@ def gate_api():
     s.set_scalar_bc("c", "-x", "periodic")
     s.set_porous_continuity(True)
     raises(RuntimeError, s.advance_scalars, "porous continuity is refused")
+    # WO-5: advection through an open domain face is refused until §6.5's high-face flux is decided
+    s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    s.set_dt(0.1)
+    s.set_domain_bc("-x", "inflow", velocity=(1.0, 0.0, 0.0))
+    s.set_domain_bc("+x", "outflow")
+    X, Y, Z = grid(s)
+    s.set_solid(np.asfortranarray(np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2) - 0.2))
+    s.add_scalar("c", 1.0, cutcell=True)
+    s.set_scalar_bc("c", "-x", "dirichlet", 1.0)
+    s.set_scalar_bc("c", "+x", "neumann")
+    raises(RuntimeError, s.advance_scalars, "an inflow/outflow domain face is refused (WO-5, open)")
 
 
 GATES = {"api": gate_api, "g1": gate_g1, "g2": gate_g2, "g3a": gate_g3a, "g3b": gate_g3b, "g7": gate_g7,
-         "giter": gate_giter}
+         "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b}
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(GATES)

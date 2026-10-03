@@ -501,6 +501,11 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             d["krylov_converged"] = st.converged;
             d["mg_levels"] = st.mgLevels;
             d["steady_incompatibility"] = st.incompatibility;
+            d["num_small_cells"] = st.numSmall;
+            d["num_implicit_faces"] = st.numImplicitFaces;
+            d["num_flux_faces"] = st.numFluxFaces;
+            d["num_guarded_flux_faces"] = st.numGuardedFaces;
+            d["bulk_courant"] = st.bulkCourant;
             return d;
           },
           nb::arg("name"),
@@ -509,7 +514,13 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(the true max-norm residual over the reference max(max|b|, max|A c0|)), "
           "'krylov_converged', 'mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 alone), "
           "'steady_incompatibility' (|sum b| / sum|b| of a singular steady problem before its "
-          "projection, else 0), 'num_solid_unknowns' (0: single phase). The geometry "
+          "projection, else 0), 'num_solid_unknowns' (0: single phase). The advection part "
+          "(design §6.3, the last advance or steady solve): 'num_small_cells' (cut cells whose "
+          "explicit outflow would exceed the bulk's), 'num_implicit_faces' / 'num_flux_faces' "
+          "(faces carrying flux that took implicit upwind / all faces carrying flux; steady: all "
+          "implicit), 'bulk_courant' (C_bulk: max over full cells of dt Out/V; 0 steady), "
+          "'num_guarded_flux_faces' (faces with projection flux toward a cell that is not a fluid "
+          "unknown, whose flux the operator drops). The geometry "
           "part: 'num_unknowns' (fluid unknowns), 'num_cut_cells' (cells carrying a facet), "
           "'num_facets', 'num_two_sided' (cells with two facets), 'num_thin_solid' (two-facet "
           "cells with solid between two fluids -- a resolution warning), 'num_sealed' / "

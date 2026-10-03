@@ -17,7 +17,8 @@
 // are bitwise the WO-3 band sweeps). Coarse level L, coarse cell C (REDISCRETIZED, §5.2):
 //   * face:  t_a = w_a(L) <Lam a>, w_a(L) = w_a / cfac_a^2, <Lam a> the plain average of the fine
 //            sub-faces' products, coarsened recursively by `coarsenOpenAvg`'s cell body;
-//   * mass:  m_C = restrictAvg of the children's m (kappa idt);
+//   * mass:  m_C = restrictAvg of the children's m (kappa idt, + the lumped implicit outflow
+//            under advection, WO-5);
 //   * wall:  W_C = (1/N_L) sum over the level-0 facets under C of alpha G(s_phi) — the plain
 //   average
 //            of the level-0 wall terms cw, at the FINE probe distance (design Amendment A1; the
@@ -73,12 +74,18 @@ struct GuardedProduct {
   }
 };
 
-/// Level-0 mass m = kappa idt on unknowns, 0 elsewhere (read by `restrictAvgCell`).
+/// Level-0 mass m = kappa idt on unknowns, 0 elsewhere (read by `restrictAvgCell`). Under
+/// advection (WO-5) the lumped implicit outflow of §4.3 rides on it: m = kappa idt + omega, so its
+/// `restrictAvg` IS §5.2's "lumped outflow: restrictAvg of the level-0 per-cell field" (both are
+/// plain child averages). `hasOut` false is the WO-4 expression verbatim.
 struct MassField {
-  CCConst kappa, unk;
+  CCConst kappa, unk, out;
   double idt = 0.0;
+  bool hasOut = false;
   KOKKOS_INLINE_FUNCTION double operator()(long i) const {
-    return unk(i) > 0.5 ? kappa(i) * idt : 0.0;
+    if (!(unk(i) > 0.5))
+      return 0.0;
+    return hasOut ? kappa(i) * idt + out(i) : kappa(i) * idt;
   }
 };
 
@@ -321,6 +328,11 @@ class ScalarMG {
     const scg::ScalarFacetOverlay* fac = nullptr;
     Kokkos::View<const double*, CCMem> facetW;  ///< level-0 wall term per facet (cw = alpha G)
     bool dirFace[6] = {false, false, false, false, false, false};
+    /// WO-5: the lumped implicit-FOU outflow per level-0 cell (§4.3; already inside SAC),
+    /// restricted with the mass onto the coarse levels (§5.2). Unset (`hasOutflow` false) without
+    /// advection.
+    CCConst outflow;
+    bool hasOutflow = false;
   };
 
   /// Rebuild the surrogate on every level from the current operator (the level table is kept).
@@ -750,7 +762,8 @@ class ScalarMG {
     }
     // mass
     if (L == 1) {
-      const smg::MassField m0{in.kappa, in.unknown, in.idt};
+      const smg::MassField m0{in.kappa, in.unknown, in.hasOutflow ? in.outflow : in.kappa, in.idt,
+                              in.hasOutflow};
       CCField cm = c.mass;
       const C3 ce = c.ext, fe = fin.ext, ci = c.inner;
       const int gc = c.g, gf = fin.g;

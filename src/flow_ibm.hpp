@@ -2633,7 +2633,8 @@ class Solver {
   // `advanceScalarCutCell` (the first statement of advanceScalars' per-scalar loop, §5.5); the
   // legacy kernels never see it. Every setter stores PHYSICAL values verbatim; they are converted
   // and folded into the operator at the next advance or steady solve, which rebuilds the operator
-  // (ruling D-WO3-3). Advection is not yet part of the operator (WO-5).
+  // (ruling D-WO3-3). Advection (WO-5, §6): the explicit-implicit split of D12 on the projection's
+  // face flux (`scalarFaceFlux`).
   bool isCutcellScalar(const std::string& name) const;
   // Wall condition of one scene instance (instance >= 0, needs a scene) or of every body
   // (instance = -1, which also clears the per-instance overrides): type 0 neumann (value = flux
@@ -2682,6 +2683,21 @@ class Solver {
   void scalarCutAssembleSolve(ScalarField& sc, bool steady);
   // y = A x for the stored operator of `sc` (exchanges x's ghosts).
   void scalarCutMatvec(ScalarField& sc, CCField y, CCField x);
+  /// The ONE predicate for the cut-cell scalar's advective face flux (doc/scalar_ibm_design.md
+  /// §6.1, D5): the face field the projection in force made discretely divergence-free and the
+  /// openness ITS divergence kernel weights it with, so that F_a/V = open * vel through the low
+  /// a-face of cell i. Staggered: C[a].u; collocated: the projected uf_/vf_/wf_ (never the
+  /// zero-gradient outflow view, never the cell average). Openness: the binary oxb_ in
+  /// ghost-projection mode, the cut-cell ox_ otherwise — `getOpennessProj`'s rule. The scalar's own
+  /// apertures weight diffusion only. Read-only on the flow state.
+  struct ScalarFaceFlux {
+    CCField vel;   ///< face-normal index velocity at the low a-face of cell i (internal)
+    CCField open;  ///< the projection's openness of that face
+  };
+  ScalarFaceFlux scalarFaceFlux(int a) const;
+  // WO-5 (§6): the face fluxes, the small-cell classification and the census of one advance or
+  // steady solve, into `sc.cut` (st.advecting false: no face carries flux, nothing else is built).
+  void scalarCutAdvection(ScalarField& sc, bool steady);
   // setSuperficialVelocity's per-step shift (the tail of step()); no-op when off.
   void applySuperficialVelocity();
   void superficialVelocityPrecheck() const;

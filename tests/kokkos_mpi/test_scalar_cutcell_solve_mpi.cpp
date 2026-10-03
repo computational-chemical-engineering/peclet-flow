@@ -1,4 +1,5 @@
-// Cut-cell scalar solve under MPI (doc/scalar_ibm_design.md §5.1, §5.2, §5.4; WO-3, WO-4).
+// Cut-cell scalar solve under MPI (doc/scalar_ibm_design.md §5.1, §5.2, §5.4, §6; WO-3, WO-4,
+// WO-5).
 //
 // np = 1, 2, 4 on the production ORB. Each problem is solved on the distributed solver and on a
 // single-rank reference of the same problem; the parallel contract of §5.4 (G10) is checked at
@@ -16,7 +17,10 @@
 //   g1        — G1 at R/h = 16 (box 4R = 64, walls everywhere): a Dirichlet sphere c = 1, the
 //               exact field R/r as the box Dirichlet profile on all six faces, steady;
 //   singular  — the periodic box, insulating walls with a flux and a source, steady: the
-//               singular case of §5.1 (mean projection on every ScalarMG level, gauge kept).
+//               singular case of §5.1 (mean projection on every ScalarMG level, gauge kept);
+//   g9        — G9 (WO-5): an annulus carrying a Gaussian blob by solid-body rotation, koren,
+//               50 backward-Euler steps with the explicit-implicit split of §6.3 (the small-cell
+//               counts compared exactly across decompositions).
 //
 // Plus the level table: ScalarMG's distributed table equals VelocityMG::initMpi's (in place).
 #include <mpi.h>
@@ -83,7 +87,8 @@ static void record(IbmSolver& s, Run& r, bool transient) {
 }
 
 static void compare(const char* tag, int n, const std::vector<double>& gsdf, FlowSetup flow,
-                    ScalarSetup scalar, Solve solve, bool checkLevels = false, bool gated = true) {
+                    ScalarSetup scalar, Solve solve, bool checkLevels = false, bool gated = true,
+                    bool cutcellPressure = false) {
   peclet::core::decomp::BlockDecomposer<3> dec =
       peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size_), n, n, n);
   const auto blk = dec.block(rank_);
@@ -99,11 +104,11 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
   IbmSolver sd(B.l[0], B.l[1], B.l[2]);
   flow(sd);
   sd.initMpi(n, n, n, MPI_COMM_WORLD);
-  sd.setSolid(lsdf, false);
+  sd.setSolid(lsdf, cutcellPressure);
   scalar(sd, B);
   IbmSolver sr(n, n, n);
   flow(sr);
-  sr.setSolid(gsdf, false);
+  sr.setSolid(gsdf, cutcellPressure);
   scalar(sr, Block{{0, 0, 0}, {n, n, n}});
   if (gated) {  // ruling Q-D: G10 is gated at rtol 1e-13
     sd.setScalarTolerance("c", 1e-13);
@@ -304,6 +309,102 @@ int main(int argc, char** argv) {
             CHECK(s.scalarField("c").cut->singular);
             return r;
           });
+    }
+    // ---- G10 on G9 (WO-5): the annulus, solid-body rotation, koren, 50 steps ----
+    {
+      // z-invariant annulus R_i = 6.4 < r < R_o = 16 cells in a 36^3 periodic box; the face
+      // velocities are node-potential differences of the clamped stream function, set to the
+      // wall value on both nodes of every face the projection closes (the Python G9's field), so
+      // the flux is discretely divergence-free in the predicate's openness. D = 0, bulk Courant
+      // 0.60 (Koren: 50 steps stay bounded; forward Euler + Koren is TVD only to 1/2).
+      const int N = 36;
+      const double cx = 17.78, cy = 18.13, Ri = 6.4, Ro = 16.0, Om = 0.5 / (std::sqrt(2.0) * Ro);
+      std::vector<double> gsdf((std::size_t)N * N * N);
+      for (int z = 0; z < N; ++z)
+        for (int y = 0; y < N; ++y)
+          for (int x = 0; x < N; ++x) {
+            const double r = std::hypot(x - cx, y - cy);
+            gsdf[(std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * N] =
+                std::fmin(r - Ri, Ro - r);
+          }
+      auto flowG9 = [](IbmSolver& s) {
+        s.setRho(1.0);
+        s.setMu(1.0);
+        s.setDt(1.0);
+      };
+      // the global face velocities, from the projection openness of a single-rank build (a pure
+      // function of the SDF, bitwise equal across decompositions)
+      std::vector<double> vx((std::size_t)N * N * N), vy((std::size_t)N * N * N);
+      {
+        IbmSolver g(N, N, N);
+        flowG9(g);
+        g.setSolid(gsdf, true);  // the projection's openness needs the cut-cell operator
+        const std::vector<double> ox = g.getOpennessProj(0), oy = g.getOpennessProj(1);
+        auto I = [&](int x, int y) {
+          return (std::size_t)((x + N) % N) + (std::size_t)((y + N) % N) * N;
+        };
+        std::vector<double> P((std::size_t)N * N);
+        for (int y = 0; y < N; ++y)
+          for (int x = 0; x < N; ++x) {  // node (x - 1/2, y - 1/2)
+            const double r = std::hypot(x - 0.5 - cx, y - 0.5 - cy);
+            const double rc = std::fmin(std::fmax(r, Ri), Ro);
+            const double wall = r < 0.5 * (Ri + Ro) ? Ri : Ro;
+            const bool mark = !(ox[I(x, y)] > 0.0) || !(ox[I(x, y - 1)] > 0.0) ||
+                              !(oy[I(x, y)] > 0.0) || !(oy[I(x - 1, y)] > 0.0);
+            P[I(x, y)] = -0.5 * Om * (mark ? wall * wall : rc * rc);
+          }
+        for (int z = 0; z < N; ++z)
+          for (int y = 0; y < N; ++y)
+            for (int x = 0; x < N; ++x) {
+              const std::size_t k = (std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * N;
+              const double fx = P[I(x, y + 1)] - P[I(x, y)], fy = -(P[I(x + 1, y)] - P[I(x, y)]);
+              vx[k] = ox[k] > 0.0 ? fx / ox[k] : 0.0;
+              vy[k] = oy[k] > 0.0 ? fy / oy[k] : 0.0;
+            }
+      }
+      compare(
+          "g9", N, gsdf, flowG9,
+          [&](IbmSolver& s, const Block& B) {
+            s.addScalar("c", 0.0, 1, 50, true);  // koren
+            const std::size_t nl = (std::size_t)B.l[0] * B.l[1] * B.l[2];
+            std::vector<double> u(nl), v(nl), w(nl, 0.0), c(nl);
+            for (int z = 0; z < B.l[2]; ++z)
+              for (int y = 0; y < B.l[1]; ++y)
+                for (int x = 0; x < B.l[0]; ++x) {
+                  const std::size_t l =
+                      (std::size_t)x + (std::size_t)y * B.l[0] + (std::size_t)z * B.l[0] * B.l[1];
+                  const int gx = x + B.o[0], gy = y + B.o[1], gz = z + B.o[2];
+                  const std::size_t k =
+                      (std::size_t)gx + (std::size_t)gy * N + (std::size_t)gz * N * N;
+                  u[l] = vx[k];
+                  v[l] = vy[k];
+                  const double dx = gx - cx - 0.7 * Ro, dy = gy - cy, sg = 0.08 * Ro;
+                  c[l] = gsdf[k] > 0.0 ? std::exp(-(dx * dx + dy * dy) / (2.0 * sg * sg)) : 0.0;
+                }
+            s.setField("u", u);
+            s.setField("v", v);
+            s.setField("w", w);
+            s.setField("c", c);
+          },
+          [](IbmSolver& s) {
+            Run r;
+            for (int k = 0; k < 50; ++k) {
+              s.advanceScalars();
+              const auto& st = *s.scalarField("c").cut;
+              r.iters.push_back(st.iterations);
+              // the classification must not depend on the decomposition: compared exactly
+              r.flux.push_back((double)st.numSmall + 1e4 * (double)st.numImplicitFaces);
+              const auto b = s.scalarBudget("c");
+              r.identity.push_back(b.identityError / b.mass);
+            }
+            const auto& st = *s.scalarField("c").cut;
+            if (rank_ == 0)
+              std::printf("  [g9] C_bulk %.3f, small cells %ld, implicit faces %ld of %ld\n",
+                          st.bulkCourant, st.numSmall, st.numImplicitFaces, st.numFluxFaces);
+            CHECK(st.numSmall > 0 && st.numImplicitFaces > 0);
+            return r;
+          },
+          false, true, true);
     }
   }
   Kokkos::finalize();

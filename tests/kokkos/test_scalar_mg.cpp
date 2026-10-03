@@ -14,7 +14,8 @@
 //                  on box geometries (G1, G2, G3a at every rung), Neumann geometries (G5b's array
 //                  on multigrid-friendly n) and no-solid geometries; (C3) <= 0.75 on a periodic
 //                  box whose only sink is one Dirichlet sphere. Krylov counts stay the primary
-//                  gate (tests/python/test_scalar_cutcell_gates.py).
+//                  gate (tests/python/test_scalar_cutcell_gates.py). WO-5 adds the C3 problem
+//                  advecting (steady implicit FOU, peak cell Peclet 1 and 10), under the same C3.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -310,6 +311,43 @@ void testContraction() {
     s.setScalarSource("c", -0.3);
     std::snprintf(tag, sizeof tag, "C3 periodic + Dirichlet sphere R/h=%d (%d^3)", n / 4, n);
     guardRow(s, tag, 3);
+  }
+  // WO-5: the same C3 problem ADVECTING — a projected Stokes field through the periodic array
+  // (20 steps under a body force), rescaled to a peak cell Peclet number max|u| h / D of 1 and 10,
+  // steady: implicit FOU on every face (§6.7), its outflow lumped into the surrogate diagonal and
+  // restricted onto the coarse levels with the mass (§5.2). The A1 guard and the iteration count
+  // must not degrade against the row above.
+  for (const double pe : {1.0, 10.0}) {
+    const int n = 64;
+    IbmSolver s(n, n, n);
+    s.setRho(1.0);
+    s.setMu(1.0);
+    s.setDt(1.0);
+    s.setSolid(sphereSdf(n, 0.5 * n + 0.37, 0.5 * n - 0.22, 0.5 * n + 0.11, 0.25 * n), true);
+    s.setBodyForce(1e-3, 4e-4, 2e-4);
+    for (int k = 0; k < 20; ++k)
+      s.step();
+    double umax = 0.0;
+    std::vector<double> u[3] = {s.getField("u"), s.getField("v"), s.getField("w")};
+    for (const auto& f : u)
+      for (double v : f)
+        umax = std::fmax(umax, std::fabs(v));
+    const double D = 0.7, scale = pe * D / umax;
+    const char* nm[3] = {"u", "v", "w"};
+    for (int c = 0; c < 3; ++c) {
+      for (double& v : u[c])
+        v *= scale;
+      s.setField(nm[c], u[c]);
+    }
+    s.addScalar("c", D, 1, 50, true);
+    s.setScalarWall("c", 1, 1.0, 0.0, -1);
+    s.setScalarSource("c", -0.3);
+    std::snprintf(tag, sizeof tag, "C3 + advection, Pe_h=%g, R/h=%d (%d^3)", pe, n / 4, n);
+    guardRow(s, tag, 3);
+    const auto& st = *s.scalarField("c").cut;
+    std::printf("    advecting: %ld implicit faces of %ld carrying flux\n", st.numImplicitFaces,
+                st.numFluxFaces);
+    CHECK(st.advecting && st.numImplicitFaces == st.numFluxFaces && st.numFluxFaces > 0);
   }
 }
 }  // namespace

@@ -671,3 +671,115 @@ carry no wall conductance.)
     7.85e-9 / 7.26e-8 and 13 / 15 vs 13). The pre-A1 gap was the indefinite preconditioner
     amplifying the reduction-order noise, A1's reading (c), not BiCGStab alone.
 - Battery (`-LE bench`, OMP 4, -j4): 207/207 pass, 717 s. **WO-4 done.**
+
+## 2026-10-03 — WO-5: advection and small cells (§6, D12) — G9b decided, two gates held, three questions
+
+**Built.**
+- `Solver::scalarFaceFlux(a)` (flow_ibm_scalars_cutcell.hpp): the one predicate (§6.1). It returns
+  the projection's face field and the openness ITS divergence kernel weights it with
+  (`getOpennessProj`'s rule: `oxb_` under the ghost projection, `ox_` otherwise); staggered
+  `C[a].u`, collocated the projected `uf_/vf_/wf_`. F/V = open * vel (index velocity: A_a/V = 1/h'_a
+  is inside it). Read-only; no projection/advection code or `ufAdvVelocity` touched.
+- scalar_cutcell_operator.hpp: face fluxes guarded toward non-unknowns (D-WO3-4's analogue; it also
+  zeroes wall/slip domain faces through the cleared ghost flags), C_bulk (global MAX over full cells),
+  the small flags over inner + ghost layer 1 (no exchange), the implicit FOU bands (outflow per cell
+  kept for the surrogate), the explicit faces (koren/sou/fou on c^n, FOU when the 2-up/1-down
+  stencil leaves the unknowns), the explicit rhs, and the budget's implicit-flux residual.
+  Steady: implicit FOU on every face (§6.7). Everything is skipped when no face carries flux.
+- scalar_mg.hpp: the lumped outflow rides on the restricted mass (m = κ idt + ω), i.e. §5.2's
+  "restrictAvg of the level-0 per-cell field"; `hasOutflow` false is the WO-4 expression verbatim.
+- Census keys `num_small_cells`, `num_implicit_faces`, `bulk_courant`, plus two new diagnostics names
+  for WO-10's NAMING rows: `num_flux_faces` (the implicit fraction's denominator) and
+  `num_guarded_flux_faces` (projection flux toward a non-unknown, dropped; 0 on every gate case).
+- Refusals added (RuntimeError at the advance): the ghost projection (Q13, below); a flow
+  inflow/outflow face (Q-E); a moving fluid without the cut-cell projection (Q-F).
+- Tests: gates `scalar_cutcell_g9`, `scalar_cutcell_g9b` (ctests), the api refusals,
+  `scalar_cutcell_solve_mpi` problem `g9` (G10), `scalar_mg` rows "C3 + advection".
+
+**Inert proof.** Zero-velocity runs (G1-like steady, transient Robin + source at level 0, transient
+full table, singular steady, collocated gauge-exact stepping): 41/41 arrays (fields, iterations, MG
+levels, residuals, wall flux, budget) `np.array_equal` to the pre-WO-5 build (fddf042). G12: 12/12
+hashes equal at OMP_NUM_THREADS=1.
+
+**G9** (annulus 0.4 < r < 1, nz 4, solid-body rotation, Gaussian σ 0.08 at r 0.7, one revolution,
+D = 0 as round 6). The face field is node-potential differences of the clamped stream function, set
+to the wall value on both nodes of every face the projection closes (`ox_` is gated, so the exact
+open-face fluxes of round 6 put 46 % of max|F| on closed faces); its divergence in the predicate's
+openness is round-off. One offset per rung with min κ < 1e-2.
+
+| R_o/h | scheme, C | steps | small cells | implicit faces | BiCGStab | (i) identity / M0 | (ii) |ΔM+Σdefect| / M0 | min c | L1 (cut cells / band share) |
+|---|---|---|---|---|---|---|---|---|---|
+| 16 | fou 0.5 / 0.9 | 333 / 185 | 28 | 1.06 % | ≤ 6 / 7 | 5.0e-15 / 4.1e-15 | 1.5e-16 / 1.2e-16 | 0 / 0 | 1.536 / 1.482 (8 % / 20 %) |
+| 16 | koren 0.5 / 0.9 | 333 / 185 | 28 | 1.06 % | ≤ 6 / 7 | 5.7e-15 / 8.0e-15 | 2.0e-16 / 1.4e-16 | −2.7e-10 / **−0.20** | 0.756 / 1.006 |
+| 32 | fou 0.5 / 0.9 | 700 / 389 | 64 | 0.60 % | ≤ 7 / 8 | 1.1e-14 / 1.1e-14 | 2.0e-16 / 9.7e-17 | 0 / 0 | 1.405 / 1.350 (4 % / 11 %) |
+| 32 | koren 0.5 / 0.9 | 700 / 389 | 64 | 0.60 % | ≤ 7 / 8 | 1.3e-14 / 9.5e-15 | 4.0e-16 / 1.8e-16 | −4.1e-10 / **−0.23** | 0.561 / 0.811 |
+| 64 | fou 0.5 / 0.9 | 1427 / 793 | 64 | 0.15 % | ≤ 6 / 8 | 2.2e-14 / 2.5e-14 | 2.5e-16 / 6.5e-17 | 0 / 0 | 1.201 / 1.141 (1.4 % / 4.5 %) |
+| 64 | koren 0.5 / 0.9 | 1427 / 793 | 64 | 0.15 % | ≤ 7 / 8 | 2.5e-14 / 3.1e-14 | 1.3e-16 / 2.6e-16 | −4.7e-10 / **−40** | 0.635 / 2.50 |
+
+- min κ over unknowns 3.0e-5 / 3.4e-5 / 1.0e-5 (gate (v)); finite throughout; max c ≤ max c0 for
+  fou and koren 0.5. (ii) sanity at rtol 1e-13 (fou 0.9): raw drift 7.6e-15 / 2.1e-15 / 8.5e-15 M0.
+  C_bulk measured 0.499–0.500 / 0.899–0.900. ΔM = −defect per step is scalar_budget's sign.
+- **Held failing: koren at bulk Courant 0.9, gate (iii)** (Q-G). It is the bulk scheme, not the cut
+  cells: forward Euler + the legacy Koren reconstruction is TVD only to C ≤ 1/2 (C_i = 1 + ψ/2r −
+  ψ_{i−1}/2 ≤ 2). Control with NO solid (periodic box, uniform translation): min c = −2.4e-10 at
+  C_bulk 0.5, **−21** at 0.9; the annulus at R_o/h 16: −2.7e-10 (0.5), −2.6e-10 (0.6), −9.9e-3 (0.7),
+  −0.20 (0.9), every minimum in a full cell. sou (unlimited) at C 0.25: −0.20 … −0.47 likewise.
+- Q8: the cut band carries 1.4 % (cut cells) / 4.5 % (± one cell) of the fou L1 at R_o/h = 64 and
+  0.0 % / 0.3 % of koren's — not dominated; WSRD not triggered. L1 is FOU/time-error dominated:
+  fou 1.54 → 1.41 → 1.20 (round 6: 1.50 / 1.36 / 1.14); koren at C 0.25: 0.85 → 0.36 → 0.32; koren
+  at C 0.5 0.76 → 0.56 → 0.63 (the limiter at its FE bound; cut share 0 % at 64).
+
+**G9b** (Stokes through an SC array c = 0.3, 32^3, body force (30, 9, 0), 50 steps, c = 1, D = 0,
+C_bulk 0.47): staggered, collocated 'gauge-exact', 'plain', 'embed': max|c − 1| = 0 exactly
+(the predicate's divergence ≤ 2e-13 max|F|). **'ghost' fails:** max|c − 1| = 4.1e-2 (C 0.016),
+0.80 (C 0.47), 1.28 (C 0.86); its face field has max|Σ o u| / max|F| = 4.3e-2 with the binary
+openness `oxb_` and 2.0e-2 with the geometric `ox_` — the constraint is the binary divergence PLUS
+the closure delta (`gpDivergDelta`), so no openness-weighted face flux of it is divergence-free. The
+staggered `diagnostics.set_ghost_projection` path is the same kernel pair: 4.5e-2. Per §13 Q13 both
+are **refused** for a cut-cell scalar (also at rest, as the rule reads). This is revisit item (iii)
+for 'ghost' — the AUTO default of SolverColocated — so a cut-cell scalar there needs an explicit
+`set_collocated_scheme('gauge-exact'|'plain'|'embed')`.
+
+**G10 on G9** (36^3 z-invariant annulus R_o 16 cells, koren, 50 steps, C_bulk 0.60, rtol 1e-13,
+cut-cell projection): np = 1 bitwise (field, iterations, counts); np = 2 / 4: max|c − c1| =
+2.78e-16 of max 0.617, iterations identical (1–3 per step), small cells 180 and implicit faces
+360 of 46 944 identical on every decomposition; budget identity ≤ 2.4e-14 of the mass. The WO-4
+problems unchanged (mixed 1.11e-15, g1 6.04e-14, singular 5.33e-15 at np 4).
+
+**Iterations with implicit upwind bands** (the brief's check).
+- WO-4 rows: no advection → bitwise unchanged (inert proof); `scalar_mg` C1–C3 rows identical.
+- Transient, advecting: G9 (D = 0, level 0) ≤ 8 per step; annulus R_o/h 32 with D at dt D/h² = 3
+  and 30 (full table, 3 levels), koren C 0.5: 5 and 6 per step advecting = 5 and 6 at rest. Not
+  degraded.
+- **Steady, advecting: degraded** (Q-H). The C3 problem (64^3 periodic, Dirichlet sphere R 16,
+  source) with a projected Stokes field rescaled to peak cell Péclet Pe_h = max|u| h/D:
+  13 iterations at rest → 19 (Pe_h 0.03), 40 (0.1), 89 (0.3), **200 not converged** (1; residual
+  1.7e-4), 127 / 200 with residual ≥ 1 (3, 10). The A1 guard on the surrogate passes (0.135 at
+  Pe_h 1, 0.071 at 10, vs 0.504 at rest) — it measures the symmetric surrogate, which carries no
+  advective coupling, so it cannot see this. Without the lumped outflow (an experiment, reverted):
+  158 / 130 iterations at Pe_h 1 / 10 — the diffusion-only surrogate is no better.
+
+**Questions (stopped; nothing chosen beyond a refusal):**
+- **Q-E** (§6.5): the advective rows of an inflow/outflow domain face need the projection's flux
+  through the HIGH boundary face. advanceScalars' plain `fillGhosts(Uf/Vf/Wf)` (legacy, before the
+  dispatch) overwrites that first-ghost-index plane with the opposite face's value, so the predicate
+  cannot read it. Recover it how — save the plane before the fill (edits advanceScalars), the
+  boundary cell's mass balance, or the BC's own velocity? Refused until decided.
+- **Q-F** (§6.1): with `set_solid(..., cutcell_pressure=False)` (the default) no projection runs and
+  `ox_` is never built, so a moving fluid would be silently unadvected. Refused when the fluid moves;
+  a fluid at rest keeps WO-3/4's behaviour. Keep, or refuse cut-cell scalars without the cut-cell
+  operator altogether?
+- **Q-G** (§11 G9 (iii)): koren at bulk Courant 0.9 cannot be bounded by FE + the legacy Koren
+  reconstruction (TVD to 1/2, measured above without any solid). Gate koren at C ≤ 1/2, or change
+  the time integration of the explicit part (an SSP-RK2 would double the explicit work)? The check
+  is left FAILING in `scalar_cutcell_g9` as evidence, not loosened.
+- **Q-H** (§4.3, §6.7, revisit (ii)): the lumped symmetric surrogate does not precondition steady
+  advection beyond Pe_h ≈ 0.1 (40 iterations; 89 at 0.3). WO-6's G8 Taylor–Aris at Pe = UR/D = 10
+  and R/h = 32 has a peak Pe_h of 0.3–0.6, against G-iter's singular-steady ≤ 30. Transient is unaffected. Needs a design decision (an advection-aware coarse operator
+  / smoother, or a different steady driver); not tuned.
+
+**Battery** (`-LE bench`, OMP 4, -j4, 765 s): 208/209 pass; the one failure is
+`scalar_cutcell_g9`, exactly its three held koren-C-0.9 (iii) rows (Q-G).
+
+**Not changed:** projection/advection code, `ufAdvVelocity`, the legacy scalar kernels and
+advanceScalars, CutcellMG/VelocityMG.

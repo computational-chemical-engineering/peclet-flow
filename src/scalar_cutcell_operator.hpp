@@ -32,6 +32,7 @@
 #include "peclet/core/scheme/probe_flux.hpp"
 #include "policy.hpp"
 #include "scalar_cutcell_geometry.hpp"
+#include "staggered_advection.hpp"  // sadv::tvd / sou / fou_flux, the legacy reconstructions
 
 namespace peclet::flow {
 
@@ -85,6 +86,18 @@ struct ScalarCutState {
   long mgVersion = -1;  ///< the geometry version its level table was built for
   std::size_t mgN = 0;  ///< the block size it was built for
   int mgLevels = 1;     ///< levels the last solve's V-cycle used (census `mg_levels`)
+  // ---- advection (WO-5, §6): the face flux of the last advance and its classification ----
+  CCField
+      phi[3];  ///< F/V through the LOW a-face of cell i (internal 1/T), guarded (sco::faceFluxes)
+  CCField Phi[3];   ///< explicit face fluxes phi c*(c^n), 0 on implicit faces (§6.2)
+  CCField small;    ///< 1 on a small cell (§6.3), inner cells + ghost layer 1
+  CCField outflow;  ///< lumped implicit outflow per cell (inside SAC; ScalarMG coarse mass, §5.2)
+  bool advecting = false;     ///< some face carried flux: else every advection kernel was skipped
+  long numSmall = 0;          ///< census `num_small_cells`
+  long numImplicitFaces = 0;  ///< census `num_implicit_faces` (faces carrying flux, implicit)
+  long numFluxFaces = 0;      ///< faces carrying flux (the implicit fraction's denominator)
+  long numGuardedFaces = 0;   ///< faces whose projection flux the guard zeroed (a no-op reading)
+  double bulkCourant = 0.0;   ///< census `bulk_courant`: C_bulk of §6.3 (0 steady)
 };
 
 namespace sco {
@@ -529,6 +542,258 @@ inline double sourceSumLocal(CCConst kappa, CCConst unk, double srcConst, CCCons
       },
       s);
   return s;
+}
+
+// ---- advection and small cells (WO-5, §6) -------------------------------------------------------
+//
+// phi_a(i) is the volume flux through the LOW a-face of cell i per unit FULL-cell volume per
+// internal time, positive along +a: open * vel with the projection's own openness and face velocity
+// (Solver::scalarFaceFlux, §6.1). The velocity is an INDEX velocity (cells per tRef), so the A_a/V
+// = 1/h'_a of F/V is already inside it (doc/anisotropic_metric.md §2). The flux out of cell i
+// through its high a-face is phi_a(i + s_a), through its low a-face -phi_a(i).
+
+/// phi = open * vel on every face whose two cells are inside the block (0 on the block's lowest
+/// layer), and 0 where either cell is not a fluid unknown: the advective analogue of the band guard
+/// of ruling D-WO3-4 (a non-unknown row is an identity row and cannot take its half of the flux; at
+/// a non-periodic global face the cleared ghost flag zeroes the wall/slip face, where u.n = 0).
+inline void faceFluxes(CCField phi, CCConst vel, CCConst open, CCConst unk, int a, C3 e) {
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const long s = st[a];
+  ccFor3(
+      "peclet::flow::sco_face_flux", C3{0, 0, 0}, e, KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        const int xa = a == 0 ? x : (a == 1 ? y : z);
+        if (xa < 1 || !(unk(i) > 0.5) || !(unk(i - s) > 0.5)) {
+          phi(i) = 0.0;
+          return;
+        }
+        phi(i) = open(i) * vel(i);
+      });
+}
+
+/// (faces carrying flux, faces whose nonzero open * vel the guard zeroed) over the low faces of the
+/// inner cells (each interior face exactly once over all ranks; a non-periodic high domain face is
+/// not counted).
+inline void faceFluxCountsLocal(CCConst phi, CCConst vel, CCConst open, int a, C3 e, int g,
+                                long& nFlux, long& nGuarded) {
+  (void)a;
+  CCExec space;
+  long n1 = 0, n2 = 0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_flux_counts",
+      MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, long& p1, long& p2) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        if (phi(i) != 0.0)
+          ++p1;
+        else if (open(i) * vel(i) != 0.0)
+          ++p2;
+      },
+      n1, n2);
+  nFlux = n1;
+  nGuarded = n2;
+}
+
+/// max |phi| over the low faces of the inner cells (0: no advection this step).
+inline double maxAbsFluxLocal(CCConst phx, CCConst phy, CCConst phz, C3 e, int g) {
+  double m = 0.0;
+  ccReduce3(
+      "peclet::flow::sco_max_flux", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        const double v = Kokkos::fmax(Kokkos::fabs(phx(i)),
+                                      Kokkos::fmax(Kokkos::fabs(phy(i)), Kokkos::fabs(phz(i))));
+        if (v > acc)
+          acc = v;
+      },
+      Kokkos::Max<double>(m));
+  return m;
+}
+
+/// Out_i = sum over the six faces of max(F_out, 0), per unit V (§6.3), in a fixed order.
+KOKKOS_INLINE_FUNCTION double cellOutflow(const CCConst& phx, const CCConst& phy,
+                                          const CCConst& phz, long i, long sy, long sz) {
+  return ((Kokkos::fmax(phx(i + 1), 0.0) + Kokkos::fmax(-phx(i), 0.0)) +
+          (Kokkos::fmax(phy(i + sy), 0.0) + Kokkos::fmax(-phy(i), 0.0))) +
+         (Kokkos::fmax(phz(i + sz), 0.0) + Kokkos::fmax(-phz(i), 0.0));
+}
+
+/// C_bulk of §6.3 on this rank: max over the inner FULL cells (an unknown with kappa = 1 and all
+/// six snapped apertures 1) of dt Out_i.
+inline double bulkCourantLocal(CCConst phx, CCConst phy, CCConst phz, CCConst kappa, CCConst unk,
+                               CCConst sax, CCConst say, CCConst saz, double dt, C3 e, int g) {
+  double m = 0.0;
+  ccReduce3(
+      "peclet::flow::sco_bulk_courant", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5) || !(kappa(i) >= 1.0) || !(sax(i) >= 1.0) || !(sax(i + 1) >= 1.0) ||
+            !(say(i) >= 1.0) || !(say(i + sy) >= 1.0) || !(saz(i) >= 1.0) || !(saz(i + sz) >= 1.0))
+          return;
+        const double v = dt * cellOutflow(phx, phy, phz, i, sy, sz);
+        if (v > acc)
+          acc = v;
+      },
+      Kokkos::Max<double>(m));
+  return m;
+}
+
+/// The small-cell flags of §6.3 over the inner cells and ghost layer 1 (from the face fluxes and
+/// kappa, which carry ghosts: no exchange, deterministic): small(i) = 1 iff i is an unknown,
+/// kappa_i < 1 and dt Out_i > thr kappa_i, thr = max(1/2, C_bulk). 0 elsewhere on the block.
+inline void smallCells(CCField small, CCConst phx, CCConst phy, CCConst phz, CCConst kappa,
+                       CCConst unk, double dt, double thr, C3 e, int g) {
+  Kokkos::deep_copy(CCExec(), small, 0.0);
+  ccFor3(
+      "peclet::flow::sco_small_cells", C3{g - 1, g - 1, g - 1},
+      C3{e.x - g + 1, e.y - g + 1, e.z - g + 1}, KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        const double k = kappa(i);
+        if (!(unk(i) > 0.5) || !(k < 1.0))
+          return;
+        small(i) = dt * cellOutflow(phx, phy, phz, i, sy, sz) > thr * k ? 1.0 : 0.0;
+      });
+}
+
+/// Count of small inner cells (census `num_small_cells`).
+inline long countSmallLocal(CCConst small, C3 e, int g) {
+  long n = 0;
+  ccReduce3(
+      "peclet::flow::sco_count_small", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        if (small(i) > 0.5)
+          ++acc;
+      },
+      n);
+  return n;
+}
+
+/// Faces carrying flux that are implicit, over the low faces of the inner cells (census
+/// `num_implicit_faces`): steady, or either adjacent cell small.
+inline long countImplicitLocal(CCConst phi, CCConst small, int a, bool steady, C3 e, int g) {
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const long s = st[a];
+  long n = 0;
+  ccReduce3(
+      "peclet::flow::sco_count_implicit", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        if (phi(i) != 0.0 && (steady || small(i) > 0.5 || small(i - s) > 0.5))
+          ++acc;
+      },
+      n);
+  return n;
+}
+
+/// The implicit FOU part of the operator (§1.4, §6.3; all faces when steady, §6.7): on every
+/// unknown inner cell, for each face that is implicit (steady, or either cell small), AC +=
+/// max(F_out, 0) and the band toward the neighbour += min(F_out, 0); `outflow` = the sum of the
+/// max(F_out, 0) added (the surrogate's lumped outflow, §4.3), 0 on every other inner cell. A face
+/// flux is one number read by both cells, so the face's two contributions are exact negatives
+/// (conservation).
+inline void advectionBands(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN, CCField AB,
+                           CCField AT, CCField outflow, CCConst phx, CCConst phy, CCConst phz,
+                           CCConst small, CCConst unk, bool steady, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::sco_adv_bands", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5)) {
+          outflow(i) = 0.0;
+          return;
+        }
+        const bool si = small(i) > 0.5;
+        // F_out per face: W, E, S, N, B, T; implicit flag per face
+        const double F[6] = {-phx(i), phx(i + sx), -phy(i), phy(i + sy), -phz(i), phz(i + sz)};
+        const long nb[6] = {i - sx, i + sx, i - sy, i + sy, i - sz, i + sz};
+        double d[6], o[6];
+        for (int f = 0; f < 6; ++f) {
+          const bool imp = steady || si || small(nb[f]) > 0.5;
+          d[f] = imp ? Kokkos::fmax(F[f], 0.0) : 0.0;
+          o[f] = imp ? Kokkos::fmin(F[f], 0.0) : 0.0;
+        }
+        const double om = ((d[0] + d[1]) + (d[2] + d[3])) + (d[4] + d[5]);
+        outflow(i) = om;
+        AC(i) += om;
+        AW(i) += o[0];
+        AE(i) += o[1];
+        AS(i) += o[2];
+        AN(i) += o[3];
+        AB(i) += o[4];
+        AT(i) += o[5];
+      });
+}
+
+/// The explicit face fluxes of §6.2 on the low a-faces of the cells g .. ext_a - g (the high face
+/// of the last inner cell included), transverse inner: 0 on an implicit face (steady, or either
+/// cell small); else Phi = phi c*(c^n) with the legacy reconstruction (`sadv`: 0 fou, 1 koren, 2
+/// sou), first-order upwind when any cell of the stencil (two upwind, one downwind) is not a fluid
+/// unknown — the ghosts beyond a non-periodic global face included (their flags are cleared).
+inline void explicitFaceFluxes(CCField Phi, CCConst phi, CCConst c, CCConst unk, CCConst small,
+                               int a, int scheme, bool steady, C3 e, int g) {
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const long s = st[a];
+  const C3 hi{a == 0 ? e.x - g + 1 : e.x - g, a == 1 ? e.y - g + 1 : e.y - g,
+              a == 2 ? e.z - g + 1 : e.z - g};
+  Kokkos::deep_copy(CCExec(), Phi, 0.0);
+  ccFor3(
+      "peclet::flow::sco_explicit_flux", C3{g, g, g}, hi, KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        const double v = phi(i);
+        if (v == 0.0 || steady || small(i) > 0.5 || small(i - s) > 0.5)
+          return;
+        const double cLL = c(i - 2 * s), cL = c(i - s), cR = c(i), cRR = c(i + s);
+        bool fou = scheme == 0;
+        if (!fou)
+          fou = v > 0.0 ? !(unk(i - 2 * s) > 0.5 && unk(i - s) > 0.5 && unk(i) > 0.5)
+                        : !(unk(i + s) > 0.5 && unk(i) > 0.5 && unk(i - s) > 0.5);
+        Phi(i) =
+            fou ? sadv::fou_flux(cL, cR, v)
+                : (scheme == 2 ? sadv::sou(cLL, cL, cR, cRR, v) : sadv::tvd(cLL, cL, cR, cRR, v));
+      });
+}
+
+/// b(i) -= the net explicit outflow sum_a (Phi_a(i + s_a) - Phi_a(i)) on the unknown inner cells.
+inline void explicitAdvectionRhs(CCField b, CCConst Px, CCConst Py, CCConst Pz, CCConst unk, C3 e,
+                                 int g) {
+  ccFor3(
+      "peclet::flow::sco_explicit_rhs", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        b(i) -= ((Px(i + sx) - Px(i)) + (Py(i + sy) - Py(i))) + (Pz(i + sz) - Pz(i));
+      });
+}
+
+/// r(i) -= the implicit faces' net outflow sum F_out c_up at c (the budget's flux-form residual,
+/// §9): per face exactly the `advectionBands` terms, so a face's two contributions are exact
+/// negatives.
+inline void advectionResidual(CCField r, CCConst c, CCConst phx, CCConst phy, CCConst phz,
+                              CCConst small, CCConst unk, bool steady, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::sco_adv_residual", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(unk(i) > 0.5))
+          return;
+        const bool si = small(i) > 0.5;
+        const double F[6] = {-phx(i), phx(i + sx), -phy(i), phy(i + sy), -phz(i), phz(i + sz)};
+        const long nb[6] = {i - sx, i + sx, i - sy, i + sy, i - sz, i + sz};
+        const double ci = c(i);
+        double q[6];
+        for (int f = 0; f < 6; ++f) {
+          const bool imp = steady || si || small(nb[f]) > 0.5;
+          q[f] = imp ? (F[f] > 0.0 ? F[f] * ci : F[f] * c(nb[f])) : 0.0;
+        }
+        r(i) -= ((q[0] + q[1]) + (q[2] + q[3])) + (q[4] + q[5]);
+      });
 }
 
 /// max over facets of cw (0 when there is no Dirichlet/Robin facet: the steady singular test).
