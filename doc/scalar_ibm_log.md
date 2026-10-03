@@ -1295,3 +1295,54 @@ and G12 rerun on the final (clang-formatted) build: 450/450 arrays bitwise, 12/1
 
 **Not changed:** the single-phase paths (bitwise above), CutcellMG / VelocityMG, the projection, the
 legacy scalar kernels, core.
+
+## 2026-10-03 — WO-7 orchestrator rulings and their rerun
+
+- **D-WO7-1 (Q-L): option (b).** A solid unknown exists iff κ_s > 0 ∧ (Σ a_s > 0 ∨ the cell has a
+  conjugate facet) — the solid mirror of the fluid's sealed rule. The excluded volume is in the census
+  (`sealed_solid_volume`, with `solid_volume` = the conjugate solid κ_s V, physical) and gated ≤ 1e-6
+  of the solid volume (as D-WO2-1). G6 stays on the TOTAL mass.
+- **D-WO7-2 (Q-M).** The §11 absolute bounds are provisional (§13 Q1): G5a and every G6 row are
+  restated as (i) order ≥ 1.7 over the ladder, (ii) for G5a the extrapolate within 1e-4 of the
+  reference, (iii) a regression bound of 2× the value measured after D-WO7-1 at each rung. G4 needs
+  no restatement (every row met its 5e-3).
+- **D-WO7-3.** The §1.5 sign erratum is recorded; the note is corrected in WO-10; the implemented rule
+  stands, gated by k* = 1.
+- **D-WO7-4.** The six readings of the WO-7 entry are accepted.
+
+**Built.** `sco::buildSolidMaterial`: the flag pass is the rule above (the conjugate-facet marker set in
+the facet pass, Σ a_s from the snapped apertures) and returns Σ κ_s and the sealed part; census keys
+`solid_volume`, `sealed_solid_volume`. Gates: `sealed_check` on every G4 / G5a / G6 / conj_unit run, the
+uncoupled-unknown count must be 0, `conj_unit` now gates the linear field over EVERY solid unknown,
+G5a / G6 restated per D-WO7-2.
+
+**Rerun** (OMP 2).
+- conj_unit: max|ψ_s − G·x| over every solid unknown 2.2e-10, 0 uncoupled, sealed 1.5e-8 of the solid
+  volume. Sealed solid ≤ 1.6e-8 of the solid volume on every G4 / G5a / G6 run; 0 uncoupled everywhere.
+- G4: unchanged to every printed digit (the orders, errors and iterations of the WO-7 table).
+- G5a (old provisional bound / measured): ND 33 ≤ 3e-3 / 9.09e-3. Restated: (i) order 1.86 ≥ 1.7
+  pass; (iii) 3.32e-2 / 9.09e-3 / 2.43e-3 ≤ 6.64e-2 / 1.82e-2 / 4.86e-3 pass; **(ii) extrapolate
+  2.332822 (fitted order 1.86): |k*/ref − 1| = 1.02e-4 > 1e-4 — FAILS by 2 %** (order-2 extrapolate
+  2.332087: −2.1e-4). Left failing as evidence, not loosened. The reference carries the finite-contrast
+  offset (~2e-4 relative at Λ_s/Λ_f = 1e4) and 3–4-digit coefficients (L3 §2 B6).
+- G6 on the total mass (old provisional bound at R/h 16 ≤ 2e-3 / measured; RMS over 3 offsets,
+  R/h 8 / 16 / 32; orders; iterations per step; budget identity):
+
+| case | measured 8 / 16 / 32 | old bound at 16 | orders | it/step | identity |
+|---|---|---|---|---|---|
+| 1 | 7.357e-3 / 1.884e-3 / 4.780e-4 | 2e-3 | 1.97, 1.98 | 11–21 | ≤ 7.9e-14 |
+| 2 | 1.684e-2 / 4.224e-3 / 1.067e-3 | 2e-3 (missed) | 2.00, 1.98 | 9–18 | ≤ 4.3e-14 |
+| 3 | 8.063e-3 / 2.080e-3 / 5.299e-4 | 2e-3 (missed) | 1.95, 1.97 | 12–26 | ≤ 9.2e-14 |
+| 4 | 1.744e-3 / 4.560e-4 / 1.184e-4 | 2e-3 | 1.93, 1.95 | 10–19 | ≤ 5.9e-14 |
+| 5 | 3.775e-3 / 1.002e-3 / 2.580e-4 | 2e-3 | 1.91, 1.96 | 10–18 | ≤ 6.9e-14 |
+| 6 | 3.702e-3 / 9.495e-4 / 2.406e-4 | 2e-3 | 1.96, 1.98 | 10–21 | ≤ 6.2e-14 |
+
+  The regression bounds (iii) are 2× these (`G6_BOUND` in the gates). Every case passes (i) and (iii);
+  the total-mass reading now equals the fluid-mass INFO of WO-7 to the printed digits.
+- Inert proof (vs f7397f5): 450/450 arrays bitwise (the dumps carry 28 new census entries, the two new
+  keys). G12 12/12 at OMP 1.
+- G10 on G6 case 1: np 1 bitwise (both fields, iterations, fluxes); np 2 / 4: max|c − c₁| 5.2e-21 /
+  5.8e-21, max|ψ_s − ψ_s1| 5.1e-21 / 5.4e-21 — now on decayed solid values (~1e-6; the frozen 0.703 is
+  gone), iterations identical, 2762 solid unknowns (2774 before D-WO7-1).
+- Battery (`-LE bench`, all 223 including the six G6 ctests; OMP 2, -j4, 3096 s): 222/223 pass; the one
+  failure is `scalar_cutcell_g5a`, exactly its (ii) row (1.02e-4 against 1e-4).

@@ -309,8 +309,10 @@ void Solver<Grid>::ensureScalarSolidRecord(ScalarField& sc, const std::vector<ch
   }
   const std::size_t nInner = (std::size_t)nx_ * ny_ * nz_;
   const bool hasOwner = hasScene_ && cutOwner_.extent(0) == nInner;
-  sco::buildSolidMaterial(st.mat, st.sunk, CCConst(gm.kappa), fo,
-                          Kokkos::View<const int*, CCMem>(cutOwner_), hasOwner, mt, e_, G);
+  double svol[2] = {0.0, 0.0};
+  sco::buildSolidMaterial(st.mat, st.sunk, CCConst(gm.kappa), CCConst(gm.sax), CCConst(gm.say),
+                          CCConst(gm.saz), fo, Kokkos::View<const int*, CCMem>(cutOwner_), hasOwner,
+                          mt, e_, G, svol);
   fillGhosts(st.mat);
   fillGhosts(st.sunk);
   for (int face = 0; face < 6; ++face)
@@ -370,8 +372,15 @@ void Solver<Grid>::ensureScalarSolidRecord(ScalarField& sc, const std::vector<ch
     MPI_Allreduce(cnt, o, 5, MPI_LONG, MPI_SUM, comm_);
     for (int k = 0; k < 5; ++k)
       cnt[k] = o[k];
+    double ov[2];
+    MPI_Allreduce(svol, ov, 2, MPI_DOUBLE, MPI_SUM, comm_);
+    svol[0] = ov[0];
+    svol[1] = ov[1];
   }
 #endif
+  const double lv = u_.lenToPhys();  // D-WO7-1: the census's sealed solid volume, physical
+  st.solidVolume = svol[0] * u_.vol * lv * lv * lv;
+  st.sealedSolidVolume = svol[1] * u_.vol * lv * lv * lv;
   st.numSolidUnknowns = cnt[0];
   for (int k = 0; k < 4; ++k)
     st.solidRungs[k] = cnt[1 + k];

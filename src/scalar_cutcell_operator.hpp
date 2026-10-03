@@ -133,6 +133,8 @@ struct ScalarCutState {
   Kokkos::View<std::uint8_t*, CCMem> rungS;
   Kokkos::View<std::uint8_t*, CCMem> conjF;  ///< 1 on a facet of a conjugate body
   long numSolidUnknowns = 0;                 ///< census `num_solid_unknowns` (global)
+  double solidVolume = 0.0;                  ///< census `solid_volume`: conjugate solid, physical
+  double sealedSolidVolume = 0.0;            ///< census `sealed_solid_volume` (D-WO7-1), physical
   long solidRungs[4] = {0, 0, 0, 0};         ///< census probe_rungs['solid'] (global)
   // the solid operator of the last build (§4.1: the solid phase's own 7 bands)
   CCField spx, spy, spz;  ///< level-0 solid face products Lam_face a_s (guarded), low faces
@@ -1299,15 +1301,19 @@ KOKKOS_INLINE_FUNCTION double solidFaceLam(const Kokkos::View<double*, CCMem>& l
 /// The material per cell and the solid-unknown flags on the inner cells (§1.3, §2.7). A cell with a
 /// facet takes the body of its conjugate facet (the larger-area one if both are conjugate), or the
 /// larger facet's body when neither is; a cell without a facet takes the scene owner `owner`
-/// (compact inner index; absent: 0). A cell is a solid unknown iff kappa_s = 1 - kappa > 0 and its
-/// material is conjugate. The caller exchanges both fields and clears the flags beyond a
-/// non-periodic global face.
-inline void buildSolidMaterial(CCField mat, CCField sunk, CCConst kappa,
-                               const scg::ScalarFacetOverlay& fo,
+/// (compact inner index; absent: 0). A cell is a solid unknown iff kappa_s = 1 - kappa > 0, its
+/// material is conjugate, and it has an open solid face (sum a_s > 0, a_s = 1 - a^snap) or a
+/// conjugate facet (ruling D-WO7-1: the solid mirror of the fluid's sealed rule). Returns, on this
+/// rank's inner cells, the conjugate solid volume sum kappa_s and the part of it that is sealed
+/// (kappa_s > 0, conjugate, neither condition) in `vol[0]`, `vol[1]` (times V by the caller). The
+/// caller exchanges both fields and clears the flags beyond a non-periodic global face.
+inline void buildSolidMaterial(CCField mat, CCField sunk, CCConst kappa, CCConst sax, CCConst say,
+                               CCConst saz, const scg::ScalarFacetOverlay& fo,
                                Kokkos::View<const int*, CCMem> owner, bool hasOwner,
-                               const MaterialTable& mt, C3 e, int g) {
+                               const MaterialTable& mt, C3 e, int g, double vol[2]) {
   const int nx = e.x - 2 * g, ny = e.y - 2 * g;
   Kokkos::deep_copy(CCExec(), mat, -1.0);
+  Kokkos::deep_copy(CCExec(), sunk, 0.0);  // first: the conjugate-facet marker
   ccFor3(
       "peclet::flow::sco_solid_owner", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
@@ -1339,15 +1345,32 @@ inline void buildSolidMaterial(CCField mat, CCField sunk, CCConst kappa,
           }
         }
         mat(cutCell(c)) = (double)(best >= 0 ? best : bestAny);
+        sunk(cutCell(c)) = best >= 0 ? 1.0 : 0.0;  // the cell has a conjugate facet
       });
   space.fence();
-  ccFor3(
-      "peclet::flow::sco_solid_flags", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
-      KOKKOS_LAMBDA(int x, int y, int z) {
-        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+  double v0 = 0.0, v1 = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_solid_flags",
+      MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& pv, double& ps) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
         const double m = mat(i);
-        sunk(i) = (kappa(i) < 1.0 && m >= 0.0 && conj(bodyIndex(m, nb)) != 0) ? 1.0 : 0.0;
-      });
+        const bool cand = kappa(i) < 1.0 && m >= 0.0 && conj(bodyIndex(m, nb)) != 0;
+        const double asSum =
+            (((1.0 - sax(i)) + (1.0 - sax(i + 1))) + ((1.0 - say(i)) + (1.0 - say(i + sy)))) +
+            ((1.0 - saz(i)) + (1.0 - saz(i + sz)));
+        const bool u = cand && (asSum > 0.0 || sunk(i) > 0.5);
+        if (cand) {
+          pv += 1.0 - kappa(i);
+          if (!u)
+            ps += 1.0 - kappa(i);
+        }
+        sunk(i) = u ? 1.0 : 0.0;
+      },
+      v0, v1);
+  vol[0] = v0;
+  vol[1] = v1;
 }
 
 /// The solid probe ladder (§3.4): per facet of a conjugate body (`conjF`), the ladder of §3.3 with

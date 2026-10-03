@@ -1478,10 +1478,18 @@ def conj_box(n, L):
     return walled((n, n, n), (L, L, L))
 
 
+def sealed_check(tag, cen):
+    """Ruling D-WO7-1: the sealed solid volume (kappa_s > 0, conjugate, no open solid face and no
+    conjugate facet: not a solid unknown) is <= 1e-6 of the conjugate solid volume (as D-WO2-1)."""
+    r = cen["sealed_solid_volume"] / cen["solid_volume"] if cen["solid_volume"] > 0 else 0.0
+    check(r <= 1e-6, f"{tag}: sealed solid volume {r:.1e} <= 1e-6 of the solid volume")
+    return r
+
+
 def solid_isolated(s, name="c"):
     """Solid unknowns that no solid face and no facet couple: kappa_s > 0, every solid aperture
-    1 - a^snap = 0 (all six fluid apertures snapped to 1, hence no facet). Their steady rows are
-    empty (§1.3's rule kappa_s > 0 admits them; INFO, see the WO-7 log)."""
+    1 - a^snap = 0 (all six fluid apertures snapped to 1, hence no facet). Ruling D-WO7-1 makes
+    them sealed (not unknowns): this count must be 0."""
     geo = s.diagnostics.scalar_geometry(name)
     us = geo["solid_unknown"] > 0.5
     ax, ay, az = geo["aperture_x"], geo["aperture_y"], geo["aperture_z"]
@@ -1550,13 +1558,14 @@ def gate_conj_unit():
         iso = solid_isolated(s)
         ef = float(np.max(np.abs(s.get_field("c") - ex)[uf]))
         cs = s.get_scalar_solid("c")
-        es = float(np.max(np.abs(cs / K - ex)[us & ~iso]))
-        ei = float(np.max(np.abs(cs / K - ex)[iso])) if iso.any() else 0.0
+        es = float(np.max(np.abs(cs / K - ex)[us]))
         scale = float(np.linalg.norm(G)) * 6.0
-        print(f"  K={K}: max|psi_f - G.x| {ef:.2e}, max|psi_s - G.x| {es:.2e} (coupled solid unknowns); "
-              f"isolated solid unknowns {int(iso.sum())} of {int(us.sum())}, max err there {ei:.2e} (INFO); "
-              f"{cen['krylov_iterations']} it, rungs {cen['probe_rungs']}")
+        print(f"  K={K}: max|psi_f - G.x| {ef:.2e}, max|psi_s - G.x| {es:.2e} (every solid unknown); "
+              f"{int(us.sum())} solid unknowns, sealed solid volume {cen['sealed_solid_volume']:.1e} "
+              f"of {cen['solid_volume']:.3e}; {cen['krylov_iterations']} it, rungs {cen['probe_rungs']}")
         check(cen["krylov_converged"], f"K={K}: converged")
+        check(int(iso.sum()) == 0, f"K={K}: no uncoupled solid unknown (D-WO7-1; {int(iso.sum())})")
+        sealed_check(f"K={K}", cen)
         check(ef <= 1e-10 * scale and es <= 1e-10 * scale,
               f"K={K}: linear field reproduced to 1e-10 |G| L in both phases ({ef:.1e}, {es:.1e})")
         check(bool(np.all(np.isnan(cs[~us]))), f"K={K}: get_scalar_solid NaN outside the solid unknowns")
@@ -1596,7 +1605,8 @@ def gate_g4():
                 Bg = 3.0 / (ratio + 2.0) * np.asarray(G)
                 rows.append(dict(err=float(np.linalg.norm(gfit - Bg) / np.linalg.norm(Bg)),
                                  it=cen["krylov_iterations"], conv=cen["krylov_converged"],
-                                 rungs=cen["probe_rungs"], iso=int(solid_isolated(s).sum())))
+                                 rungs=cen["probe_rungs"], iso=int(solid_isolated(s).sum()),
+                                 sealed=sealed_check(f"ratio={ratio} R/h={Rh}", cen)))
             e[ratio][Rh] = rms([r["err"] for r in rows])
             its[ratio][Rh] = [r["it"] for r in rows]
             print(f"  ratio={ratio:g} R/h={Rh:3d}  interior gradient rel err {fmt([r['err'] for r in rows], '.3e')}"
@@ -1660,7 +1670,8 @@ def g5a_case(n, off, D=0.6, ratio=1e4):
     J = np.asarray(s.scalar_mean_flux("c"))
     c = s.diagnostics.scalar_census("c")
     return dict(k=-J[0] / D, its=c["krylov_iterations"], conv=c["krylov_converged"], nd=2.0 * R / h,
-                iso=int(solid_isolated(s).sum()), res=c["krylov_residual"])
+                iso=int(solid_isolated(s).sum()), res=c["krylov_residual"],
+                sealed=sealed_check(f"G5a n={n}", c))
 
 
 def gate_g5a():
@@ -1678,9 +1689,17 @@ def gate_g5a():
         for r in rows:
             check(r["conv"], f"n={n}: converged ({r['its']} iterations)")
             check(r["its"] <= 30, f"n={n}: G-iter singular steady <= 30 ({r['its']})")
+    # ruling D-WO7-2: (i) order >= 1.7 over the ladder, (ii) the Richardson extrapolate (the
+    # ladder's own order) within 1e-4 of the reference, (iii) a regression bound of 2x the value
+    # measured after D-WO7-1 at each rung (the provisional 3e-3 at ND 32 is retired; log WO-7)
     p = math.log2(abs(k[20] - k[40]) / abs(k[40] - k[80])) if k[40] != k[80] else float("inf")
-    check(p >= 1.5, f"self-convergence order {p:.2f} >= 1.5")
-    check(abs(k[40] / ref - 1.0) <= 3e-3, f"|k*/ref - 1| {abs(k[40] / ref - 1.0):.2e} <= 3e-3 at ND ~ 32 (prov.)")
+    check(p >= 1.7, f"(i) self-convergence order {p:.2f} >= 1.7")
+    kx = k[80] + (k[80] - k[40]) / (2.0**p - 1.0)
+    check(abs(kx / ref - 1.0) <= 1e-4,
+          f"(ii) extrapolate {kx:.6f}: |k*/ref - 1| {abs(kx / ref - 1.0):.2e} <= 1e-4 (order-2 extrapolate "
+          f"{k[80] + (k[80] - k[40]) / 3.0:.6f}, INFO)")
+    for n, b in ((20, 6.64e-2), (40, 1.82e-2), (80, 4.86e-3)):  # 2 x 3.32e-2, 9.09e-3, 2.43e-3
+        check(abs(k[n] / ref - 1.0) <= b, f"(iii) n={n}: |k*/ref - 1| {abs(k[n] / ref - 1.0):.2e} <= {b:.2e}")
 
 
 def g6_exact(Ls, CK, Rc, R=1.0, Ro=2.0):
@@ -1717,6 +1736,12 @@ def g6_exact(Ls, CK, Rc, R=1.0, Ro=2.0):
 
 G6_CASES = ((10.0, 1.0, 1.0, 0.0), (0.1, 1.0, 1.0, 0.0), (100.0, 0.5, 1.0, 0.0), (3.0, 3.0, 3.0, 0.0),
             (1.0, 1.0, 1.0, 0.2), (5.0, 1.0, 0.5, 0.5))
+
+
+# D-WO7-2 (iii): 2x the RMS error measured after D-WO7-1 (log WO-7), per case and rung
+G6_BOUND = ({8: 1.48e-2, 16: 3.77e-3, 32: 9.56e-4}, {8: 3.37e-2, 16: 8.45e-3, 32: 2.14e-3},
+            {8: 1.62e-2, 16: 4.16e-3, 32: 1.06e-3}, {8: 3.49e-3, 16: 9.12e-4, 32: 2.37e-4},
+            {8: 7.55e-3, 16: 2.01e-3, 32: 5.16e-4}, {8: 7.41e-3, 16: 1.90e-3, 32: 4.82e-4})
 
 
 def g6_case(Rh, off, case, nsteps=30):
@@ -1757,6 +1782,7 @@ def g6_case(Rh, off, case, nsteps=30):
             return dict(err=float("nan"), its=its, conv=False, idrel=idmax, rungs=cen["probe_rungs"])
     mu_h = (masses[-2] / masses[-1] - 1.0) / dt
     mu_f = (mfl[-2] / mfl[-1] - 1.0) / dt  # INFO: the fluid mass alone (same mode, no solid cells)
+    sealed_check(f"G6 case {G6_CASES.index(case) + 1} R/h={Rh}", cen)
     return dict(err=mu_h / mu - 1.0, errf=mu_f / mu - 1.0, its=its, conv=True, idrel=idmax,
                 rungs=cen["probe_rungs"], nsolid=cen["num_solid_unknowns"], iso=iso)
 
@@ -1784,8 +1810,12 @@ def gate_g6(cases=None):
                 check(r["idrel"] <= 1e-13, f"case {ci + 1} R/h={Rh}: budget identity {r['idrel']:.1e} <= 1e-13 |d_mass|")
                 check(max(r["its"]) <= 30, f"case {ci + 1} R/h={Rh}: G-iter conjugate <= 30 ({max(r['its'])})")
         o1, o2 = order(e[8], e[16]), order(e[16], e[32])
-        check(o1 >= 1.7 and o2 >= 1.7, f"case {ci + 1}: orders {o1:.2f}, {o2:.2f} >= 1.7")
-        check(e[16] <= 2e-3, f"case {ci + 1}: |err| {e[16]:.2e} <= 2e-3 at R/h = 16 (prov.)")
+        check(o1 >= 1.7 and o2 >= 1.7, f"case {ci + 1}: (i) orders {o1:.2f}, {o2:.2f} >= 1.7")
+        # ruling D-WO7-2 (iii): a regression bound of 2x the value measured after D-WO7-1, at every
+        # rung (the provisional 2e-3 at R/h 16 is retired; old and measured values in the log)
+        for Rh in (8, 16, 32):
+            b = G6_BOUND[ci][Rh]
+            check(e[Rh] <= b, f"case {ci + 1}: (iii) |err| {e[Rh]:.3e} <= {b:.2e} at R/h = {Rh}")
 
 
 def gate_gadv_conj():

@@ -502,6 +502,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             rungs["fluid"] = nb::make_tuple(c.rungs[0], c.rungs[1], c.rungs[2], c.rungs[3]);
             d["probe_rungs"] = rungs;
             d["num_solid_unknowns"] = st.conj ? st.numSolidUnknowns : 0L;
+            d["solid_volume"] = st.conj ? st.solidVolume : 0.0;
+            d["sealed_solid_volume"] = st.conj ? st.sealedSolidVolume : 0.0;
             if (st.conj)
               rungs["solid"] = nb::make_tuple(st.solidRungs[0], st.solidRungs[1], st.solidRungs[2],
                                               st.solidRungs[3]);
@@ -525,7 +527,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "'krylov_converged', 'mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 alone), "
           "'steady_incompatibility' (|sum b| / sum|b| of a singular steady problem before its "
           "projection, else 0), 'num_solid_unknowns' (0: single phase; the solid unknowns of a "
-          "conjugate scalar, whose 'probe_rungs' then carries a 'solid' tuple too). The advection part "
+          "conjugate scalar, whose 'probe_rungs' then carries a 'solid' tuple too), 'solid_volume' / "
+          "'sealed_solid_volume' (physical: the conjugate solid kappa_s V, and its part in cells "
+          "that are not solid unknowns -- kappa_s > 0 with no open solid face and no conjugate "
+          "facet, ruling D-WO7-1). The advection part "
           "(design §6.3, the last advance or steady solve): 'num_small_cells' (cut cells whose "
           "explicit outflow would exceed the bulk's), 'num_implicit_faces' / 'num_flux_faces' "
           "(faces carrying flux that took implicit upwind / all faces carrying flux; steady: all "
