@@ -462,31 +462,26 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, i
       });
 }
 
-// --- B1: the geometric-Krylov bottom (doc/vof_step_performance_design.md §4.1, §5.7) ------------
+// --- The device bottom solve (doc/vof_step_performance_design.md §5.7, §5.14, §13) -------------
 // On a device build an ELIGIBLE agglomerated bottom (single rank, singular operator, <= 8192 inner
-// cells, 1-64 fluid components (B1b, GeoLabelKernel), at least one geometric sub-level; CutcellMG::
-// geoBottomIneligible) is solved in ONE launch instead of the host GraphAMG round trip: a single
-// team runs flexible CG (Polak-Ribiere) on the bottom level's own operator, preconditioned by one
-// symmetric V-cycle M over the geometric sub-levels below the bottom (CutcellMG::sub_), to a
-// relative infinity-norm residual of tau = 1e-5 (E3), capped at 100 iterations. Every per-cell
-// update is the A0 cell body the per-kernel V-cycle calls, behind the same ghost policy (the
-// periodic wrap fill before each colour and before the residual, the zero-gradient wall ghost
-// before a prolongation), so M is the per-kernel V-cycle over the same levels except for the
-// summation order of its fluid-mean reductions (team reductions here). The constants are fixed, not
-// setters; E3 is the only route to changing tau. Ghost width 1 on every level (single rank).
-inline constexpr long kGeoBottomMaxCells = 8192;
-inline constexpr int kGeoMaxLevels = 16;  // bottom + sub-levels: <= 14, as 8192 = 2^13 cells
+// cells, 1-64 fluid components (BottomLabelKernel), an axis whose planes hold <= 192 cells;
+// CutcellMG::directBottomIneligible) is solved in ONE launch instead of the host GraphAMG round
+// trip: a single team runs flexible CG (Polak-Ribiere) in FP64 on the bottom level's own operator,
+// preconditioned by the block-tridiagonal FP32 direct factor of mg_bottom_direct.hpp (§13; factored
+// by its own launch once per operator change), to a relative infinity-norm residual of tau = 1e-5
+// (E3), capped at 100 iterations. The constants are fixed, not setters. Ghost width 1 (single
+// rank). B1's V-cycle preconditioner over a geometric sub-hierarchy (§5.7) was retired by §13 D-4;
+// its code is in the history (the WO-6 / WO-11 commits).
+inline constexpr long kBottomMaxCells = 8192;
 // tau: 1e-5 since E3 (§7 WO-6, Q2): 1e-8, 1e-6 and 1e-5 give the SAME outer iteration count on
-// every one of the 50 bubble-column steps (653 total); 1e-5 cuts the inner iterations 17 -> 11.
-inline constexpr double kGeoTau = 1e-5;
-inline constexpr int kGeoMaxComponents = 64;  // B1b (§5.14): more -> GraphAMG
-inline constexpr int kGeoCap = 100, kGeoPre = 2, kGeoPost = 2, kGeoSweeps = 12;
+// every one of the 50 bubble-column steps (653 total).
+inline constexpr double kBottomTau = 1e-5;
+inline constexpr int kBottomMaxComponents = 64;  // B1b (§5.14): more -> GraphAMG
+inline constexpr int kBottomCap = 100;
 
-struct GeoLevel {
+struct BottomLevel {
   C3 ext{0, 0, 0}, inner{0, 0, 0};
-  C3 ratio{1, 1, 1};  // the coarsening ratio to the NEXT (coarser) level
   FPC AC, AFX, AFY, AFZ;
-  CCField x, rhs, res;
 };
 
 // B1b (§5.14): the fluid components of the bottom level. Deterministic min-label propagation over
@@ -495,8 +490,8 @@ struct GeoLevel {
 // every fluid cell ends with the smallest flat index of its component, whatever the update order
 // (Jacobi sweeps between two buffers here). Then, in flat (label) order, one thread numbers the
 // components 0, 1, ... and counts their cells. Solid cells get -1. Out: comp (ids), cnt (cells per
-// component, the first kGeoMaxComponents), nc(0) = the number of components. Geometry time only.
-struct GeoLabelKernel {
+// component, the first kBottomMaxComponents), nc(0) = the number of components. Geometry time only.
+struct BottomLabelKernel {
   using Member = Kokkos::TeamPolicy<CCExec>::member_type;
   C3 ext{0, 0, 0}, inner{0, 0, 0};
   FPC AC, AFX, AFY, AFZ;
@@ -570,7 +565,7 @@ struct GeoLabelKernel {
         if (comp(i) == (int)i)
           tmp(i) = n++;
       }
-      for (int c = 0; c < kGeoMaxComponents; ++c)
+      for (int c = 0; c < kBottomMaxComponents; ++c)
         cnt(c) = 0;
       for (int q = 0; q < ninner; ++q) {
         int lx, ly, lz;
@@ -578,14 +573,14 @@ struct GeoLabelKernel {
         if (comp(i) >= 0) {
           const int id = tmp(comp(i));
           comp(i) = id;
-          if (id < kGeoMaxComponents)
+          if (id < kBottomMaxComponents)
             cnt(id) += 1;
         }
       }
       nc(0) = n;
       if (slow >= 0) {
-        long m[kGeoMaxComponents];
-        for (int c = 0; c < kGeoMaxComponents; ++c) {
+        long m[kBottomMaxComponents];
+        for (int c = 0; c < kBottomMaxComponents; ++c) {
           kc(c) = -1;
           m[c] = 0;
         }
@@ -594,7 +589,7 @@ struct GeoLabelKernel {
             int lx, ly, lz;
             const long i = cell(q, lx, ly, lz);
             const int c = comp(i);
-            if (c < 0 || c >= kGeoMaxComponents)
+            if (c < 0 || c >= kBottomMaxComponents)
               continue;
             const int k = (slow == 0 ? lx : (slow == 1 ? ly : lz)) - 1;
             if (pass == 0 && k > kc(c))
@@ -602,30 +597,24 @@ struct GeoLabelKernel {
             else if (pass == 1 && k == kc(c))
               m[c] += 1;
           }
-        for (int c = 0; c < kGeoMaxComponents; ++c)
+        for (int c = 0; c < kBottomMaxComponents; ++c)
           aug(c) = m[c] > 0 ? 1.0 / (double)m[c] : 0.0;
       }
     });
   }
 };
 
-// The preconditioner M of the bottom's FCG, a compile-time choice (each instantiation carries only
-// its own M, so the V-cycle kernel's code -- and hence its team size and reduction order -- is the
-// B1 kernel's): kPrecondVcycle = B1's V-cycle over the sub-levels (§5.7); kPrecondDirect = the
-// block-tridiagonal direct factor of §13 (mg_bottom_direct.hpp; `dir`, factored by
-// BottomFactorKernel before the launch; dir.stat(0) = 0 takes the failure path).
-inline constexpr int kPrecondVcycle = 0, kPrecondDirect = 1;
-template <class FacReal = float, int Precond = kPrecondVcycle>
-struct GeoBottomKernel {
+// The bottom solve kernel: one TeamPolicy(1, T) launch per bottom solve. FCG in FP64 on the stored
+// operator (A0 cell bodies); M = the direct factor `dir` (FacReal = float in production), whose
+// dir.stat(0) = 0 (a factor that failed even with the largest shift) takes the failure path.
+template <class FacReal = float>
+struct BottomKernel {
   using Member = Kokkos::TeamPolicy<CCExec>::member_type;
   BottomDirect<FacReal> dir;
-  int nl = 0;  // levels: lv[0] = the bottom, lv[1..nl-1] = the sub-levels
-  GeoLevel lv[kGeoMaxLevels];
-  CCField x, b, r, p, z, zp, ap;    // the bottom's solution and rhs (its x, rhs), FCG vectors
-  int neu[6] = {0, 0, 0, 0, 0, 0};  // zero-gradient ghost on this face before a prolongation
-  int meanAll = 0;                  // the "all" mean-removal scope (every level's exit)
-  int precondOnly = 0;              // test hook: z = M(b) and nothing else
-  int noMeanForTest = 0;            // test hook: M without its mean removals (see the ctest)
+  BottomLevel lv;
+  CCField x, b, r, p, z, zp, ap;  // the bottom's solution and rhs (its x, rhs), FCG vectors
+  int precondOnly = 0;            // test hook: z = M(b) and nothing else
+  int noMeanForTest = 0;          // test hook: M without the component means' removal
   // B1b (§5.14): the bottom's fluid components -- comp(i) in [0, nc) on fluid cells, -1 on cells
   // with AC <= 1e-30 (which keep x = 0) -- their cell counts, and a scratch for their means.
   int nc = 1;
@@ -636,26 +625,16 @@ struct GeoBottomKernel {
   int flagSlot = 0;
   Kokkos::View<int*, CCMem> info;  // info(0) = inner iterations of the last solve
 
-  // ---- execution shape (none of it changes an operand or an operation order) -----------------
-  // Every phase is one TeamThreadRange pass over a level followed by a barrier, and the levels
-  // are tiny, so the phase COUNT and the per-cell index arithmetic are the cost. Two
-  // bitwise-neutral reductions of them:
-  //  * the A3 rule (§4.3): the residual and the matvec read periodic neighbours through wrapped
-  //    indices instead of after a fill, and so does a colour pass on a level whose inner dims are
-  //    all even (the wrapped neighbour then has the other colour and holds exactly the value the
-  //    fill would have copied) -- what CutcellMG::smooth / vcycleImpl do on a single rank;
-  //  * 32-bit index arithmetic (a 64-bit div/mod is a long software routine on the device).
-  // (Running the smallest levels on one thread instead was measured 4x slower: a single thread's
-  // dependent global-memory round trips cost more than the barriers it saves.)
-  KOKKOS_INLINE_FUNCTION static int nInner(const GeoLevel& l) {
+  // Every phase is one TeamThreadRange pass over the level followed by a barrier; the matvec reads
+  // periodic neighbours through wrapped indices (the A3 rule, §4.3), with 32-bit index arithmetic.
+  KOKKOS_INLINE_FUNCTION static int nInner(const BottomLevel& l) {
     return l.inner.x * l.inner.y * l.inner.z;
   }
-  KOKKOS_INLINE_FUNCTION static int nExt(const GeoLevel& l) { return l.ext.x * l.ext.y * l.ext.z; }
-  KOKKOS_INLINE_FUNCTION static bool even(const GeoLevel& l) {
-    return l.inner.x % 2 == 0 && l.inner.y % 2 == 0 && l.inner.z % 2 == 0;
+  KOKKOS_INLINE_FUNCTION static int nExt(const BottomLevel& l) {
+    return l.ext.x * l.ext.y * l.ext.z;
   }
   // inner cell q (x fastest) -> local coordinates (ghost width 1) and the flat index
-  KOKKOS_INLINE_FUNCTION static long cell(const GeoLevel& l, int q, int& lx, int& ly, int& lz) {
+  KOKKOS_INLINE_FUNCTION static long cell(const BottomLevel& l, int q, int& lx, int& ly, int& lz) {
     const int nx = l.inner.x, ny = l.inner.y;
     const int t = q / nx;
     lx = 1 + (q - t * nx);
@@ -664,124 +643,7 @@ struct GeoBottomKernel {
     lz += 1;
     return (long)lx + (long)ly * l.ext.x + (long)lz * (long)l.ext.x * l.ext.y;
   }
-  // The single-rank periodic fill (CutcellMG::fillWrap) of ext cell i: a ghost cell takes the
-  // inner cell its three coordinates wrap to. Pure copies.
-  KOKKOS_INLINE_FUNCTION static void fillCell(const GeoLevel& l, const CCField& f, int i) {
-    const C3 e = l.ext, n = l.inner;
-    const int exy = e.x * e.y;
-    const int z = i / exy, rem = i - z * exy, y = rem / e.x, x = rem - y * e.x;
-    if (x >= 1 && x <= n.x && y >= 1 && y <= n.y && z >= 1 && z <= n.z)
-      return;
-    const int sx = x < 1 ? x + n.x : (x > n.x ? x - n.x : x);
-    const int sy = y < 1 ? y + n.y : (y > n.y ? y - n.y : y);
-    const int sz = z < 1 ? z + n.z : (z > n.z ? z - n.z : z);
-    f(i) = f((long)sx + (long)sy * e.x + (long)sz * exy);
-  }
-  KOKKOS_INLINE_FUNCTION void fill(const Member& t, const GeoLevel& l, const CCField& f) const {
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nExt(l)), [&](int i) { fillCell(l, f, i); });
-    t.team_barrier();
-  }
-  // CutcellMG::applyNeumannGhost, one face (bcNeumannGhost's cell body at plane position q).
-  KOKKOS_INLINE_FUNCTION static void neumannCell(const GeoLevel& l, const CCField& f, int a, int s,
-                                                 int q) {
-    const int dims[3] = {l.ext.x, l.ext.y, l.ext.z};
-    const long st[3] = {1, (long)l.ext.x, (long)l.ext.x * l.ext.y};
-    const int bb = (a + 1) % 3, cc = (a + 2) % 3;
-    const int na = dims[a], db = dims[bb];
-    const int bic = (s == 0) ? 1 : (na - 2);
-    const int lo = (s == 0) ? 0 : (na - 1), hi = (s == 0) ? 0 : (na - 1);
-    const int p1 = q / db, p0 = q - p1 * db;
-    bcNeumannGhostCell(f, (long)p0 * st[bb] + (long)p1 * st[cc], st[a], bic, lo, hi);
-  }
-  KOKKOS_INLINE_FUNCTION static int facePlane(const GeoLevel& l, int a) {
-    const int dims[3] = {l.ext.x, l.ext.y, l.ext.z};
-    return dims[(a + 1) % 3] * dims[(a + 2) % 3];
-  }
-  // The coarse iterate's ghosts before a prolongation: the periodic fill, then the zero-gradient
-  // ghost of every wall face in its (axis, side) order.
-  KOKKOS_INLINE_FUNCTION void prolongGhosts(const Member& t, const GeoLevel& l,
-                                            const CCField& f) const {
-    fill(t, l, f);
-    for (int a = 0; a < 3; ++a)
-      for (int s = 0; s < 2; ++s) {
-        if (!neu[2 * a + s])
-          continue;
-        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, facePlane(l, a)),
-                             [&](int q) { neumannCell(l, f, a, s, q); });
-        t.team_barrier();
-      }
-  }
-  // One red-black colour pass at inner cell q (cutcellSmoothColorFace's device branch; parity
-  // origin 0), reading the neighbours through wrapped indices (wrap) or after a fill.
-  KOKKOS_INLINE_FUNCTION static void colourCell(const GeoLevel& l, const CCField& phi,
-                                                const CCField& rhs, int color, bool wrap, int q) {
-    int lx, ly, lz;
-    const long i = cell(l, q, lx, ly, lz);
-    if (((lx + ly + lz) & 1) != color)
-      return;
-    const long sy = l.ext.x, sz = (long)l.ext.x * l.ext.y;
-    if (wrap) {
-      const CcNbrs w = ccWrapNbrs(lx, ly, lz, l.inner, 1, i, sy, sz);
-      cutcellSmoothFaceCell(phi, rhs, l.AC, l.AFX, l.AFY, l.AFZ, i, 1L, sy, sz, w.xp, w.xm, w.yp,
-                            w.ym, w.zp, w.zm);
-    } else {
-      cutcellSmoothFaceCell(phi, rhs, l.AC, l.AFX, l.AFY, l.AFZ, i, 1L, sy, sz, i + 1, i - 1,
-                            i + sy, i - sy, i + sz, i - sz);
-    }
-  }
-  // CutcellMG::smooth, single rank: colours 0, 1 (1, 0 reversed) per sweep, each after a fill
-  // unless the level reads the wrap.
-  KOKKOS_INLINE_FUNCTION void smooth(const Member& t, const GeoLevel& l, const CCField& phi,
-                                     const CCField& rhs, int sweeps, bool reverse) const {
-    const bool wrap = even(l);
-    for (int k = 0; k < sweeps; ++k)
-      for (int s = 0; s < 2; ++s) {
-        if (!wrap)
-          fill(t, l, phi);
-        const int color = reverse ? (1 - s) : s;
-        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(l)),
-                             [&](int q) { colourCell(l, phi, rhs, color, wrap, q); });
-        t.team_barrier();
-      }
-  }
-  // l.res = rhs - A x (vcycleImpl's single-rank residual: the wrapped reads of A3).
-  KOKKOS_INLINE_FUNCTION static void residualCell(const GeoLevel& l, const CCField& xx,
-                                                  const CCField& rhs, int q) {
-    int lx, ly, lz;
-    const long i = cell(l, q, lx, ly, lz);
-    const long sy = l.ext.x, sz = (long)l.ext.x * l.ext.y;
-    const CcNbrs w = ccWrapNbrs(lx, ly, lz, l.inner, 1, i, sy, sz);
-    cutcellResidualFaceCell(l.res, xx, rhs, l.AC, l.AFX, l.AFY, l.AFZ, i, 1L, sy, sz, w.xp, w.xm,
-                            w.yp, w.ym, w.zp, w.zm);
-  }
-  KOKKOS_INLINE_FUNCTION void residual(const Member& t, const GeoLevel& l, const CCField& xx,
-                                       const CCField& rhs) const {
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(l)),
-                         [&](int q) { residualCell(l, xx, rhs, q); });
-    t.team_barrier();
-  }
-  // restrictAvgZeroX: c.rhs = restriction of f.res, c.x = 0 on the inner cells.
-  KOKKOS_INLINE_FUNCTION void restrictZero(const Member& t, const GeoLevel& c,
-                                           const GeoLevel& f) const {
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(c)), [&](int q) {
-      int lx, ly, lz;
-      const long ci = cell(c, q, lx, ly, lz);
-      restrictAvgCell(c.rhs, f.res, c.ext, f.ext, 1, 1, f.ratio, lx - 1, ly - 1, lz - 1);
-      c.x(ci) = 0.0;
-    });
-    t.team_barrier();
-  }
-  // prolongAdd: fx += trilinear interpolation of c.x (ghosts set by prolongGhosts).
-  KOKKOS_INLINE_FUNCTION void prolong(const Member& t, const GeoLevel& f, const GeoLevel& c,
-                                      const CCField& fx) const {
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(f)), [&](int q) {
-      int lx, ly, lz;
-      cell(f, q, lx, ly, lz);
-      prolongAddCell(fx, c.x, f.ext, c.ext, 1, 1, f.ratio, lx - 1, ly - 1, lz - 1);
-    });
-    t.team_barrier();
-  }
-  KOKKOS_INLINE_FUNCTION double dot(const Member& t, const GeoLevel& l, const CCField& a,
+  KOKKOS_INLINE_FUNCTION double dot(const Member& t, const BottomLevel& l, const CCField& a,
                                     const CCField& c) const {
     double s = 0.0;
     Kokkos::parallel_reduce(
@@ -795,48 +657,10 @@ struct GeoBottomKernel {
         s);
     return s;
   }
-  // The fluid-cell count of a level (cells with AC > 1e-30, removeMean's predicate).
-  KOKKOS_INLINE_FUNCTION long fluidCount(const Member& t, const GeoLevel& l) const {
-    long cnt = 0;
-    Kokkos::parallel_reduce(
-        Kokkos::TeamThreadRange(t, nInner(l)),
-        [&](int q, long& acc) {
-          int lx, ly, lz;
-          const long i = cell(l, q, lx, ly, lz);
-          if (l.AC(i) > 1e-30f)
-            acc += 1;
-        },
-        cnt);
-    return cnt;
-  }
-  // CutcellMG::removeMean with the level's fluid count `cnt` known: subtract the fluid mean.
-  KOKKOS_INLINE_FUNCTION void removeMean(const Member& t, const GeoLevel& l, const CCField& f,
-                                         long cnt) const {
-    if (cnt == 0)
-      return;
-    double s = 0.0;
-    Kokkos::parallel_reduce(
-        Kokkos::TeamThreadRange(t, nInner(l)),
-        [&](int q, double& acc) {
-          int lx, ly, lz;
-          const long i = cell(l, q, lx, ly, lz);
-          if (l.AC(i) > 1e-30f)
-            acc += f(i);
-        },
-        s);
-    const double mean = s / (double)cnt;
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(l)), [&](int q) {
-      int lx, ly, lz;
-      const long i = cell(l, q, lx, ly, lz);
-      meanSubtractCell(f, l.AC, i, mean);
-    });
-    t.team_barrier();
-  }
   // The bottom's mean removal, per fluid component (§5.14): one team reduction per label, in label
-  // order, then one subtraction pass. With a single component it is removeMean's arithmetic
-  // exactly (the same cells, the same sum order, mean = sum / count, f -= mean).
+  // order, then one subtraction pass.
   KOKKOS_INLINE_FUNCTION void removeMeanBottom(const Member& t, const CCField& f) const {
-    const GeoLevel& l = lv[0];
+    const BottomLevel& l = lv;
     for (int c = 0; c < nc; ++c) {
       double s = 0.0;
       Kokkos::parallel_reduce(
@@ -860,70 +684,23 @@ struct GeoBottomKernel {
     });
     t.team_barrier();
   }
-  // M: one symmetric V-cycle from the bottom (rhs R, iterate Z) through the sub-levels, exactly
-  // the per-kernel vcycleImpl sequence: pre-smooth 2 (colours 0, 1), residual, restriction (which
-  // zeroes the coarse iterate), recurse, 12 sweeps on the last sub-level; on the way up the fill
-  // and wall ghost of the coarse iterate, prolongation, post-smooth 2 (colours 1, 0), and the fluid
-  // mean removed at the bottom's exit (every level's under the "all" scope). `cnt[L]` = level L's
-  // fluid count (only read where a mean is removed). With `keep`, Z's old values go to `keep`
-  // first (the FCG's z_prev) in the same pass that zeroes Z.
-  KOKKOS_INLINE_FUNCTION void vcycle(const Member& t, const CCField& R, const CCField& Z,
-                                     const long* cnt, const CCField* keep) const {
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nExt(lv[0])), [&](int i) {
-      if (keep)
-        (*keep)(i) = Z(i);
-      Z(i) = 0.0;
-    });
-    t.team_barrier();
-    for (int L = 0; L + 1 < nl; ++L) {
-      const CCField X = (L == 0) ? Z : lv[L].x;
-      const CCField B = (L == 0) ? R : lv[L].rhs;
-      smooth(t, lv[L], X, B, kGeoPre, false);
-      residual(t, lv[L], X, B);
-      restrictZero(t, lv[L + 1], lv[L]);
-    }
-    const GeoLevel& bl = lv[nl - 1];
-    smooth(t, bl, bl.x, bl.rhs, kGeoSweeps, false);
-    if (meanAll && !noMeanForTest)
-      removeMean(t, bl, bl.x, cnt[nl - 1]);
-    for (int L = nl - 2; L >= 0; --L) {
-      const CCField X = (L == 0) ? Z : lv[L].x;
-      const CCField B = (L == 0) ? R : lv[L].rhs;
-      prolongGhosts(t, lv[L + 1], lv[L + 1].x);
-      prolong(t, lv[L], lv[L + 1], X);
-      smooth(t, lv[L], X, B, kGeoPost, true);
-      if (L == 0 && !noMeanForTest)
-        removeMeanBottom(t, X);
-      else if (meanAll && !noMeanForTest)
-        removeMean(t, lv[L], X, cnt[L]);
-    }
-  }
-  // z = M r: the V-cycle, or the direct factor's M followed by the component means' removal
-  // (§13.4.4 step 5). With `keep`, z's previous values go there first.
+  // z = M r (§13.4.4): the direct factor's M, then the component means' removal (step 5). With
+  // `keep`, z's previous values go there first.
   KOKKOS_INLINE_FUNCTION void applyM(const Member& t, const CCField& R, const CCField& Z,
-                                     const long* cnt, const CCField* keep) const {
-    if constexpr (Precond == kPrecondDirect) {
-      dir.apply(t, R, Z, comp, keep);
-      if (!noMeanForTest)
-        removeMeanBottom(t, Z);
-    } else {
-      vcycle(t, R, Z, cnt, keep);
-    }
+                                     const CCField* keep) const {
+    dir.apply(t, R, Z, comp, keep);
+    if (!noMeanForTest)
+      removeMeanBottom(t, Z);
   }
   KOKKOS_INLINE_FUNCTION void operator()(const Member& t) const {
-    const GeoLevel& B0 = lv[0];
-    long cnt[kGeoMaxLevels];  // fluid counts of the sub-levels ("all" scope only)
-    for (int L = 0; L < nl; ++L)
-      cnt[L] = (Precond == kPrecondVcycle && L > 0 && meanAll) ? fluidCount(t, lv[L]) : 0;
+    const BottomLevel& B0 = lv;
     if (precondOnly) {
-      applyM(t, b, z, cnt, nullptr);
+      applyM(t, b, z, nullptr);
       return;
     }
     const long sy = B0.ext.x, sz = (long)B0.ext.x * B0.ext.y;
     Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nExt(B0)), [&](int i) { x(i) = 0.0; });
-    // r = b on the fluid cells and 0 on the solid ones (GraphAMG's identity rows with a zero rhs):
-    // a solid cell's rhs would otherwise reach the coarse levels through the residual and make M
-    // affine instead of linear
+    // r = b on the fluid cells and 0 on the solid ones (GraphAMG's identity rows with a zero rhs)
     Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(B0)), [&](int q) {
       int lx, ly, lz;
       const long i = cell(B0, q, lx, ly, lz);
@@ -946,15 +723,13 @@ struct GeoBottomKernel {
         Kokkos::Max<double>(r0));
     int it = 0;
     // a direct factor that failed even with the largest shift (non-finite input): the failure path
-    bool fail = false;
-    if constexpr (Precond == kPrecondDirect)
-      fail = dir.stat(0) == 0;
+    bool fail = dir.stat(0) == 0;
     if (r0 != 0.0 && !fail) {
-      applyM(t, r, z, cnt, nullptr);
+      applyM(t, r, z, nullptr);
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nExt(B0)), [&](int i) { p(i) = z(i); });
       t.team_barrier();
       double rz = dot(t, B0, r, z);
-      while (it < kGeoCap) {
+      while (it < kBottomCap) {
         ++it;
         // Ap = A_b p: the band apply reading p's periodic neighbours through the wrap
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(B0)), [&](int q) {
@@ -996,10 +771,10 @@ struct GeoBottomKernel {
               }
             },
             Kokkos::Max<double>(rn));
-        if (rn <= kGeoTau * r0)
+        if (rn <= kBottomTau * r0)
           break;
-        applyM(t, r, z, cnt, &zp);  // zp = z (the previous one), z = M r
-        double rzc = 0.0;           // <r, z - zp>: Polak-Ribiere, robust to M's R != P^T asymmetry
+        applyM(t, r, z, &zp);  // zp = z (the previous one), z = M r
+        double rzc = 0.0;      // <r, z - zp>: Polak-Ribiere (robust to M's rounding)
         Kokkos::parallel_reduce(
             Kokkos::TeamThreadRange(t, nInner(B0)),
             [&](int q, double& acc) {
@@ -1258,7 +1033,7 @@ class CutcellMG {
       inner = next;
       cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
     }
-    buildGeoSub();  // B1: the sub-hierarchy below the bottom (device backends; else empty)
+    buildBottomStore();  // the device bottom's storage (device backends; else none)
     if (mgDebugLevel()) {
       printf("[mg] init %dx%dx%d single-rank -> %d levels (requested %d)\n", nx, ny, nz,
              (int)lv_.size(), nLevels);
@@ -1440,7 +1215,7 @@ class CutcellMG {
     lv_.clear();
     amg_.reset();
     distributed_ = true;
-    buildGeoSub();  // B1 is single-rank: clears sub_ (the distributed path keeps GraphAMG)
+    buildBottomStore();  // single-rank only: none (the distributed path keeps GraphAMG)
     comm_ = comm;
     gnxF_ = gnx;
     gnyF_ = gny;
@@ -1905,12 +1680,11 @@ class CutcellMG {
     // bottom level is tiny, so the per-step rebuild is negligible next to the V-cycles.
     amg_.reset();
     amgGlobalN_ = 0;
-    // B1: the sub-levels' operators are re-coarsened lazily from the new bottom (ensureGeoSub);
-    // condition 6 is evaluated once per hierarchy, here at its first operator build.
-    subStale_ = true;
-    facStale_ = true;  // §13: the direct factor is rebuilt at the next direct bottom solve
-    if (!geoConnKnown_ && bottomStore_)
-      evalGeoConnected();
+    // §13: the direct factor is rebuilt at the next device bottom solve; the components
+    // (condition 6) are labelled once per hierarchy, here at its first operator build.
+    facStale_ = true;
+    if (!bottomConnKnown_ && bottomStore_)
+      evalBottomComponents();
   }
 
   // CG preconditioned by one symmetric V-cycle (solve_pcg port). rhs on level 0; solution left in
@@ -2042,7 +1816,7 @@ class CutcellMG {
     kPAp = 0,
     kRn = 1,
     kStop = 2,
-    kGeoFlag = 3,  // B1: the geometric bottom met a non-finite scalar (read with the packet)
+    kBottomFlag = 3,  // the device bottom met a non-finite scalar (read with the packet)
     kRz = 4,
     kRzNew = 5,
     kBeta = 6,
@@ -2050,11 +1824,11 @@ class CutcellMG {
     kMsum = 8
   };
   static constexpr int kNSlots = 9;
-  static constexpr int kPacket = 4;  // the per-iteration host packet {pAp, rn, stop, geoFlag}
+  static constexpr int kPacket = 4;  // the per-iteration host packet {pAp, rn, stop, bottomFlag}
   static constexpr double kBrkPAp = 1.0, kBrkRz = 2.0;  // the stop codes (slot kStop)
   Kokkos::View<double*, CCMem> ks_;                     // the scalar slots
   Kokkos::View<long, CCMem> kcnt_;                      // removeMean's fluid-cell count
-  Kokkos::View<double*, Kokkos::HostSpace> kpk_;        // the host packet {pAp, rn, stop, geoFlag}
+  Kokkos::View<double*, Kokkos::HostSpace> kpk_;  // the host packet {pAp, rn, stop, bottomFlag}
   void ensureScalars() {
     if (ks_.extent(0) == (std::size_t)kNSlots)
       return;
@@ -2194,10 +1968,10 @@ class CutcellMG {
         maxabsTo(l0, r, kRn);
         Kokkos::deep_copy(kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));  // THE read
         const double pAp = kpk_(0), rn = kpk_(1), stop = kpk_(2);
-        noteGeoFlag(kpk_(3));   // B1: a non-finite scalar in a geometric bottom solve
-        if (stop == kBrkRz) {   // r^T z of the previous iteration was non-finite
-          solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
-          --it;                 // report the iteration that computed it
+        noteBottomFlag(kpk_(3));  // a non-finite scalar in a device bottom solve
+        if (stop == kBrkRz) {     // r^T z of the previous iteration was non-finite
+          solveFailed_ = true;    // ISSUES sweep item 6: a breakdown, not a convergence
+          --it;                   // report the iteration that computed it
           exited = true;
           break;
         }
@@ -2766,19 +2540,13 @@ class CutcellMG {
       isBottom = false;
 #endif
     if (isBottom) {
-      if (bottomSolver_ == kBottomGeometric) {
-        if (const char* why = geoBottomIneligible())
-          throw std::runtime_error(
-              std::string("set_pressure_bottom_solver('geometric'): not eligible here: ") + why);
-      } else if (bottomSolver_ == kBottomDirect) {
+      if (bottomSolver_ == kBottomDirect) {
         if (const char* why = directBottomIneligible())
           throw std::runtime_error(
               std::string("set_pressure_bottom_solver('direct'): not eligible here: ") + why);
       }
       if (agglomerateBottom()) {
-        if (bottomSolver_ == kBottomGeometric)
-          geoBottomSolve(lv);  // B1: the single-team geometric-Krylov bottom (device, one launch)
-        else if (bottomSolver_ != kBottomAlgebraic && directBottomIneligible() == nullptr)
+        if (bottomSolver_ != kBottomAlgebraic && directBottomIneligible() == nullptr)
           directBottomSolve();  // §13: FCG + the FP32 direct factor (device, one launch)
         else
           graphAmgSolveBottom(
@@ -3013,36 +2781,14 @@ class CutcellMG {
     return gx > thresh || gy > thresh || gz > thresh;
   }
 
-  // --- B1: the geometric-Krylov bottom (doc/vof_step_performance_design.md §4.1, §5.7) ----------
+  // --- The device bottom solve (doc/vof_step_performance_design.md §5.7, §5.14, §13) -----------
   static constexpr bool kHostMemory =
       std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>;
-  // Eligibility (§5.7, conditions 1-7 in the note's order): nullptr when the geometric bottom may
-  // run, else the first failed condition. Host-cheap: condition 6 is evaluated once per hierarchy
-  // (evalGeoConnected, at the first setOpenness after init) and cached -- the rho / eps / drag
+  // Eligibility (§13.4.6: §5.7 conditions 1-6 -- 6 = B1b's 1-64 fluid components -- and an axis
+  // whose planes hold at most kBottomMaxPlane cells): nullptr when the device bottom may run, else
+  // the first failed condition. Host-cheap: the components are labelled once per hierarchy
+  // (evalBottomComponents, at the first setOpenness after init) and cached -- the rho / eps / drag
   // rescaling of the per-step setOpenness never closes a face, so it cannot change the answer.
-  const char* geoBottomIneligible() const {
-    if (kHostMemory)
-      return "the backend's memory space is a host space (host backends keep GraphAMG)";
-    if (distributed_)
-      return "the solve is distributed (multi-rank)";
-    if (!removeMean_ || hasOutflow_)
-      return "the operator is not the singular one (an outflow face is present)";
-    if (!agglomerateBottom())
-      return "the bottom is not agglomerated (set_pressure_bottom / set_pressure_bottom_extent)";
-    if (lv_.empty() ||
-        (long)lv_.back().inner.x * lv_.back().inner.y * lv_.back().inner.z > kGeoBottomMaxCells)
-      return "the bottom level has more than 8192 inner cells";
-    if (!geoConnKnown_)
-      return "the pressure operator has not been built (no setOpenness since the hierarchy)";
-    if (!geoConnected_)
-      return "the bottom level has no fluid cell or more than 64 fluid components (B1b)";
-    if (sub_.empty())
-      return "no geometric sub-level exists below the bottom";
-    return nullptr;
-  }
-  // §13.4.6: the direct preconditioner's eligibility -- §5.7 conditions 1-6 (6 = B1b's 1-64
-  // components) and a slow axis whose planes hold at most kBottomMaxPlane cells; condition 7 (a
-  // sub-level) is dropped. nullptr when eligible, else the first failed condition.
   const char* directBottomIneligible() const {
     if (kHostMemory)
       return "the backend's memory space is a host space (host backends keep GraphAMG)";
@@ -3053,225 +2799,122 @@ class CutcellMG {
     if (!agglomerateBottom())
       return "the bottom is not agglomerated (set_pressure_bottom / set_pressure_bottom_extent)";
     if (lv_.empty() ||
-        (long)lv_.back().inner.x * lv_.back().inner.y * lv_.back().inner.z > kGeoBottomMaxCells)
+        (long)lv_.back().inner.x * lv_.back().inner.y * lv_.back().inner.z > kBottomMaxCells)
       return "the bottom level has more than 8192 inner cells";
-    if (!geoConnKnown_)
+    if (!bottomConnKnown_)
       return "the pressure operator has not been built (no setOpenness since the hierarchy)";
-    if (!geoConnected_)
+    if (!bottomConnected_)
       return "the bottom level has no fluid cell or more than 64 fluid components (B1b)";
     if (!dirPlanes_.valid())
       return "no axis gives planes of at most 192 cells (the direct factor's cap)";
     return nullptr;
   }
-  // The sub-hierarchy below the bottom (§5.7): built from the bottom by init()'s rule --
-  // mgChooseRatio over the axes `can()` admits -- until no axis can coarsen. Held OUTSIDE lv_, so
-  // no loop over lv_ changes. Single rank, device backends, bottom <= 8192 cells only; otherwise
-  // empty (and the B1 path ineligible).
-  void buildGeoSub(bool forceHost = false) {
-    sub_.clear();
-    bottomRatio_ = C3{1, 1, 1};
-    subStale_ = true;
+  // The bottom's storage (§13.4.7): single rank, device backends (or a test hook), a bottom of at
+  // most kBottomMaxCells cells with ghost width 1; otherwise none and the engine is ineligible.
+  // The FCG vectors, the component labels and their scratch, the plane ordering and the factor.
+  void buildBottomStore(bool forceHost = false) {
     facStale_ = true;
-    geoConnKnown_ = false;
-    geoConnected_ = false;
+    bottomConnKnown_ = false;
+    bottomConnected_ = false;
     bottomStore_ = false;
     dirPlanes_ = BottomPlanes{};
     if ((kHostMemory && !forceHost) || distributed_ || lv_.empty())
       return;
     const Level& bt = lv_.back();
-    if (bt.g != 1 || (long)bt.inner.x * bt.inner.y * bt.inner.z > kGeoBottomMaxCells)
+    if (bt.g != 1 || (long)bt.inner.x * bt.inner.y * bt.inner.z > kBottomMaxCells)
       return;
-    auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
-    C3 inner = bt.inner, cf = bt.cfac;
-    for (;;) {
-      const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
-      const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-      const C3 ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
-      const C3 next{inner.x / ratio.x, inner.y / ratio.y, inner.z / ratio.z};
-      if (next.x == inner.x && next.y == inner.y && next.z == inner.z)
-        break;
-      if (sub_.empty())
-        bottomRatio_ = ratio;
-      else
-        sub_.back().ratio = ratio;
-      inner = next;
-      cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
-      Level v;
-      v.inner = inner;
-      v.gdim = inner;
-      v.ext = C3{inner.x + 2, inner.y + 2, inner.z + 2};
-      v.cfac = cf;
-      v.ratio = C3{1, 1, 1};
-      v.n = (std::size_t)v.ext.x * v.ext.y * v.ext.z;
-      v.x = CCField("mg_geo_x", v.n);
-      v.rhs = CCField("mg_geo_rhs", v.n);
-      v.res = CCField("mg_geo_res", v.n);
-      v.ox = CCField("mg_geo_ox", v.n);
-      v.oy = CCField("mg_geo_oy", v.n);
-      v.oz = CCField("mg_geo_oz", v.n);
-      for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
-        *p = FPV("mg_geo_A", v.n);
-      sub_.push_back(v);
-      assert((int)sub_.size() + 1 <= kGeoMaxLevels);
-    }
-    // The bottom's own storage, shared by both preconditioners (§13.6): the FCG vectors, the
-    // component labels; and the direct engine's plane ordering and factor storage (§13.4.7).
     bottomStore_ = true;
-    for (CCField* f : {&geoR_, &geoP_, &geoZ_, &geoZp_, &geoAp_})
-      *f = CCField("mg_geo_fcg", bt.n);
-    geoInfo_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_geo_info", 1);
-    geoComp_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_geo_comp", bt.n);
-    geoLabTmp_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_geo_labtmp", bt.n);
-    geoCompCnt_ = Kokkos::View<long*, CCMem>("peclet::flow::mg_geo_compcnt", kGeoMaxComponents);
-    geoCompMean_ = CCField("peclet::flow::mg_geo_compmean", kGeoMaxComponents);
-    geoTeam_ = 0;
-    dirKc_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_kc", kGeoMaxComponents);
-    dirAug_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_bottom_aug", kGeoMaxComponents);
+    for (CCField* f : {&bottomR_, &bottomP_, &bottomZ_, &bottomZp_, &bottomAp_})
+      *f = CCField("mg_bottom_fcg", bt.n);
+    bottomInfo_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_info", 1);
+    bottomComp_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_comp", bt.n);
+    bottomLabTmp_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_labtmp", bt.n);
+    bottomCompCnt_ =
+        Kokkos::View<long*, CCMem>("peclet::flow::mg_bottom_compcnt", kBottomMaxComponents);
+    bottomCompMean_ = CCField("peclet::flow::mg_bottom_compmean", kBottomMaxComponents);
+    dirKc_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_kc", kBottomMaxComponents);
+    dirAug_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_bottom_aug", kBottomMaxComponents);
     dirPlanes_ = bottomChoosePlanes(bt.inner, bc_);
     dir_ = BottomDirect<float>::allocate(dirPlanes_, bt.ext);
     dirTeam_ = 0;
     dirFacTeam_ = 0;
   }
   // Condition 6, as B1b replaced it (§5.14): the bottom level's fluid components, labelled on the
-  // device by GeoLabelKernel -- eligible with 1..64 of them (the register's per-component projector
-  // for the agglomerated bottom; more go to GraphAMG). One team launch and one scalar read, at
-  // the first operator build of a hierarchy (geometry time; the rho / eps / drag rescaling of the
-  // per-step setOpenness never closes or opens a face, so the labels stay valid).
-  void evalGeoConnected() {
-    geoConnKnown_ = true;
-    geoConnected_ = false;
-    geoNComp_ = 0;
+  // device by BottomLabelKernel -- eligible with 1..64 of them (the register's per-component
+  // projector for the agglomerated bottom; more go to GraphAMG) -- and, along the slow axis, each
+  // component's last plane and 1/m_c (§13.4.2). One team launch and one scalar read, at the first
+  // operator build of a hierarchy (geometry time; the rho / eps / drag rescaling of the per-step
+  // setOpenness never closes or opens a face, so the labels stay valid).
+  void evalBottomComponents() {
+    bottomConnKnown_ = true;
+    bottomConnected_ = false;
+    bottomNComp_ = 0;
     if (!bottomStore_)
       return;
     const Level& bt = lv_.back();
-    GeoLabelKernel k;
+    BottomLabelKernel k;
     k.ext = bt.ext;
     k.inner = bt.inner;
     k.AC = bt.AC;
     k.AFX = bt.AFX;
     k.AFY = bt.AFY;
     k.AFZ = bt.AFZ;
-    k.comp = geoComp_;
-    k.tmp = geoLabTmp_;
-    k.cnt = geoCompCnt_;
-    k.nc = geoInfo_;  // info(0) doubles as the component-count landing slot here
+    k.comp = bottomComp_;
+    k.tmp = bottomLabTmp_;
+    k.cnt = bottomCompCnt_;
+    k.nc = bottomInfo_;  // info(0) doubles as the component-count landing slot here
     k.slow = dirPlanes_.s;
     k.kc = dirKc_;
     k.aug = dirAug_;
     Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
     const int T = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
-    Kokkos::parallel_for("peclet::flow::mg_geo_label", Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T),
-                         k);
-    Kokkos::deep_copy(geoNComp_, Kokkos::subview(geoInfo_, 0));
-    geoConnected_ = geoNComp_ >= 1 && geoNComp_ <= kGeoMaxComponents;
+    Kokkos::parallel_for("peclet::flow::mg_bottom_label",
+                         Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
+    Kokkos::deep_copy(bottomNComp_, Kokkos::subview(bottomInfo_, 0));
+    bottomConnected_ = bottomNComp_ >= 1 && bottomNComp_ <= kBottomMaxComponents;
     if (mgDebugLevel())
-      printf("[mg] geometric bottom: %d fluid component(s) on the %dx%dx%d bottom%s\n", geoNComp_,
+      printf("[mg] device bottom: %d fluid component(s) on the %dx%dx%d bottom%s\n", bottomNComp_,
              bt.inner.x, bt.inner.y, bt.inner.z,
-             geoConnected_ ? "" : " -> GraphAMG (more than 64, or none)");
+             bottomConnected_ ? "" : " -> GraphAMG (more than 64, or none)");
   }
-  // Coarsen the bottom's current operator into sub_ -- setOpenness's own loop body (coarsenOpenAvg,
-  // the openness fill, the boundary re-imposition, the face-form build at the level's 1/cfac^2
-  // scale) continued below the bottom. Run lazily, on the first geometric bottom solve after a
-  // setOpenness (the inputs, the bottom's ox/oy/oz, are unchanged until the next one), so a
-  // configuration that never takes the geometric path never pays for it.
-  void ensureGeoSub() {
-    if (!subStale_)
-      return;
-    for (std::size_t s = 0; s < sub_.size(); ++s) {
-      Level& c = sub_[s];
-      Level& fin = (s == 0) ? lv_.back() : sub_[s - 1];
-      const C3 ratio = (s == 0) ? bottomRatio_ : sub_[s - 1].ratio;
-      coarsenOpenAvg(c.ox, c.oy, c.oz, CCConst(fin.ox), CCConst(fin.oy), CCConst(fin.oz), c.ext,
-                     fin.ext, c.g, fin.g, c.inner, ratio);
-      fillOpenness(c);
-      CCField fo[3] = {fin.ox, fin.oy, fin.oz};
-      applyBoundaryOpennessFrom(c, fo, fin.ext, fin.g, ratio);
-      const double sx = 1.0 / (double)(c.cfac.x * c.cfac.x),
-                   sy = 1.0 / (double)(c.cfac.y * c.cfac.y),
-                   sz = 1.0 / (double)(c.cfac.z * c.cfac.z);
-      buildCutcellOpFace(c.AC, c.AFX, c.AFY, c.AFZ, CCConst(c.ox), CCConst(c.oy), CCConst(c.oz),
-                         c.ext, c.g, gfx_ * sx, gfy_ * sy, gfz_ * sz);
-    }
-    subStale_ = false;
-  }
-  template <class FR = float, int Precond = kPrecondVcycle>
-  GeoBottomKernel<FR, Precond> makeGeoKernel(Level& lv, bool precondOnly) {
+  template <class FR = float>
+  BottomKernel<FR> makeBottomKernel(bool precondOnly) {
     ensureScalars();
-    GeoBottomKernel<FR, Precond> k;
-    auto set = [](GeoLevel& d, const Level& s, C3 ratio) {
-      d.ext = s.ext;
-      d.inner = s.inner;
-      d.ratio = ratio;
-      d.AC = s.AC;
-      d.AFX = s.AFX;
-      d.AFY = s.AFY;
-      d.AFZ = s.AFZ;
-      d.x = s.x;
-      d.rhs = s.rhs;
-      d.res = s.res;
-    };
-    k.nl = 1 + (int)sub_.size();
-    set(k.lv[0], lv, bottomRatio_);
-    for (std::size_t s = 0; s < sub_.size(); ++s)
-      set(k.lv[s + 1], sub_[s], sub_[s].ratio);
-    k.x = lv.x;
-    k.b = lv.rhs;
-    k.r = geoR_;
-    k.p = geoP_;
-    k.z = geoZ_;
-    k.zp = geoZp_;
-    k.ap = geoAp_;
-    for (int f = 0; f < 6; ++f)
-      k.neu[f] = (hasBC_ && bcGhost_ && (bc_[f] == 1 || bc_[f] == 2 || bc_[f] == 4)) ? 1 : 0;
-    k.meanAll = meanRemovalAll_ ? 1 : 0;
+    Level& bt = lv_.back();
+    BottomKernel<FR> k;
+    k.lv.ext = bt.ext;
+    k.lv.inner = bt.inner;
+    k.lv.AC = bt.AC;
+    k.lv.AFX = bt.AFX;
+    k.lv.AFY = bt.AFY;
+    k.lv.AFZ = bt.AFZ;
+    k.x = bt.x;
+    k.b = bt.rhs;
+    k.r = bottomR_;
+    k.p = bottomP_;
+    k.z = bottomZ_;
+    k.zp = bottomZp_;
+    k.ap = bottomAp_;
     k.precondOnly = precondOnly ? 1 : 0;
     k.ks = ks_;
-    k.flagSlot = kGeoFlag;
-    k.info = geoInfo_;
-    k.nc = geoNComp_;
-    k.comp = geoComp_;
-    k.ccnt = geoCompCnt_;
-    k.cmean = geoCompMean_;
+    k.flagSlot = kBottomFlag;
+    k.info = bottomInfo_;
+    k.nc = bottomNComp_;
+    k.comp = bottomComp_;
+    k.ccnt = bottomCompCnt_;
+    k.cmean = bottomCompMean_;
     return k;
   }
-  void launchGeoKernel(const GeoBottomKernel<>& k) {
-    if (geoTeam_ == 0) {
-      Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
-      geoTeam_ = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
-      if (mgDebugLevel()) {
-        printf(
-            "[mg] geometric bottom: %dx%dx%d + %d sub-levels (coarsest %dx%dx%d), team size %d\n",
-            lv_.back().inner.x, lv_.back().inner.y, lv_.back().inner.z, (int)sub_.size(),
-            sub_.back().inner.x, sub_.back().inner.y, sub_.back().inner.z, geoTeam_);
-        fflush(stdout);
-      }
-    }
-    Kokkos::parallel_for("peclet::flow::mg_geo_bottom",
-                         Kokkos::TeamPolicy<CCExec>(CCExec(), 1, geoTeam_), k);
-  }
-  // The B1 bottom solve: lv.x = A_b^{-1} lv.rhs (fluid-mean-free) by the single-team FCG.
-  void geoBottomSolve(Level& lv) {
-    ensureGeoSub();
-    launchGeoKernel(makeGeoKernel(lv, false));
-    geoFlagPending_ = true;
-    if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
-      int it = 0;
-      Kokkos::deep_copy(it, Kokkos::subview(geoInfo_, 0));
-      printf("[mg]     geometric bottom: %d inner iterations\n", it);
-    }
-  }
-  // A non-finite scalar in a geometric bottom solve (the kernel's device flag) fails the solve.
-  // `v` is the flag as read by the PCG packet or by lastSolveFailed(); a set flag is cleared on the
+  // A non-finite scalar in a device bottom solve (the kernel's device flag) fails the solve. `v`
+  // is the flag as read by the PCG packet or by lastSolveFailed(); a set flag is cleared on the
   // device so it is reported once.
-  void noteGeoFlag(double v) {
-    geoFlagPending_ = false;
+  void noteBottomFlag(double v) {
+    bottomFlagPending_ = false;
     if (v != 0.0) {
       solveFailed_ = true;
-      setSlot(kGeoFlag, 0.0);
+      setSlot(kBottomFlag, 0.0);
     }
   }
-
-  // --- §13: the direct preconditioner of the device bottom (mg_bottom_direct.hpp) ---------------
   // A launch's team size: min(1024, team_size_max) when team <= 0, else `team` clamped to it; with
   // `probe` false a positive `team` (a size this kernel already ran with) is used as is.
   template <class K>
@@ -3292,7 +2935,7 @@ class CutcellMG {
     k.AFX = bt.AFX;
     k.AFY = bt.AFY;
     k.AFZ = bt.AFZ;
-    k.comp = geoComp_;
+    k.comp = bottomComp_;
     k.kc = dirKc_;
     k.aug = dirAug_;
     k.tauPiv0 = tauPiv0;
@@ -3306,9 +2949,7 @@ class CutcellMG {
   template <class FR>
   int launchDirectKernel(const BottomDirect<FR>& D, bool precondOnly, int team, bool noMean,
                          CCField zOut = CCField(), CCField rIn = CCField(), bool probe = true) {
-    Level& bt = lv_.back();
-    GeoBottomKernel<FR, kPrecondDirect> k = makeGeoKernel<FR, kPrecondDirect>(bt, precondOnly);
-    k.nl = 1;  // the direct preconditioner reads no sub-level
+    BottomKernel<FR> k = makeBottomKernel<FR>(precondOnly);
     k.dir = D;
     k.noMeanForTest = noMean ? 1 : 0;
     if (precondOnly) {
@@ -3344,10 +2985,10 @@ class CutcellMG {
           dirPlanes_.b, dirPlanes_.border, dirFacTeam_, dirTeam_);
       fflush(stdout);
     }
-    geoFlagPending_ = true;
+    bottomFlagPending_ = true;
     if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
       int it = 0;
-      Kokkos::deep_copy(it, Kokkos::subview(geoInfo_, 0));
+      Kokkos::deep_copy(it, Kokkos::subview(bottomInfo_, 0));
       printf("[mg]     direct bottom: %d inner iterations (team %d)\n", it, dirTeam_);
     }
   }
@@ -4313,13 +3954,13 @@ class CutcellMG {
   // ISSUES sweep item 6: did the LAST solve driver give up on a non-finite recurrence scalar?
   // A failing solve returns the ITERATION CAP (so a rule-3b "no capped solve" check sees it) and
   // sets this; it used to print to stdout, zero the correction and report 0 iterations.
-  // A geometric bottom (B1) flags a non-finite scalar on the device; a driver whose host reads do
-  // not carry it (all but the single-rank PCG packet) has it folded in here, by one scalar read.
+  // The device bottom flags a non-finite scalar on the device; a driver whose host reads do not
+  // carry it (all but the single-rank PCG packet) has it folded in here, by one scalar read.
   bool lastSolveFailed() {
-    if (geoFlagPending_) {
+    if (bottomFlagPending_) {
       double v = 0.0;
-      Kokkos::deep_copy(v, slot(kGeoFlag));
-      noteGeoFlag(v);
+      Kokkos::deep_copy(v, slot(kBottomFlag));
+      noteBottomFlag(v);
     }
     return solveFailed_;
   }
@@ -4401,21 +4042,18 @@ class CutcellMG {
   // scalar (a preconditioner or operator that produced NaN/Inf)? Reset at the head of
   // every solve. See `lastSolveFailed()`.
   bool solveFailed_ = false;
-  // B1, the geometric-Krylov bottom (geoBottomSolve): the sub-hierarchy below the bottom, the
-  // bottom-to-sub_[0] ratio, the FCG vectors, the engine selection and the cached eligibility.
-  std::vector<Level> sub_;
-  C3 bottomRatio_{1, 1, 1};
-  CCField geoR_, geoP_, geoZ_, geoZp_, geoAp_;
-  Kokkos::View<int*, CCMem> geoInfo_;  // [0] = inner iterations of the last geometric solve
-  int geoTeam_ = 0;                    // the kernel's team size (chosen at its first launch)
-  bool subStale_ = true;               // sub_'s operators predate the last setOpenness
-  bool geoConnKnown_ = false, geoConnected_ = false;  // condition 6 (B1b), per hierarchy
-  int geoNComp_ = 0;                                  // the bottom's fluid components
-  Kokkos::View<int*, CCMem> geoComp_, geoLabTmp_;     // component ids (-1 solid), label scratch
-  Kokkos::View<long*, CCMem> geoCompCnt_;             // cells per component
-  CCField geoCompMean_;                               // the kernel's per-component means
-  bool geoFlagPending_ = false;  // a geometric solve ran since the device flag was last read
-  int bottomSolver_ = 0;  // kBottomAuto / kBottomGeometric / kBottomAlgebraic / kBottomDirect
+  // The device bottom (§5.7, §5.14, §13): the FCG vectors, the kernel's info slot, the component
+  // labels (condition 6, cached per hierarchy), and whether a device solve ran since its flag was
+  // last read.
+  CCField bottomR_, bottomP_, bottomZ_, bottomZp_, bottomAp_;
+  Kokkos::View<int*, CCMem> bottomInfo_;  // [0] = inner iterations of the last device solve
+  bool bottomConnKnown_ = false, bottomConnected_ = false;  // condition 6 (B1b), per hierarchy
+  int bottomNComp_ = 0;                                     // the bottom's fluid components
+  Kokkos::View<int*, CCMem> bottomComp_, bottomLabTmp_;  // component ids (-1 solid), label scratch
+  Kokkos::View<long*, CCMem> bottomCompCnt_;             // cells per component
+  CCField bottomCompMean_;                               // the kernel's per-component means
+  bool bottomFlagPending_ = false;  // a device solve ran since the device flag was last read
+  int bottomSolver_ = 0;            // kBottomAuto / kBottomDirect / kBottomAlgebraic
   // §13, the direct preconditioner: the bottom storage exists (single rank, <= 8192 cells, device
   // or forced by a hook), the plane ordering, the FP32 factor, the per-component augmentation, the
   // factor's staleness (set by setOpenness), the two kernels' team sizes, the first attempt's
@@ -4708,54 +4346,25 @@ class CutcellMG {
     agglomMode_ = on ? 1 : 0;
     amg_.reset();
   }
-  // Engine selection for an agglomerated bottom (§5.7, §13 D-5): kBottomAuto = the device bottom
+  // Engine selection for an agglomerated bottom (§13 D-5): kBottomAuto = the device bottom
   // preconditioned by the direct factor wherever directBottomIneligible() is null (device backends
   // only), GraphAMG otherwise; kBottomDirect = that engine or a raise naming the failed condition;
-  // kBottomGeometric = B1's V-cycle-preconditioned engine or a raise;
   // kBottomAlgebraic = GraphAMG always (the A/B instrument).
-  enum : int { kBottomAuto = 0, kBottomGeometric = 1, kBottomAlgebraic = 2, kBottomDirect = 3 };
+  enum : int { kBottomAuto = 0, kBottomDirect = 1, kBottomAlgebraic = 2 };
   void setBottomSolver(int m) { bottomSolver_ = m; }
   int bottomSolver() const { return bottomSolver_; }
-  // Test hooks (tests/kokkos/test_geo_bottom.cpp). `geoBottomPrecondForTest`: z = M r on the
-  // bottom by the team kernel's V-cycle alone. `geoBottomSolveForTest`: the full kernel on the
-  // bottom level (its rhs -> its x); returns the inner iteration count.
-  // `geoBottomReferenceForTest`: a per-kernel CutcellMG whose levels ARE the bottom plus sub_
-  // (shared views), smoothed bottom, pre/post/bottom 2/2/12 -- its `precondForTest` is the
-  // reference M. Requires sub_ (device backends build it; the hooks force it on a host backend
-  // too).
-  int geoSubLevels() const { return (int)sub_.size(); }
-  bool geoConnected() const { return geoConnected_; }
-  int geoComponents() const { return geoNComp_; }
-  void geoForceSubForTest() {
+  // Test hooks (tests/kokkos/test_bottom_direct.cpp). Host backends never build the device
+  // bottom's storage; `bottomForceForTest` builds it (and labels the components) so the kernels can
+  // be exercised there.
+  bool bottomConnected() const { return bottomConnected_; }
+  int bottomComponents() const { return bottomNComp_; }
+  void bottomForceForTest() {
     if (!bottomStore_ && kHostMemory) {
-      // host backends never build sub_; the hooks build it so the kernel can be exercised there
-      buildGeoSub(/*forceHost=*/true);
-      evalGeoConnected();
+      buildBottomStore(/*forceHost=*/true);
+      evalBottomComponents();
     }
   }
-  void geoBottomPrecondForTest(CCField z, CCField r, bool noMean = false) {
-    ensureGeoSub();
-    Level bt = lv_.back();  // shallow: the kernel reads b and writes z
-    GeoBottomKernel<> k = makeGeoKernel(bt, true);
-    k.b = r;
-    k.z = z;
-    k.noMeanForTest = noMean ? 1 : 0;
-    launchGeoKernel(k);
-    Kokkos::fence();
-  }
-  int geoBottomSolveForTest() {
-    ensureGeoSub();
-    launchGeoKernel(makeGeoKernel(lv_.back(), false));
-    int it = 0;
-    Kokkos::deep_copy(it, Kokkos::subview(geoInfo_, 0));
-    return it;
-  }
-  bool geoFlagForTest() {
-    double v = 0.0;
-    Kokkos::deep_copy(v, slot(kGeoFlag));
-    return v != 0.0;
-  }
-  // §13 test hooks (tests/kokkos/test_bottom_direct.cpp; host backends after geoForceSubForTest).
+  // §13 hooks (host backends after bottomForceForTest).
   // `directFactorForTest<FR>`: a fresh factor of the bottom in FR arithmetic (team T, 0 = the
   // default), `*Tused` = the team size it ran with. `directApplyForTest`: z = M(r) by that factor
   // through the FCG kernel's precondition-only path (`noMean`: without the component means'
@@ -4782,7 +4391,7 @@ class CutcellMG {
   int directSolveForTest() {
     directBottomSolve();
     int it = 0;
-    Kokkos::deep_copy(it, Kokkos::subview(geoInfo_, 0));
+    Kokkos::deep_copy(it, Kokkos::subview(bottomInfo_, 0));
     return it;
   }
   int directRestarts() const {
@@ -4791,38 +4400,6 @@ class CutcellMG {
   }
   void directPivotTolForTest(double t) { dirPivotTol_ = t; }
   void directMarkStaleForTest() { facStale_ = true; }
-  // `noMean`: the reference V-cycle without its mean removals (removeMean_ off in the copy).
-  CutcellMG geoBottomReferenceForTest(bool noMean = false) {
-    ensureGeoSub();
-    CutcellMG m;
-    m.lv_.push_back(lv_.back());
-    m.lv_[0].ratio = bottomRatio_;
-    for (const Level& s : sub_)
-      m.lv_.push_back(s);
-    m.hp_[0] = hp_[0];
-    m.hp_[1] = hp_[1];
-    m.hp_[2] = hp_[2];
-    m.aniso_ = aniso_;
-    for (int f = 0; f < 6; ++f)
-      m.bc_[f] = bc_[f];
-    m.hasBC_ = hasBC_;
-    m.removeMean_ = removeMean_ && !noMean;
-    m.hasOutflow_ = hasOutflow_;
-    m.bcGhost_ = bcGhost_;
-    m.meanRemovalAll_ = meanRemovalAll_;
-    m.agglomMode_ = 0;
-    m.pre_ = kGeoPre;
-    m.post_ = kGeoPost;
-    m.bottom_ = kGeoSweeps;
-    m.gnxF_ = lv_.back().inner.x;
-    m.gnyF_ = lv_.back().inner.y;
-    m.gnzF_ = lv_.back().inner.z;
-    return m;
-  }
-  void precondForTest(CCField z, CCField r) {
-    precondVcycle(z, r);
-    Kokkos::fence();
-  }
 
  private:
 };

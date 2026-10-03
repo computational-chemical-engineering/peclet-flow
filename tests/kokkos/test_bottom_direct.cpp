@@ -367,7 +367,7 @@ int runCase(const Case& cs) {
       }
   CCField ox = toDevice(hx, "ox"), oy = toDevice(hy, "oy"), oz = toDevice(hz, "oz");
   mg.setOpenness(CCConst(ox), CCConst(oy), CCConst(oz), 1.0, 1.0, 1.0);
-  mg.geoForceSubForTest();
+  mg.bottomForceForTest();
   CutcellMG::Level& bt = mg.level(mg.nLevels() - 1);
   HostBottom H;
   H.e = bt.ext;
@@ -384,10 +384,10 @@ int runCase(const Case& cs) {
   printf(
       "[%s] bottom %dx%dx%d: slow axis %d, P = %d, b = %d, border %d; %d fluid component(s) "
       "(host %d); %s\n",
-      cs.name, bt.inner.x, bt.inner.y, bt.inner.z, pl.s, pl.P, pl.b, pl.border, mg.geoComponents(),
-      H.nc, why ? why : "eligible");
+      cs.name, bt.inner.x, bt.inner.y, bt.inner.z, pl.s, pl.P, pl.b, pl.border,
+      mg.bottomComponents(), H.nc, why ? why : "eligible");
   int fails = 0;
-  if (!pl.valid() || mg.geoComponents() != H.nc) {
+  if (!pl.valid() || mg.bottomComponents() != H.nc) {
     printf("[%s] FAIL: no plane ordering, or the device labels disagree\n", cs.name);
     return 1;
   }
@@ -491,7 +491,7 @@ int runCase(const Case& cs) {
     double mm, xm, xs;
     H.means(x, mm, xm, xs);
     const bool ok = it >= 1 && it <= itMax && !flag && restarts == restartsWant &&
-                    rn <= 10.0 * kGeoTau * r0 && xs == 0.0 && mm <= 4e-16 * xm;
+                    rn <= 10.0 * kBottomTau * r0 && xs == 0.0 && mm <= 4e-16 * xm;
     printf(
         "[%s] %s FCG: %d iteration(s), restarts %d, flag %d, true residual %.3e r0, max|x| "
         "solid %.1e, max|component mean| %.2e max|x| -> %s\n",
@@ -501,7 +501,7 @@ int runCase(const Case& cs) {
   fails += fcg("U4", 3, 0);        // U4
   mg.directPivotTolForTest(1e30);  // U5: the first attempt fails at every pivot
   mg.directMarkStaleForTest();
-  fails += fcg("U5", kGeoCap - 1, 1);
+  fails += fcg("U5", kBottomCap - 1, 1);
   mg.directPivotTolForTest(kBottomPivotTol);
   mg.directMarkStaleForTest();
   {  // U6: a non-finite face coefficient

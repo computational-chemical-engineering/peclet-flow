@@ -563,15 +563,12 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           [](D& diag, const std::string& engine) {
             if (engine == "auto")
               diag.s->setPressureBottomSolver(0);
-            else if (engine == "geometric")
+            else if (engine == "direct")
               diag.s->setPressureBottomSolver(1);
             else if (engine == "algebraic")
               diag.s->setPressureBottomSolver(2);
-            else if (engine == "direct")
-              diag.s->setPressureBottomSolver(3);
             else
-              throw std::runtime_error(
-                  "set_pressure_bottom_solver: 'auto' | 'direct' | 'algebraic' | 'geometric'");
+              throw std::runtime_error("set_pressure_bottom_solver: 'auto' | 'direct' | 'algebraic'");
           },
           nb::arg("engine"),
           "Engine of the AGGLOMERATED pressure bottom (set_pressure_bottom 'auto' / "
@@ -583,9 +580,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "one axis, explicit Schur-complement inverses), refactored once per operator change -- "
           "no host transfer; everywhere else the host GraphAMG solve. 'direct' forces the device "
           "engine and raises at the bottom solve, naming the failed condition, where it is not "
-          "eligible; 'algebraic' forces GraphAMG (the A/B instrument); 'geometric' is the "
-          "superseded V-cycle-preconditioned device engine. Host backends always run GraphAMG "
-          "under 'auto'. doc/vof_step_performance_design.md §13.")
+          "eligible; 'algebraic' forces GraphAMG (the A/B instrument). Host backends always run "
+          "GraphAMG under 'auto'. doc/vof_step_performance_design.md §13.")
       .def("set_pressure_graph_amg", [](D& diag, bool on) { return diag.s->setPressureGraphAmg(on); }, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "

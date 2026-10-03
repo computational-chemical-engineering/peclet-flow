@@ -349,14 +349,6 @@ target_include_directories(test_march_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(test_march_state PRIVATE Kokkos::kokkos)
 add_test(NAME march_state COMMAND test_march_state)
 
-# B1 (doc/vof_step_performance_design.md §5.7, WO-6): the single-team geometric-Krylov bottom --
-# its V-cycle against the per-kernel V-cycle over the same levels, and the inner FCG to tau.
-add_executable(test_geo_bottom test_geo_bottom.cpp)
-target_include_directories(test_geo_bottom PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-                           ${PECLET_CORE_INCLUDE})
-target_link_libraries(test_geo_bottom PRIVATE Kokkos::kokkos)
-add_test(NAME geo_bottom COMMAND test_geo_bottom)
-
 # §13 (doc/vof_step_performance_design.md, WO-D1): the device bottom's block-tridiagonal direct
 # preconditioner -- FP64 exactness, FP32 accuracy, team-size independence (bitwise), the FCG to
 # tau, the shift and non-finite paths, and a host dense FP64 reference (gate A, U1-U7).
