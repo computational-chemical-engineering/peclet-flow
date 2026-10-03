@@ -461,9 +461,7 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     in.say = CCConst(gm.say);
     in.saz = CCConst(gm.saz);
     in.fac = &gm.fac;
-    in.wallType = wt.type;
-    in.wallK = wt.k;
-    in.numBodies = nb;
+    in.facetW = st.cw;
     for (int f = 0; f < 6; ++f)
       in.dirFace[f] = st.dirFace[f];
     st.mg->build(in);

@@ -9,9 +9,12 @@
 //                  unknown row), and the face coefficient of the constant-Lam single-phase case
 //                  equal to CutcellMG's rule w_a(L) <Lam a>;
 //   level rule   — transient with dt D / h^2 < 1 uses level 0 alone, steady the full table;
-//   contraction  — §11 G-iter: the power estimate of rho(I - M^-1 S) at the finest G1 grid
-//                  (R/h = 32, box 4R, Dirichlet sphere and box faces) and on the G5b geometry
-//                  (periodic simple-cubic array, c = 0.3, insulating, steady: singular) is <= 0.3.
+//   contraction  — the guard of design Amendment A1 (the power estimate of rho(I - M^-1 S), the
+//                  geometric mean of the last 10 of 30): (C1) < 1 on every geometry; (C2) <= 0.35
+//                  on box geometries (G1, G2, G3a at every rung), Neumann geometries (G5b's array
+//                  on multigrid-friendly n) and no-solid geometries; (C3) <= 0.75 on a periodic
+//                  box whose only sink is one Dirichlet sphere. Krylov counts stay the primary
+//                  gate (tests/python/test_scalar_cutcell_gates.py).
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -191,53 +194,122 @@ double contraction(IbmSolver& s, const char* tag) {
   return gm;
 }
 
-// Q2's fallback, measured beside the default for the record (no gate): the same problem with the
-// coarse levels built by Galerkin RAP (ScalarMG::setGalerkin, C++ only, default off).
-void galerkinReference(IbmSolver& s, const char* tag) {
-  auto& st = *s.scalarField("c").cut;
-  st.mg->setGalerkin(true);
-  Kokkos::deep_copy(s.scalarField("c").c, 0.0);
+// The concentric-shells scene of G2 (cell units): instance 0 a sphere Ri, instance 1 a huge box
+// minus a sphere Ro (solid outside Ro), both centred at c.
+void shellsScene(IbmSolver& s, double c, double Ri, double Ro) {
+  const std::vector<int> ni = {1, -1, -1, 3, -1, -1, 1, -1, -1, 34, 1, 2};
+  std::vector<double> nr(4 * 16, 0.0);
+  for (int k = 0; k < 4; ++k) {
+    nr[16 * k + 14] = 1.0;
+    nr[16 * k + 15] = 1.0;
+  }
+  nr[0] = Ri;
+  nr[16 + 0] = nr[16 + 1] = nr[16 + 2] = 1e5;
+  nr[32 + 0] = Ro;
+  const std::vector<int> ii = {0, -1, 3, -1};
+  std::vector<double> ir(2 * 18, 0.0);
+  for (int k = 0; k < 2; ++k) {
+    ir[18 * k + 0] = ir[18 * k + 1] = ir[18 * k + 2] = c;
+    ir[18 * k + 6] = 1.0;
+    ir[18 * k + 7] = 1.0;
+  }
+  s.setScene(ni, nr, ii, ir, false);
+  s.setSolidFromScene(false);
+}
+
+void walls(IbmSolver& s) {
+  s.setRho(1.0);
+  s.setMu(1.0);
+  s.setDt(1.0);
+  for (int f = 0; f < 6; ++f)
+    s.setDomainBc(f, 1, 0.0, 0.0, 0.0);
+}
+
+// rho on one configured problem; class 2 -> C2 (<= 0.35), 3 -> C3 (<= 0.75), always C1 (< 1).
+void guardRow(IbmSolver& s, const char* tag, int cls) {
   s.solveScalarSteady("c");
-  char t[128];
-  std::snprintf(t, sizeof t, "  [Galerkin RAP reference] %s, %d BiCGStab iterations", tag,
-                st.iterations);
-  contraction(s, t);
-  st.mg->setGalerkin(false);
+  char t[160];
+  std::snprintf(t, sizeof t, "%-44s %2d it", tag, s.scalarField("c").cut->iterations);
+  const double rho = contraction(s, t);
+  CHECK(rho < 1.0);
+  if (cls == 2)
+    CHECK(rho <= 0.35);
+  if (cls == 3)
+    CHECK(rho <= 0.75);
 }
 
 void testContraction() {
-  {  // the finest G1 rung: R/h = 32, box 4R = 128
-    const int n = 128;
+  char tag[96];
+  for (int n : {32, 64, 128}) {  // G1: Dirichlet sphere R = n/4, Dirichlet box
     IbmSolver s(n, n, n);
-    g1Setup(s, n, 32.0, 0.37);
-    s.solveScalarSteady("c");
-    std::printf("G1 R/h=32: %d BiCGStab iterations\n", s.scalarField("c").cut->iterations);
-    CHECK(contraction(s, "contraction G1 R/h=32 (128^3)") <= 0.3);
-    galerkinReference(s, "G1 R/h=32");
+    g1Setup(s, n, 0.25 * n, 0.37);
+    std::snprintf(tag, sizeof tag, "C2 G1 R/h=%d (%d^3)", n / 4, n);
+    guardRow(s, tag, 2);
   }
-  {  // G5b's geometry: periodic SC array, c = 0.3, insulating, steady (singular)
-    for (int n : {80, 77}) {
-      IbmSolver s(n, n, n);
-      s.setRho(1.0);
-      s.setMu(1.0);
-      s.setDt(1.0);
-      const double R = 0.5 * n * std::cbrt(0.3 * 6.0 / M_PI);
-      s.setSolid(sphereSdf(n, 0.5 * n + 0.21, 0.5 * n - 0.13, 0.5 * n + 0.07, R), false);
-      s.addScalar("c", 0.7, 1, 50, true);
-      s.setScalarWall("c", 0, 0.3, 0.0, -1);
-      s.setScalarSource("c", 0.1);
-      s.solveScalarSteady("c");
-      CHECK(s.scalarField("c").cut->singular);
-      char tag[96];
-      std::snprintf(tag, sizeof tag, "contraction G5b-geometry N=%d (ND=%.1f, singular)", n, 2 * R);
-      std::printf("G5b geometry n=%d: %d BiCGStab iterations\n", n,
-                  s.scalarField("c").cut->iterations);
-      const double rho = contraction(s, tag);
-      if (n == 80)
-        galerkinReference(s, "G5b geometry n=80");
-      if (n == 80)
-        CHECK(rho <= 0.3);
-    }
+  const int g2box[3] = {48, 80, 128};
+  for (int k = 0; k < 3; ++k) {  // G2 on its multigrid-friendly boxes (ruling D-WO4-1)
+    const int Rih = 6 << k, n = g2box[k];
+    IbmSolver s(n, n, n);
+    walls(s);
+    shellsScene(s, 0.5 * n + 0.29, Rih, 2.5 * Rih);
+    s.addScalar("c", 0.8, 1, 50, true);
+    for (int f = 0; f < 6; ++f)
+      s.setScalarBc("c", f, 1, 0.0);  // the box is solid (outside Ro): Neumann
+    s.setScalarWall("c", 0, 0.3, 0.0, 0);
+    s.setScalarWall("c", 1, 0.0, 0.0, 1);
+    std::snprintf(tag, sizeof tag, "C2 G2 Ri/h=%d (%d^3)", Rih, n);
+    guardRow(s, tag, 2);
+  }
+  for (int n : {32, 64, 128}) {  // G3a, Da = 1: Robin sphere, Dirichlet box
+    IbmSolver s(n, n, n);
+    g1Setup(s, n, 0.25 * n, 0.37);
+    s.setScalarWall("c", 2, 0.0, 0.7 / (0.25 * n), -1);  // k = Da D / R
+    std::snprintf(tag, sizeof tag, "C2 G3a Da=1 R/h=%d (%d^3)", n / 4, n);
+    guardRow(s, tag, 2);
+  }
+  {  // Neumann sphere, Dirichlet box
+    IbmSolver s(64, 64, 64);
+    g1Setup(s, 64, 16.0, 0.37);
+    s.setScalarWall("c", 0, 0.3, 0.0, -1);
+    guardRow(s, "C2 Neumann sphere + Dirichlet box (64^3)", 2);
+  }
+  {  // no solid, Dirichlet box
+    IbmSolver s(64, 64, 64);
+    walls(s);
+    s.setSolid(std::vector<double>((std::size_t)64 * 64 * 64, 100.0), false);
+    s.addScalar("c", 0.7, 1, 50, true);
+    for (int f = 0; f < 6; ++f)
+      s.setScalarBc("c", f, 2, 0.25);
+    s.setScalarSource("c", 0.1);
+    guardRow(s, "C2 no solid, Dirichlet box (64^3)", 2);
+  }
+  for (int n : {32, 48, 80, 77}) {  // G5b's geometry: periodic SC array, c = 0.3, singular
+    IbmSolver s(n, n, n);
+    s.setRho(1.0);
+    s.setMu(1.0);
+    s.setDt(1.0);
+    const double R = 0.5 * n * std::cbrt(0.3 * 6.0 / M_PI);
+    s.setSolid(sphereSdf(n, 0.5 * n + 0.21, 0.5 * n - 0.13, 0.5 * n + 0.07, R), false);
+    s.addScalar("c", 0.7, 1, 50, true);
+    s.setScalarWall("c", 0, 0.3, 0.0, -1);
+    s.setScalarSource("c", 0.1);
+    // n = 77 (G5b's literal ND = 64) is odd: one level, correctness-only (C1)
+    std::snprintf(tag, sizeof tag, "%s G5b geometry n=%d (ND %.1f, singular)",
+                  n == 77 ? "C1" : "C2", n, 2 * R);
+    guardRow(s, tag, n == 77 ? 1 : 2);
+    CHECK(s.scalarField("c").cut->singular);
+  }
+  for (int n : {64, 128}) {  // C3: periodic box, the only sink one Dirichlet sphere R = n/4
+    IbmSolver s(n, n, n);
+    s.setRho(1.0);
+    s.setMu(1.0);
+    s.setDt(1.0);
+    s.setSolid(sphereSdf(n, 0.5 * n + 0.37, 0.5 * n - 0.22, 0.5 * n + 0.11, 0.25 * n), false);
+    s.addScalar("c", 0.7, 1, 50, true);
+    s.setScalarWall("c", 1, 1.0, 0.0, -1);
+    s.setScalarSource("c", -0.3);
+    std::snprintf(tag, sizeof tag, "C3 periodic + Dirichlet sphere R/h=%d (%d^3)", n / 4, n);
+    guardRow(s, tag, 3);
   }
 }
 }  // namespace

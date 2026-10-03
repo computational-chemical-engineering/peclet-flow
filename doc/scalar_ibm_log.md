@@ -624,3 +624,50 @@ steady — the case where the stand-alone rediscretized V-cycle diverges (rho = 
 the V-cycle as the BiCGStab preconditioner it converges at every offset: R/h = 16 (64^3, 6 levels)
 13 / 14 / 14 iterations, true residual 3e-11 .. 9e-11 of the reference; R/h = 32 (128^3, 7 levels)
 15 / 16 / 16, 1e-11 .. 6e-11. The diverging mode is few-dimensional and the Krylov method removes it.
+
+## 2026-10-03 — WO-4 completion: Amendment A1 (coarse wall term at the fine probe distance)
+
+**Change** (design Amendment A1, 03435df). The coarse gather averages the level-0 wall terms:
+W_C = (1/N_L) Σ cw(φ), with cw = α G(s_φ) — the fine probe distance (rung included), the same
+gather and summation order. Robin is covered by cw; WO-7's conjugate coupling goes the same way.
+Coarse faces stay rediscretized: 7-point, RB-GS. RAP was removed (`setGalerkin`, the assembly and
+the 8-colour sweep); its evidence stays in c1e312e and in the WO-4 entry. `ScalarMG::Inputs` takes
+`facetW` (= cw) instead of the per-body wall table.
+
+**Contraction guard, restated per A1** (`scalar_mg`; power estimate, geometric mean of the last 10
+of 30; C1 < 1 everywhere, C2 <= 0.35, C3 <= 0.75):
+
+| row | before A1 (s_L) | after A1 (s_φ) | BiCGStab iterations after |
+|---|---|---|---|
+| C2 G1 R/h 8 / 16 / 32 | – / 0.470 / 0.788 | 0.186 / 0.222 / 0.274 | 9 / 10 / 11 |
+| C2 G2 Ri/h 6 / 12 / 24 (mg boxes 48/80/128) | – | 0.280 / 0.272 / 0.323 | 10 / 10 / 11 |
+| C2 G3a Da 1, R/h 8 / 16 / 32 | – | 0.172 / 0.177 / 0.180 | 4 / 5 / 5 |
+| C2 Neumann sphere + Dirichlet box 64^3 | 0.185 | 0.185 | 5 |
+| C2 no solid, Dirichlet box 64^3 | 0.175 | 0.175 | 5 |
+| C2 G5b geometry n 32 / 48 / 80 (singular) | – / – / 0.193 | 0.190 / 0.190 / 0.193 | 5 / 5 / 6 |
+| C1 G5b geometry n = 77 (odd: one level) | 0.968 | 0.968 | 78 |
+| C3 periodic + Dirichlet sphere R/h 16 / 32 | 3.105 / – | 0.504 / 0.523 | 13 / 14 |
+
+Every row passes C1-C3. (Neumann, no-solid and singular rows are unchanged, as they must be: they
+carry no wall conductance.)
+
+**Reruns.**
+- Inert: the level-0-only runs remain `np.array_equal` to WO-3 (6/6). G12: 12/12 hashes equal.
+- Accuracy ladder: every order and bound line is identical to the pre-A1 run (the preconditioner
+  moves the solution only within rtol).
+- G-iter (stop rule: no row worse by more than 2 — none is; most improve):
+  - G1 12/14/15 -> 10/10/11;
+  - G2 (mg box) 13/15/17 -> 10/11/12;
+  - G3a Da 1 4/4/5 -> 4/5/5;
+  - transient max 10 -> 10;
+  - singular 5/5/6 -> 5/5/6;
+  - G3b per step at R/h 32: Bi 1 11-13 -> 11-12, Bi 10 7-8 -> 7, Bi 100 9-10 -> 9, Bi inf 12 -> 11-12;
+  - G7: unchanged within 1 (Dirichlet 64: 18-20; Neumann 64: 28-31; Graetz 64: 21-22).
+- G10 at rtol 1e-13, np = 1 / 2 / 4:
+  - mixed: bitwise / 1.33e-15 / 1.33e-15, iterations 14 7 7 7 at every np;
+  - g1: bitwise / 1.13e-13 / 2.13e-14, iterations 14 = 14;
+  - singular: bitwise / 3.55e-15 / 7.11e-15, iterations 6 = 6.
+  - Information, g1 at the default rtol: 8.19e-13 / 1.50e-13, iterations 10 = 10 (before A1:
+    7.85e-9 / 7.26e-8 and 13 / 15 vs 13). The pre-A1 gap was the indefinite preconditioner
+    amplifying the reduction-order noise, A1's reading (c), not BiCGStab alone.
+- Battery (`-LE bench`, OMP 4, -j4): 207/207 pass, 717 s. **WO-4 done.**
