@@ -3707,6 +3707,15 @@ class CutcellMG {
     return eigWarm_ && !lv_.empty() && eigVmax_.extent(0) == lv_[0].n &&
            eigVmin_.extent(0) == lv_[0].n;
   }
+  // The kept iterates are cross-step state: the Solver's `redistribute` carries them across a
+  // repartition (inner cells migrated like a registry field) and hands them back here.
+  CCField eigenWarmMax() const { return eigVmax_; }
+  CCField eigenWarmMin() const { return eigVmin_; }
+  void setEigenWarm(CCField vmax, CCField vmin) {
+    eigVmax_ = vmax;
+    eigVmin_ = vmin;
+    eigWarm_ = true;
+  }
 
   // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power
   // iteration (direct for the max + a shifted iteration for the min), seeded by `seed` (or, with
