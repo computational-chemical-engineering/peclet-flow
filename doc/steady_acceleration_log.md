@@ -1402,3 +1402,29 @@ restart rule fires (the R2 regime: single-call jumps at the inexact-solve floor)
 CUDA) the same: Δt 60 disabled at 2588 with 5 restarts, Δt 600 1 restart. With R2 the disabled run
 holds the last good output (K 7.7e-10 / 2.2e-10 from K∞) instead of the rejected one (WO-8: 4e-7).
 Reported, not tuned.
+
+---
+
+## 2026-10-03 — Orchestrator rulings on G1 bed Δt 60 and G3 bed; final battery
+
+**Rulings (recorded in note §8 G1 / G3 and §10):**
+- **G1 bed ν dt/h² = 60: PASS.** The plain tight march has no certificate within 20 000 steps (K
+  2.6e-7 off K∞); the accelerated march certifies at 724 steps (CUDA; host 686), 1.7–2.1e-8 off,
+  15× closer. Criterion extension: when the plain march does not certify within max_steps, the
+  accelerated K must be closer to K∞ than the plain march's K at max_steps (gate script
+  `--plain-uncertified`, or automatic when window 0 of the run did not converge).
+- **G3 bed: K agreement PASSES** (spread 4.67e-9 CUDA / 5.46e-9 host). **The status / restart
+  criteria are a DOCUMENTED LIMITATION, not a pass:** restarts occur only below ~5e-12 (the
+  inexact-solve floor) over 3000 unconditional calls; there the criterion is R2's guarantee (the
+  state is never left at a rejected iterate; the disabled runs hold K within 7.7e-10 / 2.2e-10 of
+  K∞). Unreachable from `march_to_steady` (phase A hands over above ~1e-10 under S1). §10 risk added.
+
+**Final battery at the branch head** (flow `ae6fa3a` code = `a6da9eb`; core unchanged since
+`868938f`, so its 96 / 96 battery of entry "Review fixes" stands):
+
+    wo7/battery.sh build_omp <log>     # OMP_NUM_THREADS=8 ctest -LE bench -E '_np[0-9]+$' -j3;
+                                       # OMP_NUM_THREADS=2 ctest -LE bench -R '_np[0-9]+$' -j4 (--bind-to none)
+    OMP_NUM_THREADS=8 ctest --test-dir build_cuda -R '^march' -V
+
+- host-openmp: serial **63/63** (471 s), MPI **130/130** (238 s);
+- CUDA: `march_to_steady`, `march_state` **2/2** (61 [ok] checks).

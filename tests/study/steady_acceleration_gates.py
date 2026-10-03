@@ -262,15 +262,23 @@ def g1_bed(a, case, conv, Ks):
     kp = Ks.get(0, a.k_plain)
     if kp is None or not (0 in conv or a.k_plain is not None):
         return
+    # Extension (orchestrator 2026-10-03): when the plain tight march does not certify within
+    # max_steps, the accelerated K must be closer to K_inf than the plain K at max_steps.
+    uncert = (0 in conv and not conv[0]) or a.plain_uncertified
     for w, K in Ks.items():
         if w == 0:
             continue
         ends = [(abs(K / ki - 1.0), abs(kp / ki - 1.0)) for ki in BED_K_INF]
-        ok = conv[w] and all(ea <= ep + 1e-8 for ea, ep in ends)
+        if uncert:
+            ok = conv[w] and all(ea < ep for ea, ep in ends)
+            rule = "acc closer than the uncertified plain K at max_steps"
+        else:
+            ok = conv[w] and all(ea <= ep + 1e-8 for ea, ep in ends)
+            rule = "acc <= plain + 1e-8"
         print(f"G1 bed staggered dt={case.dt():.6g} m={w}: |K_acc/K_inf-1| "
               f"{ends[0][0]:.2e}..{ends[1][0]:.2e}, |K_plain/K_inf-1| {ends[0][1]:.2e}.."
-              f"{ends[1][1]:.2e} (K_plain {kp!r}) -> {'PASS' if ok else 'FAIL'} "
-              f"(acc <= plain + 1e-8)", flush=True)
+              f"{ends[1][1]:.2e} (K_plain {kp!r}) -> {'PASS' if ok else 'FAIL'} ({rule})",
+              flush=True)
         rec = common_rec(a, case)
         rec.update(gate="g1_bed", window=w, K_acc=K, K_plain=kp, K_inf=list(BED_K_INF),
                    err_acc=[e[0] for e in ends], err_plain=[e[1] for e in ends], ok=ok)
@@ -546,6 +554,9 @@ def main():
     ap.add_argument("--k-plain", type=float, default=None,
                     help="run, tight staggered bed: the plain tight certificate's K at this dt "
                          "(from the log) for the G1 bed criterion, when window 0 is not run")
+    ap.add_argument("--plain-uncertified", action="store_true",
+                    help="run, G1 bed: --k-plain is the plain march's K at max_steps (it did not "
+                         "certify); the accelerated K must then be closer to K_inf")
     ap.add_argument("--steps", type=int, default=30)
     ap.add_argument("--at", type=int, default=25)
     ap.add_argument("--warmup", type=int, default=100, help="g8: plain steps before timing")
