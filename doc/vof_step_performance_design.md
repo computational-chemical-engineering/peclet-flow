@@ -2169,3 +2169,471 @@ build).**
    labels, FCG, flag and selector carry over.
 5. **Selector spelling** `set_pressure_bottom_solver('auto'|'direct'|'algebraic')` (pending
    Q-D4).
+
+---
+
+## 14. Addendum (2026-10-04): the host (OpenMP) step, from 3.1× TBFsolver toward parity
+
+**Status:** DESIGN. Worktree `suite/flow-cpu14` (branch `cpu14` = flow origin/main `6719f01`). Brief:
+`~/Codes/bubble_column_perf/BRIEF_CPU_PROJECTION.md`. §14 **supersedes** the CPU columns of §0 and
+§6, the host clause of §13 D-5 ("host backends keep GraphAMG") and §13.9 Q-D6's default. WO-9/10/12
+are in flight and are assumed to land as designed in §5.10/§5.8/§5.13.
+
+Markers: **[meas-S]** Snellius genoa, job 27519212, flow `d02d3b0`, 1×24 and 8×3, rtol 1e-10
+(`/projects/0/prjs1022/peclet/bubble-cpu/results/kprof-d02d3b0/summary.txt`); **[meas-W]** this
+note's workstation runs (5965WX, load 39–57: only serial code and launch structure are read from
+them); **[model]** derived here. All savings are ms/step.
+
+### 14.0 Decisions at a glance
+
+| rank | item | kind | 1×24 | 8×3 | build | risk |
+|---|---|---|---|---|---|---|
+| 1 | **H-0** benchmark protocol: np = 1 runs without `init_mpi`; the case's rtol 1e-8; Zen layouts that never straddle an L3; `PECLET_FLOW_HOST_ARCH=znver4` | no `src/` change | −9 (np 1), −16 (rtol) | −20 to −25 (layout), −15 (rtol) | S | low |
+| 2 | **H-1** `'direct'` bottom on host backends (single rank); the FCG's reductions single-lane on host | recorded numerics | −13 | 0 (see H-6) | S | low |
+| 3 | **H-4** container on host: exact-count list launches with a dynamic schedule, row-mapped region kernels, flattened bbox, row scans, one-launch moves | bitwise | −11 to −16 | −8 to −12 | M | low |
+| 4 | **H-3** single-launch stragglers and fill/BC launches under rule H | bitwise | −10 to −13 | −5 to −7 | S–M | low |
+| 5 | **H-2** prolong with integer coarse indices and weights | bitwise | −5 | −4 | S | low |
+| 6 | **H-6** distributed host `'direct'` (§13 Q-D7, host half): redundant per rank | recorded | 0 | −13 | M | med |
+| 7 | **H-7** distributed box passes: shell-only shell launch, simd interior | bitwise | 0 | −3 to −5 | S | low |
+| 8 | **H-5** Krylov reduction fusion on host (after WO-10) | bitwise vs post-WO-10 | −2 | −2 | M | low |
+
+**End state [model]** (§14.4): 1×24 ≈ **69 ms** (60–78) against TBFsolver's 46, i.e. ≈ 1.5×; 8×3 ≈ 83
+(a CCD-aligned 6×4 is the recommended 24-core MPI layout); 192 cores ≈ 55 (45–65, low confidence)
+against 25. **The brief's ≤ 50 ms at 1×24 is not reached by structural work plus H-1.** Closing the
+remaining ≈ 19 ms needs user-owned options stacked (U-1 case rtol 1e-6 ≈ −9; U-2 E1 float V-cycle ≈ −8)
+plus the conditional F4 (≈ −3); see Q-H6, Q-H7.
+
+### 14.1 What the profile measured: five findings that reorder the work
+
+1. **The 1×24 profile ran the distributed code path.** `bench_peclet.py` (and
+   `tests/study/vof_perf/run_mpi.py`) call `mpi_block` + `init_mpi` at np = 1, so
+   `CutcellMG::distributed_` is true and none of WO-3…5's single-rank paths runs: A3's wrap reads
+   (`fusedWrapReads()` needs `!distributed_`), A5's fused zero, A6's resident loop. Fingerprints
+   [meas-S]: `core::halo::selfCopy` 493.8 launches (7.90 ms) is GridHalo's periodic self-exchange;
+   `cc_smooth_box` 626.4 launches (17.9 ms) is an interior plus a shell launch per colour pass;
+   `cc_residual_box` 78.3, `cc_apply_exact_box` 28.1, `zeromemset` 78.1 (the distributed
+   `deep_copy(cs.x, 0)`). The single-rank profile of the same code has `cc_smooth` 313.2 launches,
+   no selfCopy and no box kernels [meas-W, `bubble_column_perf/perf/main_host/kern_omp8.txt`]. The
+   brief's "fuse the periodic self-copy into the stencils" is therefore built (A3) but was not
+   measured.
+2. **The ≈ 22 ms outside kernels is the host GraphAMG bottom.** [meas-W] `PECLET_FLOW_MG_DEBUG=3`
+   level timer, frozen main host module (`perf3/frozen_main/omp`), `prof.py 20 --warm 3 --pcg`, 1×8,
+   two runs: L3 (16×12×8: `graphAmgSolveBottom` including its per-step `buildAmg`) **0.375 s and
+   0.374 s per 250 V-cycles = 1.50 ms per V-cycle**, while the parallel levels moved 14 % between the
+   runs. At 13.0 iterations (≈ 13.5 V-cycles) that is ≈ 20 ms/step, which is nearly all of the
+   143.6 − 121.2 = 22.4 ms outside kernels [meas-S]. At rtol 1e-8 (≈ 11.6 V-cycles) it is ≈ 17 ms.
+3. **The batched container's list kernels are serial per block on host.** Under GCC, Kokkos'
+   OpenMP backend compiles a static `RangePolicy` to `schedule(static)` without a chunk
+   (`OpenMP/Kokkos_OpenMP_Parallel_For.hpp`): one contiguous block of iterations per thread. The
+   WO-8 list kernels launch over Σ upper bounds (each block's inner region) and exit at `q ≥ end`;
+   a block's active entries (≈ 10 % of its sub-range) sit at its head and land on one thread. With
+   16 blocks on 24 threads at least 8 threads idle and the largest block sets the time. Tier 3
+   (`batch_curv_list` pass 1: PV fits on ≈ 35 % of interfacial cells) is the most expensive of
+   these. The region kernels map a flat index with three 64-bit div/mod per cell plus a job search.
+   This finding is from the code; WO-H0 measures it before WO-H4 relies on it.
+4. **The baseline ran rtol 1e-10; the case runs 1e-8** (register, 2026-10-03; 10.6 iterations per
+   step instead of 13.0).
+5. **The 8×3 imbalance is placement.** `--distribution=block:block --cpu-bind=cores` on cores 0–23
+   (CCDs 0–2 of an EPYC 9654, 8 cores per CCD) gives rank 2 cores 6–8 and rank 5 cores 15–17: each
+   straddles two L3s. Ranks 2 and 5 show 122.9 and 124.4 ms kernel time against 98.0–101.7 for the
+   others [meas-S], and the others wait in MPI.
+
+**Scope:** host execution of the bubble-column step; the projection first, then the container and
+the momentum stragglers. **Out of scope:** device paths (every change here is either bitwise on
+device or a host-only `if constexpr` branch); S3; E1/E2; core changes (merging GridHalo's selfCopy
+into pack needs a core tag: deferred); the momentum algorithms; multi-node.
+
+### 14.2 Constraints added to §2
+
+- A host-only branch selects on `std::is_same_v<typename Exec::memory_space, Kokkos::HostSpace>`,
+  as `ccdetail::ccRows3` does. The device branch keeps its bits.
+- Bitwise items pass G-BIT (§8) on host 1×8 and 1×24, nvidia-cuda, `state_hash` + np2 and the MPI
+  np-tests. Recorded items pass G-NUM-H (§14.6).
+- The register holds "np = 1 bit-exactness is the gate for every distributed default". That gate
+  needs `init_mpi` at size 1 to keep running the distributed path, so H-0 is a **protocol** change,
+  not a change of `init_mpi`.
+- No new host `MDRange3<` in a hot path (rule H, §4.5). The host-serial cutoff (8192) stands.
+
+### 14.3 The items
+
+**H-0. Benchmark protocol (no `src/` change).**
+- **np = 1 is single-rank.** When `comm.Get_size() == 1`, skip `mpi_block` and `init_mpi`: in
+  `tests/study/vof_perf/run_mpi.py` (and add `--dump` there, same format as `prof.py`), and in the
+  caller's Snellius `bench_peclet.py`. [model] −9 at 1×24 and rtol 1e-8: selfCopy −4.9 (net of the
+  single-rank fills before prolong), smoother launches and shell scans −3.7, residual/matvec box
+  −0.65, zero fills −0.65; the single-rank momentum fills (`ibm_pfill`, 3 MDRange2 per fill) give
+  back +1 to +2 until H-3(d) lands.
+- **rtol.** `bench_peclet.py` uses the case's registered 1e-8 in both `set_pressure_pcg` calls.
+  [model] projection −14.2, momentum −1.5 (its rtol follows the pressure rtol).
+- **Layouts on Zen.** A rank's cpuset never spans two CCDs. On genoa (8 cores per CCD) the
+  24-core layouts are 1×24, 3×8, 6×4, 12×2 and 24×1 on cores 0–23; 8×3 only as 8 CCDs × 3 cores
+  (`--cpu-bind=mask_cpu`, one 3-core mask per CCD). At 192 cores, 24×8 (one rank per CCD) is
+  measured next to 64×3.
+- **Site build.** `PECLET_FLOW_HOST_ARCH=znver4`. Under A1 (`-ffp-contract=off`) its bits equal
+  the generic build's; confirm once with G-BIT on the workstation at `znver3`.
+- `OMP_WAIT_POLICY=active` and spread placement (24 threads over 12 CCDs) are measured in S-1,
+  not assumed (Q-H5).
+
+**H-1. `'direct'` bottom on host backends, single rank (recorded numerics change).**
+- **Decision.** `'auto'` selects `'direct'` on host where §13.4.6 holds; the `kHostMemory`
+  condition of `directBottomIneligible()` is removed. The engine is §13's, unchanged: the FP32
+  block-tridiagonal factor (the case: walls in y, so s = y, P = 12, b = 128) preconditions FP64 FCG
+  to τ = 1e-5. `'algebraic'` stays selectable.
+- **Host team size.** `T_host = min(kBottomHostTeam = 8, team_size_max)` for the factor and the
+  solve launches (`directTeam`, `mac_cutcell_mg.hpp:2918`). 8 is one Zen CCX. The factor and M are
+  bitwise independent of T by construction (§13.2, U3).
+- **Host reductions single-lane.** On host, every team reduction of the FCG skeleton (the dots,
+  the max-norms, the per-component sums of the mean projections) is computed by one lane,
+  `Kokkos::single(Kokkos::PerTeam(t), …, result)` with the broadcast form, ascending ext index over
+  the same cell set. Cost ≈ 8 × 1536 FMA ≈ 5 µs per FCG iteration. The host bottom's bits are then
+  independent of T and of `OMP_NUM_THREADS`, which H-6 needs. The device keeps team reductions.
+- **Factor launch.** Lazy, at the first bottom solve after `setOpenness`, as on device.
+- **Cost [model].** Factor ≈ 17–21 M FMA in ordered chains over 8 threads ≈ 1.3–1.8 ms per step.
+  A solve takes one FCG iteration (§13.8 B: mean 1.02), ≈ 0.13 ms. So ≈ 3 ms per step at 11.6
+  V-cycles, against ≈ 17: **−13**.
+- **Numerics.** GraphAMG's inner 1e-8 is replaced by FCG to τ = 1e-5 with an M accurate to 2e-7…5e-6
+  (U2). On CUDA the same switch measured 2.67e-14 over 50 steps with identical iterations (653).
+- **Rejected:** keeping GraphAMG for host bitwise (17 ms per step, the largest single host term);
+  GraphAMG at τ = 1e-5 (at best halves its iterations: still ≈ 8–10 ms); reusing GraphAMG's setup
+  across steps (still ≈ 1 ms of serial sparse work per solve); an explicit dense inverse (2n³ =
+  7.2 GFLOP per step).
+- **Lever if the host bottom exceeds 4 ms per step at 1×24 (not v1):** in M and in the factor's
+  Q = WᵀW and trailing update, loop j outer and outputs i inner (`omp simd` over i). Each output
+  keeps its ascending-j sum, so the bits are unchanged, and the loops vectorize 4–8 wide.
+
+**H-2. Prolong with integer coarse indices (bitwise).**
+`prolongAddCell` (`mac_cutcell_mg.hpp:406`) derives the coarse index and weight from
+`floor(0.5·i − 0.25 + gc)`: three floors and six FP↔int conversions per fine cell, scalar. Per axis:
+
+```
+ratio 2:  x0 = (i >> 1) + gc - 1 + (i & 1);   wx = (i & 1) ? 0.25 : 0.75
+ratio 1:  x0 = i + gc;                         wx = 0.0
+```
+
+These are exactly the values the floor path produces: 0.5·i − 0.25 + gc is exact in double, so its
+floor is exact and the weight is exactly 0.25, 0.75 or 0. The interpolation expression stays
+**textually unchanged**, including `(1 - wx)` written as a subtraction, so nvcc sees the same DAG
+(A2's FMA lesson, R1). The body is shared by host and device; if CUDA G-BIT fails, the change goes
+to the host branch only. [model] 0.64 → ≈ 0.22 ms per V-cycle: **−4.9**.
+
+The brief's question about mean removal and dot at ≈ 170 µs per launch has two causes: host MDRange
+(`mgmeanr` is a raw `MDRange3`; `dot` is `ccReduce3`'s MDRange) and a loop-carried add chain of
+≈ 4 cycles per cell. WO-10 removes the first. H-5 removes passes. The chain stays unless WO-10
+adopts lanes (Q-H4).
+
+**H-3. Stragglers and fill/BC launches under rule H (bitwise; one commit per family).**
+- **(a) `Solver::copyInner`** (`flow_ibm_core.hpp:983`; also `flow_reference.hpp:131`). Today a
+  flat index with three 64-bit div/mod per cell. Change: `ccFor3` over the inner box. 7 launches,
+  3.07 ms [meas-S] → ≈ 0.2.
+- **(b) `vof::block::gather_local_sum`** (`block_exchange.hpp:461`). Today, per domain cell,
+  16 jobs × 3 axes of `((v % L) + L) % L`. Change: `ccFor3`, plus per-axis job masks.
+  - For each axis d, a host-built array over the patch's coordinates holds 16-bit masks
+    `m_d[x_d]` = {k : job k's box contains `x_d + o_d` under today's periodic predicate}.
+  - Per cell, `m = mx[x] & my[y] & mz[z]`; the jobs in m are visited in ascending k, with `l[d]`
+    computed as today.
+  - Same jobs, same order, same additions, so bitwise. 2.83 → ≈ 0.2.
+- **(c) `rhs_var`** (`flow_ibm_project.hpp:988`) and **`ibm_build_diff_var`**
+  (`cut_cell_ibm.hpp:366`). `MDRange3` → `ccFor3` with the body verbatim; each kernel keeps its
+  execution space (add an `Exec` parameter to the helper if they differ). 2.52 + 3.78 → ≈ 1.5 + 2.2.
+- **(d) Momentum periodic fill** (`Solver::fillAxis`, `ibm_pfill`, one MDRange2 per axis). Where a
+  call site fills x, y and z back to back:
+  - one launch over the rows of the three disjoint ghost slabs, exactly as `CutcellMG::fillWrap`
+    (§5.4), with the serial cutoff;
+  - single-axis callers keep `fillAxis`;
+  - bitwise by §5.4's argument (each ghost cell is written once, from the inner cell the sequential
+    fill propagates);
+  - −1 to −2. This is what makes H-0's np = 1 switch pay in the momentum stage.
+- **(e) `bc_vel`** (`mac_bc.hpp:54`, one MDRange2 per face and component). One launch per (axis,
+  BC application) covers both faces and every component the call site applies back to back, when
+  the two ghost planes are disjoint (`ext_a > 2g`). Different axes stay separate launches in their
+  original order, so edges keep their write order. 138.5 launches → ≈ 25: ≈ −2.
+
+**H-4. The container on host (bitwise).** Host branches only; the device launches are untouched.
+The statistics kernels (`area`, moments) belong to WO-9 and are not touched here.
+- **(a) List kernels.** These are the bodies with the `q ≥ end(base + k)` guard:
+  `vofCurvListPass` passes 0–3, the PLIC over the worklist, the debris act kernels, and every other
+  batch kernel of that shape.
+  - Launch `RangePolicy<SExec, Schedule<Dynamic>>(0, Σ_k cnt_k).set_chunk_size(16)`.
+  - `cnt_k = end − start` is read directly: the View is HostSpace, so no transfer exists. A
+    host-built exact offset table maps t → (k, q = start(base + k) + t − off_k). The body is
+    verbatim.
+  - Each q is visited once, and every body writes only its own cell or adds integers atomically,
+    so the result is bitwise.
+- **(b) Region kernels.** These map a flat index with `%`/`/` per cell: ghost zero, periodic,
+  clamp, the sweep update, hf reset, CSF force, freeze, flux.
+  - Iterate rows (k, y, z) with the x loop inside, `omp simd` where `ccFor3`'s contract holds, and
+    find the job once per row.
+  - Ghost-only kernels (ghost zero, periodic) iterate only their ghost shell's rows, using
+    `fillWrap`'s three-slab split per job.
+  - Clamp skips any row that lies inside the domain on every non-periodic axis (no cell in it
+    writes).
+- **(c) `batch_bbox`.** Today `TeamPolicy(nj, AUTO)`, which on host is one thread per block.
+  Change: one row-parallel pass over all jobs' inner rows. Each row computes its six extrema over
+  x, then integer `atomic_min` / `atomic_max` into the job's slots. Order-free, so bitwise.
+- **(d) Scans** (`batch_worklist`, `batch_curv_compact`, the debris mark scans).
+  - A `parallel_scan` over rows; a row's value is its hit count in x order.
+  - The final pass writes the row's hits at [prefix, prefix + count) in x order, which gives the
+    identical list.
+- **(e) `movePiece`** (`move_local`: one MDRange3 per piece per component, 75 launches). One launch
+  per call over all (piece, component) pairs, through a by-value job table (≤ 16 per chunk), rows
+  inside. Pieces write disjoint block regions; add a debug assert for it.
+- [model] curvature 16.9 → ≈ 7.5 (with H-3b), block advect 15.3 → ≈ 6, debris 1.9 → ≈ 1.
+
+**H-5. Krylov reduction fusion on host (after WO-10; bitwise against the post-WO-10 state).**
+- In the single-rank resident PCG, host branch:
+  - (i) the matvec kernel also accumulates p·Ap;
+  - (ii) the update kernel (x += αp, r −= αAp) also accumulates {Σr, count} over fluid cells;
+  - (iii) the mean subtract of r also takes max|r|.
+- Each fused loop visits the cells in WO-10's order: `ccFor3`'s row partition, x ascending,
+  per-thread partials combined in thread order. If WO-10's order cannot be expressed inside a
+  `ccFor3`-shaped row loop, STOP and report.
+- The distributed path fuses the same way, before the Allreduce. Net: −3 L0 passes and −3 launches
+  per iteration.
+- **Q-H4 (WO-10 not yet committed):** adopt 4 fixed x-lanes per row.
+  - lane = (x − lo.x) & 3, each lane ascending; the row value is (l0 + l1) + (l2 + l3).
+  - ISA-independent: there is no reassociation, and vectorizing changes no lane's order.
+  - It breaks the add chain that bounds a pencil reduction at ≈ 40 µs per L0 pass at 24 threads:
+    ≈ −2 more at 1×24.
+
+**H-6. Distributed host `'direct'` (§13 Q-D7, host half; recorded).**
+- **Eligibility.** On host-memory builds the `!distributed_` condition is dropped. The device keeps
+  it, because CUDA-aware MPI is unresolved.
+- **Once per operator change:**
+  - every rank allgathers the bottom level's openness ox, oy, oz (inner cells, by global id),
+    reusing GraphAMG's `amgGlobalOfLocal_` map and gatherv helper;
+  - the data goes into a private, single-rank-shaped global bottom level `gb_`;
+  - `gb_` runs the single-rank `fillOpenness`, `applyBoundaryOpenness`, `buildCutcellOpFace` (same
+    gf), the label kernel and the factor.
+- **Per V-cycle:** allgatherv the rhs (as GraphAMG does today), run the FCG on `gb_`, and each rank
+  copies its own block of x out.
+- **Why it is bitwise.** With H-1's single-lane reductions, the result equals the single-rank
+  `'direct'` result bitwise at any thread count, provided the gathered openness equals single-rank's
+  bottom openness bitwise. The np-gates assert that property of the hierarchy, and GraphAMG's
+  gather already relies on it.
+- Every rank factors redundantly, which is GraphAMG's pattern today. [model] 8×3 −13; 192 cores
+  −12 to −15.
+- **Rejected:** a rank-0 solve plus broadcast. It adds a latency step per V-cycle, and the other
+  ranks idle anyway.
+
+**H-7. Distributed box passes (bitwise).** In the host branch of `cutcellSmoothColorBoxFace`,
+`residualCutcellBoxFace` and the apply box:
+- the shell launch iterates only the shell (the z-slabs, then the y-slabs inside them, then the two
+  x-runs of the remaining rows), instead of every row of the box with a per-cell skip test;
+- the interior launch (empty skip box) uses a variant with `omp simd` and no skip test;
+- same cells, same colour rule. [model] 8×3: −3 to −5.
+
+**Conditional (not main line; Q-H7):**
+- **F4: a persistent host team for the coarse tail** (L1, L2 and the bottom in one
+  `TeamPolicy(1, pool)` launch with team barriers).
+  - After the main line, ≈ 1000 launches/step × 6–8 µs ≈ 6–8 ms of fork/join remain; F4 recovers
+    about half, at L cost.
+  - It is B1's retired in-kernel V-cycle rebuilt for host, and Kokkos has no barrier inside
+    `parallel_for`.
+- **F1: two-colour temporal blocking.** It needs its own design: at 24 threads the 64 z-planes give
+  each thread 2–3 planes, so z-slab lagging is mostly boundary planes.
+- **Prolong reading coarse ghosts through a composed wrap/clamp map.** It removes the fill + Neumann
+  launches before each prolong: ≈ −0.6.
+
+### 14.4 Expected end state [model]
+
+**1×24, rtol 1e-8**, ms/step:
+
+| stage | now [meas-S] (rtol 1e-10, np 1 distributed) | after H-0 | main line (H-0…H-5 + WO-10) |
+|---|---|---|---|
+| projection | 85.2 | 60.5 | 37 (32–42) |
+| momentum | 15.0 | 15.0 | 8.5 (7.5–10.5) |
+| curvature | 16.9 | 16.9 | 7.5 (6–9) |
+| block advect | 15.3 | 15.3 | 6 (5–8) |
+| predictor + debris + csf | 6.2 | 6.2 | 5.5 |
+| outside the stage timers | 5.0 | 5.0 | 4.5 |
+| **step** | **143.6** | **≈ 119** | **≈ 69 (60–78)** |
+| TBFsolver, same 24 cores [brief] | 46 | | |
+
+Projection in the main line, per V-cycle or iteration [model]:
+- smoother 1.1 ms per V-cycle;
+- residual 0.3;
+- prolong 0.22;
+- restrict + fills 0.19;
+- the bottom ≈ 3 ms per step;
+- the Krylov part 0.87 ms per iteration;
+- setup ≈ 6 ms per step.
+
+The smoother (≈ 13 ms per step) is the largest remaining term, and it is near its L3 bandwidth.
+Only F1, E1 or fewer iterations (S3, U-1) move it.
+
+**Beyond the main line**, each approximate at 1×24:
+- U-1, case rtol 1e-6 (D1 passed every physics gate; 7.4 iterations): −9;
+- U-2, E1 float V-cycle: −7 to −10;
+- F4: −3 to −4;
+- lanes (Q-H4): −2;
+- spread placement: unknown (fact, S-1).
+
+**8×3** (rank 0): 166.3 [meas-S] → aligned ≈ 143 → rtol 1e-8 ≈ 128 → main line with H-6 and H-7
+≈ **83** (72–95). A 6×4 run is expected at or below that.
+
+**192 cores** (64×3): 82–85 [brief] → ≈ **55** (45–65). The contributions are H-6 (−13), rtol (−6)
+and the per-thread items scaled by ⅛ (−4). Confidence is low: the profile at this size is missing,
+and exchange latency (≈ 31 exchanges per iteration on the box path) is the probable next term.
+TBFsolver: 25.
+
+### 14.5 Work orders
+
+Order: WO-H0, then WO-H1…H3 in sequence; WO-H4 may run in parallel in its own worktree (it touches
+`src/vof/*` only); then S-1; WO-H5 waits for WO-10; then WO-H6, WO-H7, S-2, WO-H8. Every commit stages
+named paths only.
+
+- **WO-H0. Protocol and baselines** (§14.3 H-0).
+  - `run_mpi.py`: the size-1 skip and `--dump`.
+  - The `bench_peclet.py` diff (size-1 skip, rtol 1e-8) and the slurm layouts are handed to the
+    caller.
+  - Workstation baselines on current main:
+    - host 50-step dumps at 1×8 and 1×24, rtol 1e-10 and 1e-8;
+    - `PECLET_FLOW_MG_DEBUG=3` level times, 2 runs;
+    - kernel-timer profiles of the container kernels at `OMP_NUM_THREADS=1` and `8`, interleaved,
+      for H-4's scaling gate.
+  - *Accept:*
+    - the kernel listing of `run_mpi.py` at np 1, 1×8, shows 0 `selfCopy` and 0 `cc_smooth_box`
+      launches;
+    - the np = 1 dump against the `prof.py` dump is bitwise, or the difference is logged (it must
+      be ≤ N50);
+    - all numbers are in the log.
+- **WO-H1. H-1.**
+  - *Accept:* G-NUM-H (§14.6).
+  - U3 is extended on OpenMP to T ∈ {1, 2, 4, 8}: the factor + M, **and the whole FCG solve**, are
+    bitwise across T.
+  - G-PERF: L3 self time ≤ 0.35 ms per V-cycle at 1×8 by the [meas-W] method (1.50 today).
+- **WO-H2. H-2.**
+  - *Accept:* G-BIT on host and CUDA.
+  - The host `prolong` kernel time is ≤ 0.45× the pre-change module's, in an interleaved A/B on
+    the workstation (1×8, kernel timer, 3 rounds, minimum per kernel).
+- **WO-H3. H-3 (a)…(e)**, one commit each.
+  - *Accept:* G-BIT for each commit.
+  - Interleaved A/B ratios: `copyInner` ≤ 0.15×, `gather_local_sum` ≤ 0.2×, `rhs_var` and
+    `ibm_build_diff_var` ≤ 0.75×.
+  - Launches per step on the case: `ibm_pfill` ÷ 3, `bc_vel` ≤ 30.
+- **WO-H4. H-4 (a)…(e)**, commits a–e.
+  - *Accept:* G-BIT on the state (u v w p C and the block colours). The statistics are bitwise as
+    well, since H-4 does not touch their kernels.
+  - The VoF block MPI ctests pass at np 1, 2, 4.
+  - Scaling gate: time(OMP 1) / time(OMP 8) ≥ 5.5 for `batch_curv_list` and ≥ 5 for the region
+    batch kernels (interleaved; WO-H0 recorded the ratio before the change, predicted ≤ 3 for the
+    list passes).
+  - `move_local` ≤ 10 launches per step.
+- **S-1. Snellius run 1**, after WO-H0…H4 (and WO-9/10/12 if they have landed); znver4 build;
+  rtol 1e-8.
+  - Runs: 1×24; 1×24 with `OMP_WAIT_POLICY=active`; 1×24 spread over 12 CCDs
+    (`--cpus-per-task=96`, `OMP_NUM_THREADS=24`, `OMP_PLACES=cores`, `OMP_PROC_BIND=spread`); 6×4
+    CCD-aligned; 8×3 on the old map (for continuity).
+  - kprof for 1×24 and 6×4.
+  - *Accept:* the numbers are logged, §14.4 is re-stated with them, and Q-H3, Q-H5 and Q-H7 are
+    answered by their triggers.
+- **WO-H5. H-5**, after WO-10.
+  - *Accept:* G-BIT against the post-WO-10 state; −3 launches per PCG iteration.
+- **WO-H6. H-6.**
+  - *Accept:* G-NUM-H at np 2 and 4 against `'algebraic'`.
+  - `'direct'` at np 1, 2, 4 is bitwise to single-rank `'direct'` at equal `OMP_NUM_THREADS`
+    (50-step column through `run_mpi.py --dump`).
+  - `vardensity_mpi` and `telescope_mpi` are green; distributed `'algebraic'` is bitwise to before.
+- **WO-H7. H-7.**
+  - *Accept:* G-BIT, including the np-tests.
+- **S-2. Snellius run 2.**
+  - Runs: 1×24; 6×4; 8×3 on 8 CCDs; 192 cores as 24×8 and 64×3; kprof of 64×3 and 24×8.
+  - *Accept:* G-PERF-H.
+- **WO-H8.** Log, register text (§14.8), state file and handoff.
+
+### 14.6 Verification gates
+
+**G-NUM-H** (WO-H1, WO-H6). Host, `'direct'` against `'algebraic'` on the same build:
+
+| # | check | threshold |
+|---|---|---|
+| 1 | 50 steps from `ckpt_t43`, rtol 1e-10, 1×8: max rel. diff over u v w p C | ≤ 1.499e-11 (host N50, WO-0); expected ≤ 1e-13 |
+| 2 | outer iterations | identical on every step (1×8 baseline: 13 × 49, 14 × 1) |
+| 3 | `max_open_divergence_projected()` ratio | ≤ 2 per step (expected ≤ 1.001) |
+| 4 | 300 steps, inner FCG | max ≤ 3, mean ≤ 2.5; shift restarts 0; flag never set |
+| 5 | rtol 1e-8 (the case), 50 steps | iterations identical on every step |
+| 6 | `p3/solids.py` battery on host | iterations identical per step; u v w within rtol × 10 |
+| 7 | §8 G-NUM 4 physics (static drop, Hysing 1) on host | as §8 |
+| 8 | `ctest -LE bench` | green. Host `state_hash` re-baselined in the commit, with an old → new table, for the cases that newly select `'direct'`; the CUDA `state_hash` is unchanged |
+| 9 | two runs | bitwise |
+
+**G-BIT:** §8, unchanged.
+
+**Workstation A/B method** (robust to the shared host's load):
+- two modules in the same session, run A B A B A B;
+- the kernel timer's 20-step difference, taking each kernel's minimum;
+- the gates are ratios, never absolute times.
+
+**G-PERF-H** (S-2: Snellius, rtol 1e-8, znver4, 1×24 single-rank), each against its expected value:
+
+| quantity | gate | expected |
+|---|---|---|
+| step | ≤ 78 | 69 |
+| projection | ≤ 42 | 37 |
+| curvature | ≤ 9 | 7.5 |
+| block advect | ≤ 8 | 6 |
+| momentum | ≤ 10.5 | 8.5 |
+| launches per step | ≤ 1300 | |
+| step − kernel time | ≤ 8 ms | |
+| 6×4 or 8×3 on 8 CCDs | ≤ 95 | |
+
+A miss is reported, not reverted (§7).
+
+### 14.7 Open questions and risks (each has a default)
+
+- **Q-H1 [pref] Reverse §13 D-5 / Q-D6 (`'direct'` on host).** *Default:* yes (H-1); host G-NUM-H
+  replaces host bitwise. Revert = restore the `kHostMemory` line in `directBottomIneligible()`.
+- **Q-H2 [pref] Should `init_mpi` at size 1 select the single-rank engines in code?** *Default:* no.
+  The register's np = 1 gate needs the distributed path at np = 1, so this stays a protocol choice
+  (H-0).
+- **Q-H3 [fact] T_host.** *Default:* 8. Experiment: L3 self time at T ∈ {1, 2, 4, 8, 16, 24} on the
+  workstation (`PECLET_FLOW_MG_DEBUG=3`); H-1's single-lane reductions keep the bits. Take the
+  fastest, as a constant, not a setter.
+- **Q-H4 [fact] Lanes in WO-10's order.** *Default:* adopt them if WO-10 has not committed its
+  order. Otherwise there is no second re-baseline, unless S-1 shows reductions > 2.5 ms per step.
+- **Q-H5 [fact; a TBFsolver rerun is the user's (billed)] Placement for the comparison.** *Default:*
+  publish contiguous cores (as so far). S-1 measures peclet at spread placement; TBFsolver is not
+  rerun.
+- **Q-H6 [pref] Close ≤ 50 ms with U-1 (case rtol 1e-6) and/or U-2 (E1).** *Default:* neither.
+  Report the main-line number.
+- **Q-H7 [fact] F4 / F1.** *Default:* design F4 only if S-1 shows ≥ 1100 launches per step at 1×24
+  and a step above 78. F1 needs its own architect pass.
+- **Q-H8 [fact] The next step at 192 cores.** *Default:* the S-2 kprof of 64×3 and 24×8. The
+  expected next design is F3 (communication-avoiding smoothing with wall BCs) plus exchange
+  aggregation.
+- **Q-H9 [pref] The published 24-core MPI layout.** *Default:* 6×4.
+- **Q-H10 [fact] The row-pair prolong** (x-interpolated coarse lines shared by four fine rows;
+  bitwise: the same operands and expressions per output). *Default:* only if prolong exceeds
+  1.5 ms per step at 1×24 after H-2.
+- **R-H1.** H-4's premise comes from the code. If WO-H0's 1→8 scaling ratio is already ≥ 5, H-4
+  shrinks to its index-math part (−4 to −6).
+- **R-H2.** Between H-0 and H-3(d), the single-rank momentum fills cost +1 to +2.
+- **R-H3.** At spread placement, T_host = 8 spans CCDs and the barrier cost about doubles (Q-H3).
+- **R-H4.** H-2 on CUDA could contract differently. Keep the expression text; the fallback is the
+  host branch only.
+- **R-H5.** The 1×24 end state misses ≤ 50 ms (centre 69).
+- **R-H6.** Other host cases (IBM, porous) take `'direct'` only under §13.4.6 (≤ 64 components,
+  b ≤ 192, n ≤ 8192). Otherwise GraphAMG runs, unchanged.
+
+### 14.8 Register entries this section creates (for the caller to add)
+
+1. **Host backends use the `'direct'` bottom where eligible.** This reverses §13 D-5's host clause
+   and Q-D6's default.
+   - Evidence: GraphAMG costs 1.50 ms per V-cycle [meas-W], which is ≈ the 22 ms/step outside
+     kernels [meas-S].
+   - Rejected: GraphAMG kept for host bitwise; GraphAMG at τ = 1e-5; GraphAMG setup reuse.
+2. **On host, the bottom FCG's reductions are single-lane in index order**, so the bits are
+   independent of T and of the thread count; T_host = 8 affects speed only.
+   - Rejected: team reductions on host.
+3. **The distributed host `'direct'` runs redundantly on every rank**, from the allgathered bottom
+   openness.
+   - Rejected: a rank-0 solve plus broadcast; GraphAMG.
+4. **One-rank benchmarks run without `init_mpi`.** `init_mpi` at size 1 stays distributed, because
+   the np = 1 gate needs it.
+   - Rejected: a silent single-rank switch inside `init_mpi`.
+5. **Host list-driven batch kernels launch over exact counts with a dynamic schedule; host region
+   kernels iterate rows.**
+   - Rejected: upper-bound launches under GCC's contiguous static schedule; per-cell div/mod index
+     maps.
+6. **Benchmark layouts on Zen never straddle an L3 (CCD).**
+   - Rejected: 8×3 on contiguous cores 0–23.
