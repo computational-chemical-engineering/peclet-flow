@@ -2917,11 +2917,14 @@ class CutcellMG {
   }
   // A launch's team size: min(1024, team_size_max) when team <= 0, else `team` clamped to it; with
   // `probe` false a positive `team` (a size this kernel already ran with) is used as is.
+  // `scratch` = the team scratch (level 0) the kernel requests, in bytes.
   template <class K>
-  static int directTeam(const K& k, int team, bool probe) {
+  static int directTeam(const K& k, int team, bool probe, std::size_t scratch = 0) {
     if (team > 0 && !probe)
       return team;
     Kokkos::TeamPolicy<CCExec> pol(CCExec(), 1, 1);
+    if (scratch)
+      pol.set_scratch_size(0, Kokkos::PerTeam(scratch));
     const int tmax = std::min(1024, pol.team_size_max(k, Kokkos::ParallelForTag()));
     return (team > 0) ? std::min(team, tmax) : tmax;
   }
@@ -2939,9 +2942,12 @@ class CutcellMG {
     k.kc = dirKc_;
     k.aug = dirAug_;
     k.tauPiv0 = tauPiv0;
-    const int T = directTeam(k, team, probe);
-    Kokkos::parallel_for("peclet::flow::mg_bottom_factor",
-                         Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
+    const std::size_t scratch = BottomFactorKernel<FR, FPC>::scratchBytes(D.pl.b);
+    const int T = directTeam(k, team, probe, scratch);
+    Kokkos::parallel_for(
+        "peclet::flow::mg_bottom_factor",
+        Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T).set_scratch_size(0, Kokkos::PerTeam(scratch)),
+        k);
     return T;
   }
   // The FCG kernel with M = the direct factor `D`: the production solve (precondOnly = false) or,

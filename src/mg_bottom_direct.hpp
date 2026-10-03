@@ -36,6 +36,14 @@
 
 namespace peclet::flow {
 
+// Unrolling the single-accumulator dot loops keeps several independent loads in flight; it changes
+// no operation and no order (bitwise-neutral).
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#define PECLET_BOTTOM_UNROLL _Pragma("unroll 16")
+#else
+#define PECLET_BOTTOM_UNROLL
+#endif
+
 inline constexpr int kBottomMaxPlane = 192;  // b cap (§13.9 Q-D5)
 inline constexpr int kBottomTile = 16;       // Cholesky tile (compile time: it fixes the order)
 inline constexpr double kBottomPivotTol = 1e-6;
@@ -207,9 +215,11 @@ struct BottomDirect {
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b), [&](int i) {
         FacReal acc = 0;
         if (k == 0) {
+          PECLET_BOTTOM_UNROLL
           for (int j = 0; j < b; ++j)
             acc += Q(k, j, i) * u(o + j);
         } else {
+          PECLET_BOTTOM_UNROLL
           for (int j = 0; j < b; ++j)
             acc += Q(k, j, i) * (u(o + j) - e(k, j) * g(op + j));
         }
@@ -221,6 +231,7 @@ struct BottomDirect {
       const int o = k * b, on = o + b;
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b), [&](int i) {
         FacReal acc = 0;
+        PECLET_BOTTOM_UNROLL
         for (int j = 0; j < b; ++j)
           acc += Q(k, j, i) * (e(k + 1, j) * g(on + j));
         g(o + i) = g(o + i) - acc;
@@ -231,6 +242,7 @@ struct BottomDirect {
       const int oB = (P - 1) * b, oL = (P - 2) * b;
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b), [&](int i) {
         FacReal acc = 0;
+        PECLET_BOTTOM_UNROLL
         for (int j = 0; j < b; ++j)
           acc += Q(P - 1, j, i) * ((u(oB + j) - e(0, j) * g(j)) - e(P - 1, j) * g(oL + j));
         g(oB + i) = acc;
@@ -239,6 +251,7 @@ struct BottomDirect {
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, oB), [&](int f) {
         const int k = f / b, i = f - k * b;
         FacReal acc = 0;
+        PECLET_BOTTOM_UNROLL
         for (int j = 0; j < b; ++j)
           acc += Y(k, j, i) * g(oB + j);
         g(f) = g(f) - acc;
@@ -259,6 +272,14 @@ struct BottomDirect {
 template <class FacReal, class OpV>
 struct BottomFactorKernel {
   using Member = Kokkos::TeamPolicy<CCExec>::member_type;
+  // Level-0 (team) scratch, a bitwise-neutral staging of the factor's working set (§13.4.7): Ls =
+  // the current tile column of L (rows j0..b-1, the tile's columns; padded to kBottomTile + 1 so a
+  // warp's column reads hit distinct banks), St = the current diagonal tile of Sigma.
+  using SMat = Kokkos::View<FacReal**, Kokkos::LayoutRight, typename CCExec::scratch_memory_space,
+                            Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+  static std::size_t scratchBytes(int b) {
+    return SMat::shmem_size(b, kBottomTile + 1) + SMat::shmem_size(kBottomTile, kBottomTile + 1);
+  }
   BottomDirect<FacReal> D;
   OpV AFX, AFY, AFZ;
   Kokkos::View<const int*, CCMem> comp, kc;
@@ -322,7 +343,8 @@ struct BottomFactorKernel {
   }
   // Sigma's lower triangle for plane k: mode 0 = A^_k; 1 = A^_k - diag(e_k) Q_{k-1} diag(e_k);
   // 2 = the border A^_{P-1} - diag(e_0) Y_0 - diag(e_{P-1}) Y_{P-2}.
-  KOKKOS_INLINE_FUNCTION void assemble(const Member& t, int k, int mode, double delta) const {
+  KOKKOS_INLINE_FUNCTION void assemble(const Member& t, int k, int mode, double delta,
+                                       const SMat& St) const {
     const int b = D.pl.b, P = D.pl.P;
     Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b * b), [&](int idx) {
       const int i = idx / b, j = idx - i * b;
@@ -334,48 +356,68 @@ struct BottomFactorKernel {
       else if (mode == 2)
         a = (a - D.e(0, i) * D.Y(0, j, i)) - D.e(P - 1, i) * D.Y(P - 2, j, i);
       D.Sg(i, j) = a;
+      if (i < kBottomTile)
+        St(i, j) = a;  // the first diagonal tile
     });
     t.team_barrier();
   }
   // Q(k) = Sigma^{-1} (§13.4.3, "Dense SPD inverse"). Returns false (team-uniform) on a pivot
-  // that is not > tauPiv (a NaN pivot included).
-  KOKKOS_INLINE_FUNCTION bool invert(const Member& t, int k, double tauPiv, int flag) const {
+  // that is not > tauPiv (a NaN pivot included). Sigma's lower triangle is read from D.Sg and its
+  // current diagonal tile from St; the current tile column of L is kept in Ls (and stored to D.L
+  // for W). Each stored scalar is the same expression, in the same order, as without the staging.
+  KOKKOS_INLINE_FUNCTION bool invert(const Member& t, int k, double tauPiv, int flag,
+                                     const SMat& Ls, const SMat& St) const {
     const int b = D.pl.b;
     const auto& S = D.Sg;
     const auto& L = D.L;
     const auto& W = D.W;
     for (int j0 = 0; j0 < b; j0 += kBottomTile) {
       const int j1 = (j0 + kBottomTile < b) ? j0 + kBottomTile : b;
-      Kokkos::single(Kokkos::PerTeam(t), [&]() {  // 1. the diagonal tile, one thread
-        for (int j = j0; j < j1; ++j) {
-          FacReal acc = 0;
-          for (int m = j0; m < j; ++m)
-            acc += L(j, m) * L(j, m);
-          const FacReal p = S(j, j) - acc;
-          if (!((double)p > tauPiv)) {
-            D.stat(flag) = 1;
+      const int nc = j1 - j0;
+      // 1. the diagonal tile, column by column: row r of the tile (one thread) computes L(r, c)
+      //    for every column c < r and, right after L(r, r - 1), its own pivot L(r, r) -- each
+      //    scalar the single-thread column Cholesky's expression in its order; one barrier per
+      //    column publishes the column.
+      for (int c = -1; c < nc; ++c) {
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nc), [&](int r) {
+          if (r <= c)
             return;
-          }
-          const FacReal ljj = Kokkos::sqrt(p);
-          L(j, j) = ljj;
-          for (int i = j + 1; i < j1; ++i) {
+          const int i = j0 + r;
+          if (c >= 0) {  // L(i, j) for j = j0 + c
+            const int j = j0 + c;
             FacReal a2 = 0;
-            for (int m = j0; m < j; ++m)
-              a2 += L(i, m) * L(j, m);
-            L(i, j) = (S(i, j) - a2) / ljj;
+            for (int m = 0; m < c; ++m)
+              a2 += Ls(i, m) * Ls(j, m);
+            const FacReal lij = (St(r, c) - a2) / Ls(j, c);
+            Ls(i, c) = lij;
+            L(i, j) = lij;
           }
-        }
-      });
-      t.team_barrier();
+          if (r == c + 1) {  // the pivot of column r: every L(i, m < r) is this thread's own
+            FacReal acc = 0;
+            for (int m = 0; m < r; ++m)
+              acc += Ls(i, m) * Ls(i, m);
+            const FacReal p = St(r, r) - acc;
+            if (!((double)p > tauPiv))
+              D.stat(flag) = 1;
+            const FacReal lii = Kokkos::sqrt(p);
+            Ls(i, r) = lii;
+            L(i, i) = lii;
+          }
+        });
+        t.team_barrier();
+      }
       if (D.stat(flag))
         return false;
       if (j1 < b) {
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, j1, b), [&](int i) {  // 2. the panel
-          for (int j = j0; j < j1; ++j) {
+          for (int c = 0; c < nc; ++c) {
+            const int j = j0 + c;
             FacReal acc = 0;
-            for (int m = j0; m < j; ++m)
-              acc += L(i, m) * L(j, m);
-            L(i, j) = (S(i, j) - acc) / L(j, j);
+            for (int m = 0; m < c; ++m)
+              acc += Ls(i, m) * Ls(j, m);
+            const FacReal lij = (S(i, j) - acc) / Ls(j, c);
+            Ls(i, c) = lij;
+            L(i, j) = lij;
           }
         });
         t.team_barrier();
@@ -385,28 +427,71 @@ struct BottomFactorKernel {
           if (j > i)
             return;
           FacReal acc = 0;
-          for (int m = j0; m < j1; ++m)
-            acc += L(i, m) * L(j, m);
-          S(i, j) = S(i, j) - acc;
+          for (int m = 0; m < nc; ++m)
+            acc += Ls(i, m) * Ls(j, m);
+          const FacReal v = S(i, j) - acc;
+          S(i, j) = v;
+          if (i < j1 + kBottomTile)
+            St(i - j1, j - j1) = v;  // the next diagonal tile
         });
         t.team_barrier();
       }
     }
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b), [&](int j) {  // W = L^{-1}, per column
-      W(j, j) = FacReal(1) / L(j, j);
-      for (int i = j + 1; i < b; ++i) {
-        FacReal acc = 0;
-        for (int m = j; m < i; ++m)
-          acc += L(i, m) * W(m, j);
-        W(i, j) = -acc / L(i, i);
-      }
-    });
-    t.team_barrier();
+    // W = L^{-1}: W(j, j) = 1 / L(j, j), W(i, j) = -(sum_{m=j}^{i-1} L(i, m) W(m, j)) / L(i, i) in
+    // ascending m, by row blocks of kBottomTile: (1) every thread takes one (row i of the block,
+    // column j left of it) and sums the terms m < i0 into A(r, j) (Ls's storage); (2) thread j
+    // continues the SAME accumulator over the block's own rows (the L tile staged in St, its new
+    // W(m, j) in registers) -- each W(i, j) is the column recurrence's expression in its order.
+    const SMat A(Ls.data(), kBottomTile, b);
+    for (int i0 = 0; i0 < b; i0 += kBottomTile) {
+      const int i1 = (i0 + kBottomTile < b) ? i0 + kBottomTile : b;
+      const int nr = i1 - i0;
+      Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nr * i0 + nr * nr), [&](int idx) {
+        if (idx < nr * i0) {
+          const int r = idx / i0, j = idx - r * i0, i = i0 + r;
+          FacReal acc = 0;
+          PECLET_BOTTOM_UNROLL
+          for (int m = j; m < i0; ++m)
+            acc += L(i, m) * W(m, j);
+          A(r, j) = acc;
+        } else {
+          const int q = idx - nr * i0, r = q / nr, c = q - r * nr;
+          if (c <= r)
+            St(r, c) = L(i0 + r, i0 + c);
+        }
+      });
+      t.team_barrier();
+      Kokkos::parallel_for(Kokkos::TeamThreadRange(t, i1), [&](int j) {
+        FacReal wb[kBottomTile];  // W(i0 + r, j) of this block, this column
+        for (int r = 0; r < kBottomTile; ++r) {
+          if (r >= nr)
+            break;
+          const int i = i0 + r;
+          if (j > i) {
+            wb[r] = 0;
+            continue;
+          }
+          if (j == i) {
+            wb[r] = FacReal(1) / St(r, r);
+            W(i, j) = wb[r];
+            continue;
+          }
+          FacReal acc = (j < i0) ? A(r, j) : FacReal(0);
+          const int m0 = (j > i0) ? j : i0;
+          for (int m = m0; m < i; ++m)
+            acc += St(r, m - i0) * wb[m - i0];
+          wb[r] = -acc / St(r, r);
+          W(i, j) = wb[r];
+        }
+      });
+      t.team_barrier();
+    }
     Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b * b), [&](int idx) {  // Q = W^T W
       const int i = idx / b, j = idx - i * b;
       if (j > i)
         return;
       FacReal acc = 0;
+      PECLET_BOTTOM_UNROLL
       for (int m = i; m < b; ++m)
         acc += W(m, i) * W(m, j);
       D.Q(k, i, j) = acc;
@@ -423,6 +508,7 @@ struct BottomFactorKernel {
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b * b), [&](int idx) {
         const int c = idx / b, i = idx - c * b;
         FacReal acc = 0;
+        PECLET_BOTTOM_UNROLL
         for (int j = 0; j < b; ++j) {
           FacReal bj = 0;
           if (j == c)
@@ -438,6 +524,7 @@ struct BottomFactorKernel {
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b * b), [&](int idx) {
         const int c = idx / b, i = idx - c * b;
         FacReal acc = 0;
+        PECLET_BOTTOM_UNROLL
         for (int j = 0; j < b; ++j)
           acc += D.Q(k, j, i) * (D.e(k + 1, j) * D.Y(k + 1, c, j));
         D.Y(k, c, i) = D.Y(k, c, i) - acc;
@@ -448,6 +535,8 @@ struct BottomFactorKernel {
   KOKKOS_INLINE_FUNCTION void operator()(const Member& t) const {
     const int P = D.pl.P;
     const int Pt = D.pl.border ? P - 1 : P;
+    const SMat Ls(t.team_scratch(0), D.pl.b, kBottomTile + 1);
+    const SMat St(t.team_scratch(0), kBottomTile, kBottomTile + 1);
     Kokkos::single(Kokkos::PerTeam(t), [&]() {
       for (int a = 0; a < kBottomAttempts; ++a)
         D.stat(2 + a) = 0;
@@ -461,13 +550,13 @@ struct BottomFactorKernel {
       const double tauPiv = (attempt == 0) ? tauPiv0 : kBottomPivotTol;
       ok = true;
       for (int k = 0; k < Pt && ok; ++k) {
-        assemble(t, k, k == 0 ? 0 : 1, delta);
-        ok = invert(t, k, tauPiv, 2 + attempt);
+        assemble(t, k, k == 0 ? 0 : 1, delta, St);
+        ok = invert(t, k, tauPiv, 2 + attempt, Ls, St);
       }
       if (ok && D.pl.border) {
         border(t);
-        assemble(t, P - 1, 2, delta);
-        ok = invert(t, P - 1, tauPiv, 2 + attempt);
+        assemble(t, P - 1, 2, delta, St);
+        ok = invert(t, P - 1, tauPiv, 2 + attempt, Ls, St);
       }
     }
     const int restarts = attempt - 1;
