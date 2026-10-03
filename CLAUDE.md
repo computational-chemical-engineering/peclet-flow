@@ -609,7 +609,10 @@ res = peclet.flow.march_to_steady(s, lambda: float(s.get_u().mean()))   # <u_x> 
   instrument (budget `2 * (num_passes + 3)` blocks, early "slow" exit, ×0.1 and resume), so the
   reported state is a plain-march state. There is no instability guard (rev 2: a Ritz radius of
   this non-normal map is no stability test); an unstable plain map shows only on plain steps
-  (growth exit, R ≥ 1 never passes, stagnation fallback). `Solver.step()` is untouched. Data
+  (growth exit, R ≥ 1 never passes, stagnation fallback). Phase A "stagnates" when its residual
+  has not fallen by `slow_rate**(10 window)` (the plain march's assumed rate) in `10 window` calls
+  (review R1; a halving rule lost the dense bed at ν dt/h² = 60). A core restart restores the last
+  kept map output (review R2). `Solver.step()` is untouched. Data
   path: core's `AndersonCore` + `src/anderson_accelerator.hpp`; control path:
   `packaging/flow_steady.py` (installed as `peclet/flow/steady.py`).
 - **Scope.** Staggered `Solver`; `SolverColocated` with the `'ghost'` scheme only. Refused with a
@@ -626,7 +629,8 @@ res = peclet.flow.march_to_steady(s, lambda: float(s.get_u().mean()))   # <u_x> 
   `acc.residual`, `acc.status` ("active" | "disabled"), `acc.reason`, `acc.num_restarts`,
   `acc.num_resets`, `acc.num_columns`, `acc.memory_bytes`, `acc.seconds`, `acc.reset()`,
   `acc.disable()`. A redistribute
-  reallocates the state buffers; the accelerator then refuses to step (construct a new one).
+  reallocates the state buffers, and collocated `set_advection` changes the field count (a
+  configuration change, history reset); the accelerator then refuses to step (construct a new one).
 
 ## Open items
 

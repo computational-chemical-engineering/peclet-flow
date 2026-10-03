@@ -1243,3 +1243,106 @@ pre-WO-7 build; ctest `-LE bench` serial **63/63** (1387 s, 8 threads), MPI **13
 2 threads/rank, `--bind-to none`). Core Kokkos trees rebuilt at `f9956ed`: host-openmp **96/96**,
 CUDA **96/96** (`OMP_NUM_THREADS=2 ctest -LE bench`, MPI np 1/2/4/8 with `--bind-to none`).
 clang-format 18.1.8: flow (154 files) and core clean.
+
+---
+
+## 2026-10-03 — Review fixes R1–R6 (core `323a23a`, `868938f`; flow `c5201b2` … `fddcec7`) — G1 bed Δt 60 and G3 bed K agreement FAIL (reported, not tuned)
+
+Fixes as decided by the orchestrator on the independent review (`<scratch>/anderson_review.md`).
+Queue `<scratch>/fix/queue.sh <cuda|omp> <parts>` (WO-8's, plus the G1 bed at `--beta 60`); raw
+`<scratch>/fix/{cuda,omp}/*.jsonl`; comparisons `<scratch>/fix/cmp.py <b> g1|g2`. Builds: flow
+`build_omp` (MPI) and `build_cuda` rebuilt against core-anderson `868938f`.
+
+**Core.** R6 `323a23a`: `validate()` inside the constructor's collective (2-double sum {invalid,
+alloc}); `test_anderson_mpi` R6 case: the last rank's field one entry short → invalid_argument on
+1/1, 2/2, 4/4 ranks (host and CUDA). R2 `868938f`: a restart restores Gprev after the broadcast
+(flag in the packet), skips step 6, keeps ρ_min and the residual; step 6 moved after the broadcast.
+
+    build_{omp,cuda}/tests/test_anderson            # OMP_NUM_THREADS=8 OMP_PROC_BIND=false
+    mpirun --bind-to none -np {1,2,4} build_{omp,cuda}/tests/test_anderson_mpi
+
+- Digests before (`f9956ed`) → after, host-openmp and CUDA: metric, U1a, U1b, U1c, U2, U3, U4, U4b,
+  U6, U10 **identical** (no restart occurs in them); **U5 changes** (host e2f51bebca930280 →
+  72b951a934406e0a, CUDA bf682d437b8d3943 → 8a728a6fee4fc767) — U5 has one restart (now printed);
+  its assertions pass. U4 ≤ 1e-10 at call 154, U4b at 89 (unchanged).
+- U11 (new; Velocity + Carried, four entries λ = 1 − 1e-4, p* = 1e9, κ = 0.1, 1e-12 relative noise,
+  2000 calls): host 5 restart calls (first at 229), CUDA 5 (first at 600), status disabled ("too
+  many restarts"), state left at a rejected output **0** times; against the `f9956ed` header the
+  same harness (scan: p* 1e9 / 1e10, 3 / 4 pockets, λ = 0.9999) left it there on **5 of 5**
+  restarts in all four runs. Digest host a8f572bb99ebe1f3, CUDA
+  e83c3972cba12531.
+- U7 np 1/2/4, host and CUDA: digests **identical** to before; max|x_np − x_1|/max|x_1| = 0 /
+  4.3e-15 / 3.9e-15 (host), 0 / 4.9e-15 / 1.2e-14 (CUDA).
+- Core battery `OMP_NUM_THREADS=2 ctest -LE bench`: host-openmp **96/96**, CUDA **96/96**.
+  clang-format 18.1.8 over core's CI list: clean.
+
+**Flow.** R5 `c5201b2` (field-count change = configuration change, invalidate + refuse), R4
+`48b9174` (ctest `march_to_steady` gate_adapter), R1 `03e5757` (stagnation against
+`slow_rate**(10·window)`), R3 `fddcec7` (g3: bed depth 5e-11, K after the last non-restart call).
+
+- ctest `march_to_steady` (host): adapter — set_dt → num_resets 0 → 1 and the call bitwise equal
+  to a twin's plain step (a mix was pending without set_dt), both grids; set_pressure_warmstart
+  after construction refused at the next call, both grids; collocated set_advection(True) →
+  "changed from 4 to 7 fields … configuration change", num_resets + 1. G0(b) 75 / 395 steps
+  bit-identical; small G1 2.8e-12 / 2.2e-10. G7a: plain diverged at 440; accelerated m 3 / 5 / 8
+  **diverged at 591 / 662 / 782** (accelerated 559 / 632 / 753; WO-8 312 / 270 / 208) — R1 keeps
+  phase A going longer on this unstable map; `converged=False`, reason "diverged": pass.
+- G0(a) `state_hash.py` (serial, 1 thread) + `mpirun --bind-to none -np 2 … mpi`: **13/13
+  identical** to WO-8.
+- Flow battery (`wo7/battery.sh build_omp`): serial **63/63** (8074 s, box load ~110), MPI
+  **130/130** (1191 s). clang-format 18.1.8 (154 files): clean.
+
+**G1 tight, m = 5** (CUDA all; host the WO-5 failures + both bed Δt). Steps WO-8 → now; K against
+WO-5's plain K, the staggered bed against K∞ ∈ [98.9156994, 98.9156995].
+
+| case | CUDA steps | \|K/K_ref − 1\| CUDA | host steps | \|K/K_ref − 1\| host |
+|---|---|---|---|---|
+| §11 coll N14 / N16 / N18 / N20 / N24 | 159 / 141 / 131 / 185 / 153 (all unchanged) | 2.7e-10 / 5.1e-10 / 4.0e-10 / 6.4e-10 / 6.7e-10 | N14 147 (=) | 2.7e-10 |
+| §11 stag N14 / N16 / N18 / N24 | 60 / 79 / 139 / 207 (unchanged) | 7.0e-12 / 1.8e-11 / 1.4e-10 / 6.9e-10 | — | — |
+| §11 stag N20 | 188 → **194** | 4.6e-10 | 205 (=) | 1.9e-9 |
+| Z&H 0.343 / 0.45 N32 | 174 (=) / 396 → **409** | 4.1e-10 / 1.4e-9 | — | — |
+| bed coll | 321 → **353** (a333 c20) | 1.8e-9 | — | — |
+| bed stag ν dt/h² = 6 | 536 → **695** (a675 c20) | 1.0e-9 – 2.0e-9 (K∞) | 536 → **809** (a789 c20) | 1.6e-10 – 1.2e-9 |
+| **bed stag ν dt/h² = 60 (new)** | **724** (a699 c25), certified, 0 restarts, K 98.9156977050 | **1.7e-8 – 1.8e-8 (K∞): FAIL** | **686** (a666 c20), K 98.9156974505 | **2.0e-8 – 2.1e-8: FAIL** |
+
+Every case `converged=True`. 14/14 old cases pass; **the new case misses the 1e-8 bar on both
+backends** — as the reviewer measured (724 steps, 1.7e-8). The bar is not loosened. The accelerated
+state is certified by the unchanged instrument at rtol 1e-10; on this bed that certificate is
+premature (the plain march's own tight certificate is 1.44e-8 off K∞, WO-5), so the miss is the
+instrument's certificate depth on a 0.9999 tail, not an Anderson fixed-point error — a reading,
+for the caller.
+
+**G2 production** (CUDA, 42 runs: §11 N14–24 both schemes, Z&H, both beds; m 3 / 5 / 8): **42/42
+step counts identical to WO-8 and K bit-identical** (max |K/K_WO8 − 1| = 0); host coll N16 m5 89,
+stag N16 m5 51, stag bed m5 93 — identical. (Phase A reaches its target before any stagnation.)
+
+**G3 staggered bed** (`g3 bed --scheme staggered --N 64 --window 5 --steps 400 --extend-to 3000
+--betas 60 600 1e4`; R3 spec: depth 5e-11, cap 3000, K after the last non-restart call):
+
+| backend | ν Δt/h² | steps | status | restarts | min res | final res | K | \|K/K∞ − 1\| |
+|---|---|---|---|---|---|---|---|---|
+| CUDA | 60 | 819 | active | 0 | 4.99e-11 | = min | 98.915698483296 | 9.8e-9 |
+| CUDA | 600 | 924 | active | 0 | 4.96e-11 | = min | 98.915696022481 | 3.5e-8 |
+| CUDA | 1e4 | 1005 | active | 0 | 5.00e-11 | = min | 98.915696891947 | 2.6e-8 |
+| host | 60 | 798 | active | 0 | 4.96e-11 | = min | 98.915698453159 | 1.0e-8 |
+| host | 600 | 1031 | active | 0 | 5.00e-11 | = min | 98.915695994619 | 3.5e-8 |
+| host | 1e4 | 1176 | active | 0 | 4.99e-11 | = min | 98.915695369281 | 4.1e-8 |
+
+Status, restarts, depth and final ≤ 10·min: pass on every Δt. **K agreement over Δt: spread
+2.49e-8 (CUDA) / 3.12e-8 (host) — FAIL** (≤ 1e-8). The R3 premise (K error / residual 37–170
+along the Δt-60 trajectory, so 5e-11 pins K to 1e-8) holds at Δt 60 (ratio ~200) but not at
+600 / 1e4: there K is 2.6–4.1e-8 off K∞ at 5e-11, a ratio of 500–830. Reported, not tuned. (WO-8's
+supplementary 3000-step run had Δt 600 / 1e4 at 2.7e-12 / 2.0e-12 within 5.0e-9 of K∞.) No restart
+fired in any of these runs (they stop at 5e-11, above the floor where the R2 jumps began).
+
+**G8** (CUDA, `g8 sphere --scheme S --N 64 --window 5 --steps 50 --warmup 150`, two reps):
+staggered **3.41 / 3.43 %** of the plain step (0.517 / 0.512 ms; WO-8 3.50 / 3.52 %), collocated
+**1.21 / 1.21 %** (0.520 / 0.510 ms; WO-8 1.26 / 1.21 %): pass (≤ 5 %). `memory_bytes` =
+130 803 712 = formula.
+
+**Not done (stopped, for the caller):** R5's "invalidate on any change of the field list (incl.
+set_advection on staggered)" — on the staggered grid `set_advection` does not change the field
+list (`Solver::marchState()` returns u, v, w, P whatever the advection flag;
+`src/flow_ibm_diagnostics.hpp` marchState), so no field-list check can see it. Detecting it needs
+a new signature/configuration key (which flags: advection, scheme, implicit advection?) — a
+design choice the fix list does not make. Implemented: the field-count change (collocated) only.

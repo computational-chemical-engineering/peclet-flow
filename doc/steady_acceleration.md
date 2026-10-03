@@ -17,6 +17,12 @@ gives the decision and its oracle evidence; D5, §2.4, §4.1–§4.3, §4.6, §5
 U4, U4b, U8, U9) and §9 (WO-7, WO-3c, WO-8) are amended in place and mark what they supersede.
 Numbers and commands: log, entry "Revision 2".*
 
+***Review fixes** (2026-10-03, after the independent review of core `f9956ed` / flow `bcb5b18`;
+fixes decided by the orchestrator). Amended in place: §4.3 "Restart" (R2: a restart restores the
+last kept output), §7 stagnation (R1: progress against `slow_rate^(10·window)`, not a halving),
+§8 G1 (the staggered bed also at ν dt/h² = 60) and G3 (R3: bed depth 5e-11, K at a non-restart
+call). Numbers and commands: log, entry "Review fixes".*
+
 ---
 
 ## Revision 2 — the instability guard is removed
@@ -797,23 +803,29 @@ decCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
           else:     reason = "non-finite residual on a plain step"
           status = disabled; reset(); havePrev = false; return
       if havePrev: accept column s: copy the new RR row and column; mk = min(mk+1, m)
+      restarted = false
       if mixed and residual ≥ kNoiseFloor and rho > kRestartGrowth·rhoMin:
-          reset(); numRestarts++; rhoMin = rho
+          restarted = true
+          reset(); numRestarts++                    # review R2: rhoMin and residual keep their
+          residual = residual before this call      #   pre-call values (the restored output's)
           if numRestarts ≥ kMaxRestarts: status = disabled; reason = "too many restarts"
       decCount = (rho < rhoPrev) ? decCount+1 : 0;  if decCount ≥ kEngageDecreases: engaged = true
-      rhoPrev = rho;  rhoMin = min(rhoMin, rho)
-      # --- 6. commit on the device --------------------------------------------------------------
-      swap(Rprev, X)                                # Rprev := r_k (handle swap; X becomes scratch)
-      Gprev = buf                                   # copy (kernel COPY)
-      havePrev = true
+      rhoPrev = rho;  rhoMin = restarted ? rhoMin before this call : min(rhoMin, rho)
       # --- 7. next coefficients ------------------------------------------------------------------
       if status == active and engaged and mk ≥ 1:
           while mk > 1 and condScaled(RR) < kCondMin: drop the oldest column (mk--)
           gamma = solveTruncated(RR, b)             # §4.4
           pending = true
-      broadcast (rank 0 → all): status, reason code, mk and slot order, gamma[0..mk-1], pending, residual,
-                                numRestarts
+      broadcast (rank 0 → all): status, reason code, mk and slot order, gamma[0..mk-1], pending,
+                                restarted, residual, numRestarts
       # rev 2: the rev-1 Ritz block of step 7 (eligibility, ritzRadius, ritzCount, status = unstable) is deleted
+      # --- 6. commit on the device (review R2: after the broadcast, keyed on its restarted flag) --
+      if restarted:
+          buf = Gprev                               # restore the last kept output; no swap, no copy
+      else:
+          swap(Rprev, X)                            # Rprev := r_k (handle swap; X becomes scratch)
+          Gprev = buf                               # copy (kernel COPY)
+      havePrev = true
 
 **Notes that are not left to the implementer:**
 - The **first call** has `havePrev = false`. It evaluates one plain step, records `Rprev`/`Gprev`,
@@ -827,8 +839,17 @@ decCount = 0; rhoMin = rhoPrev = +inf. It keeps `havePrev`.
 - **The column-drop rule (cond < kCondMin) and the zero-norm drop** are unchanged. With the velocity
   metric, a column whose velocity differences are exactly zero (only Carried fields moved) has
   D_j = 0 and is dropped first.
-- **Restart** keeps `Rprev`/`Gprev` (step 6 still commits). The next call therefore forms a column
-  at once, and mixing resumes after re-engagement (two decreases).
+- **Restart (amended 2026-10-03, review R2)** restores the last kept output, like the non-finite
+  path: after the broadcast (so every rank acts on rank 0's decision) `buf := Gprev`, and step 6 is
+  skipped — `Rprev`/`Gprev` stay those of the last kept output, the rejected evaluation's ρ does
+  not enter ρ_min, and `residual` keeps its pre-call value (the restored output's). The rest of
+  step 5 is unchanged (reset, the count, the 5th restart disables, rhoPrev/decCount). The next
+  call is a plain step from the restored output and forms a column at once; mixing resumes after
+  re-engagement. Cost: one evaluation per restart. Effect: the solver never holds a rejected
+  output, and "too many restarts" leaves the last good one. *Superseded:* "Restart keeps
+  `Rprev`/`Gprev` (step 6 still commits)" — the fifth restart then left the state at the rejected
+  output (WO-8's G3 Δt-60 run: final residual 9.0e-5 after reaching 2.7e-12; the K "4e-7 off"
+  was sampled at that iterate). Core unit test U11.
 - **After `status ≠ active`,** `step()` keeps working as a plain step with no history maintenance.
   It skips the reductions too; residual stays at its last value. The driver uses `solver.step()`
   directly then anyway.
@@ -1076,8 +1097,8 @@ instrument (target residual, budget, early exit), never the instrument.
             while steps < max_steps and acc.status == "active" and acc.residual > target:
                 acc.step(True); steps += 1; callback(steps, "accelerate")
                 # rev 2: no "unstable" status; rev 1 returned MarchResult(False, steps, "unstable") here
-                if acc.residual <= 0.5 * best: best, since = acc.residual, 0
-                else: since += 1
+                if acc.residual <= slow_rate ** (10 * window) * best: best, since = acc.residual, 0
+                else: since += 1                                     # review R1 (was 0.5 * best)
                 if since >= 10 * window: stagnated = True; break
             if acc.status != "active":
                 return certify(solver.step, budget=None)             # plain march from here
@@ -1139,6 +1160,21 @@ carry at most rtol of remaining change, since its error is at most residual/(1 �
 - It never fired in the revision-1 matrix; it is the insurance that keeps the larger budget from
   costing 60 plain steps on such a case.
 
+**Why stagnation is measured against `slow_rate` (amended 2026-10-03, review R1).** Phase A
+counts a call as progress when the residual has fallen to `slow_rate^(10·window)` (0.86 at the
+defaults) of the best so far; `10·window` calls without progress end phase A as "stagnated", and a
+stagnated phase A followed by a failed certification hands the march to the plain march for good.
+The reference is the rate the instrument already assumes for the plain march, so "stagnated" means
+"Anderson is not beating the plain march" — exactly what justifies the hand-over. No new constant.
+- *Superseded:* progress = a halving within `10·window` calls. On the dense bed at tight settings
+  the accelerated residual falls about one decade per 100–200 calls (20–100× faster than the plain
+  0.9999 tail) but less than a halving per 50 calls: at ν dt/h² = 60 phase A "stagnated" at call
+  279 (4.0e-9) and the rest was plain — `converged=False`, "max_steps", 20 000 steps; at 600 the
+  same at call 305 (reviewer, CUDA).
+- *Measured with the rule* (reviewer, CUDA): ν dt/h² = 60 tight certified in 724 steps; ν dt/h² = 6
+  tight 536 → 695 steps (the halving rule's plain tail from 2.5e-10 happened to certify within 120
+  steps). Re-gate numbers: log, entry "Review fixes".
+
 **Why a growth exit returns to the plain march** rather than failing: growth means the plain map at
 this Δt departs from the accelerated state. The honest outcome is whatever the unaccelerated march
 does from there: converge elsewhere, oscillate until `max_steps`, or diverge.
@@ -1177,9 +1213,9 @@ the plain march decides. The reasons a march can return are "certified", "max_st
 | gate | what, measured how | configurations | pass threshold |
 |---|---|---|---|
 | **G0** inertness | (a) `tests/regression/state_hash.py` before/after; (b) `march_to_steady(accelerate=False)` vs the study's `march()`; (c) full ctest battery | (a) all entry paths; (b) §11 φ=0.125 N = 16, 24, collocated + staggered, production; (c) host tree, `-LE bench` | (a) identical hashes; (b) **identical step count and bit-identical ⟨u_x⟩**; (c) 188 existing + new tests all pass |
-| **G1** fixed point | K accelerated vs K plain, both `converged=True`, tight | §11 N = 14, 16, 18, 20, 24 (collocated ghost + staggered); Z&H SC array φ = 0.343 and 0.45 at N = 32 (staggered); dense random bed φ ≈ 0.6 (§10 Q2), staggered + collocated ghost | **\|K_acc/K_plain − 1\| ≤ 1e-8** every case |
+| **G1** fixed point | K accelerated vs K plain, both `converged=True`, tight | §11 N = 14, 16, 18, 20, 24 (collocated ghost + staggered); Z&H SC array φ = 0.343 and 0.45 at N = 32 (staggered); dense random bed φ ≈ 0.6 (§10 Q2), staggered + collocated ghost; **the staggered bed also at ν dt/h² = 60** (review R1: the case the halving stagnation rule lost) | **\|K_acc/K_plain − 1\| ≤ 1e-8** every case; for the staggered bed K_plain is K∞ of the 60 000-step plain march (WO-8, orchestrator decision 1), at both Δt |
 | **G2** speed-up | steps to `converged=True`, pressure iterations and wall time incl. accelerator overhead, production | all G1 cases, host and CUDA | §11 collocated N = 16: **steps ratio ≥ 3.0 and wall ratio ≥ 2.7**; every case: steps_acc ≤ steps_plain **and** \|K_acc/K_G1 − 1\| ≤ 1e-4; **dense bed: the D11 rule (wall ≥ 1.5×, staggered decides, Q13)**; report all ratios (rev-1 oracle at m = 5: 4.4× collocated N16, 1.47–2.7× staggered §11, 2.6× Re ≈ 10, 3.5× / 2.3× staggered / collocated bed) |
-| **G3** no new instability | 400 unconditional `acc.step(True)` (no stop), tight inner solves | §11 N = 16 collocated + staggered at νΔt/h² ∈ {6, 60, 600, 1e4}; dense bed at Δt = 60 and 600 (cell units, as in `collocated_invisible_subspace.md` §3) and at νΔt/h² = 1e4 | status stays "active"; ≤ 1 restart per 100 steps; running-min residual reaches ≤ 1e-9; residual at step 400 ≤ 10 × its running min; the four-Δt K agree to 1e-8 (C2 under acceleration) |
+| **G3** no new instability | 400 unconditional `acc.step(True)` (no stop), tight inner solves; **the bed (amended 2026-10-03, review R3): at least 400, then on until the running-min residual reaches its depth bar, capped at 3000**; K sampled after the last call that did not restart | §11 N = 16 collocated + staggered at νΔt/h² ∈ {6, 60, 600, 1e4}; dense bed at Δt = 60 and 600 (cell units, as in `collocated_invisible_subspace.md` §3) and at νΔt/h² = 1e4 | status stays "active"; ≤ 1 restart per 100 steps; running-min residual reaches ≤ 1e-9 (**bed: ≤ 5e-11**); final residual ≤ 10 × its running min; the four-Δt K agree to 1e-8 (C2 under acceleration). *Bed depth:* the measured K-error / velocity-residual ratio along the Δt-60 trajectory is 37–170, so 1e-9 leaves K ~1e-7 off (WO-8's 3.8e-7 spread) and 5e-11 is the depth that pins K to 1e-8. *Superseded:* bed depth 1e-9, K sampled at the last call whatever it was (WO-8's supplementary failure was K sampled at a rejected iterate, R2) |
 | **G4** MPI | tight `march_to_steady`, kokkos_mpi tree, `mpirun --bind-to none` | §11 N = 32 collocated ghost + staggered, np = 1, 2, 4 | \|K_np/K_1 − 1\| ≤ 1e-9; np=1 (MPI build) vs serial build: identical state hash after 60 accelerated steps; step counts within ±10 % across np (report) |
 | **G4c** MPI ctest | `test_anderson_mpi` (C++, `tests/kokkos_mpi`) | staggered N = 16 sphere, 40 `acc.step(True)`, np = 1, 2, 4; plus U7 | max\|u_np − u_1\| ≤ 1e-8·max\|u_1\|; γ bitwise equal on all ranks of a run (assert after the Bcast) |
 | **G5** restart | interrupt at step 25: `get_field` u,v,w,p → fresh solver, same setup → `set_field` → `march_to_steady` | §11 N = 16 collocated + staggered, tight | K vs uninterrupted accelerated K ≤ 1e-8; total steps ≤ uninterrupted + 15 (report); variant with `set_state` (velocity only): K ≤ 1e-8, extra steps reported |
