@@ -587,6 +587,9 @@ class ScalarMG {
     /// the faces from the operator's products) and the same-cell coupling W (level 0: the
     /// operator's W0; coarse: A1's average of the level-0 cc at the fine probe distances).
     CCField xs, rhss, ress, ACs, AFXs, AFYs, AFZs, unks, masss, pxs, pys, pzs, W;
+    /// WO-9b: the gathered wall term W (and the conjugate W_c) of this coarse level, per cell, kept
+    /// for reuse across builds (ScalarMG::wallKeep).
+    CCField wallG, wallCG;
     double nUnkS = 0.0;  ///< global count of solid unknowns
 #ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;
@@ -781,7 +784,8 @@ class ScalarMG {
     for (int f = 0; f < 6; ++f)
       dirFace_[f] = in.dirFace[f];
     if (nUse_ > 1) {
-      buildCutLists(in);
+      const bool newLists = buildCutLists(in);
+      wallReuse_ = !newLists && wallKeep(in);
       for (int f = 0; f < 6; ++f)
         if (dirFace_[f] && touches(l0, f))
           buildPlane0(in, f);
@@ -1421,10 +1425,11 @@ class ScalarMG {
   /// cells) per level instead of O(N0) (the former loop over every descendant ran one serial
   /// thread per coarse cell: 30 ms per advance on the GPU at 128^3, most of it on the deepest
   /// levels). Geometry only: built once per facet overlay (its cutCell view and count), on the host.
-  void buildCutLists(const Inputs& in) {
+  /// Returns whether it (re)built them.
+  bool buildCutLists(const Inputs& in) {
     const auto& fo = *in.fac;
     if (cutKey_ == fo.cutCell.data() && cutKeyN_ == fo.nCut && (int)cutStart_.size() == nUse_)
-      return;
+      return false;
     const Level& l0 = lv_[0];
     const C3 e0 = l0.ext, n0 = l0.inner;
     const int g0 = l0.g;
@@ -1474,6 +1479,53 @@ class ScalarMG {
     }
     cutKey_ = fo.cutCell.data();
     cutKeyN_ = fo.nCut;
+    return true;
+  }
+
+  /// The gathered coarse wall terms W (and the conjugate W_c) of the last build are reused when
+  /// their inputs are unchanged BY CONTENT (WO-9b; the caching ruling D-WO3-3 deferred to WO-9): the
+  /// same cut lists, the same level-0 unknown flags (view), the same two-phase mode and level count,
+  /// and every per-facet cw (and cc) bitwise equal to the snapshot taken when they were gathered.
+  /// W is a pure function of those, so the reuse is bitwise; under advection only the mass changes
+  /// from step to step, and the gather — O(cut cells) per level, serial per coarse cell — then runs
+  /// only when a wall setting or dt-independent table actually changes. One reduction per build.
+  bool wallKeep(const Inputs& in) {
+    const auto& fo = *in.fac;
+    const bool two = in.twoPhase;
+    bool keep = wallValid_ && wallTwo_ == two && wallUse_ == nUse_ &&
+                wallUnk_ == in.unknown.data() && cwSnap_.extent(0) == (std::size_t)fo.n &&
+                (!two || ccSnap_.extent(0) == (std::size_t)fo.n);
+    if (keep && fo.n > 0) {
+      auto a = in.facetW, as = Kokkos::View<const double*, CCMem>(cwSnap_);
+      auto c = two ? in.facetC : in.facetW, cs = two ? Kokkos::View<const double*, CCMem>(ccSnap_) : as;
+      long diff = 0;
+      Kokkos::parallel_reduce(
+          "peclet::flow::smg_wall_same", Kokkos::RangePolicy<CCExec>(CCExec(), 0, fo.n),
+          KOKKOS_LAMBDA(const long f, long& d) {
+            auto same = [](double u, double w) {
+              return u == w && Kokkos::signbit(u) == Kokkos::signbit(w);
+            };
+            if (!same(a(f), as(f)) || (two && !same(c(f), cs(f))))
+              ++d;
+          },
+          diff);
+      keep = diff == 0;
+    }
+    if (!keep) {  // the gather below runs: snapshot its inputs
+      if (cwSnap_.extent(0) != (std::size_t)fo.n)
+        cwSnap_ = Kokkos::View<double*, CCMem>("smg_cw_snap", (std::size_t)fo.n);
+      Kokkos::deep_copy(CCExec(), cwSnap_, in.facetW);
+      if (two) {
+        if (ccSnap_.extent(0) != (std::size_t)fo.n)
+          ccSnap_ = Kokkos::View<double*, CCMem>("smg_cc_snap", (std::size_t)fo.n);
+        Kokkos::deep_copy(CCExec(), ccSnap_, in.facetC);
+      }
+      wallValid_ = true;
+      wallTwo_ = two;
+      wallUse_ = nUse_;
+      wallUnk_ = in.unknown.data();
+    }
+    return keep;
   }
 
   /// Level-0 Dirichlet boundary plane of face f: <Lam a_bf> = Lam a_bf on unknown boundary cells
@@ -1755,6 +1807,12 @@ class ScalarMG {
     const bool two = two_;
     auto ccv = in.facetC;
     CCField Wl = c.W;
+    if (c.wallG.extent(0) != c.n)  // the gathered W (and W_c) of this level, kept across builds
+      c.wallG = CCField("smg_wall_gathered", c.n);
+    if (two && c.wallCG.extent(0) != c.n)
+      c.wallCG = CCField("smg_wallc_gathered", c.n);
+    CCField wg = c.wallG, wcg = c.wallCG;
+    const bool reuse = wallReuse_;
     ccFor3(
         "peclet::flow::smg_coarse_diag", C3{0, 0, 0}, ci, KOKKOS_LAMBDA(int icx, int icy, int icz) {
           const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
@@ -1765,24 +1823,34 @@ class ScalarMG {
             return;
           }
           double W = 0.0, Wc = 0.0;
-          // the cut descendants in increasing level-0 index = the (dz, dy, dx) order (buildCutLists)
-          const long ic = (long)icx + (long)icy * ci.x + (long)icz * ci.x * ci.y;
-          for (int k = cstart(ic); k < cstart(ic + 1); ++k) {
-            const int row = crows(k);
-            if (!(unk0(cutCell(row)) > 0.5))
-              continue;
-            for (int f = cfs(row); f < cfs(row + 1); ++f) {
-              W += cw(f);
-              if (two)
-                Wc += ccv(f);
+          if (reuse) {  // wallKeep: the inputs of the last gather are unchanged
+            W = wg(i);
+            if (two)
+              Wc = wcg(i);
+          } else {
+            // the cut descendants in increasing level-0 index = the (dz, dy, dx) order
+            const long ic = (long)icx + (long)icy * ci.x + (long)icz * ci.x * ci.y;
+            for (int k = cstart(ic); k < cstart(ic + 1); ++k) {
+              const int row = crows(k);
+              if (!(unk0(cutCell(row)) > 0.5))
+                continue;
+              for (int f = cfs(row); f < cfs(row + 1); ++f) {
+                W += cw(f);
+                if (two)
+                  Wc += ccv(f);
+              }
             }
+            W *= invN;
+            if (two)
+              Wc *= invN;
+            wg(i) = W;
+            if (two)
+              wcg(i) = Wc;
           }
-          W *= invN;
           const double tw = wx * px(i), te = wx * px(i + sx);
           const double ts = wy * py(i), tn = wy * py(i + sy);
           const double tb = wz * pz(i), tt = wz * pz(i + sz);
           if (two) {
-            Wc *= invN;
             AC(i) = ((mass(i) + (((tw + te) + (ts + tn)) + (tb + tt))) + W) + Wc;
             Wl(i) = Wc;
           } else {
@@ -1828,6 +1896,12 @@ class ScalarMG {
   std::vector<Kokkos::View<int*, CCMem>> cutStart_, cutRows_;
   const void* cutKey_ = nullptr;
   long cutKeyN_ = -1;
+  /// wallKeep: the snapshot of the gather's per-facet inputs and its key; wallReuse_ this build's
+  /// verdict.
+  Kokkos::View<double*, CCMem> cwSnap_, ccSnap_;
+  bool wallValid_ = false, wallTwo_ = false, wallReuse_ = false;
+  int wallUse_ = 0;
+  const void* wallUnk_ = nullptr;
   double w_[3] = {1.0, 1.0, 1.0};
   double hp_[3] = {1.0, 1.0, 1.0};
   bool aniso_ = false;
