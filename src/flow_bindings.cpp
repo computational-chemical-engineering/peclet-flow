@@ -661,6 +661,15 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
            "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "
            "CAP, so the usual rule-3b 'a capped pressure solve invalidates the run' check sees "
            "it; pressure_solve_failed() distinguishes the two.")
+      .def_prop_ro("num_pressure_chebyshev_restarts",
+                   [](D& diag) { return diag.s->numPressureChebyshevRestarts(); },
+                   "How many Chebyshev pressure solves were redone on cold spectral bounds since "
+                   "construction. Under variable density the bounds are re-estimated every step "
+                   "from the previous estimate's power iterates (5 + 5 iterations instead of "
+                   "15 + 15 from the right-hand side); a solve on such bounds that reaches the "
+                   "cap, or whose residual after 3 iterations exceeds the initial one, is redone "
+                   "on a cold estimate and counted here; the abandoned attempt's V-cycles count in "
+                   "last_pressure_iterations().")
       .def("pressure_solve_failed", [](D& diag) { return diag.s->pressureSolveFailed(); },
            "Did the last pressure solve break down on a non-finite recurrence scalar (a "
            "preconditioner or operator that produced NaN/Inf)?\n\n"

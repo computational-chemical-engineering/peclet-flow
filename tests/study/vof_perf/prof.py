@@ -17,6 +17,8 @@ Usage:
     --case-dir  directory holding run_peclet.py + case.py (default:
                 ~/Codes/peclet-examples/benchmarks/bubble-column/scripts)
     --pcg       MG-PCG pressure with cap 800 and relative tolerance --rtol (default 1e-10)
+    --cheb      Chebyshev pressure (cap --cheb-maxit, default 120) at --rtol; prints the
+                solver's num_pressure_chebyshev_restarts when the build has it (D3, §5.13)
     --dump      save u, v, w, p, C, the timed steps' dt and pressure iterations (iters) and every
                 VoF block's colour array (col<id>) -- compare two dumps with cmp.py (G-BIT item 2)
     --timing    per-stage breakdown from diagnostics.vof_timing()
@@ -84,6 +86,8 @@ for _name in ("set_superficial_velocity", "set_bulk_velocity"):
         break
 if "--pcg" in A:
     s.set_pressure_pcg(True, 800, RTOL)
+if "--cheb" in A:  # the variable-density default driver, solver default cap 120, at --rtol
+    s.set_pressure_chebyshev(True, arg("--cheb-maxit", 120, int), RTOL)
 if "--bottom" in A:
     s.set_pressure_bottom(arg("--bottom", "auto"))
 if "--bottom-solver" in A:
@@ -135,6 +139,8 @@ wall = time.perf_counter() - w0
 print(f"steps {N}  wall {wall:.3f} s  {1000*wall/N:.2f} ms/step  dt mean {np.mean(dts):.3e}")
 print("per-step ms: " + "  ".join(f"{k} {1000*v/N:.2f}" for k, v in T.items()))
 print(f"pressure iters mean {np.mean(iters):.2f} min {min(iters)} max {max(iters)}")
+if "--cheb" in A and hasattr(s.diagnostics, "num_pressure_chebyshev_restarts"):
+    print(f"chebyshev restarts {s.diagnostics.num_pressure_chebyshev_restarts}")
 if TIMING:
     v = s.diagnostics.vof_timing()
     n = v["steps"]

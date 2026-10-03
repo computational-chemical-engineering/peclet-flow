@@ -1280,6 +1280,12 @@ class Solver {
   long lastPressureIterations() const;
 
 
+  // D3 (doc/vof_step_performance_design.md §5.13): how many pressure solves on warm-started
+  // Chebyshev bounds tripped the guard (the cap, or a residual above r0 after 3 iterations) and
+  // were redone on cold bounds, since construction.
+  long numPressureChebyshevRestarts() const { return chebColdRestarts_; }
+
+
   // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
   // (doc/anisotropic_metric.md §5).  On an isotropic domain this is today's table; on a stretched
   // one the aspect rule defers an axis while it is at least the aspect threshold (2) times
@@ -4590,6 +4596,11 @@ class Solver {
   CCField zp1_;                 // FCG's extra scratch: allocated lazily at the first FCG solve
   int chebMaxit_ = 120;
   double chebRtol_ = 1e-9, chebA_ = 0.0, chebB_ = 0.0;
+  // D3 (§5.13): may the next main-bound re-estimate start warm? Set by a coefficient rebuild that
+  // drops VALID bounds, cleared by every structural invalidation (driver, density, porous setters).
+  bool chebWarmOk_ = false;
+  long chebColdRestarts_ = 0;  // guard firings (numPressureChebyshevRestarts)
+  CCField chebX0_;             // the solve's starting iterate under the pressure warm start
   int nLevels_ = 4;             // multigrid depth (CUDA default; set_pressure_multigrid)
   bool pressGraphAmg_ = false;
   // Coarse-solve policy: -1 auto (DEFAULT — agglomerate when the coarsest grid exceeds

@@ -1313,7 +1313,10 @@ void Solver<Grid>::projectBuildCoefficients() {
     mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
     mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
     mg_.setOutflowCoefficient(false);
-    chebBoundsSet_ = false;  // spectrum changed with the coefficients (re-estimated by the solve)
+    // The spectrum changed with the coefficients: re-estimated by the solve, warm-started from
+    // the previous estimate's iterates when the bounds being dropped were valid (D3, §5.13).
+    chebWarmOk_ = chebWarmOk_ || chebBoundsSet_;
+    chebBoundsSet_ = false;
   }
   // Porous continuity: the Poisson operator is eps-weighted (c_f = open_f * eps_f), same rails as
   // the density coefficient above. Rebuilt every step (eps moves with the particles). With
@@ -1352,6 +1355,7 @@ void Solver<Grid>::projectBuildCoefficients() {
     mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
     mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
     mg_.setOutflowCoefficient(false);
+    chebWarmOk_ = chebWarmOk_ || chebBoundsSet_;  // a coefficient rebuild, as above (D3)
     chebBoundsSet_ = false;
   }
 }
@@ -1402,11 +1406,40 @@ template <class Grid>
 long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
   long iters = 0;
   if (useChebyshev_) {
+    // D3 (doc/vof_step_performance_design.md §5.13): after a coefficient rebuild the bounds are
+    // re-estimated from the previous estimate's last v_max / v_min iterates with 5 + 5 power
+    // iterations instead of 15 + 15 from the right-hand side. Guard: a solve on such bounds that
+    // reaches the cap, or whose residual after 3 iterations exceeds r0, is redone from its
+    // starting iterate on cold bounds (counted in chebColdRestarts_). Every other estimate --
+    // the first, and the one after a structural change (a driver/density/porous setter, a
+    // hierarchy rebuild) -- is the cold one, unchanged.
+    using ES = typename CutcellMG::EigenStart;
+    bool warm = false;
     if (!chebBoundsSet_) {
-      mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12);
+      warm = chebWarmOk_ && mg_.eigenWarmReady();
+      mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, warm ? 5 : 15, 2, 2, 12,
+                              warm ? ES::Warm : ES::ColdKeep);
       chebBoundsSet_ = true;
     }
-    iters = mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
+    if (!warm) {
+      iters = mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
+    } else {
+      if (pwarm_) {  // the starting iterate is the previous phi: keep it for a redo
+        if (chebX0_.extent(0) != x1.extent(0))
+          chebX0_ = CCField("chebX0", x1.extent(0));
+        Kokkos::deep_copy(chebX0_, x1);
+      }
+      iters = mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_, true);
+      if (iters >= chebMaxit_ || mg_.chebyshevGuardTripped()) {
+        ++chebColdRestarts_;
+        mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12, ES::ColdKeep);
+        if (pwarm_)
+          Kokkos::deep_copy(x1, chebX0_);
+        else
+          Kokkos::deep_copy(x1, 0.0);
+        iters += mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
+      }
+    }
   } else if (ghostProjection_) {
     // Nonsymmetric ghost-projection operator (both grids — the phi matrix is identical):
     // BiCGStab, preconditioned by the symmetric binary-openness V-cycle (the hierarchy set up

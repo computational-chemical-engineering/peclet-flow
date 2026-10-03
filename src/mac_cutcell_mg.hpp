@@ -991,6 +991,7 @@ class CutcellMG {
   void init(int nx, int ny, int nz, int nLevels) {
     lv_.clear();
     amg_.reset();
+    eigWarm_ = false;  // D3: the kept power-iteration vectors belong to the old hierarchy
     gnxF_ = nx;
     gnyF_ = ny;
     gnzF_ = nz;
@@ -1214,6 +1215,7 @@ class CutcellMG {
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     lv_.clear();
     amg_.reset();
+    eigWarm_ = false;  // D3: the kept power-iteration vectors belong to the old hierarchy
     distributed_ = true;
     buildBottomStore();  // single-rank only: none (the distributed path keeps GraphAMG)
     comm_ = comm;
@@ -3693,12 +3695,25 @@ class CutcellMG {
     return v;
   }
 
+  // How estimateEigenvalues starts its two power iterations (D3, doc/vof_step_performance_design.md
+  // §5.13). `Cold`: both from `seed` (the right-hand side), nothing kept -- the pre-D3 estimate,
+  // and still the balanced-force pre-projection's. `ColdKeep`: the same arithmetic, and the last
+  // v_max / v_min iterates are kept. `Warm`: each iteration starts from its kept iterate (masked,
+  // mean-removed and normalised exactly as the rhs seed is) and the kept iterates are replaced by
+  // the new last ones; `seed` is not read. Warm requires eigenWarmReady().
+  enum class EigenStart { Cold, ColdKeep, Warm };
+  // True when a ColdKeep or Warm estimate has run on the current hierarchy (init/initMpi drop it).
+  bool eigenWarmReady() const {
+    return eigWarm_ && !lv_.empty() && eigVmax_.extent(0) == lv_[0].n &&
+           eigVmin_.extent(0) == lv_[0].n;
+  }
+
   // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power
-  // iteration (direct for the max + a shifted iteration for the min), seeded by `seed`.
-  // Communication-heavy, so the CUDA driver runs it once on step 1 and reuses the bounds. Port of
-  // estimate_eigenvalues.
+  // iteration (direct for the max + a shifted iteration for the min), seeded by `seed` (or, with
+  // EigenStart::Warm, by the iterates a previous estimate kept). Communication-heavy, so the CUDA
+  // driver runs it once on step 1 and reuses the bounds. Port of estimate_eigenvalues.
   void estimateEigenvalues(CCConst seed, double& lmin, double& lmax, int iters, int pre, int post,
-                           int bottom) {
+                           int bottom, EigenStart start = EigenStart::Cold) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     pre_ = pre;
     post_ = post;
@@ -3707,7 +3722,9 @@ class CutcellMG {
     const std::size_t n = l0.n;
     CCField v = workVector(0, n, "ev_v"), w = workVector(1, n, "ev_w"),
             z = workVector(2, n, "ev_z"), srhs = workVector(3, n, "ev_srhs");
-    Kokkos::deep_copy(CCExec(), srhs, seed);
+    const bool warm = start == EigenStart::Warm, keep = start != EigenStart::Cold;
+    if (!warm)
+      Kokkos::deep_copy(CCExec(), srhs, seed);
     auto matvec = [&](CCField y, CCField x) { matvecOverlap(l0, y, x); };
     auto applyT = [&](CCField out,
                       CCField in) {  // out = M^{-1} A in, projected onto the fluid range
@@ -3721,13 +3738,18 @@ class CutcellMG {
       if (nr > 0)
         scale(x, 1.0 / nr);
     };
-    auto seedf = [&](CCField x) {
-      Kokkos::deep_copy(CCExec(), x, srhs);
+    auto seedf = [&](CCField x, CCField src) {
+      Kokkos::deep_copy(CCExec(), x, src);
       removeMean(l0, x);
       maskSolid(l0, x);
       normalize(x);
     };
-    seedf(v);
+    auto keepf = [&](CCField& dst, CCField x, const char* label) {
+      if (dst.extent(0) != n)
+        dst = CCField(label, n);
+      Kokkos::deep_copy(CCExec(), dst, x);
+    };
+    seedf(v, warm ? eigVmax_ : srhs);
     lmax = 1.0;
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
@@ -3735,7 +3757,9 @@ class CutcellMG {
       Kokkos::deep_copy(CCExec(), v, z);
       normalize(v);
     }
-    seedf(v);
+    if (keep)
+      keepf(eigVmax_, v, "ev_vmax");
+    seedf(v, warm ? eigVmin_ : srhs);
     double mu = 0.0;
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
@@ -3743,6 +3767,10 @@ class CutcellMG {
       mu = dot(l0, v, z);
       Kokkos::deep_copy(CCExec(), v, z);
       normalize(v);
+    }
+    if (keep) {
+      keepf(eigVmin_, v, "ev_vmin");
+      eigWarm_ = true;
     }
     double e_hi = lmax, e_lo = lmax - mu;  // direct (max) + shifted (min) Rayleigh estimates
     lmin = e_lo < e_hi ? e_lo : e_hi;
@@ -3755,9 +3783,13 @@ class CutcellMG {
   // the step coefficients come from the spectral bounds [a,b], so NO per-iteration global
   // dot-products (communication- light at scale). rhs on level-0 supplied as `b`; solution left in
   // `x`. Returns the V-cycle count. Port of solve_chebyshev.
+  // `guard3` (D3, §5.13, for a solve on warm-started bounds): if the residual after 3 iterations
+  // is not <= r0 the solve stops there and chebyshevGuardTripped() reports it, so the caller can
+  // re-estimate cold and redo the solve. Off, the loop is the pre-D3 loop.
   int solveChebyshev(CCField b, CCField x, int maxit, double rtol, int pre, int post, int bottom,
-                     double a, double bnd) {
+                     double a, double bnd, bool guard3 = false) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    chebGuardTripped_ = false;
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -3795,8 +3827,13 @@ class CutcellMG {
         matvec(w, d);
         axpy(r, -1.0, w);
         removeMean(l0, r);  // r -= A d
-        if (maxabs(l0, r) < rtol * rref)
+        const double rn = maxabs(l0, r);
+        if (rn < rtol * rref)
           break;
+        if (guard3 && i == 3 && !(rn <= r0)) {  // growing after 3 iterations: bounds gone stale
+          chebGuardTripped_ = true;
+          break;
+        }
         precond(z, r);
         ++nvc;
         const double rho_new = 1.0 / (2.0 * sigma1 - rho);
@@ -3812,6 +3849,8 @@ class CutcellMG {
   // projection, flow doc/collocated_varrho_forces.md §4.6 / WO-P5). ref <= 0 restores the
   // default (stop relative to the initial residual). Callers set it around ONE solve only.
   void setStopReference(double ref) { stopRef_ = ref; }
+  // Did the last solveChebyshev(..., guard3 = true) stop on its 3-iteration growth guard?
+  bool chebyshevGuardTripped() const { return chebGuardTripped_; }
   // max|b| over the fluid cells after the null-space (mean) projection -- the drivers' norm.
   double rhsNorm(CCField b, CCField scratch) {
     Level& l0 = lv_[0];
@@ -4022,6 +4061,11 @@ class CutcellMG {
 
   std::vector<Level> lv_;
   CCField work_[8];  // workVector's slots (0-3 the eigenvalue estimate, 4-7 the Chebyshev driver)
+  // D3 (§5.13): the last v_max / v_min power iterates of a ColdKeep/Warm estimate, persistent
+  // across solves (never zeroed), valid while eigWarm_ (dropped by init/initMpi).
+  CCField eigVmax_, eigVmin_;
+  bool eigWarm_ = false;
+  bool chebGuardTripped_ = false;  // see chebyshevGuardTripped()
   // The physical metric (setMetric), doc/anisotropic_metric.md §5: h_a' = h_a/hRef and the flag
   // that engages the aspect-ratio coarsening rule.  (1,1,1)/false is the isotropic lattice, on
   // which mgChooseRatio reproduces today's level table exactly.
