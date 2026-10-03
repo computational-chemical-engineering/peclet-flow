@@ -1454,3 +1454,19 @@ gap / contact / conj at R/h 8 (steady + 2 BE steps; solid field and solid rungs)
 
 **Not changed:** core (the ladder), the probe direction, the operator, ScalarMG and every numerical
 path (bitwise above).
+
+## 2026-10-04 — WO-8 orchestrator rulings
+
+- **D-WO8-1 (G13-a).** The two-sided census is checked at R/h 8 and 16. At R/h 32 the gap equals h,
+  so it is INFO there.
+- **D-WO8-2 (G13-b; §13 Q4 TRIGGERED).** The conjugate contact row (k_s/k_f = 100) becomes INFO,
+  marked OPEN, so the battery stays a clean regression signal. The evidence is in the WO-8 entry.
+  - The point-sampled SDF closes every fluid wedge thinner than ~h: the neck comes out √(a² + Rh)
+    instead of a, and conducting sub-cell gaps fuse.
+  - Probes are exonerated: k_s = k_f is exact to 1e-6.
+  - The contact model / body-aware geometry record goes to FRANK, with options:
+    - an architect-designed contact model (Claassen 2024 line / Peters' appendix very-close faces);
+    - pre-asymptotic restatement;
+    - resolution requirement only.
+  - Recommendation: a body-aware geometry record (per-body SDF at face samples) plus a lubrication-
+    type contact conductance, designed by the architect after Frank's input.
