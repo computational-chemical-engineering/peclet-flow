@@ -401,7 +401,8 @@ inline void facetCoefficients(Kokkos::View<double*, CCMem> cw, Kokkos::View<doub
 /// y(i) += sum over the facets of cut cell i of cw * (probe interpolation of x): the overlay pass
 /// of the matvec (§4.1 step 3). One thread per cut cell, facets in CSR order: deterministic, no
 /// atomics.
-/// `subtract` = true gives y(i) -= that sum instead (the budget's flux-form residual).
+/// `subtract` = true gives y(i) -= that sum instead (the budget's flux-form residual). No fence: the
+/// next kernel on the execution space is ordered after it (WO-9b).
 inline void overlayApply(CCField y, CCConst x, const scg::ScalarFacetOverlay& fo,
                          Kokkos::View<const double*, CCMem> cw, bool subtract = false) {
   auto cutCell = fo.cutCell;
@@ -425,7 +426,6 @@ inline void overlayApply(CCField y, CCConst x, const scg::ScalarFacetOverlay& fo
         else
           y(i) += acc;
       });
-  space.fence();
 }
 
 /// b(i) += sum over the facets of cut cell i of rw (the wall part of the right-hand side).
@@ -1575,7 +1575,6 @@ inline void conjOverlayApply(CCField yf, CCField ys, CCConst xf, CCConst xs,
           ys(i) += as;
         }
       });
-  space.fence();
 }
 
 /// The two-field level-0 surrogate (§4.3): SAC_f = AC_f + sum (cw + cc), SAC_s = AC_s + sum cc,

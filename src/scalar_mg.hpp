@@ -35,7 +35,9 @@
 // there before the trilinear prolongation reads it, and every face coefficient toward them is 0.
 //
 // Smoother: red-black Gauss-Seidel, colour = (gx + gy + gz) mod 2 from GLOBAL indices, an exchange
-// before each colour. V-cycle: pre 2 sweeps R -> B, residual (after a fresh exchange), restrictAvg,
+// before each colour — on a single rank (WO-9b; flow's A3) the colour passes and the residual of a
+// level with even inner dimensions read the periodic neighbour through the wrapped index instead
+// (`wrapReads`), and a coarse level's fill is ONE launch (`smg::fillShell`), no fence. V-cycle: pre 2 sweeps R -> B, residual (after a fresh exchange), restrictAvg,
 // (singular: the coarse rhs mean removed), recurse, coarse ghosts filled, prolongAdd (trilinear),
 // pinned cells re-zeroed, post 2 sweeps B -> R. Bottom: 16 sweeps (8 R -> B then 8 B -> R, so the
 // cycle stays symmetric) plus the mean removal when singular. The level rule (§5.2): transient with
@@ -55,6 +57,7 @@
 #ifndef PECLET_FLOW_SCALAR_MG_HPP
 #define PECLET_FLOW_SCALAR_MG_HPP
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -63,10 +66,11 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "mac_cutcell_mg.hpp"  // coarsenOpenAvgCell, restrictAvg, prolongAdd, CutcellMG::mgChooseRatio
-#include "mac_pressure.hpp"  // cutcellSmoothColorFace, cutcellResidualFaceCell, cutcellApplyFaceCell
+#include "mac_pressure.hpp"  // cutcellSmoothFaceCell, cutcellResidualFaceCell, cutcellApplyFaceCell
 #include "policy.hpp"
 #include "scalar_cutcell_geometry.hpp"  // ScalarFacetOverlay
 
@@ -134,7 +138,8 @@ inline void zeroPinned(CCField x, CCConst unk, C3 e, int g) {
       });
 }
 
-/// f = 0 on the planes [lo, hi) of axis a (full transverse extent).
+/// f = 0 on the planes [lo, hi) of axis a (full transverse extent). No fence: the next kernel on
+/// the same execution space is ordered after it (WO-9b).
 inline void zeroPlanes(CCField f, C3 e, int a, int lo, int hi) {
   if (hi <= lo)
     return;
@@ -142,47 +147,208 @@ inline void zeroPlanes(CCField f, C3 e, int a, int lo, int hi) {
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long st[3] = {1, (long)e.x, (long)e.x * e.y};
   const long sa = st[a], sb = st[b], sc = st[c];
+  const int nb = ext[b], nc = ext[c];
   CCExec space;
-  Kokkos::parallel_for(
-      "peclet::flow::smg_zero_planes", MDRange2<CCExec>(space, {0, 0}, {ext[b], ext[c]}),
-      KOKKOS_LAMBDA(int pb, int pc) {
-        for (int k = lo; k < hi; ++k)
-          f((long)k * sa + (long)pb * sb + (long)pc * sc) = 0.0;
-      });
-  space.fence();
+  auto row = KOKKOS_LAMBDA(long t) {  // one transverse row (pb, pc) through the planes
+    const int pb = (int)(t % nb), pc = (int)(t / nb);
+    for (int k = lo; k < hi; ++k)
+      f((long)k * sa + (long)pb * sb + (long)pc * sc) = 0.0;
+  };
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    if (hostRunSerial((long)nb * nc * (hi - lo))) {
+      for (long t = 0; t < (long)nb * nc; ++t)
+        row(t);
+      return;
+    }
+  }
+  Kokkos::parallel_for("peclet::flow::smg_zero_planes",
+                       Kokkos::RangePolicy<CCExec>(space, 0, (long)nb * nc), row);
 }
 
-/// Single-rank periodic wrap of the g ghost layers of axis `a` (VelocityMG::fillAxis).
-inline void wrapAxis(CCField f, C3 e, C3 inner, int g, int a) {
-  const int dims[3] = {e.x, e.y, e.z};
-  const int N3[3] = {inner.x, inner.y, inner.z};
-  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
-  const int b = (a + 1) % 3, c = (a + 2) % 3;
-  const long sa = st[a], sb = st[b], sc = st[c];
-  const int N = N3[a];
+/// The single-rank ghost fill of a level in ONE launch (WO-9b; CutcellMG::fillWrap's form): a ghost
+/// cell with a coordinate in the ghost layer of a NON-periodic axis takes 0, every other ghost cell
+/// the value of the inner cell its three coordinates wrap to. That is exactly what the former
+/// sequence left: the periodic wrap of all three axes (x, then y, then z, each over the full
+/// transverse extent; a ghost written by an earlier pass is overwritten by a later one with the
+/// wrapped-inner value) followed by the zeroing of the non-periodic ghost planes, so the two are
+/// bitwise identical (pure copies and zeros); inner cells are only read. Needs inner >= g per axis.
+/// The ghost shell is enumerated as three slabs: the z-ghost planes (all x, y), the y-ghost rows of
+/// the inner z range (all x), the x-ghost cells of the inner (y, z) rows.
+inline void fillShell(CCField f, C3 e, C3 inner, int g, const bool per[3]) {
   CCExec space;
+  const int nx = inner.x, ny = inner.y, nz = inner.z;
+  const long exy = (long)e.x * e.y;
+  const bool px = per[0], py = per[1], pz = per[2];
+  CCField ff = f;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    // host launch rule: rows (one index computation per row, a contiguous x loop inside)
+    const long rZ = 2L * g * e.y, rY = (long)nz * 2 * g, rX = (long)nz * ny;
+    auto row = [=](long t) {
+      long dst, src;
+      bool zero;
+      if (t < rZ) {  // z-ghost plane row (y, zg), all x
+        const int l = (int)(t / e.y), y = (int)(t - (long)l * e.y);
+        const int z = l < g ? l : nz + l;
+        const bool yg = y < g || y >= g + ny;
+        const int sy = y < g ? y + ny : (y >= g + ny ? y - ny : y);
+        const int sz = z < g ? z + nz : z - nz;
+        zero = !pz || (yg && !py);
+        dst = (long)y * e.x + (long)z * exy;
+        src = (long)sy * e.x + (long)sz * exy;
+      } else if (t < rZ + rY) {  // y-ghost row (yg, z) of the inner z range, all x
+        const long t2 = t - rZ;
+        const int zi = (int)(t2 / (2 * g)), l = (int)(t2 - (long)zi * 2 * g);
+        const int y = l < g ? l : ny + l, z = g + zi;
+        const int sy = y < g ? y + ny : y - ny;
+        zero = !py;
+        dst = (long)y * e.x + (long)z * exy;
+        src = (long)sy * e.x + (long)z * exy;
+      } else {  // the x-ghost cells of the inner row (y, z)
+        const long t3 = t - rZ - rY;
+        const int zi = (int)(t3 / ny), yi = (int)(t3 - (long)zi * ny);
+        const long base = (long)(g + yi) * e.x + (long)(g + zi) * exy;
+        for (int x = 0; x < g; ++x)
+          ff(base + x) = px ? ff(base + x + nx) : 0.0;
+        for (int x = g + nx; x < e.x; ++x)
+          ff(base + x) = px ? ff(base + x - nx) : 0.0;
+        return;
+      }
+      if (zero) {
+        for (int x = 0; x < e.x; ++x)
+          ff(dst + x) = 0.0;
+        return;
+      }
+      for (int x = 0; x < g; ++x)
+        ff(dst + x) = px ? ff(src + x + nx) : 0.0;
+      for (int x = g; x < g + nx; ++x)
+        ff(dst + x) = ff(src + x);
+      for (int x = g + nx; x < e.x; ++x)
+        ff(dst + x) = px ? ff(src + x - nx) : 0.0;
+    };
+    const long cells = 2L * g * exy + (long)nz * 2 * g * e.x + (long)nz * ny * 2 * g;
+    if (hostRunSerial(cells)) {
+      for (long t = 0; t < rZ + rY + rX; ++t)
+        row(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::smg_fill_shell",
+                         Kokkos::RangePolicy<CCExec>(space, 0, rZ + rY + rX), row);
+    return;
+  }
+  const long nZ = 2L * g * exy, nY = (long)nz * 2 * g * e.x, nX = (long)nz * ny * 2 * g;
   Kokkos::parallel_for(
-      "peclet::flow::smg_wrap", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
-      KOKKOS_LAMBDA(int p0, int p1) {
-        const long base = (long)p0 * sb + (long)p1 * sc;
-        for (int gl = 0; gl < g; ++gl) {
-          f(base + (long)gl * sa) = f(base + (long)(gl + N) * sa);
-          f(base + (long)(g + N + gl) * sa) = f(base + (long)(g + gl) * sa);
+      "peclet::flow::smg_fill_shell", Kokkos::RangePolicy<CCExec>(space, 0, nZ + nY + nX),
+      KOKKOS_LAMBDA(long t) {
+        int x, y, z;
+        if (t < nZ) {
+          const int l = (int)(t / exy);
+          const long r = t - (long)l * exy;
+          x = (int)(r % e.x);
+          y = (int)(r / e.x);
+          z = l < g ? l : nz + l;
+        } else if (t < nZ + nY) {
+          const long t2 = t - nZ, rw = 2L * g * e.x;
+          const long zi = t2 / rw, r = t2 - zi * rw;
+          const int l = (int)(r / e.x);
+          x = (int)(r % e.x);
+          y = l < g ? l : ny + l;
+          z = g + (int)zi;
+        } else {
+          const long t3 = t - nZ - nY, rw = (long)ny * 2 * g;
+          const long zi = t3 / rw, r = t3 - zi * rw;
+          const int l = (int)(r % (2 * g));
+          x = l < g ? l : nx + l;
+          y = g + (int)(r / (2 * g));
+          z = g + (int)zi;
         }
+        const bool gx = x < g || x >= g + nx, gy = y < g || y >= g + ny, gz = z < g || z >= g + nz;
+        const long d = (long)x + (long)y * e.x + (long)z * exy;
+        if ((gx && !px) || (gy && !py) || (gz && !pz)) {
+          ff(d) = 0.0;
+          return;
+        }
+        const int sx = x < g ? x + nx : (x >= g + nx ? x - nx : x);
+        const int sy = y < g ? y + ny : (y >= g + ny ? y - ny : y);
+        const int sz = z < g ? z + nz : (z >= g + nz ? z - nz : z);
+        ff(d) = ff((long)sx + (long)sy * e.x + (long)sz * exy);
       });
-  space.fence();
+}
+
+/// Neighbour indices of an inner cell for the fused periodic-wrap reads (WO-9b; flow's A3,
+/// `ccWrapNbrs`, here per axis): on an axis whose bit is set in `wrap` the neighbour of a boundary
+/// cell across the block face is the inner cell the single-rank ghost fill copies into that ghost,
+/// on every other axis it is the ghost index itself (wrap = 0: the plain i +- s).
+struct Nb {
+  long xp, xm, yp, ym, zp, zm;
+};
+KOKKOS_INLINE_FUNCTION Nb nbrs(int lx, int ly, int lz, C3 n, int g, long i, long sy, long sz,
+                               int wrap) {
+  Nb w;
+  w.xm = ((wrap & 1) && lx == g) ? i + (long)(n.x - 1) : i - 1;
+  w.xp = ((wrap & 1) && lx == g + n.x - 1) ? i - (long)(n.x - 1) : i + 1;
+  w.ym = ((wrap & 2) && ly == g) ? i + (long)(n.y - 1) * sy : i - sy;
+  w.yp = ((wrap & 2) && ly == g + n.y - 1) ? i - (long)(n.y - 1) * sy : i + sy;
+  w.zm = ((wrap & 4) && lz == g) ? i + (long)(n.z - 1) * sz : i - sz;
+  w.zp = ((wrap & 4) && lz == g + n.z - 1) ? i - (long)(n.z - 1) * sz : i + sz;
+  return w;
+}
+
+/// One colour of the face-form red-black Gauss-Seidel: cutcellSmoothColorFace (mac_pressure.hpp)
+/// with the neighbours of `nbrs` (wrap = 0: that kernel, the same launch forms and cell body).
+template <class OpV>
+inline void sweepColorFace(CCField x, CCConst rhs, OpV AC, OpV AFX, OpV AFY, OpV AFZ, C3 e, C3 og,
+                           int g, int color, C3 n, int wrap) {
+  CCExec space;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
+    const long cells = (long)nyi * nzi * (e.x - 2 * g);
+    auto pencil = KOKKOS_LAMBDA(long t) {
+      const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      PECLET_FLOW_OMP_SIMD  // same-colour cells are independent (ccFor3's contract)
+          for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        cutcellSmoothFaceCell(x, rhs, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                              w.zp, w.zm);
+      }
+    };
+    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::smg_smooth",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+    return;
+  }
+  using MD = MDRange3<CCExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::smg_smooth", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        cutcellSmoothFaceCell(x, rhs, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                              w.zp, w.zm);
+      });
 }
 
 /// r = b - A x (face form, double), inner cells.
+/// x's neighbours from `nbrs` (n the inner dims; wrap = 0: the ghosts).
 inline void residualFace(CCField r, CCConst x, CCConst b, CCField AC, CCField AFX, CCField AFY,
-                         CCField AFZ, C3 e, int g) {
+                         CCField AFZ, C3 e, int g, C3 n, int wrap) {
   ccFor3(
       "peclet::flow::smg_residual", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
-                                i - sy, i + sz, i - sz);
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                                w.zp, w.zm);
       });
 }
 
@@ -202,13 +368,13 @@ struct GuardedPart {
 };
 
 /// The band-form off-diagonal sum of A2, in its fixed order:
-/// ((AW x_W + AE x_E) + (AS x_S + AN x_N)) + (AB x_B + AT x_T).
+/// ((AW x_W + AE x_E) + (AS x_S + AN x_N)) + (AB x_B + AT x_T); x's neighbours from `nbrs`.
 template <class XV, class BV>
 KOKKOS_INLINE_FUNCTION double bandOff(const XV& x, const BV& AW, const BV& AE, const BV& AS,
-                                      const BV& AN, const BV& AB, const BV& AT, long i, long sx,
-                                      long sy, long sz) {
-  return ((AW(i) * x(i - sx) + AE(i) * x(i + sx)) + (AS(i) * x(i - sy) + AN(i) * x(i + sy))) +
-         (AB(i) * x(i - sz) + AT(i) * x(i + sz));
+                                      const BV& AN, const BV& AB, const BV& AT, long i,
+                                      const Nb& w) {
+  return ((AW(i) * x(w.xm) + AE(i) * x(w.xp)) + (AS(i) * x(w.ym) + AN(i) * x(w.yp))) +
+         (AB(i) * x(w.zm) + AT(i) * x(w.zp));
 }
 
 /// One colour of the band-form Gauss-Seidel (A2), on the unknown inner cells of the colour:
@@ -216,20 +382,21 @@ KOKKOS_INLINE_FUNCTION double bandOff(const XV& x, const BV& AW, const BV& AE, c
 /// launch forms: host pencils, device MDRange).
 template <class BV, class UV>
 inline void sweepColorBand(CCField x, CCConst rhs, BV AC, BV AW, BV AE, BV AS, BV AN, BV AB, BV AT,
-                           UV unk, C3 e, C3 og, int g, int color) {
+                           UV unk, C3 e, C3 og, int g, int color, C3 n, int wrap) {
   CCExec space;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
     const long cells = (long)nyi * nzi * (e.x - 2 * g);
     auto pencil = KOKKOS_LAMBDA(long t) {
       const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
-      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const long sy = e.x, sz = (long)e.x * e.y;
       const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
       for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
         if (!(unk(i) > 0.5))
           continue;
-        x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)) / AC(i);
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, w)) / AC(i);
       }
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
@@ -247,20 +414,22 @@ inline void sweepColorBand(CCField x, CCConst rhs, BV AC, BV AW, BV AE, BV AS, B
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
           return;
-        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
         if (!(unk(i) > 0.5))
           return;
-        x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)) / AC(i);
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, w)) / AC(i);
       });
 }
 
-/// The face-form neighbour sum of cutcellSmoothFaceCell, in its order.
+/// The face-form neighbour sum of cutcellSmoothFaceCell, in its order; x's neighbours from `nbrs`
+/// (the coefficients at their own indices).
 template <class XV, class OV>
 KOKKOS_INLINE_FUNCTION double faceOff(const XV& x, const OV& AFX, const OV& AFY, const OV& AFZ,
-                                      long i, long sx, long sy, long sz) {
-  return AFX(i + sx) * x(i + sx) + AFX(i) * x(i - sx) + AFY(i + sy) * x(i + sy) +
-         AFY(i) * x(i - sy) + AFZ(i + sz) * x(i + sz) + AFZ(i) * x(i - sz);
+                                      long i, long sx, long sy, long sz, const Nb& w) {
+  return AFX(i + sx) * x(w.xp) + AFX(i) * x(w.xm) + AFY(i + sy) * x(w.yp) + AFY(i) * x(w.ym) +
+         AFZ(i + sz) * x(w.zp) + AFZ(i) * x(w.zm);
 }
 
 /// The two-field cell update of the conjugate V-cycle (§5.2, WO-7; design A2's WO-7 note): where
@@ -278,14 +447,14 @@ KOKKOS_INLINE_FUNCTION void twoPhaseCell(const XV& x, const XV& rhs, const BV& A
                                          const XV& xs, const XV& rhss, const BV& ACs,
                                          const BV& AFXs, const BV& AFYs, const BV& AFZs,
                                          const BV& W, const CCConst& unkF, long i, long sx, long sy,
-                                         long sz) {
+                                         long sz, const Nb& w) {
   const double wc = W(i);
   const double af = AC(i), as = ACs(i);
   if (wc > 0.0) {
-    const double nf = Band ? bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)
-                           : faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz);
+    const double nf =
+        Band ? bandOff(x, AW, AE, AS, AN, AB, AT, i, w) : faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz, w);
     const double rf = rhs(i) - nf;
-    const double rs = rhss(i) - faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz);
+    const double rs = rhss(i) - faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz, w);
     const double det = af * as - wc * wc;
     if (det > 1e-300 * af * as) {
       x(i) = (as * rf + wc * rs) / det;
@@ -298,13 +467,13 @@ KOKKOS_INLINE_FUNCTION void twoPhaseCell(const XV& x, const XV& rhs, const BV& A
   }
   if constexpr (Band) {
     if (unkF(i) > 0.5)
-      x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)) / af;
+      x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, w)) / af;
   } else {
     if (!(af < 1e-30))
-      x(i) = (rhs(i) - faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz)) / af;
+      x(i) = (rhs(i) - faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz, w)) / af;
   }
   if (!(as < 1e-30))
-    xs(i) = (rhss(i) - faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz)) / as;
+    xs(i) = (rhss(i) - faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz, w)) / as;
 }
 
 /// One colour of the two-field red-black sweep (same launch forms as cutcellSmoothColorFace).
@@ -312,7 +481,8 @@ template <bool Band>
 inline void sweepColorTwo(CCField x, CCField rhs, CCField AC, CCField AFX, CCField AFY, CCField AFZ,
                           CCField AW, CCField AE, CCField AS, CCField AN, CCField AB, CCField AT,
                           CCField xs, CCField rhss, CCField ACs, CCField AFXs, CCField AFYs,
-                          CCField AFZs, CCField W, CCConst unkF, C3 e, C3 og, int g, int color) {
+                          CCField AFZs, CCField W, CCConst unkF, C3 e, C3 og, int g, int color,
+                          C3 n, int wrap) {
   CCExec space;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
@@ -323,8 +493,9 @@ inline void sweepColorTwo(CCField x, CCField rhs, CCField AC, CCField AFX, CCFie
       const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
       for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
         twoPhaseCell<Band>(x, rhs, AC, AFX, AFY, AFZ, AW, AE, AS, AN, AB, AT, xs, rhss, ACs, AFXs,
-                           AFYs, AFZs, W, unkF, i, sx, sy, sz);
+                           AFYs, AFZs, W, unkF, i, sx, sy, sz, w);
       }
     };
     if (hostRunSerial(cells)) {
@@ -344,8 +515,9 @@ inline void sweepColorTwo(CCField x, CCField rhs, CCField AC, CCField AFX, CCFie
           return;
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
         twoPhaseCell<Band>(x, rhs, AC, AFX, AFY, AFZ, AW, AE, AS, AN, AB, AT, xs, rhss, ACs, AFXs,
-                           AFYs, AFZs, W, unkF, i, sx, sy, sz);
+                           AFYs, AFZs, W, unkF, i, sx, sy, sz, w);
       });
 }
 
@@ -355,15 +527,16 @@ template <bool Band>
 inline void residualTwo(CCField r, CCConst x, CCConst b, CCField AC, CCField AFX, CCField AFY,
                         CCField AFZ, CCField AW, CCField AE, CCField AS, CCField AN, CCField AB,
                         CCField AT, CCField rs, CCConst xs, CCConst bs, CCField ACs, CCField AFXs,
-                        CCField AFYs, CCField AFZs, CCField W, C3 e, int g) {
+                        CCField AFYs, CCField AFZs, CCField W, C3 e, int g, C3 n, int wrap) {
   ccFor3(
       "peclet::flow::smg_residual_two", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const double ax = Band ? AC(i) * x(i) + bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)
-                               : AC(i) * x(i) + faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz);
-        const double axs = ACs(i) * xs(i) + faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz);
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        const double ax = Band ? AC(i) * x(i) + bandOff(x, AW, AE, AS, AN, AB, AT, i, w)
+                               : AC(i) * x(i) + faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz, w);
+        const double axs = ACs(i) * xs(i) + faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz, w);
         const double wc = W(i);
         r(i) = (b(i) - ax) + wc * xs(i);
         rs(i) = (bs(i) - axs) + wc * x(i);
@@ -372,13 +545,15 @@ inline void residualTwo(CCField r, CCConst x, CCConst b, CCField AC, CCField AFX
 
 /// r = b - (AC x + bandOff) over the inner cells (A2's band-form residual).
 inline void residualBand(CCField r, CCConst x, CCConst b, CCField AC, CCField AW, CCField AE,
-                         CCField AS, CCField AN, CCField AB, CCField AT, C3 e, int g) {
+                         CCField AS, CCField AN, CCField AB, CCField AT, C3 e, int g, C3 n,
+                         int wrap) {
   ccFor3(
       "peclet::flow::smg_residual_band", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
-        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        r(i) = b(i) - (AC(i) * x(i) + bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz));
+        const Nb w = nbrs(lx, ly, lz, n, g, i, sy, sz, wrap);
+        r(i) = b(i) - (AC(i) * x(i) + bandOff(x, AW, AE, AS, AN, AB, AT, i, w));
       });
 }
 
@@ -432,6 +607,11 @@ class ScalarMG {
     for (int a = 0; a < 3; ++a)
       per_[a] = per[a];
   }
+
+  /// Declare that the injected level-0 fill is the single-rank periodic wrap of ALL three axes
+  /// (Solver::fillGhosts: fillAxis on x, y, z, regardless of the domain bc), so the level-0 passes
+  /// may read the wrapped neighbours directly instead of filling first (WO-9b, `wrapReads`).
+  void setLevel0Wrap(bool on) { fill0Wraps_ = on; }
 
   /// Single-rank level table (VelocityMG::init's rule, no depth cap).
   void init(int nx, int ny, int nz, Fill fill0) {
@@ -601,7 +781,7 @@ class ScalarMG {
     for (int f = 0; f < 6; ++f)
       dirFace_[f] = in.dirFace[f];
     if (nUse_ > 1) {
-      buildCutIndex(in);
+      buildCutLists(in);
       for (int f = 0; f < 6; ++f)
         if (dirFace_[f] && touches(l0, f))
           buildPlane0(in, f);
@@ -675,10 +855,10 @@ class ScalarMG {
         KOKKOS_LAMBDA(int lx, int ly, int lz) {
           const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
           const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-          const double ax =
-              band ? AC(i) * x(i) + smg::bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)
-                   : AC(i) * x(i) + smg::faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz);
-          const double axs = ACs(i) * s(i) + smg::faceOff(s, AFXs, AFYs, AFZs, i, sx, sy, sz);
+          const smg::Nb w{i + sx, i - sx, i + sy, i - sy, i + sz, i - sz};
+          const double ax = band ? AC(i) * x(i) + smg::bandOff(x, AW, AE, AS, AN, AB, AT, i, w)
+                                 : AC(i) * x(i) + smg::faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz, w);
+          const double axs = ACs(i) * s(i) + smg::faceOff(s, AFXs, AFYs, AFZs, i, sx, sy, sz, w);
           yf(i) = ax - W(i) * s(i);
           ys(i) = axs - W(i) * x(i);
         });
@@ -775,13 +955,16 @@ class ScalarMG {
     }
     for (int k = 0; k < kPre; ++k)
       sweep(L, true);
-    fill(L, lv.x);  // the smoother leaves the ghosts one colour stale
+    // the smoother leaves the ghosts one colour stale: a fresh fill, or the fused reads
+    const int wr = wrapReads(L);
+    if (wr < 0)
+      fill(L, lv.x);
     if (adv_)
       smg::residualBand(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AW, lv.AE, lv.AS, lv.AN,
-                        lv.AB, lv.AT, lv.ext, lv.g);
+                        lv.AB, lv.AT, lv.ext, lv.g, lv.inner, wr < 0 ? 0 : wr);
     else
       smg::residualFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ,
-                        lv.ext, lv.g);
+                        lv.ext, lv.g, lv.inner, wr < 0 ? 0 : wr);
     Level& cs = lv_[L + 1];
     restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
     if (singular_)
@@ -811,18 +994,22 @@ class ScalarMG {
     }
     for (int k = 0; k < kPre; ++k)
       sweep(L, true);
-    fill(L, lv.x);
-    fill(L, lv.xs);
+    const int wr = wrapReads(L);
+    if (wr < 0) {
+      fill(L, lv.x);
+      fill(L, lv.xs);
+    }
+    const int w = wr < 0 ? 0 : wr;
     if (adv_)
       smg::residualTwo<true>(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ,
                              lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT, lv.ress, CCConst(lv.xs),
                              CCConst(lv.rhss), lv.ACs, lv.AFXs, lv.AFYs, lv.AFZs, lv.W, lv.ext,
-                             lv.g);
+                             lv.g, lv.inner, w);
     else
       smg::residualTwo<false>(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ,
                               lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT, lv.ress, CCConst(lv.xs),
                               CCConst(lv.rhss), lv.ACs, lv.AFXs, lv.AFYs, lv.AFZs, lv.W, lv.ext,
-                              lv.g);
+                              lv.g, lv.inner, w);
     Level& cs = lv_[L + 1];
     restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
     restrictAvg(cs.rhss, CCConst(lv.ress), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
@@ -845,27 +1032,33 @@ class ScalarMG {
   /// black. The kernel's colour counts the ghost offset (lx = gx + g on every axis), hence + 3g.
   void sweepColor(int L, int rb) {
     Level& lv = lv_[L];
-    fill(L, lv.x);
+    // WO-9b: on a single-rank level with every inner dimension even the pass reads the periodic
+    // neighbours directly (wrapSmooth), so no fill; otherwise the fill before each colour
+    const int ws = wrapSmooth(L);
+    const int w = ws < 0 ? 0 : ws;
+    if (ws < 0)
+      fill(L, lv.x);
     const int kc = (rb + 3 * lv.g) & 1;
     if (two_) {  // WO-7: the coupled two-field update (one more exchange: the solid's)
-      fill(L, lv.xs);
+      if (ws < 0)
+        fill(L, lv.xs);
       if (adv_)
         smg::sweepColorTwo<true>(lv.x, lv.rhs, lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.AW, lv.AE, lv.AS,
                                  lv.AN, lv.AB, lv.AT, lv.xs, lv.rhss, lv.ACs, lv.AFXs, lv.AFYs,
-                                 lv.AFZs, lv.W, unkOf(L), lv.ext, lv.og, lv.g, kc);
+                                 lv.AFZs, lv.W, unkOf(L), lv.ext, lv.og, lv.g, kc, lv.inner, w);
       else
         smg::sweepColorTwo<false>(lv.x, lv.rhs, lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.AW, lv.AE, lv.AS,
                                   lv.AN, lv.AB, lv.AT, lv.xs, lv.rhss, lv.ACs, lv.AFXs, lv.AFYs,
-                                  lv.AFZs, lv.W, unkOf(L), lv.ext, lv.og, lv.g, kc);
+                                  lv.AFZs, lv.W, unkOf(L), lv.ext, lv.og, lv.g, kc, lv.inner, w);
       return;
     }
     if (adv_) {
       smg::sweepColorBand(lv.x, CCConst(lv.rhs), lv.AC, lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT,
-                          unkOf(L), lv.ext, lv.og, lv.g, kc);
+                          unkOf(L), lv.ext, lv.og, lv.g, kc, lv.inner, w);
       return;
     }
-    cutcellSmoothColorFace(lv.x, CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.ext, lv.og,
-                           lv.g, kc);
+    smg::sweepColorFace(lv.x, CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.ext, lv.og, lv.g,
+                        kc, lv.inner, w);
   }
 
   /// One full red-black sweep: R -> B forward, B -> R backward.
@@ -883,13 +1076,36 @@ class ScalarMG {
     }
     Level& lv = lv_[L];
 #ifdef PECLET_FLOW_MPI
-    if (distributed_)
+    if (distributed_) {
       lv.dev->exchange(f);
-    else
+      zeroNonPeriodicGhosts(lv, f);
+      return;
+    }
 #endif
-      for (int a = 0; a < 3; ++a)
-        smg::wrapAxis(f, lv.ext, lv.inner, lv.g, a);
-    zeroNonPeriodicGhosts(lv, f);
+    smg::fillShell(f, lv.ext, lv.inner, lv.g, per_);  // WO-9b: one launch, no fence
+  }
+
+  /// WO-9b, the fused periodic-wrap reads (flow's A3): the axes (bit a) a level-L pass may read
+  /// across the block face through the wrapped inner index instead of a filled ghost, or -1 when it
+  /// must fill first. Single rank only. Coarse levels: the periodic axes (a non-periodic ghost of
+  /// x is 0 — zeroed with x before its level's cycle and only ever rewritten to 0 by `fill` — which
+  /// the pass reads in place). Level 0: all three axes when the injected fill is the single-rank
+  /// periodic wrap of every axis (`setLevel0Wrap`), else -1. A read-only pass (residual) needs
+  /// nothing more.
+  int wrapReads(int L) const {
+    if (distributed_)
+      return -1;
+    if (L == 0)
+      return fill0Wraps_ ? 7 : -1;
+    return (per_[0] ? 1 : 0) | (per_[1] ? 2 : 0) | (per_[2] ? 4 : 0);
+  }
+  /// A red-black pass reads the wrapped neighbour safely only when it has the OTHER colour (so it
+  /// still holds what the fill would have copied before the pass): every inner dimension even.
+  int wrapSmooth(int L) const {
+    const Level& lv = lv_[L];
+    if (lv.inner.x % 2 != 0 || lv.inner.y % 2 != 0 || lv.inner.z % 2 != 0)
+      return -1;
+    return wrapReads(L);
   }
 
   /// Does this rank's block on level `lv` touch global face f (0..5 = -x,+x,-y,+y,-z,+z)?
@@ -1198,19 +1414,66 @@ class ScalarMG {
         });
   }
 
-  /// cut0_(i) = the CSR row of level-0 cell i in the facet overlay, or -1.
-  void buildCutIndex(const Inputs& in) {
+  /// Per coarse level L the overlay rows (cut cells) under each coarse inner cell, in increasing
+  /// level-0 linear index — the (dz, dy, dx) order in which the wall gather of `assembleCoarse`
+  /// visited the descendants — as a CSR over the coarse inner cells (WO-9b). The gather then
+  /// visits only the cut descendants, in the same order: the same additions, bitwise, at O(cut
+  /// cells) per level instead of O(N0) (the former loop over every descendant ran one serial
+  /// thread per coarse cell: 30 ms per advance on the GPU at 128^3, most of it on the deepest
+  /// levels). Geometry only: built once per facet overlay (its cutCell view and count), on the host.
+  void buildCutLists(const Inputs& in) {
+    const auto& fo = *in.fac;
+    if (cutKey_ == fo.cutCell.data() && cutKeyN_ == fo.nCut && (int)cutStart_.size() == nUse_)
+      return;
     const Level& l0 = lv_[0];
-    if (cut0_.extent(0) != l0.n)
-      cut0_ = Kokkos::View<int*, CCMem>("smg_cut0", l0.n);
-    Kokkos::deep_copy(CCExec(), cut0_, -1);
-    auto cut0 = cut0_;
-    auto cutCell = in.fac->cutCell;
-    CCExec space;
-    Kokkos::parallel_for(
-        "peclet::flow::smg_cut_index", Kokkos::RangePolicy<CCExec>(space, 0, in.fac->nCut),
-        KOKKOS_LAMBDA(const long c) { cut0(cutCell(c)) = (int)c; });
-    space.fence();
+    const C3 e0 = l0.ext, n0 = l0.inner;
+    const int g0 = l0.g;
+    auto hc = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fo.cutCell);
+    // the inner cut rows by level-0 linear index (the rows of one cell are unique)
+    std::vector<std::pair<long, int>> rows;
+    rows.reserve((std::size_t)fo.nCut);
+    for (long r = 0; r < fo.nCut; ++r) {
+      const long i0 = hc(r);
+      const int x = (int)(i0 % e0.x) - g0, y = (int)((i0 / e0.x) % e0.y) - g0,
+                z = (int)(i0 / ((long)e0.x * e0.y)) - g0;
+      if (x >= 0 && x < n0.x && y >= 0 && y < n0.y && z >= 0 && z < n0.z)
+        rows.emplace_back(i0, (int)r);
+    }
+    std::sort(rows.begin(), rows.end());
+    cutStart_.assign((std::size_t)nUse_, Kokkos::View<int*, CCMem>());
+    cutRows_.assign((std::size_t)nUse_, Kokkos::View<int*, CCMem>());
+    for (int L = 1; L < nUse_; ++L) {
+      const Level& c = lv_[L];
+      const C3 ci = c.inner, cf = c.cfac;
+      const long nc = (long)ci.x * ci.y * ci.z;
+      std::vector<int> start((std::size_t)nc + 1, 0), list(rows.size());
+      auto coarseOf = [&](long i0) {
+        const int x = (int)(i0 % e0.x) - g0, y = (int)((i0 / e0.x) % e0.y) - g0,
+                  z = (int)(i0 / ((long)e0.x * e0.y)) - g0;
+        return (long)(x / cf.x) + (long)(y / cf.y) * ci.x + (long)(z / cf.z) * ci.x * ci.y;
+      };
+      for (const auto& q : rows)
+        ++start[(std::size_t)coarseOf(q.first) + 1];
+      for (long k = 0; k < nc; ++k)
+        start[(std::size_t)k + 1] += start[(std::size_t)k];
+      std::vector<int> pos(start.begin(), start.end() - 1);
+      for (const auto& q : rows)  // stable: increasing level-0 index within each coarse cell
+        list[(std::size_t)pos[(std::size_t)coarseOf(q.first)]++] = q.second;
+      Kokkos::View<int*, CCMem> ds("smg_cut_start", (std::size_t)nc + 1),
+          dl("smg_cut_rows", std::max<std::size_t>(list.size(), 1));
+      Kokkos::deep_copy(ds, Kokkos::View<const int*, Kokkos::HostSpace,
+                                         Kokkos::MemoryTraits<Kokkos::Unmanaged>>(start.data(),
+                                                                                  start.size()));
+      if (!list.empty())
+        Kokkos::deep_copy(Kokkos::subview(dl, std::make_pair((std::size_t)0, list.size())),
+                          Kokkos::View<const int*, Kokkos::HostSpace,
+                                       Kokkos::MemoryTraits<Kokkos::Unmanaged>>(list.data(),
+                                                                                list.size()));
+      cutStart_[(std::size_t)L] = ds;
+      cutRows_[(std::size_t)L] = dl;
+    }
+    cutKey_ = fo.cutCell.data();
+    cutKeyN_ = fo.nCut;
   }
 
   /// Level-0 Dirichlet boundary plane of face f: <Lam a_bf> = Lam a_bf on unknown boundary cells
@@ -1240,7 +1503,6 @@ class ScalarMG {
           const double abf = side == 0 ? saA(i) : saA(i + sa);
           pl((long)j1 + (long)j2 * n1) = unk(i) > 0.5 ? lam * abf : 0.0;
         });
-    space.fence();
   }
 
   static void tangents(int a, int& t1, int& t2) {
@@ -1458,7 +1720,6 @@ class ScalarMG {
               s += pf((long)(r1 * j1 + p) + (long)(r2 * j2 + q) * f1);
           pc((long)j1 + (long)j2 * n1) = s / (double)(r1 * r2);
         });
-    space.fence();
   }
 
   /// Coarse face form + diagonal: AF_a = -w_a(L) <Lam a> over the full extent; on unknown inner
@@ -1480,11 +1741,10 @@ class ScalarMG {
           AFZ(i) = -(wz * pz(i));
         });
     // the wall term: the plain average of the level-0 wall terms (fine probe distance, A1)
-    const Level& l0 = lv_[0];
-    const C3 e0 = l0.ext;
-    const int g0 = l0.g;
     const double invN = 1.0 / ((double)cf.x * cf.y * cf.z);
-    auto cut0 = cut0_;
+    auto cstart = cutStart_[(std::size_t)L];
+    auto crows = cutRows_[(std::size_t)L];
+    auto cutCell = in.fac->cutCell;
     CCConst unk0 = in.unknown;
     CCConst unk = c.unk, mass = c.mass;
     auto cfs = in.fac->cellFacetStart;
@@ -1505,21 +1765,18 @@ class ScalarMG {
             return;
           }
           double W = 0.0, Wc = 0.0;
-          const long s0y = e0.x, s0z = (long)e0.x * e0.y;
-          for (int dz = 0; dz < cf.z; ++dz)
-            for (int dy = 0; dy < cf.y; ++dy)
-              for (int dx = 0; dx < cf.x; ++dx) {
-                const long i0 = (long)(cf.x * icx + dx + g0) + (long)(cf.y * icy + dy + g0) * s0y +
-                                (long)(cf.z * icz + dz + g0) * s0z;
-                const int row = cut0(i0);
-                if (row < 0 || !(unk0(i0) > 0.5))
-                  continue;
-                for (int f = cfs(row); f < cfs(row + 1); ++f) {
-                  W += cw(f);
-                  if (two)
-                    Wc += ccv(f);
-                }
-              }
+          // the cut descendants in increasing level-0 index = the (dz, dy, dx) order (buildCutLists)
+          const long ic = (long)icx + (long)icy * ci.x + (long)icz * ci.x * ci.y;
+          for (int k = cstart(ic); k < cstart(ic + 1); ++k) {
+            const int row = crows(k);
+            if (!(unk0(cutCell(row)) > 0.5))
+              continue;
+            for (int f = cfs(row); f < cfs(row + 1); ++f) {
+              W += cw(f);
+              if (two)
+                Wc += ccv(f);
+            }
+          }
           W *= invN;
           const double tw = wx * px(i), te = wx * px(i + sx);
           const double ts = wy * py(i), tn = wy * py(i + sy);
@@ -1556,17 +1813,21 @@ class ScalarMG {
               return;
             AC(i) += tw2 * pl((long)j1 + (long)j2 * n1);
           });
-      space.fence();
     }
   }
 
  private:
   std::vector<Level> lv_;
   Fill fill0_;
+  bool fill0Wraps_ = false;  ///< fill0_ is the single-rank periodic wrap of all three axes (WO-9b)
   CCConst unk0_;
   CCConst unkS0_;     ///< WO-7: level 0's solid-unknown flags (the operator's)
   bool two_ = false;  ///< WO-7: the last build was the coupled two-field surrogate
-  Kokkos::View<int*, CCMem> cut0_;
+  /// buildCutLists: per coarse level the CSR of the cut rows under each coarse inner cell, and the
+  /// overlay it was built from (its cutCell data and count).
+  std::vector<Kokkos::View<int*, CCMem>> cutStart_, cutRows_;
+  const void* cutKey_ = nullptr;
+  long cutKeyN_ = -1;
   double w_[3] = {1.0, 1.0, 1.0};
   double hp_[3] = {1.0, 1.0, 1.0};
   bool aniso_ = false;

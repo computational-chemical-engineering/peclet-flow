@@ -1137,7 +1137,10 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
       st.mg->initMpi(*dec_, comm_, og_, fill0);
     else
 #endif
+    {
       st.mg->init(nx_, ny_, nz_, fill0);
+      st.mg->setLevel0Wrap(true);  // single rank: fillGhosts = the periodic wrap of x, y, z
+    }
     st.mgVersion = gm.version;
     st.mgN = n_;
   }
