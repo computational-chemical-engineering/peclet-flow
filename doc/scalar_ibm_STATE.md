@@ -67,8 +67,8 @@ own gates.
 | WO-3 operator + Krylov | DONE f0fc80a: G1 1.93, G2 1.89, G3a 1.93–2.00, G3b 1.76–2.34, G7 1.97–2.02; budget 2.8e-14; 205/205 |
 | WO-4 ScalarMG | DONE 35e183d (+Amendment A1 03435df: coarse wall term averaged at the fine probe distance; RAP removed): G1 10/10/11 it, contraction ≤ 0.27, MPI parity 1e-13; 207/207 |
 | WO-5 advection/small cells | DONE a12106a (rulings D-WO5-1..4; collocated 'ghost' refused) |
-| WO-5b open faces, Koren gate, refusal messages | IN PROGRESS |
-| WO-5c advective surrogate (Amendment A2, a61f88e) | NEXT, after WO-5b; WO-6 depends on it |
+| WO-5b open faces, Koren gate, refusal messages | DONE 0794b15 (collocated open faces refused: possible `uf_` outlet issue, see log D-WO5b-1) |
+| WO-5c advective surrogate (Amendment A2, a61f88e) | IN PROGRESS |
 | WO-6 closures | |
 | WO-7 conjugate | |
 | WO-8 contacts | |

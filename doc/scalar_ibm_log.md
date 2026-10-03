@@ -881,3 +881,19 @@ plus `scalar_cutcell_g9c` registered after it and passing.
 
 **Not changed:** the projection, ufAdvVelocity, the legacy scalar path, ScalarMG / the
 preconditioner, steady mode (Q-H / A2), the design note.
+
+## 2026-10-03 — WO-5b orchestrator rulings
+
+- **D-WO5b-1 (Q-I).** Collocated open faces stay REFUSED for cut-cell scalars (option c).
+  - **FOUND (a possible flow issue beyond scalars):** after the collocated projection, the outlet
+    plane of `uf_` holds the inlet's values. `projectCorrectVelocities` fills ghosts before the
+    outflow correction.
+  - Collocated momentum advection reads `uf_` (register: "COLLOCATED momentum advection uses the
+    PROJECTED face field"), so it may be affected at open boundaries.
+  - To be investigated separately; it touches projection code and would move the
+    `colocated_advect_bc` hash. Not fixed inside this campaign.
+- **D-WO5b-2.** The G9c identity is gated against the exactly summed (fsum) mass change, plus
+  `identity_error` ≤ 1e-12 of M as a sanity check. Accepted.
+- **D-WO5b-3.** Accepted: the new refusal (open face + moving fluid before the first projection)
+  and the inert boundary capture.
+- **Known limitation:** outflow backflow uses the signed F_out·c_i (zero-gradient). It is ungated.
