@@ -570,6 +570,11 @@ consistent: `uStar_` for the reaction force, the face field, and the `last_*` di
 
 For the supported configurations (D10), g has a unique fixed point modulo the pressure constant.
 
+*Scope (added 2026-10-03, Q18): the argument below is for the Stokes steady system (−μLu = F − GP).
+With advection on, the steady Navier–Stokes problem can have several fixed points (and unstable
+ones), so uniqueness is not claimed there; `MarchResult`'s docstring states the caveat. Q18 was
+ruled "stationarity only" by the user on 2026-10-03.*
+
 - **Exact solves.** By Prop. 1 of `collocated_invisible_subspace.md`, P-stationarity gives
   ((ρ/Δt)I + μA_p)φ = 0, hence φ = 0, D_αΠu = 0, and the Δt-free steady system −μLu = F − GP. For
   the staggered scheme and the collocated ghost scheme that system has a unique solution modulo

@@ -51,7 +51,17 @@ class MarchResult:
 
     converged=True certifies that the state passed the stop test on consecutive plain steps at this
     dt (stationarity); it does not certify that a plain march from the initial state would reach
-    it.
+    it. Without advection (Stokes) the steady state is unique, so a certified state is the
+    discrete steady solution. With advection the steady Navier-Stokes problem can have several
+    solutions, and above a flow instability (e.g. a wake past its Hopf point) Anderson can converge
+    to an *unstable* steady branch that a time march would never show; the certification's plain
+    steps catch only fast-growing modes. Check such cases with a plain march
+    (``accelerate=False``) or by stepping on from the result.
+
+    The stop test assumes no mode decays slower than ``slow_rate`` per step. Where one does, the
+    remainder is underestimated by up to ``(1 - slow_rate) / (1 - rate)``: on a dense bed (phi 0.6,
+    tail rate ~0.9999) at rtol 1e-10 it certifies ~1.4e-8 from the steady state. Treat
+    certificates below ~1e-8 on such geometries as approximate (an open limitation).
     """
 
     converged: bool

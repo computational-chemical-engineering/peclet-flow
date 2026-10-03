@@ -13,11 +13,12 @@ steady marches, `peclet.flow.march_to_steady`. History and every number:
   byte-identical to the pre-rebase head.
 - **Umbrella**: register (2 superseded, 5 flow + 1 core new; 593 -> 599), CLAUDE.md counts,
   CHANGELOG core 1.4.0, pointers core + flow.
-- **Q18 OPEN (user)**: converged=True promises stationarity only (documented default) vs also
-  plain-march reachability. Recorded as open in the register; "also reachability" -> a small
-  architect question (a plain verification tail of user-chosen length) before the driver changes.
+- **Q18 DECIDED (user, 2026-10-03): stationarity only.** MarchResult docstring states the
+  caveats: uniqueness holds for Stokes only (note §2.3 scope line added); with advection Anderson
+  can land on an unstable steady branch; the stop test under-reads slow tails (~1.4e-8 at rtol
+  1e-10 on the dense bed — open limitation).
 
-**Next action.** Q18 when the user rules. flow's next release (1.3.0 in the pending family 1.4.0)
+**Next action.** None in this campaign. flow's next release (1.3.0 in the pending family 1.4.0)
 ships march_to_steady; its CHANGELOG entry goes under [Unreleased] at that release.
 
 **Anchors.** Note §4.3 "Restart (amended)", §7 "Why stagnation is measured against slow_rate",
