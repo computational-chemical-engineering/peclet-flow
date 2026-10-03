@@ -462,7 +462,10 @@ void Solver<Grid>::bridgeVelocityToVof() {
   if constexpr (Grid::collocated) {
     CCField fa[3] = {uf_, vf_, wf_};
     for (int c = 0; c < 3; ++c) {
-      fillGhosts(fa[c]);  // the face field's own ghost policy (project() does exactly this)
+      // the face field's own ghost policy (project() does exactly this), keeping the high-side
+      // boundary face: the fill is IN PLACE on uf_, and a plain wrap would undo the projection's
+      // outlet face for every later reader -- the scalars, the census (doc/uf_outlet_fix.md)
+      fillFaceGhostsKeepBoundary(fa[c], c);
       vof::copyFaceVelocity(vofAdv_.faceVel(c), I3{e3_.x, e3_.y, e3_.z}, kVofG, fa[c],
                             I3{e_.x, e_.y, e_.z}, G, c);
     }
