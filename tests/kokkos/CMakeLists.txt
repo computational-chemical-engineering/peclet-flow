@@ -377,6 +377,14 @@ add_test(NAME units_anisotropic_tgv COMMAND test_units tgv)
 # PHASE 3 (flow/doc/anisotropic_vof.md §11 S2): the balanced-force CSF on BOX cells — the gate the
 # Phase 2 merge unlocked, since `enable_vof` refused an anisotropic domain until Phase 3 landed.
 add_test(NAME units_vof_aniso COMMAND test_units vofaniso)
+# The scalar-transport and phase-change energy surface in physical units (2026-10-02; U3 had missed
+# it): the same diffusion / advection-diffusion problem in two unit systems (length x1e3, time
+# x0.037, mass x2.9e5) and both call orders, the Boussinesq closure on a scalar; a sine mode decaying
+# as exp(-D k^2 t) on cubic and box cells at two resolutions; and the kinematic Stefan problem
+# (constant-D and rho c_p T paths) plus 12 full steps of the sucking interface in both systems.
+add_test(NAME units_scalar_scale_invariance COMMAND test_units scalar)
+add_test(NAME units_scalar_sine_decay COMMAND test_units scalarsine)
+add_test(NAME units_phase_change_scale_invariance COMMAND test_units phasechange)
 
 # G.8: link every target in this directory against the one compiled instantiation. The library is
 # STATIC, so this is inert for the kernel unit tests that never name `Solver` -- the linker pulls no

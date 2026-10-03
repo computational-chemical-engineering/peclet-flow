@@ -183,6 +183,40 @@ class Solver {
     // `{1,1,1}` — hence the pre-Phase-3 arithmetic exactly — whenever the cells are cubes.
     double hpMax = 1.0;               ///< max_a h_a'
     vof::VofMetric vofMetric() const { return vof::VofMetric{{hp[0], hp[1], hp[2]}}; }
+
+    // ---- Scalar transport and the phase-change energy path (2026-10-02) -----------------------
+    // The internal system is the one above: length hRef, time tRef, mass rhoRef*hRef^3.  A
+    // transported scalar (temperature, concentration) is NOT scaled — it enters every equation
+    // linearly or through an absolute value (T_sat, a Boussinesq T0, an Arrhenius 1/T) — so each
+    // factor below is the M-L-T dimension of its quantity alone, with temperature as its own unit.
+    // Every one is a product of 1.0s, i.e. EXACTLY 1.0, while `physical` is false.
+    //   diffusivity        D       L^2/T         D'    = D * tRef/hRef^2  (the cell Fourier number)
+    //   mass flux          mdot    M/(L^2 T)     mdot' = mdot * tRef/(rhoRef*hRef)
+    //   latent heat        h_lv    L^2/T^2       h'    = h_lv * tRef^2/hRef^2
+    //   conductivity       k       M L/(T^3 K)   k'    = k * tRef^3/(rhoRef*hRef^4)
+    //   heat capacity      rho c_p M/(L T^2 K)   rcp'  = rcp * tRef^2/(rhoRef*hRef^2)
+    //   IHTR resistance    R_int   K L^2 T/M     R'    = R_int * rhoRef*hRef/tRef  (T = mdot R)
+    //   divergence source  S       1/T           S'    = S * tRef
+    // so k'/rcp' = D', mdot' = k' grad'T / h' and mdot' R' = mdot R_int (a temperature): every
+    // phase-change formula holds unchanged on the internal values.  Out, per CELL SUM (the
+    // diagnostics sum per cell without the cell volume, which the caller multiplies by `vol`):
+    double diffToInt() const { return tRef / (hRef * hRef); }
+    double mdotToInt() const { return tRef / (rhoRef * hRef); }
+    double mdotToPhys() const { return rhoRef * hRef / tRef; }
+    double latentToInt() const { return (tRef * tRef) / (hRef * hRef); }
+    double condToInt() const {
+      const double h2 = hRef * hRef;
+      return tRef * tRef * tRef / (rhoRef * h2 * h2);
+    }
+    double rcpToInt() const { return tRef * tRef / (rhoRef * hRef * hRef); }
+    double rintToInt() const { return rhoRef * hRef / tRef; }
+    double divToInt() const { return tRef; }
+    double areaToPhys() const { return hRef * hRef; }
+    double volToPhys() const { return hRef * hRef * hRef; }
+    /// An internal energy (rho c_p T summed over cells of volume hRef^3) to joules: the internal
+    /// energy unit is rhoRef*hRef^5/tRef^2.
+    double energyToPhys() const { return rhoRef * volToPhys() * hRef * hRef / (tRef * tRef); }
+    double powerToPhys() const { return energyToPhys() / tRef; }
   };
 
   /// The map between the solver's INDEX coordinates and the coordinate system the analytic scene
@@ -2544,7 +2578,8 @@ class Solver {
 
 
   // --- Scalar transport (advection-diffusion) -------------------------------------------------
-  // Register a transported scalar `name` with constant diffusivity D (grid units). scheme: 0 FOU,
+  // Register a transported scalar `name` with constant diffusivity D (length^2/time in the
+  // caller's units; under no extent, cells^2 per time unit). scheme: 0 FOU,
   // 1 Koren TVD (default), 2 SOU. iters = RB-GS sweeps for the implicit diffusion solve. Its field
   // is registered in the directory (get_field/set_field/field_view). Openness (set_solid /
   // set_pressure_geometry) must be established for transport to occur.
@@ -3791,8 +3826,10 @@ class Solver {
   /// Turn on phase change. `rhoG`/`rhoL` are the phase densities used by the regression
   /// (`dV = mdot A dt / rho_l`) and by the divergence source (`S = mdot A (1/rho_g - 1/rho_l)`);
   /// they are given EXPLICITLY rather than read off a closure, exactly as `enable_vof_momentum`
-  /// does and for the same reason. `hlv` is the latent heat (J/kg) and is only used by the thermal
-  /// mass flux. Registers "mdot" (kg m^-2 s^-1, solver units) and "pc_source" (1/s).
+  /// does and for the same reason. `hlv` is the latent heat (energy per mass) and is only used by
+  /// the thermal mass flux. All three are PHYSICAL (kept verbatim in `pc*Phys_`, converted by
+  /// `pcRefreshUnits`, so a reference scale pinned later re-derives them). Registers "mdot" and
+  /// "pc_source", which hold INTERNAL values (`mdotToInt`, `divToInt` of `UnitScales`).
   void enablePhaseChange(double rhoG, double rhoL, double hlv);
 
 
@@ -3800,17 +3837,21 @@ class Solver {
 
 
 
-  /// Prescribe a UNIFORM mass flux (P0). Overwrites "mdot" on the inner cells and its ghosts.
+  /// Prescribe a UNIFORM mass flux (P0), in mass per area per time. Overwrites "mdot" on the inner
+  /// cells and its ghosts with the INTERNAL value, so under an armed extent the reference density
+  /// and time must already be pinned (`requireScalesPinned`): the field is not re-derived later.
   void setMassFluxUniform(double v);
 
 
-  /// Prescribe a per-cell mass flux (P0), x-fastest over the inner region.
+  /// Prescribe a per-cell mass flux (P0), x-fastest over the inner region; units and call-order
+  /// rule as `setMassFluxUniform`.
   void setMassFlux(const std::vector<double>& v);
 
 
   /// P1: compute `mdot` each step from the registered scalar `tname` by the one-sided pure-cell
   /// weighted least-squares gradients of `vof/phase_change.hpp`. `Tsat` is the saturation
-  /// temperature, `kg`/`kl` the phase conductivities (W/(cell K)) and `Rint` the interfacial
+  /// temperature (never rescaled), `kg`/`kl` the phase conductivities (power per length per
+  /// kelvin, physical) and `Rint` the interfacial
   /// heat-transfer resistance of the Schrage/IHTR Robin condition `T_G = T_sat + mdot R_int`
   /// (Bureš & Sato 2021); `Rint = 0` is the hard Dirichlet and is the default.
   void setPhaseChangeThermal(const std::string& tname, double Tsat, double kg, double kl,
@@ -3886,7 +3927,7 @@ class Solver {
 
 
 
-  /// The summed interfacial area over the inner region, in h^2 (globally reduced under MPI) —
+  /// The summed interfacial area over the inner region, PHYSICAL (globally reduced under MPI) —
   /// the E7 gallery's `vof_interface_area()`. Uses the CURRENT `set_phase_change_area` geometry,
   /// so the number a page quotes and the number the phase change integrates are the same one.
   /// Needs `enable_vof`; does not need phase change.
@@ -3914,6 +3955,7 @@ class Solver {
   /// This is what stops artificial heating at a high `rho c_p` ratio: with two different fluxes the
   /// heat content carried into a mixed cell is divided by a heat capacity built from another flux,
   /// an error of order `d(rho c_p)` — 2000x at water/steam. Requires the thermal mass flux.
+  /// `rcpGas`/`rcpLiquid` are volumetric heat capacities, physical (`UnitScales::rcpToInt`).
   void setPhaseChangeEnergy(double rcpGas, double rcpLiquid);
 
 
@@ -4033,18 +4075,23 @@ class Solver {
   bool phaseChangeDepositFallback() const;
 
 
+  /// The operator's interfacial heat (power), physical.
   double phaseChangeQOperator() const;
 
 
   double phaseChangeQOrphan() const;
 
 
+  /// The carry ledger, physical: an energy with the consistent transport on, and a temperature
+  /// times a volume without it (the constant-diffusivity scalar carries no heat capacity).
   double phaseChangeCarryDeposited() const;
 
 
   double phaseChangeCarryLost() const;
 
 
+  /// The budget, physical: energies and powers with the consistent transport on, temperature x
+  /// volume (and per time) without it — see `phaseChangeCarryDeposited`.
   PhaseChangeBudget phaseChangeBudgetValues() const;
 
 
@@ -4068,6 +4115,45 @@ class Solver {
 
 
 
+  /// Re-derive the INTERNAL phase-change constants (`pcRhoG_` ... `pcRcpL_`) from the caller's
+  /// physical ones (`pc*Phys_`) with the current reference scales, and push them to the consumers
+  /// that cache them (the energy advector, the k(C)/rho c_p(C) fields). Called by every setter that
+  /// takes one and by `refreshUnitDerived`; exactly the identity in cell units.
+  void pcRefreshUnits();
+
+
+
+  /// Under an armed extent, refuse a call that writes a dimensional value into a FIELD before the
+  /// reference scales it converts with are pinned (`rho`: the first set_rho, `dt`: the first
+  /// set_dt). A field is converted once, at the call, and a scale pinned later would leave it in
+  /// the wrong units silently. A no-op in cell units.
+  void requireScalesPinned(const char* who, bool needRho) const;
+
+
+
+  /// The internal-per-physical factor of a closure TARGET: rho, mu, force_x/y/z; 0.0 for any
+  /// other field (its units are not known — the caller writes it in internal units).
+  double closureTargetToInt(const std::string& target) const;
+
+
+
+  /// Re-derive a closure's internal `p` / `tabY` from its physical `pPhys` / `tabYPhys` with the
+  /// current reference scales (setPropertyModel/Table, and refreshUnitDerived for all of them).
+  void closureRefreshUnits(Closure& cl);
+
+
+  /// Under a physical domain, say on stderr that a closure on a target of unknown dimension takes
+  /// its parameters in internal units (once, at registration).
+  void closureUnitsNotice(const std::string& target) const;
+
+
+
+  /// The factor from an internal phase-change ledger entry (a per-cell sum of rcp' dT) to the
+  /// caller's units: joules with the consistent transport on, temperature x volume without it.
+  double pcLedgerEnergyToPhys() const;
+
+
+
   /// The colour block's ghost policy WITHOUT the colour-specific rules (no solid-band fill, no VoF
   /// boundary colour): the halo/periodic exchange plus the non-periodic zero-gradient clamp. This
   /// is the temperature's policy on the g=3 block.
@@ -4075,7 +4161,8 @@ class Solver {
 
 
 
-  /// A PRESCRIBED extra divergence source (1/s), x-fastest over the inner region, added to the
+  /// A PRESCRIBED extra divergence source (1/time, physical; set_dt must precede it under an
+  /// extent, `requireScalesPinned`), x-fastest over the inner region, added to the
   /// Poisson RHS exactly like the phase-change deposit: the projection then solves for
   /// `div(open u) = S_pc + S_user`. This is how a CLOSED (periodic) box is made compatible with a
   /// net vapour production: put a balancing sink somewhere the exact solution can absorb it. In a
@@ -4302,6 +4389,13 @@ class Solver {
   // BoussinesqForce / ArrheniusMu. in0/in1: input field names (in1 "" if unused). params: up to 4
   // doubles (meaning per kind — property_closures.hpp). Applied at the top of step() in
   // registration order. Targeting a force component turns on the per-cell body-force RHS path.
+  // UNITS: the inputs are taken as UNSCALED fields (a phase fraction, a temperature, a
+  // concentration — never rescaled), so the output's dimension sits in the parameters: on a
+  // target "rho", "mu" or "force_a" the parameters carrying it (all of LinearMix's p0..p2,
+  // Boussinesq's rho0, Arrhenius' mu_ref, a table's ys) are PHYSICAL and convert with that target's
+  // factor (`closureTargetToInt`); the rest enter only as a product with that one (Boussinesq's
+  // g*beta) or against the unscaled input (T0, B, Tref, xs) and stay as given. Any other target
+  // is in that field's INTERNAL units (a stderr notice says so under a physical domain).
   void setPropertyModel(const std::string& target, ClosureKind kind, const std::string& in0,
                         const std::string& in1, const std::vector<double>& params);
 
@@ -4391,7 +4485,7 @@ class Solver {
 
 
   // Tabulated property: out = piecewise-linear interp of (xs, ys) at the input field (xs
-  // ascending).
+  // ascending). Units as setPropertyModel: ys in the target's physical units, xs in the input's.
   void setPropertyTable(const std::string& target, const std::string& in0,
                         const std::vector<double>& xs, const std::vector<double>& ys);
 
@@ -4858,8 +4952,12 @@ class Solver {
   long scgVersion_ = 0;
   // --- phase change (WO-P01) -------------------------------------------------------------------
   bool pcEnabled_ = false, pcThermal_ = false, pcHasUser_ = false;
-  double pcRhoG_ = 1.0, pcRhoL_ = 1.0, pcHlv_ = 1.0;
+  double pcRhoG_ = 1.0, pcRhoL_ = 1.0, pcHlv_ = 1.0;  // INTERNAL (pcRefreshUnits)
   double pcTsat_ = 0.0, pcKg_ = 0.0, pcKl_ = 0.0, pcRint_ = 0.0;
+  // the caller's PHYSICAL values, kept verbatim (refreshUnitDerived re-derives the internal ones)
+  double pcRhoGPhys_ = 1.0, pcRhoLPhys_ = 1.0, pcHlvPhys_ = 1.0;
+  double pcKgPhys_ = 0.0, pcKlPhys_ = 0.0, pcRintPhys_ = 0.0;
+  double pcRcpGPhys_ = 1.0, pcRcpLPhys_ = 1.0;
   double pcInterfaceEps_ = 1e-12, pcPureEps_ = 1e-12;
   std::string pcTName_;
   CCField pcMdot_, pcSrc_, pcUser_, pcArea_, pcNrm_[3], pcDep_, pcTgt_, pcCnew_, pcDefic_;

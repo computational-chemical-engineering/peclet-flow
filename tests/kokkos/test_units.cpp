@@ -1219,6 +1219,474 @@ void gateVofAniso() {
   checkClose(ca.dp, ca.kappa, 5e-2 * ca.kappa, "anisotropic Young-Laplace (computed kappa)");
 }
 
+namespace {
+// --------------------------------------------------------------------------------------------
+// SCALAR TRANSPORT + THE PHASE-CHANGE ENERGY PATH IN PHYSICAL UNITS (2026-10-02).
+//
+// PHYSICAL_UNITS_PLAN U3 converted the momentum and VoF setters and missed this surface:
+// add_scalar's diffusivity, the phase-change densities, latent heat, conductivities, heat
+// capacities, interfacial resistance and prescribed mass flux, the divergence source, the closures
+// that read a scalar, and the getters that report them. The three gates below are the ones the
+// first two ran without — each would have failed before the fix.
+//
+// A system is parameterised by its unit factors: the numerical value of a length is divided by
+// `lam`, of a time by `tau`, of a mass by `mas` (lam = tau = mas = 1 is the reference system). A
+// transported scalar (temperature, concentration) is never rescaled.
+struct Units {
+  double lam = 1.0, tau = 1.0, mas = 1.0;
+  double len(double x) const { return x / lam; }
+  double time(double t) const { return t / tau; }
+  double rho(double r) const { return r * lam * lam * lam / mas; }
+  double mu(double m) const { return m * lam * tau / mas; }
+  double diff(double d) const { return d * tau / (lam * lam); }
+  double vel(double u) const { return u * tau / lam; }
+  double mdot(double m) const { return m * lam * lam * tau / mas; }
+  double latent(double h) const { return h * tau * tau / (lam * lam); }
+  double cond(double k) const { return k * tau * tau * tau / (mas * lam); }
+  double rcp(double c) const { return c * lam * tau * tau / mas; }
+  double pres(double p) const { return p * lam * tau * tau / mas; }
+  double force(double f) const { return f * lam * lam * tau * tau / mas; }  // per volume
+  double area(double a) const { return a / (lam * lam); }
+  double vol(double v) const { return v / (lam * lam * lam); }
+  double energy(double e) const { return e * tau * tau / (mas * lam * lam); }
+  double power(double p) const { return p * tau * tau * tau / (mas * lam * lam); }
+  double rate(double r) const { return r * tau; }  // 1/time
+};
+
+double relDiff(const std::vector<double>& a, const std::vector<double>& b) {
+  return relDiffScaled(a, b, 1.0);
+}
+double relScalar(double a, double b) {  // |a - b| / |a| (or |b| when a == 0)
+  const double den = std::fabs(a) > 0.0 ? std::fabs(a) : std::fabs(b);
+  return den > 0.0 ? std::fabs(a - b) / den : 0.0;
+}
+
+/// A sine mode in x on a periodic, all-fluid box, pure diffusion or advection-diffusion with a
+/// uniform x velocity. Everything is stated in the reference system and converted with `un`.
+/// `dtFirst = false` registers the scalar BEFORE set_dt pins tRef — the order the conversion has
+/// to be indifferent to.
+struct ScalarSine {
+  std::vector<double> T, x;
+  double amp = 0.0;
+};
+ScalarSine runScalarSine(int N, const std::array<double, 3>& ext, double D, double U, double dt,
+                         int nsteps, const Units& un, bool dtFirst, int scheme = 1) {
+  const int ny = 4, nz = 4;
+  peclet::flow::Solver<peclet::flow::Staggered> s(N, ny, nz);
+  s.setPhysicalDomain({un.len(ext[0]), un.len(ext[1]), un.len(ext[2])}, {0.0, 0.0, 0.0},
+                      {N, ny, nz});
+  s.setRho(un.rho(1.0));
+  if (dtFirst)
+    s.setDt(un.time(dt));
+  s.addScalar("T", un.diff(D), scheme, 200);
+  if (!dtFirst)
+    s.setDt(un.time(dt));
+  s.setPressureGeometry(std::vector<double>((std::size_t)N * ny * nz, un.len(1.0)));
+  const double k = 2.0 * M_PI / un.len(ext[0]);
+  const std::vector<double> cx = s.cellCentres(0);
+  std::vector<double> T0((std::size_t)N * ny * nz);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < N; ++x)
+        T0[(std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * ny] = std::sin(k * cx[x]);
+  s.setField("T", T0);
+  if (U != 0.0)
+    s.setVelocity(0, std::vector<double>((std::size_t)N * ny * nz, un.vel(U)));
+  for (int n = 0; n < nsteps; ++n)
+    s.advanceScalars();
+  ScalarSine r;
+  r.T = s.getField("T");
+  r.x = cx;
+  double num = 0.0, den = 0.0;  // projection on the (exactly discrete) sine mode
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < N; ++x) {
+        const double sx = std::sin(k * cx[x]);
+        num += r.T[(std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * ny] * sx;
+        den += sx * sx;
+      }
+  r.amp = num / den;
+  return r;
+}
+
+/// The internal value a closure writes, read back from the raw registry for one cell.
+double closureProbe(const Units& un, bool rhoFirst) {
+  const int N = 8;
+  peclet::flow::Solver<peclet::flow::Staggered> s(N, N, N);
+  s.setPhysicalDomain({un.len(1.0), un.len(1.0), un.len(1.0)}, {0.0, 0.0, 0.0}, {N, N, N});
+  if (rhoFirst) {
+    s.setRho(un.rho(998.0));
+    s.setDt(un.time(1e-3));
+  }
+  s.setPressureGeometry(std::vector<double>((std::size_t)N * N * N, un.len(1.0)));
+  s.addScalar("T", un.diff(1.4e-7), 1, 10);
+  s.setField("T", std::vector<double>((std::size_t)N * N * N, 310.0));
+  // buoyancy rho0 g beta (T - T0): rho0 a density, g an acceleration, beta 1/K
+  s.setPropertyModel("force_z", peclet::flow::ClosureKind::BoussinesqForce, "T", "",
+                     {un.rho(998.0), un.force(9.81) / un.rho(1.0), 2.1e-4, 300.0});
+  if (!rhoFirst) {
+    s.setRho(un.rho(998.0));
+    s.setDt(un.time(1e-3));
+  }
+  s.updateProperties();
+  return s.getField("force_z")[0];
+}
+
+void gateScalar() {
+  std::printf("=== units_scalar_scale_invariance ===\n");
+  const double TOL = 1e-13;
+  const Units ref;  // the reference system
+  Units big;  // a length unit 1000x, a time unit 0.037x, a mass unit 2.9e5x the reference: not
+              // powers of ten, so no conversion factor is exact by accident
+  big.lam = 1e3;
+  big.tau = 3.7e-2;
+  big.mas = 2.9e5;
+  const int N = 32;
+  const std::array<double, 3> ext{2.0, 4.0 * 2.0 / N, 4.0 * 2.0 / N};
+  const double h = 2.0 / N, D = 0.05, dt = 0.5 * h * h / D;
+  for (int adv = 0; adv < 2; ++adv) {
+    const double U = adv ? 0.3 : 0.0;  // Courant U dt/h = 0.19
+    const ScalarSine a = runScalarSine(N, ext, D, U, dt, 40, ref, true);
+    const ScalarSine b = runScalarSine(N, ext, D, U, dt, 40, big, false);
+    const double rT = relDiff(a.T, b.T);
+    std::printf("  %s: max|T_A - T_B|/max|T_A| = %.3e (B registers the scalar before set_dt)\n",
+                adv ? "advection-diffusion (Koren)" : "diffusion                  ", rT);
+    CHECK(maxAbs(a.T) > 0.1);
+    CHECK(rT <= TOL);
+  }
+  // Closures reading a scalar: the Boussinesq force lands in force_z at the same INTERNAL value in
+  // both systems and in both call orders (a scale pinned after registration re-derives it).
+  const double fA = closureProbe(ref, true), fB = closureProbe(big, false);
+  const double fC = closureProbe(big, true);
+  std::printf("  Boussinesq force_z (internal): A %.17g  B(rho/dt after) %.17g  B(before) %.17g\n",
+              fA, fB, fC);
+  CHECK(std::fabs(fA) > 0.0);
+  CHECK(relScalar(fA, fB) <= TOL);
+  CHECK(relScalar(fA, fC) <= TOL);
+}
+
+void gateScalarSine() {
+  std::printf("=== units_scalar_sine_decay ===\n");
+  // 1-D diffusion of a sine mode, T = sin(k x) exp(-D k^2 t), on a PHYSICAL box (Lx = 2,
+  // D = 0.05) that is not the cell count, at two resolutions with the Fourier number D dt/h^2 = 1/4
+  // fixed (so backward Euler's O(dt) is O(h^2) too), to t = 1/(D k^2). Two statements:
+  //   (a) the amplitude equals the EXACT backward-Euler/second-difference amplitude
+  //       r^n, r = 1/(1 + dt D 4 sin^2(k h/2)/h^2), to round-off — the physical D reaches the
+  //       operator exactly, metric included;
+  //   (b) it converges to exp(-D k^2 t) at second order.
+  // Both on cubic cells and on BOX cells (h_y = h_z = h_x/2, so hRef = h_x/2 and the diffusing
+  // axis carries w_x = 1/4).
+  Units un;
+  un.lam = 0.37;  // a unit system that is neither cells nor the reference
+  un.tau = 3.0;
+  un.mas = 2.0;
+  const double Lx = 2.0, D = 0.05, k = 2.0 * M_PI / Lx, tEnd = 1.0 / (D * k * k);
+  for (int box = 0; box < 2; ++box) {
+    double err[2] = {0, 0};
+    for (int q = 0; q < 2; ++q) {
+      const int N = q ? 32 : 16;
+      const double h = Lx / N, dt0 = 0.25 * h * h / D;
+      const int ns = (int)std::ceil(tEnd / dt0);
+      const double dt = tEnd / ns;
+      const double hyz = box ? 0.5 * h : h;
+      const ScalarSine r = runScalarSine(N, {Lx, 4 * hyz, 4 * hyz}, D, 0.0, dt, ns, un, true);
+      const double s2 = std::sin(0.5 * k * h);
+      const double rr = 1.0 / (1.0 + dt * D * 4.0 * s2 * s2 / (h * h));
+      const double discrete = std::pow(rr, ns), exact = std::exp(-D * k * k * tEnd);
+      err[q] = std::fabs(r.amp - exact) / exact;
+      const double eDisc = std::fabs(r.amp - discrete) / discrete;
+      std::printf(
+          "  %s N=%2d (%3d steps): amplitude %.15f  discrete %.15f (rel %.2e)  exact %.15f "
+          "(rel %.3e)\n",
+          box ? "box  " : "cubic", N, ns, r.amp, discrete, eDisc, exact, err[q]);
+      CHECK(eDisc <= 1e-12);
+    }
+    const double order = std::log(err[0] / err[1]) / std::log(2.0);
+    std::printf("  %s observed order %.3f\n", box ? "box  " : "cubic", order);
+    CHECK(order > 1.9 && order < 2.1);
+    CHECK(err[1] < 1e-2);
+  }
+}
+
+// ---- the phase-change energy path ----------------------------------------------------------
+struct PcRun {
+  std::vector<double> C, T, u, p;
+  double layer = 0.0;
+  peclet::flow::IbmSolver::PhaseChangeDiagnostics d;
+  peclet::flow::IbmSolver::PhaseChangeBudget b;
+  double carryDep = 0.0, area = 0.0;
+};
+
+double stefanLambdaU(double St) {  // lambda e^{lambda^2} erf(lambda) = St/sqrt(pi)
+  const double rhs = St / std::sqrt(M_PI);
+  double a = 1e-8, b = 5.0;
+  for (int i = 0; i < 200; ++i) {
+    const double m = 0.5 * (a + b);
+    ((m * std::exp(m * m) * std::erf(m) - rhs) > 0 ? b : a) = m;
+  }
+  return 0.5 * (a + b);
+}
+
+/// test_vof_phase_change's P1' Stefan problem (kinematic: apply_phase_change + advance_scalars),
+/// in physical units. `energy` adds the consistent rho c_p T path with WO-P3g's second-order
+/// package (operator mdot, Gibou-Fedkiw rows, curvature distance, carry-conserve) and the budget.
+/// `scalesFirst = false` sets every phase-change constant BEFORE set_rho/set_dt pin the scales.
+PcRun runStefanUnits(int N, const Units& un, bool energy, bool scalesFirst) {
+  const double St = 1.0, alpha = 1.0, x0p = 0.10, xep = 0.25, Fo = 0.5;
+  const double lam = stefanLambdaU(St);
+  const double t0 = (x0p / (2 * lam)) * (x0p / (2 * lam)) / alpha;
+  const double te = (xep / (2 * lam)) * (xep / (2 * lam)) / alpha;
+  const int ny = 4, nz = 4;
+  const double D = alpha * N * N;  // the reference system is the cell-unit one: h = 1
+  const int ns = (int)std::llround((te - t0) / (Fo / D));
+  const double dt = (te - t0) / ns;
+  peclet::flow::IbmSolver s(N, ny, nz);
+  s.setPhysicalDomain({un.len(N), un.len(ny), un.len(nz)}, {0.0, 0.0, 0.0}, {N, ny, nz});
+  auto scales = [&] {
+    s.setRho(un.rho(1.0));
+    s.setMu(un.mu(1e-3));
+    s.setDt(un.time(dt));
+  };
+  if (scalesFirst)
+    scales();
+  s.setDomainBc(0, 1, 0, 0, 0);
+  s.setDomainBc(1, 1, 0, 0, 0);
+  s.setPressureGeometry(std::vector<double>((std::size_t)N * ny * nz, un.len(1.0)));
+  const double xg = x0p * N;
+  std::vector<double> C((std::size_t)N * ny * nz, 0.0), T((std::size_t)N * ny * nz, 0.0);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < N; ++x) {
+        const std::size_t i = (std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * ny;
+        C[i] = std::fmin(1.0, std::fmax(0.0, (x + 1) - xg));
+        const double xp = (x + 0.5) / N;
+        T[i] = xp < x0p ? 1.0 - std::erf(lam * xp / x0p) / std::erf(lam) : 0.0;
+      }
+  s.enableVof();
+  s.setVof(C);
+  s.addScalar("T", un.diff(D), 1, 60);
+  s.setScalarBc("T", 0, 2, 1.0);
+  s.setScalarBc("T", 1, 2, 0.0);
+  s.setField("T", T);
+  s.enablePhaseChange(un.rho(1.0), un.rho(1.0), un.latent(1.0));
+  // rho c_p = 1 in the reference system, so k = rho c_p D = D
+  s.setPhaseChangeThermal("T", 0.0, un.cond(D), un.cond(D), 0.0);
+  if (energy) {
+    s.setPhaseChangeEnergy(un.rcp(1.0), un.rcp(1.0));
+    s.setPhaseChangeEnergyOrder(2);
+    s.setPhaseChangeBudget(true);
+  }
+  if (!scalesFirst)
+    scales();
+  for (int n = 0; n < ns; ++n) {
+    s.applyPhaseChange(un.time(dt));
+    s.advanceScalars();
+  }
+  PcRun r;
+  r.C = s.getVof();
+  r.T = s.getField("T");
+  double sum = 0;
+  for (double q : r.C)
+    sum += q;
+  r.layer = un.len(N - sum / (ny * nz));
+  r.d = s.phaseChangeDiagnostics();
+  if (energy) {
+    r.b = s.phaseChangeBudgetValues();
+    r.carryDep = s.phaseChangeCarryDeposited();
+  }
+  r.area = s.vofInterfaceArea();
+  return r;
+}
+
+/// test_vof_phase_change's P2 sucking interface (Welch & Wilson): density ratio 10, the rho
+/// closure, the consistent energy transport, an outflow face, the full step() — at N = 32 for
+/// `nsteps` steps.
+PcRun runSuckingUnits(int N, int nsteps, const Units& un) {
+  const double ratio = 10.0, ja = 1.0, alpha_l = 1.0, x0p = 0.10, Fo = 0.5, cfl = 0.2;
+  const double rr = 1.0 / ratio;
+  double b = ja / std::sqrt(M_PI);
+  for (int i = 0; i < 300; ++i) {
+    const double g = b * rr;
+    b = ja * std::exp(-g * g) / (std::sqrt(M_PI) * std::erfc(g));
+  }
+  const double t0 = (x0p / (2 * b)) * (x0p / (2 * b)) / alpha_l;
+  const int ny = 4, nz = 4;
+  const double al = alpha_l * N * N, rho_l = 1.0, rho_v = rr, cpl = 1.0;
+  const double k_l = al * rho_l * cpl, k_v = k_l / ratio, dT = 1.0;
+  const double h_lv = rho_l * cpl * dT / (rho_v * ja);
+  peclet::flow::IbmSolver s(N, ny, nz);
+  s.setPhysicalDomain({un.len(N), un.len(ny), un.len(nz)}, {0.0, 0.0, 0.0}, {N, ny, nz});
+  s.setRho(un.rho(rho_l));
+  s.setMu(un.mu(1e-3));
+  s.setDomainBc(0, 1, 0, 0, 0);
+  s.setDomainBc(1, 3, 0, 0, 0);
+  s.setPressureGeometry(std::vector<double>((std::size_t)N * ny * nz, un.len(1.0)));
+  const double X0 = x0p * N;
+  std::vector<double> C((std::size_t)N * ny * nz, 0.0), T((std::size_t)N * ny * nz, 0.0);
+  for (int z = 0; z < nz; ++z)
+    for (int y = 0; y < ny; ++y)
+      for (int x = 0; x < N; ++x) {
+        const std::size_t i = (std::size_t)x + (std::size_t)y * N + (std::size_t)z * N * ny;
+        C[i] = std::fmin(1.0, std::fmax(0.0, (x + 1) - X0));
+        const double xp = (x + 0.5) / N;
+        if (xp > x0p) {
+          const double sv = xp / (2 * std::sqrt(alpha_l * t0)) - b * (1.0 - rr);
+          T[i] = dT - dT * std::erfc(sv) / std::erfc(b * rr);
+        }
+      }
+  s.enableVof();
+  s.setVof(C);
+  s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "",
+                     {un.rho(rho_v), un.rho(rho_l - rho_v)});
+  s.setPressureFcg(true, 4000, 1e-10);
+  s.addScalar("T", un.diff(al), 1, 60);
+  s.setScalarBc("T", 0, 2, 0.0);
+  auto farT = [&](double tt) {
+    const double sv = 1.0 / (2 * std::sqrt(alpha_l * tt)) - b * (1.0 - rr);
+    return dT - dT * std::erfc(sv) / std::erfc(b * rr);
+  };
+  s.setScalarBc("T", 1, 2, farT(t0));
+  s.setField("T", T);
+  s.enablePhaseChange(un.rho(rho_v), un.rho(rho_l), un.latent(h_lv));
+  s.setPhaseChangeThermal("T", 0.0, un.cond(k_v), un.cond(k_l), 0.0);
+  s.setPhaseChangeEnergy(un.rcp(rho_v * cpl), un.rcp(rho_l * cpl));
+  double tcur = t0;
+  for (int n = 0; n < nsteps; ++n) {
+    const double Xd = b * std::sqrt(alpha_l / tcur) * N;
+    const double dt = std::fmin(cfl / std::fmax(Xd * (1.0 - rr), 1e-30), Fo / al);
+    s.setDt(un.time(dt));  // the FIRST one pins tRef: every constant above is re-derived
+    s.setScalarBc("T", 1, 2, farT(tcur + dt));
+    s.step();
+    tcur += dt;
+  }
+  PcRun r;
+  r.C = s.getVof();
+  r.T = s.getField("T");
+  r.u = s.getVelocity(0);
+  r.p = s.getPressure();
+  r.d = s.phaseChangeDiagnostics();
+  return r;
+}
+
+void gatePhaseChange() {
+  std::printf("=== units_phase_change_scale_invariance ===\n");
+  const double TOL = 1e-12;
+  const Units ref;
+  Units big;  // as in gateScalar
+  big.lam = 1e3;
+  big.tau = 3.7e-2;
+  big.mas = 2.9e5;
+  // (1) kinematic Stefan, constant-diffusivity energy path (P1'), and (2) with the consistent
+  //     energy transport + the second-order package + the budget instruments.
+  for (int energy = 0; energy < 2; ++energy) {
+    const PcRun a = runStefanUnits(32, ref, energy != 0, true);
+    const PcRun b = runStefanUnits(32, big, energy != 0, false);
+    const double rC = relDiff(a.C, b.C), rT = relDiff(a.T, b.T);
+    const double rL = relScalar(big.len(a.layer), b.layer);
+    const double rM = relScalar(big.mdot(a.d.mdotMean), b.d.mdotMean);
+    const double rA = relScalar(big.area(a.d.area), b.d.area);
+    const double rAv = relScalar(big.area(a.area), b.area);
+    const double rV = relScalar(big.vol(a.d.removedVolume), b.d.removedVolume);
+    std::printf(
+        "  Stefan (%s): C %.2e  T %.2e  layer %.2e  mdot_mean %.2e  interface_area %.2e  "
+        "vof_interface_area %.2e  removed_volume %.2e\n",
+        energy ? "rho c_p T, order 2" : "constant D        ", rC, rT, rL, rM, rA, rAv, rV);
+    CHECK(maxAbs(a.T) > 0.1 && a.d.interfaceCells > 0);
+    CHECK(rC <= TOL && rT <= TOL && rL <= TOL);
+    CHECK(rM <= TOL && rA <= TOL && rAv <= TOL && rV <= TOL);
+    if (energy) {
+      const double rq = relScalar(big.power(a.d.qOperator), b.d.qOperator);
+      const double rh = relScalar(big.energy(a.b.hOpen), b.b.hOpen);
+      const double rg = relScalar(big.power(a.b.qGfm), b.b.qGfm);
+      std::printf("    q_operator %.2e  budget h_open %.2e  q_gfm %.2e  (carry %.3e vs %.3e)\n", rq,
+                  rh, rg, big.energy(a.carryDep), b.carryDep);
+      CHECK(a.d.qOperator != 0.0 && a.b.qGfm != 0.0);
+      CHECK(rq <= TOL && rh <= TOL && rg <= TOL);
+      CHECK(std::fabs(big.energy(a.carryDep) - b.carryDep) <=
+            TOL * std::fabs(big.energy(a.b.hOpen)) + 1e-300);
+    }
+  }
+  // (3) the full step(): density ratio 10, the rho closure, the outflow face, the consistent
+  //     energy transport, every constant set before the first set_dt pins tRef.
+  {
+    const PcRun a = runSuckingUnits(32, 12, ref);
+    const PcRun b = runSuckingUnits(32, 12, big);
+    const double rC = relDiff(a.C, b.C), rT = relDiff(a.T, b.T);
+    const double ru = relDiffScaled(b.u, a.u, big.vel(1.0)),
+                 rp = relDiffScaled(b.p, a.p, big.pres(1.0));
+    const double rM = relScalar(big.mdot(a.d.mdotMean), b.d.mdotMean);
+    std::printf("  sucking interface, 12 full steps: C %.2e  T %.2e  u %.2e  p %.2e  mdot %.2e\n",
+                rC, rT, ru, rp, rM);
+    CHECK(maxAbs(a.u) > 0.0);
+    // measured 1.8e-15 / 7.8e-16 / 3.2e-15 / 1.7e-13 / 9.9e-16 on host-openmp: the pressure is the
+    // FCG's own round-off (rtol 1e-10, the same iteration count in both systems)
+    CHECK(rC <= 1e-11 && rT <= 1e-11 && ru <= 1e-11 && rp <= 1e-11 && rM <= 1e-11);
+  }
+  // (4) vof_interface_area on BOX cells: a plane x = x0 across a (Ly, Lz) box has area Ly*Lz in
+  //     every mode. Before 1c80540 the 'plic' mode summed the unit-cube polygon (one per column of
+  //     cells), i.e. ny*nz*hRef^2 = half the area here.
+  {
+    const int nx = 16, ny = 32, nz = 8;
+    const double Lx = 1.6, Ly = 0.8, Lz = 0.4;  // h = (0.1, 0.025, 0.05): three spacings
+    peclet::flow::IbmSolver s(nx, ny, nz);
+    s.setPhysicalDomain({Lx, Ly, Lz}, {0.0, 0.0, 0.0}, {nx, ny, nz});
+    s.setRho(1.0);
+    s.setDt(1e-3);
+    s.setPressureGeometry(std::vector<double>((std::size_t)nx * ny * nz, 1.0));
+    s.enableVof();
+    std::vector<double> C((std::size_t)nx * ny * nz);
+    for (std::size_t i = 0; i < C.size(); ++i)
+      C[i] = std::fmin(1.0, std::fmax(0.0, (double)(i % nx) + 1.0 - 5.3));
+    s.setVof(C);
+    const double aDefault = s.vofInterfaceArea();
+    s.setPhaseChangeArea(peclet::flow::vof::kAreaPlic);
+    const double aPlic = s.vofInterfaceArea();
+    std::printf(
+        "  box-cell plane: vof_interface_area %.15g (default sheet), %.15g (plic) vs %.15g\n",
+        aDefault, aPlic, Ly * Lz);
+    CHECK(relScalar(aPlic, Ly * Lz) <= 1e-12);
+    CHECK(relScalar(aDefault, Ly * Lz) <= 1e-12);
+  }
+  // (5) the refusals. A prescribed mass flux is written into a field once, so under a physical
+  //     domain it needs the scales pinned; and the operator mdot without the consistent energy
+  //     transport has no heat capacity to be physical with.
+  {
+    peclet::flow::IbmSolver s(16, 4, 4);
+    s.setPhysicalDomain({1.0, 0.25, 0.25}, {0.0, 0.0, 0.0}, {16, 4, 4});
+    s.setPressureGeometry(std::vector<double>(16 * 4 * 4, 1.0));
+    s.enablePhaseChange(1.0, 1000.0, 2.26e6);
+    bool threw = false;
+    try {
+      s.setMassFluxUniform(1e-3);
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    CHECK(threw);
+    s.setRho(1000.0);
+    s.setDt(1e-4);
+    s.setMassFluxUniform(1e-3);  // now fine
+    const double kInt = s.unitScales().mdotToInt();
+    CHECK(relScalar(s.getField("mdot")[0], 1e-3 * kInt) <= 1e-15);
+    s.addScalar("T", 1e-7, 1, 10);
+    s.setPhaseChangeThermal("T", 373.15, 0.025, 0.6, 0.0);
+    s.setPhaseChangeMdotOperator(true);
+    std::vector<double> C(16 * 4 * 4, 0.0);
+    for (int i = 0; i < 16 * 4 * 4; ++i)
+      C[(std::size_t)i] = std::fmin(1.0, std::fmax(0.0, (i % 16) + 1 - 6.5));
+    s.setVof(C);
+    threw = false;
+    try {
+      s.applyPhaseChange(1e-4);
+    } catch (const std::runtime_error&) {
+      threw = true;
+    }
+    std::printf("  refusals: set_mass_flux before the scales, operator mdot without rho c_p: %s\n",
+                threw ? "both raise" : "MISSING");
+    CHECK(threw);
+  }
+}
+}  // namespace
+
 int main(int argc, char** argv) {
   const std::string gate = argc > 1 ? argv[1] : "identity";
   Kokkos::initialize(argc, argv);
@@ -1237,8 +1705,16 @@ int main(int argc, char** argv) {
       gateAnisoTgv();
     else if (gate == "vofaniso")
       gateVofAniso();
+    else if (gate == "scalar")
+      gateScalar();
+    else if (gate == "scalarsine")
+      gateScalarSine();
+    else if (gate == "phasechange")
+      gatePhaseChange();
     else {
-      std::fprintf(stderr, "usage: test_units [identity|scale|vof|aniso|sphere|tgv|vofaniso]\n");
+      std::fprintf(stderr,
+                   "usage: test_units [identity|scale|vof|aniso|sphere|tgv|vofaniso|scalar|"
+                   "scalarsine|phasechange]\n");
       ++failures;
     }
   }

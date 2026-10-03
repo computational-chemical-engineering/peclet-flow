@@ -1442,7 +1442,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "'band_div' = max|div(open u)| over the INTERFACIAL cells (WO-P23: the direct read-out of "
           "whether the field Weymouth-Yue advects with is the liquid velocity there — the "
           "band-extended velocity of VOF_PLAN section 9 item 3 is needed iff this is not at the "
-          "projection floor), and the energy-scalar extrema under the consistent transport.")
+          "projection floor), and the energy-scalar extrema under the consistent transport.\n"
+          "Units are the solver's physical ones: mdot_* a mass flux, interface_area/area_orphan "
+          "an area, q_* a power, removed_volume/redistributed/unresolved a liquid VOLUME (colour "
+          "x cell volume), source_sum and band_div 1/time; colours and temperatures as given.")
       .def(
           "set_phase_change_fit_curvature",
           [](D& diag, double k) { diag.s->setPhaseChangeFitCurvature(k); }, nb::arg("kappa"),
@@ -1494,7 +1497,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "WO-P3g item 1 (default OFF): take mdot from the energy operator's own interfacial flux "
           "-- the sum of the ghost-fluid rows' Dirichlet couplings evaluated with the converged T "
           "-- instead of the one-sided least-squares fit, which stays as "
-          "`phase_change_diagnostics()['mdot_fit']`.")
+          "`phase_change_diagnostics()['mdot_fit']`. Under a physical domain this needs "
+          "set_phase_change_energy: the constant-diffusivity flux carries no heat capacity, so "
+          "the step raises rather than assume one.")
       .def(
           "set_phase_change_gfm_order", [](D& diag, int o) { diag.s->setPhaseChangeGfmOrder(o); },
           nb::arg("order"),
@@ -1537,7 +1542,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           },
           "WO-P3f: the last `set_phase_change_carry_conserve` pass — the enthalpy actually handed "
           "back ('deposited') and the enthalpy of the interfacial cells that had NO neighbour left "
-          "in the solve ('lost', which stays destroyed). Both 0 when the option is off.")
+          "in the solve ('lost', which stays destroyed). Both 0 when the option is off. Units as "
+          "phase_change_budget's enthalpies.")
       .def(
           "set_phase_change_budget", [](D& diag, bool on) { diag.s->setPhaseChangeBudget(on); },
           nb::arg("on") = true,
@@ -1572,8 +1578,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             r["calls"] = b.calls;
             return r;
           },
-          "WO-P3f: the ENERGY BUDGET of the LAST energy solve (units: J for the enthalpies, W for "
-          "`q_gfm`; cell volume = 1).\n"
+          "WO-P3f: the ENERGY BUDGET of the LAST energy solve, in the solver's physical units: "
+          "energies for the enthalpies and powers for `q_gfm`/`q_behind` with "
+          "set_phase_change_energy on; without it the constant-diffusivity scalar carries no heat "
+          "capacity and they are temperature x volume (and per time).\n"
           "  h_open / h_open_new  sum rho c_p (T - T_sat) over the UNMASKED cells, before / after "
           "the solve\n"
           "  h_liquid, h_masked   the same over the pure-liquid and the interfacial cells\n"
@@ -1927,6 +1935,15 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
                 u.forceToInt(0), u.forceToInt(1), u.forceToInt(2)};
             d["force_to_physical"] = u.forceTotalToPhys();
             d["torque_to_physical"] = u.torqueToPhys();
+            // scalar transport + the phase-change energy path (a transported scalar itself, a
+            // temperature or a concentration, is never rescaled)
+            d["diffusivity_to_internal"] = u.diffToInt();
+            d["mass_flux_to_internal"] = u.mdotToInt();
+            d["latent_heat_to_internal"] = u.latentToInt();
+            d["conductivity_to_internal"] = u.condToInt();
+            d["heat_capacity_to_internal"] = u.rcpToInt();  // volumetric, rho*c_p
+            d["interface_resistance_to_internal"] = u.rintToInt();
+            d["divergence_to_internal"] = u.divToInt();
             return d;
           },
           "The factors between the caller's units and the ones the solver computes in.\n\n"
@@ -1935,7 +1952,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "(diagnostics.field_view / get_field / set_field) is in those INTERNAL units, unlike get_u/get_p, "
           "which convert. `identity` is True when no extent was given, and then every factor is "
           "exactly 1.0 and internal == physical. Multiply a physical value by *_to_internal, and "
-          "an internal one by force_to_physical (a total force) to come back.")
+          "an internal one by force_to_physical (a total force) to come back. The registered "
+          "'mdot' field is in mass_flux_to_internal units and 'pc_source' / 'div_source' in "
+          "divergence_to_internal units; a transported scalar is never rescaled.")
       .def_prop_ro(
           "physical_units", [](S& s) { return s.hasPhysicalDomain(); },
           "True when the solver was given an extent, i.e. lengths are physical rather than cells.")
@@ -2502,7 +2521,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           nb::arg("name"), nb::arg("diffusivity") = 0.0, nb::arg("scheme") = "koren",
           nb::arg("iters") = 50,
           "Register a transported scalar (temperature/concentration/...): constant diffusivity "
-          "(grid units), advection scheme 'fou' (first-order upwind), 'koren' (Koren TVD, the "
+          "(length^2/time, in the solver's physical units -- cells^2 per time unit without an "
+          "extent), advection scheme 'fou' (first-order upwind), 'koren' (Koren TVD, the "
           "default) or 'sou' (second-order upwind), and RB-GS diffusion sweeps. The scalar is a "
           "registered field (get_field/set_field/diagnostics.field_view). Requires geometry "
           "(set_solid/set_pressure_geometry) for the openness-weighted operators.")
@@ -2515,8 +2535,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           },
           nb::arg("name"), nb::arg("face"), nb::arg("type"), nb::arg("value") = 0.0,
           "Scalar boundary condition on a domain face ('-x', '+x', '-y', '+y', '-z', '+z'): "
-          "type 'periodic', 'neumann' (zero flux, adiabatic) or 'dirichlet' (the given value). "
-          "Single-rank.")
+          "type 'periodic', 'neumann' (zero flux, adiabatic) or 'dirichlet' (the given value, in "
+          "the scalar's own units: the solver never rescales a transported scalar). Single-rank.")
       .def(
           "has_scalar", [](S& s, const std::string& name) { return s.hasScalar(name); },
           nb::arg("name"), "Whether a transported scalar of this name is registered.")
@@ -3010,8 +3030,12 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           },
           nb::arg("rho_gas"), nb::arg("rho_liquid"), nb::arg("h_lv") = 1.0,
           "Enable VoF phase change (VOF_PLAN section 9, rungs P0/P1; the Boyd & Ling 2023 / Malan "
-          "2021 pattern). Registers 'mdot' (the interfacial mass flux, kg m^-2 s^-1 in solver "
-          "units, POSITIVE = evaporation) and 'pc_source' (the deposited divergence source, 1/s).\n"
+          "2021 pattern). rho_gas/rho_liquid are densities and h_lv the latent heat (energy per "
+          "mass), all in the solver's physical units. Registers 'mdot' (the interfacial mass flux, "
+          "POSITIVE = evaporation) and 'pc_source' (the deposited divergence source); both are "
+          "raw-registry fields and hold INTERNAL values -- multiply by 1/unit_scales"
+          "['mass_flux_to_internal'] and 1/unit_scales['divergence_to_internal'] (both 1 "
+          "without an extent).\n"
           "\nWhat it does per step, at the HEAD of step(): (1) reconstruct the PLIC plane of every "
           "interfacial cell and take its POLYGON AREA A analytically (A = |m|_2 dV/dalpha, not a "
           "finite difference); (2) evaluate mdot (prescribed by set_mass_flux*, or computed by "
@@ -3030,14 +3054,16 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "set_mass_flux_uniform", [](S& s, double v) { s.setMassFluxUniform(v); },
           nb::arg("mdot"),
-          "P0: prescribe a UNIFORM interfacial mass flux (kg m^-2 s^-1, solver units; positive = "
-          "evaporation, liquid consumed). Turns the thermal mass flux OFF.")
+          "P0: prescribe a UNIFORM interfacial mass flux (mass per area per time; positive = "
+          "evaporation, liquid consumed). Turns the thermal mass flux OFF. Under an extent, call "
+          "set_rho and set_dt first: the value is converted into the 'mdot' field once.")
       .def(
           "set_mass_flux",
           [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setMassFlux(grid_in(a)); },
           nb::arg("array"),
           "P0: prescribe a per-cell interfacial mass flux from a Fortran-order (nx,ny,nz) float64 "
-          "array (== set_field('mdot') plus the ghost fill). Turns the thermal mass flux OFF.")
+          "array, in the units of set_mass_flux_uniform (and with its call-order rule). Turns "
+          "the thermal mass flux OFF.")
       .def(
           "set_phase_change_thermal",
           [](S& s, bool enabled, const std::string& name, double t_sat, double k_gas,
@@ -3070,14 +3096,18 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "The energy scalar's diffusivity is whatever add_scalar was given (a CONSTANT); per-cell "
           "k(C) and the consistent rho c_p T geometric transport are set_phase_change_energy. That "
           "is not a limitation for the Stefan gate, where the liquid is saturated and pinned at "
-          "T_sat.")
+          "T_sat.\n\n"
+          "Units: t_sat in the temperature scalar's own units (never rescaled); k_gas/k_liquid "
+          "are thermal conductivities (power per length per kelvin) and r_int an interfacial "
+          "resistance (kelvin per mass flux), all in the solver's physical units.")
       .def(
           "vof_interface_area", [](S& s) { return s.vofInterfaceArea(); },
-          "Total interfacial area of the colour field, in CELLS squared (h^2), summed over "
+          "Total interfacial area of the colour field (an area in the solver's units; cells "
+          "squared without an extent), summed over "
           "the inner region and globally reduced under MPI. Uses the geometry "
           "diagnostics.set_phase_change_area selects, so the number a page quotes and the number the phase "
           "change integrates are the same one. Needs enable_vof; phase change need not be on. "
-          "A sphere of radius R cells reads 4 pi R^2 to about 0.2-0.8 % once its colour field is "
+          "A sphere of radius R reads 4 pi R^2 to about 0.2-0.8 % once its colour field is "
           "resolved (WO-P3c).")
       .def(
           "set_phase_change_energy",
@@ -3108,12 +3138,15 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "cell, where the pure neighbour's own k is used -- a Dirichlet row is an identity row, so "
           "that coefficient's only job is the conductance with which the pure cell reaches a "
           "boundary condition that already sits at the interface.\n"
-          "Units: rho*c_p in J/(cell^3 K), k in W/(cell K). Requires set_phase_change_thermal.")
+          "Units: rho_cp_* are VOLUMETRIC heat capacities (energy per volume per kelvin) in the "
+          "solver's physical units, like the k of set_phase_change_thermal. Requires "
+          "set_phase_change_thermal.")
       .def(
           "set_divergence_source",
           [](S& s, nb::ndarray<double, nb::f_contig> a) { s.setDivergenceSource(grid_in(a)); },
           nb::arg("array"),
-          "A PRESCRIBED extra divergence source (1/s) on the inner cells, added to the Poisson RHS "
+          "A PRESCRIBED extra divergence source (1/time; under an extent call set_dt first) on "
+          "the inner cells, added to the Poisson RHS "
           "beside the phase-change deposit, so the projection solves div(open u) = S. Registered "
           "as the field 'div_source'. Its use is to make a CLOSED (periodic) domain compatible "
           "with a net vapour production by carrying a balancing sink; with an outflow face the "
@@ -3189,7 +3222,12 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "'force_x'/'force_y'/'force_z'). kind: 'linear' (params [p0,p1,p2]: "
           "p0+p1*field+p2*field2), "
           "'boussinesq' (params [rho0,g,beta,T0]: rho0*g*beta*(field-T0) buoyancy), 'arrhenius' "
-          "(params [mu_ref,B,Tref]: mu_ref*exp(B*(1/field-1/Tref))). Applied at the top of step().")
+          "(params [mu_ref,B,Tref]: mu_ref*exp(B*(1/field-1/Tref))). Applied at the top of step().\n\n"
+          "Units: the input fields are taken as UNSCALED quantities (a phase fraction, a "
+          "temperature, a concentration -- the solver never rescales a transported scalar), so on "
+          "a target 'rho', 'mu' or 'force_x/y/z' the parameters are in the solver's PHYSICAL "
+          "units (a density, a viscosity, a force per volume: rho0*g*beta*(T-T0) as written); "
+          "any other target takes its field's INTERNAL units (see unit_scales).")
       .def(
           "set_property_table",
           [](S& s, const std::string& target, const std::string& field,
@@ -3197,7 +3235,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
              const std::vector<double>& y) { s.setPropertyTable(target, field, x, y); },
           nb::arg("target"), nb::arg("field"), nb::arg("x"), nb::arg("y"),
           "Register a tabulated property: target = piecewise-linear interpolation of (x, y) at the "
-          "input field value (x ascending, clamped at the ends).")
+          "input field value (x ascending, clamped at the ends). Units as set_property_model: y in "
+          "the target's physical units on 'rho'/'mu'/'force_*', x in the input field's.")
       .def(
           "update_properties", [](S& s) { s.updateProperties(); },
           "Apply all registered property/force closures now (also done at the top of step()).")

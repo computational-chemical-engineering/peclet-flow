@@ -41,7 +41,9 @@ struct ScalarField {
   std::string name;
   CCField c, cOld, b;                  // solution (registered), time base c^n, rhs
   CCField AC, AW, AE, AS, AN, AB, AT;  // implicit diffusion+time 7-band operator
-  double D = 0.0;                      // constant diffusivity (grid units)
+  double D = 0.0;                      // constant diffusivity, INTERNAL: D' = Dphys*tRef/hRef^2
+  double Dphys = 0.0;                  // the caller's diffusivity (L^2/T), kept so a reference
+                                       // scale pinned later re-derives D (refreshUnitDerived)
   int scheme = 1;                      // explicit advection flux: 0 FOU, 1 Koren TVD, 2 SOU
   int iters = 50;                      // RB-GS sweeps for the implicit diffusion solve
   int bc[6] = {0, 0, 0, 0, 0, 0};      // -x,+x,-y,+y,-z,+z (ScalarBc)
