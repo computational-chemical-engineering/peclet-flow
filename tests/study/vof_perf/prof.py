@@ -13,9 +13,9 @@ Usage:
             [--warm W] [--flux device|python|none] [--levels L] [--bottom MODE] [--fixdt DT]
             [--ckpt PATH] [--case-dir DIR] [--dummy N]
 
-    --ckpt      checkpoint (default ~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/
-                data/ckpt_t43.npz)
-    --case-dir  directory holding run_peclet.py + case.py (default: that repo's scripts/)
+    --ckpt      checkpoint (default ~/Codes/bubble_column_perf/ckpt_t43.npz)
+    --case-dir  directory holding run_peclet.py + case.py (default:
+                ~/Codes/peclet-examples/benchmarks/bubble-column/scripts)
     --pcg       MG-PCG pressure with cap 800 and relative tolerance --rtol (default 1e-10)
     --dump      save u, v, w, p, C, the timed steps' dt and pressure iterations (iters) and every
                 VoF block's colour array (col<id>) -- compare two dumps with cmp.py (G-BIT item 2)
@@ -40,9 +40,9 @@ def arg(name, default, cast=str):
 
 
 CASE_DIR = arg("--case-dir", os.path.expanduser(
-    "~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/scripts"))
+    "~/Codes/peclet-examples/benchmarks/bubble-column/scripts"))
 CKPT = arg("--ckpt", os.path.expanduser(
-    "~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/data/ckpt_t43.npz"))
+    "~/Codes/bubble_column_perf/ckpt_t43.npz"))
 sys.path.insert(0, CASE_DIR)
 import run_peclet as rp  # noqa: E402
 
