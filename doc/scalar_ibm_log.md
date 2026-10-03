@@ -1474,3 +1474,96 @@ path (bitwise above).
 **D-WO8-2 applied.** In `gate_g13` the conjugate contact row prints "OPEN: contact model pending (§13 Q4,
 Frank)", and its clauses print as `info` (order −2.84, numbers unchanged). The Dirichlet rows and the
 thin plate stay gated. Rerun: ctest `scalar_cutcell_g13` passes; G12 12/12 hashes equal at OMP 1.
+
+## 2026-10-04 — WO-9a: backends (G11) and provisional G-perf — CUDA builds and agrees on every row but one; stopped on G9 koren at R_o/h 32
+
+**Build.** A separate tree `build_cuda` (nvidia-cuda prefix: Kokkos 5.1.1 `OPENMP;SERIAL;CUDA`,
+`BLACKWELL120`, `CUDA_CONSTEXPR` on; core sibling `core-scalar-ibm`; tests on, MPI off). One device-
+compile fix, in `src/scalar_mg.hpp` only: 24 nvcc errors "the enclosing parent function for an
+extended __host__ __device__ lambda cannot have private or protected access" (`countUnknownS`,
+`removeMeanTwo`, `buildLevel0SolidFaces`, `buildCoarseSolid`, `countUnknown`, `removeMean`, `norm2`,
+`buildLevel0Faces`, `buildCutIndex`, `buildPlane0`, `buildCoarse`, `coarsenAdvection`,
+`assembleBands`, `coarsenPlane`, `assembleCoarse`). The `private:` boundary moved below the member
+functions to the data members, which stay private: access only, the layout unchanged. No other scalar
+source needed a change; no nvcc warning in a scalar file.
+
+**Kernel ctests on the RTX 5080:** `scalar_transport`, `scalar_cutcell_operator`, `scalar_mg` pass.
+`scalar_cutcell_geometry` failed only on its own bitwise clause "device kappa == host recomputation"
+(memcmp): nvcc contracts FMAs in the kernel while both host sides are `-ffp-contract=off`. Reading
+taken: on a device backend that clause is G11's geometry tolerance, |Δκ| ≤ 1e-12, facet count still
+exact; bitwise kept on host backends (the test detects the default memory space). It then passes.
+
+**G11** (`tests/python/scalar_cutcell_backends.py`: the gate cases of `test_scalar_cutcell_gates.py`
+called unchanged through a recording `Solver` subclass that logs every solve's count; dump on each
+tree, `compare`; OMP_NUM_THREADS=4 on both; "floor" = the same OpenMP build at 1 thread against 4,
+the reference backend's own reproducibility). Geometry = max over κ, apertures, κ_s and the facet
+centroid/normal/area; "exact" = unknown flags, facet instance and per-facet probe rung, census rungs
+(fluid + solid); solution = c (+ c_s) over the unknowns, facet flux and wall value.
+
+| row | geometry | exact | solution | Δits | solves | floor |
+|---|---|---|---|---|---|---|
+| G1 R/h 8 / 16 / 32 | 3.3e-16 | yes | 6.2e-15 / 2.0e-14 / 6.5e-13 | 0 | 1 | 8.1e-16 / 1.0e-14 / 2.2e-13 |
+| G6 case 1 R/h 8 / 16 (30 BE steps) | 4.3e-14 / 3.7e-14 | yes | 1.9e-14 / 5.8e-14 | 0 | 30 | 1.1e-14 / 5.4e-15 |
+| G9 fou 16 / 32, Cr 0.5 | 2.2e-16 | yes | 1.4e-15 / 1.4e-14 | 0 | 333 / 700 | 8.1e-13 / 9.5e-15 |
+| G9 fou 16 / 32, Cr 0.9 | 2.2e-16 | yes | 3.9e-15 / 4.9e-14 | 0 | 185 / 389 | 5.1e-16 / 1.4e-12 |
+| G9 koren 16, Cr 0.5 / 0.9 | 2.2e-16 | yes | 5.3e-11 / 4.3e-13 | 0 | 333 / 185 | 2.7e-11 / 1.2e-10 |
+| **G9 koren 32, Cr 0.5 / 0.9** | 2.2e-16 | yes | **6.8e-9 / 6.5e-9** | 0 / 1 | 700 / 389 | **1.8e-9 / 1.5e-9** |
+| G-adv(a) R/h 16, Pe_h 1 / 10 | 2.2e-16 | yes | 4.8e-15 / 7.9e-15 | 0 | 2 | 1.6e-15 |
+| G-adv(b) closure 32³, Pe_h 1 / 10 | 3.3e-16 | yes | 2.1e-14 / 1.0e-13 | 0 | 2 | 1.2e-14 / 6.2e-14 |
+| G-adv(b′) 32³, Pe_h 1 / 10 | 3.3e-16 | yes | 1.4e-15 / 1.1e-15 | 0 | 2 | 1.4e-15 |
+
+Every row meets G11 (geometry ≤ 1e-12, rungs identical, solution ≤ 1e-9, iterations ±1) except G9
+koren at R_o/h 32, at both Courant numbers. Evidence that this is the koren path's own sensitivity,
+not the backend:
+- the GPU is bitwise reproducible run to run; the OpenMP build at 1 vs 4 threads differs by the same
+  amount (final 1.5–1.8e-9; the per-step maximum reaches 2.4e-9 at rtol 1e-10 and 7.7e-9 at rtol
+  1e-13, so it is not the Krylov tolerance);
+- the per-step census (implicit faces, small cells, guarded faces, iterations, bulk Courant) is
+  identical in all 700 steps on all three runs: no discrete classification or count flips;
+- fou on the same geometry stays at 1e-14; koren is at round-off (≤ 3e-16) until step 55 (GPU) /
+  56 (OpenMP 1 thread), then jumps in ONE step to 5e-12 / 3e-13, at the blob's leading edge against a
+  non-unknown neighbour where c ~ 1e-9 – 1e-10 (previous-step difference 6.6e-24 absolute in the
+  1-thread case: an amplification of ~1e11 in one step, i.e. a discontinuity, not a Lipschitz
+  growth), and further such events accumulate to ~1e-9.
+
+**G-perf (PROVISIONAL — shared host at load 15–18, the RTX 5080 at 91–93 % utilization from another
+session's CUDA ctests; a cupy launch + synchronize costs 0.97 ms here against ~10 µs idle, and a 512 MB
+add runs at 553 GB/s).** Instruments: `tests/kokkos/bench_scalar_cutcell` (new, label `bench`) and
+`tests/study/scalar_ibm/gperf.py` (new), and the `scalar_mg` ctest's V-cycle line.
+
+| item | OpenMP (4 threads) | CUDA | bound |
+|---|---|---|---|
+| triad (2^26 doubles) | 53.3 GB/s | 692.5 GB/s | — |
+| matvec 128³ SC bed (72 B / ext. cell) | 4.40 ms, 37.7 GB/s = 71 % | 0.63 ms (mean 0.80), 265 GB/s = **38 %** | ≥ 50 % |
+| memory, one single-phase scalar (steady, 7 levels), 128³ | 239 B/cell (+ 48 geometry record, shared) | 239 (+ 49) | ≤ 300 |
+| scalar advance / projection, 128³ bed, dt D/h² = 1, koren | 510–580 / 325–352 ms = **1.58** (median) | 2.9–3.3 s / 91–93 ms = **33.7** | ≤ 1 |
+| advective / symmetric V-cycle 64³ | 3.27 / 2.07 ms = 1.58 | 222 / 192 ms = 1.15 | ≤ 2 |
+| steady G-adv(b) 64³ solve, Pe_h 1 / 10 | 0.11 s (10 it) / 0.17 s (17 it) | 3.1 s / 4.5 s | recorded |
+
+Red flags → §13 Q9: the advance/projection ratio on both backends and the GPU matvec fraction.
+- The GPU path is synchronize-bound. nsys on 3 steps of G6 case 1 at R/h 8: 47 705 kernel launches,
+  40 769 `cudaStreamSynchronize` (99.0 % of the API time, 0.60 ms each under this contention), 78 ms
+  of kernel time in 24.8 s of wall time. The largest counts are ScalarMG's per-plane ghost kernels
+  `smg::zeroPlanes` (26 262) and `smg::wrapAxis` (13 122), each followed by an explicit
+  `space.fence()` (scalar_mg.hpp:151, :174).
+- On an idle GPU the same count of synchronizations would cost ~0.4 s per step; the latency, not the
+  bandwidth, is the lever.
+- Not changed here (performance pass later, on a quiet machine).
+
+**G12:** 12/12 state hashes = `doc/scalar_ibm_baseline_hashes.txt` (OMP_NUM_THREADS=1, build_dev with
+the scalar_mg.hpp change).
+**Battery** (build_dev, `-LE bench`): 224/224 pass. Run in two pieces: the first 52 at OMP 4, -j4 (the four G6 ctests 1197–1605 s each
+while another session drove the host load to 70), stopped while two np = 4 MPI ctests sat at 30 min;
+the remaining 172 at OMP 2, -j4 with OMP_WAIT_POLICY=passive and OMPI_MCA_mpi_yield_when_idle=1
+(scheduling only), 238 s.
+
+**Question (stopped):**
+- **Q-N (G11 on G9 koren).** At R_o/h 32 the CUDA–OpenMP difference (6.5–6.8e-9) exceeds G11's 1e-9.
+  The OpenMP build's thread-count difference is the same size (1.5–1.8e-9 final, up to 7.7e-9 per step),
+  so no backend tolerance can hold this row as the note writes it. Options: (a) gate the koren rows
+  of G11 against the reference backend's own floor (e.g. ≤ 10× the 1-vs-4-thread difference);
+  (b) restrict G11's G9 rows to fou and gate koren on G9's integral quantities (budget, conservation,
+  bounds) on both backends; (c) shorten the koren row to G10's 50 steps; (d) treat the one-step
+  1e11 amplification at the blob front as a defect of the koren path (a threshold or guard in the
+  limiter or the small-cell face treatment) and find it first — it is backend-independent and
+  would also bound G10's koren row.

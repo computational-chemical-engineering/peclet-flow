@@ -901,7 +901,7 @@ class ScalarMG {
     return (f % 2 == 0) ? (o == 0) : (o + n == gn);
   }
 
- private:
+ public:  // nvcc: a member enclosing an extended device lambda must be public (data stays private)
   static constexpr int kMaxLevels = 64;  ///< no depth cap in practice (the full table)
   static constexpr int kPre = 2, kPost = 2, kBottom = 16;
 
@@ -1560,6 +1560,7 @@ class ScalarMG {
     }
   }
 
+ private:
   std::vector<Level> lv_;
   Fill fill0_;
   CCConst unk0_;

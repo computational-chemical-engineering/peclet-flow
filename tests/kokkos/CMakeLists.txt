@@ -193,6 +193,15 @@ target_link_libraries(bench_rbgs PRIVATE Kokkos::kokkos)
 add_test(NAME bench_rbgs COMMAND bench_rbgs 64 20)
 set_tests_properties(bench_rbgs PROPERTIES LABELS bench)
 
+# Cut-cell scalar G-perf instrument (doc/scalar_ibm_design.md §11 G-perf; WO-9): triad, memory
+# per single-phase scalar, matvec effective bandwidth. Prints only.
+add_executable(bench_scalar_cutcell bench_scalar_cutcell.cpp)
+target_include_directories(bench_scalar_cutcell PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(bench_scalar_cutcell PRIVATE Kokkos::kokkos)
+add_test(NAME bench_scalar_cutcell COMMAND bench_scalar_cutcell 64 20)
+set_tests_properties(bench_scalar_cutcell PROPERTIES LABELS bench)
+
 add_executable(test_mg test_mg.cpp)
 target_include_directories(test_mg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
 target_link_libraries(test_mg PRIVATE Kokkos::kokkos)

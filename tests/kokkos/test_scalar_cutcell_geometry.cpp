@@ -16,12 +16,16 @@
 // The sphere is SOLID (the G1 configuration), so the measured volume is sum (1 - kappa) V over
 // the inner cells. Per-cell PL records (rho, kind, areaPL) are recomputed on the host from a
 // mirror of sdf_ through the SAME sample assembly (scg::cellSamples) and core kernel, and the
-// device record's kappa must equal them bitwise.
+// device record's kappa must equal them bitwise on a host backend (both sides -ffp-contract=off).
+// On a device backend (WO-9) nvcc contracts FMAs inside the kernel, so the clause there is G11's
+// geometry tolerance: |kappa_device - kappa_host| <= 1e-12 (kappa in [0, 1]); the facet count must
+// still match exactly.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -108,7 +112,12 @@ struct Measure {
   double minRho = 1.0, maxSnapRes = 0.0;             // (f): max |A^snap - areaPL| / max A
   double sealedMaxKappa = 0.0, sealedVolFrac = 0.0;  // evidence for the '0 sealed' clause
   long kappaMismatch = 0, countMismatch = 0;
+  double maxKappaDiff = 0.0;  // max |kappa_device - kappa_host| (0 on a host backend)
 };
+
+// WO-9 / G11: a device execution space computes the record with FMA contraction.
+constexpr bool kDeviceBackend =
+    !std::is_same_v<Kokkos::DefaultExecutionSpace::memory_space, Kokkos::HostSpace>;
 
 Measure measure(IbmSolver& s, const int n[3], const double hp[3]) {
   Measure m;
@@ -133,7 +142,9 @@ Measure measure(IbmSolver& s, const int n[3], const double hp[3]) {
         double corner[8], face[6], centre;
         scg::cellSamples(sdf, i, sy, sz, corner, face, centre);
         const cs::CutCellGeometry g = cs::cutCellGeometryFanTet(corner, face, centre, hp);
-        if (std::memcmp(&g.kappa, &kap(i), sizeof(double)) != 0)
+        m.maxKappaDiff = std::fmax(m.maxKappaDiff, std::fabs(g.kappa - kap(i)));
+        if (kDeviceBackend ? !(std::fabs(g.kappa - kap(i)) <= 1e-12)
+                           : std::memcmp(&g.kappa, &kap(i), sizeof(double)) != 0)
           ++m.kappaMismatch;
         m.fluidVol += g.kappa * vol;
         m.solidVol += (1.0 - g.kappa) * vol;
@@ -246,6 +257,9 @@ void sphereSet(const char* label, const double hp[3], bool strictR0) {
       else
         CHECK((double)m.r0 >= 0.999 * (double)m.facets && m.r2 == 0);
       CHECK(m.maxSnapRes <= 2e-3);
+      if (m.kappaMismatch != 0 || m.countMismatch != 0)
+        std::printf("    record vs host: %ld kappa mismatches (max diff %.2e), facet count %s\n",
+                    m.kappaMismatch, m.maxKappaDiff, m.countMismatch ? "DIFFERS" : "equal");
       CHECK(m.kappaMismatch == 0 && m.countMismatch == 0);
     }
     rmsV[r] = std::sqrt(sV / 3.0);
@@ -290,6 +304,9 @@ void pipeSet() {
       CHECK(m.r0 == m.facets && m.facets > 0);
       CHECK(m.sealed == 0 && m.notSingle == 0);
       CHECK(m.maxSnapRes <= 2e-3);
+      if (m.kappaMismatch != 0 || m.countMismatch != 0)
+        std::printf("    record vs host: %ld kappa mismatches (max diff %.2e), facet count %s\n",
+                    m.kappaMismatch, m.maxKappaDiff, m.countMismatch ? "DIFFERS" : "equal");
       CHECK(m.kappaMismatch == 0 && m.countMismatch == 0);
     }
   }
