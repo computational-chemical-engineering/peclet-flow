@@ -64,7 +64,7 @@ own gates.
 |---|---|
 | WO-1 core kernels (core worktree `suite/core-scalar-ibm`, branch `scalar-ibm`) | DONE: core a031c6f + b1fcb6a |
 | WO-2 flow geometry record | DONE: 9a445cb, 88f0214 (gate restated D-WO2-1/2) |
-| WO-3 operator + Krylov | NEXT, after the scalar-units merge |
+| WO-3 operator + Krylov | IN PROGRESS (scalar-units merged 184ae9f; §1.2 amended by Q6: reuse its factors) |
 | WO-4 ScalarMG | |
 | WO-5 advection/small cells | |
 | WO-6 closures | |
@@ -84,6 +84,16 @@ Q4. Results go in `pack_ks*.out` → the log.
   surface (add_scalar D, the phase-change thermal properties, …), converted at the API boundary at
   use time; cell units stay bit-identical. Work is on branch `scalar-units`, worktree
   `suite/flow-scalar-units`, off origin/main, run by an opus-engineer.
-  **MERGE ORDER:** `scalar-units` → `scalar-ibm` BEFORE WO-3. WO-3 must reuse its UnitScales helpers
+  **DONE:** 6 commits db28d0c…f9a3d27, merged into scalar-ibm as 184ae9f.
+  - Gates: scale invariance ≤ 1e-13, sine decay order 1.98, G12 12/12, battery 190/191 (one
+    unrelated timeout, which passes on rerun).
+  - Sub-decision (accepted): operator-mdot without set_phase_change_energy RAISES under an extent
+    (an implicit internal ρc_p = 1).
+  - Also fixed: `vof_interface_area` in plic mode on box cells.
+  - Open: the q-kernels carry no w_a (pre-existing; box cells only).
+  - Register entry text: `doc/scalar_units_register_entry.md`. It goes into
+    ../docs/decisions/flow.md + DECISIONS.md at landing (umbrella shared checkout; not now).
+  - The branch could land on flow main independently. Needs Frank's OK.
+  Formerly: **MERGE ORDER:** `scalar-units` → `scalar-ibm` BEFORE WO-3. WO-3 must reuse its UnitScales helpers
   instead of adding its own `diffToInt`. Design §1.2 / §13 Q6 are to be amended in WO-10.
 - **Q7** Cut-cell stays opt-in until G1–G13 pass and one release has shipped.
