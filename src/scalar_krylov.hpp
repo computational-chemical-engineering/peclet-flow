@@ -3,8 +3,9 @@
 // Modelled statement for statement on `CutcellMG::solveBiCGStab` (mac_cutcell_mg.hpp): the same
 // recurrence, the same breakdown guards, the same stagnation guard, and the mean projection of
 // r / v / t in the singular case. Three pieces are injected by the caller through `Ops`: the matvec
-// of the TRUE (probe) operator, the preconditioner z = M^-1 r (WO-3: level 0 of ScalarMG only, the
-// 2 + 2 red-black Gauss-Seidel sweeps on the SPD surrogate), and the reductions (`dot`, `dot2`,
+// of the TRUE (probe) operator, the preconditioner z = M^-1 r (one ScalarMG V-cycle on the SPD
+// surrogate, scalar_mg.hpp; level 0 alone = 2 + 2 red-black sweeps under the transient level
+// rule), and the reductions (`dot`, `dot2`,
 // `maxabs`, `removeMean`), which carry the MPI_Allreduce. Vectors are block fields on flow's G = 2
 // block; vector operations run over inner cells, and identity rows keep every Krylov vector exactly
 // 0 at the cells that are not unknowns, so the dots need no mask.

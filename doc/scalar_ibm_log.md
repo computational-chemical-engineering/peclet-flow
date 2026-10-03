@@ -450,3 +450,135 @@ steady gates on the two coarsest rungs, D-WO3-1):
 - The per-cell source refuses a block that changed size (redistribute) rather than dropping it.
 - Not in WO-3: the advection census keys (`num_small_cells`, `num_implicit_faces`,
   `bulk_courant`, WO-5), the §9 resolution warnings (WO-8), dirty-flag caching (D-WO3-3, WO-9).
+
+## 2026-10-03 — WO-4: ScalarMG, single phase — G-iter and G10 NOT met (stopped on two questions)
+
+**Built.**
+- `src/scalar_mg.hpp` (new): `ScalarMG` per §5.2. Level table = VelocityMG's rule verbatim (single
+  rank and distributed in place, no depth cap), level 0 the scalar's G = 2 block (the solver's
+  exchange injected), coarse levels g = 1 with their own `GridHalo<double>`. Surrogate in face form,
+  double. Level 0: AC = WO-3's SAC, faces -Lam w a with sco::buildBands' guard (so the level-0 sweep
+  is bitwise the band sweep). Coarse (rediscretized, D10): face <Lam a> by `coarsenOpenAvgCell` on
+  the guarded products, w_a(L) = w_a/cfac^2; mass by `restrictAvg`; wall W_C = (1/N_L) sum alpha
+  G(s_L) gathered from the level-0 facets at s_L = 1.1 * 1/2 sum |n_a| H'_a(L); pins = max of the
+  children; Dirichlet domain faces 2 w_a(L) <Lam a_bf> from a per-level boundary plane. RB-GS by
+  global parity, exchange per colour; V-cycle pre 2 (R->B), residual after a fresh exchange,
+  `restrictAvg`, singular: coarse rhs mean removed, `prolongAdd`, pinned re-zeroed, post 2 (B->R);
+  bottom 16 sweeps (8 R->B + 8 B->R) + mean removal. Level rule kappa_A < 13 -> level 0 alone.
+  `contraction()`: power estimate of rho(I - M^-1 S), deterministic global-index seed.
+  Q2's fallback (Galerkin RAP, restrict = average, prolong = trilinear incl. the zero ghosts and
+  the pinned re-zero) is implemented for EVALUATION behind the C++-only `setGalerkin` (default
+  off); its coarse operator is 27-point and is swept with 8 per-axis-parity colours (see Q-B).
+- Wiring in `flow_ibm_scalars_cutcell.hpp` (level table per geometry version/block, coefficients
+  every build, `precond` = one V-cycle); `ScalarCutState` gains `mg`, `mgVersion`, `mgN`,
+  `mgLevels`; census `mg_levels` is now the levels used.
+- Tests: `tests/kokkos/test_scalar_mg.cpp` (ctest `scalar_mg`: level table == VelocityMG on 8
+  grids incl. odd, short and h' = (1,1,2), (1,1.5,3), (2,1,1); coarse identity rows / M-matrix /
+  face rule; level rule; contraction at the finest G1 and on G5b's geometry);
+  `test_scalar_cutcell_solve_mpi.cpp` (G10 problems `mixed`, `g1` R/h = 16, `singular`, and the
+  distributed level table == VelocityMG::initMpi); `test_scalar_cutcell_gates.py`: the full ladder
+  for g1/g2/g3a/g7, every successive order, the provisional absolute bounds, G-iter rows on
+  g1/g2/g3a(Da = 1) and a new `giter` gate (transient dt D/h^2 = 1; singular steady on G5b's
+  geometry); maxit back to the default 200 (D-WO3-1's 3000 removed).
+
+**Inert proof.** Transient runs with dt D/h^2 in {0.3, 0.5, 0.9} (level 0 alone): fields and
+iteration counts `np.array_equal` to the WO-3 build (f0fc80a/9736d6f) — 6/6 arrays. G12: 12/12
+hashes equal at OMP_NUM_THREADS=1.
+
+**Accuracy, full ladder** (RMS over 3 offsets; preconditioner-independent at rtol 1e-10):
+
+| gate | rungs | errors | orders | bound at finest gated rung |
+|---|---|---|---|---|
+| G1 Nu/2 - 1 | 8/16/32 | 2.488e-2, 6.510e-3, 1.664e-3 | 1.93, 1.97 | 1.66e-3 <= 2e-3 |
+| G1 field L1 / Linf | 8/16/32 | 3.12e-3/3.75e-2, 8.11e-4/9.62e-3, 2.07e-4/2.40e-3 | 1.94/1.96, 1.97/2.01 | |
+| G1 aniso (1,1,2) | 16/32 | 1.185e-2, 3.056e-3 | 1.95 | |
+| G2 c_Gamma | 6/12/24 | 2.315e-2, 6.266e-3, 1.637e-3 | 1.89, 1.94 | 1.64e-3 <= 2e-3 |
+| G2 field L1 | 6/12/24 | 1.54e-3, 3.79e-4, 9.42e-5 | 2.02, 2.01 | |
+| G3a Sh, Da 0.1 | 8/16/32 | 9.90e-3, 2.48e-3, 6.20e-4 | 2.00, 2.00 | 6.2e-4 <= 3e-3 |
+| G3a Da 1 | | 1.48e-2, 3.80e-3, 9.60e-4 | 1.97, 1.98 | 9.6e-4 |
+| G3a Da 10 | | 2.26e-2, 5.88e-3, 1.50e-3 | 1.94, 1.97 | 1.5e-3 |
+| G3a Da 100 | | 2.46e-2, 6.44e-3, 1.65e-3 | 1.93, 1.97 | 1.65e-3 |
+| G3b mu (Bi 0.1/1/10/100/inf) | 8/16/32 | unchanged from WO-3 to 3 digits | unchanged | |
+| G7a Dirichlet j01^2 | 16/32/64 | 1.640e-3, 4.193e-4, 1.062e-4 | 1.97, 1.98 | 4.19e-4 <= 5e-4 |
+| G7a Neumann j'11^2 | 16/32/64 | 2.056e-4, 5.176e-5, 1.295e-5 | 1.99, 2.00 | 5.18e-5 <= 5e-4 |
+| G7b Graetz Nu_T | 16/32/64 | 8.827e-4, 2.176e-4, 5.403e-5 | 2.02, 2.01 | 2.18e-4 <= 1e-3 |
+
+Budget: G1 |wall - box - defect| <= 3.8e-14 |wall|, |defect| <= 3.7e-11 |wall|; G3b identity
+<= 3.0e-14 |d_mass|. R0 = 100 % on every isotropic rung.
+
+**Iterations, WO-3 (level 0) -> WO-4 (ScalarMG)** (per steady solve, or per step):
+G1 8/16/32: 20-21 / 40-43 / (not run) -> 10-12 / 13-14 / 15. G1 aniso 16/32: 35-37 / 69-76 ->
+11-13 / 14-15. G2 6/12/24: 19-20 / 35-37 / - -> 12-13 / 11 / 16-17. G3a 8/16/32: 19-23 /
+37-54 / - -> 4-9 / 4-10 / 5-11. G3b per step at 32: 27-70 -> 7-16. G7a Dirichlet 16/32/64:
+19-20 / 35-38 / - -> 10-12 / 11-14 / 18-20; Neumann: 32-36 / 59-72 / - -> 8-9 / 14-15 / 28-31.
+G7b: 21-26 / 39-44 / - -> 10-13 / 13-14 / 21-22. Singular, G5b geometry n = 20/40/80: 5 / 5 / 5-6.
+A 128^3 steady G1 solve takes ~2 s at 4 threads.
+
+**G-iter (single phase): NOT met.**
+- G1 <= 20 and growth <= 3: pass (12, 14, 15). G3a Da 1: pass (4, 4, 5). Singular (G5b
+  geometry): pass (5, 5, 6; <= 30, growth <= 5).
+- G2 growth: FAIL (13, 11, 17: +6). The G2 box n = ceil(2 Ro/h) + 6 = 36/66/126 gives a 3/2/2-level
+  table (66 -> 33, 126 -> 63: a 63^3 bottom under 16 sweeps). On boxes rounded up to a multiple of
+  16 (48/80/128, 5/5/7 levels; the cells added are solid) the same solves take 12-13 / 15 / 17
+  (+2, +2, pass). The gate's box is the test's choice, not the note's (Q-C).
+- Transient dt D/h^2 = 1 (<= 8 per step): FAIL by one or two — 10 on the cold first step, 8-9 after,
+  at every rung 8/16/32 (5/6/7 levels).
+- Contraction <= 0.3 (power estimate, geometric mean of the last 10 of 30): FAIL at the finest G1.
+
+| case | rediscretized (D10) | Galerkin RAP, 8-colour GS (Q2, eval.) | averaged W, s = s0 (R7-rejected; probe only) |
+|---|---|---|---|
+| G1 R/h = 32, 128^3, Dirichlet sphere + box | **0.788** (15 it) | **0.358** (11 it) | 0.274 |
+| G1-like 64^3, R = 16 | 0.470 (13 it) | 0.303 (10 it) | 0.222 |
+| periodic box + Dirichlet sphere, 64^3 | **3.105** (15 it) | 0.284 (14 it) | 0.503 |
+| Dirichlet box, no solid, 64^3 | 0.175 | 0.334 | — |
+| periodic, no solid (singular) | 0.179 | 0.167 | — |
+| Neumann sphere + Dirichlet box | 0.185 | 0.336 | — |
+| Neumann sphere, periodic (singular) | 0.193 | 0.167 | — |
+| G5b geometry n = 80 (ND 66.4, singular) | 0.193 (6 it) | 0.173 (6 it) | — |
+| G5b geometry n = 77 (ND 64.0) | 0.968 (1 level: 77 is odd; 78 it) | same | — |
+
+Reading: the plumbing is not the cause (Neumann and no-solid cases contract at 0.18-0.19; the V-cycle
+is bitwise decomposition-independent, below). The rediscretized wall term W_C at s_L ~ 2^L s_0
+under-represents an immersed DIRICHLET wall once the coarse cell approaches the body size (R/h =
+32 has 7 levels, bottom cell 64h; s_L > R from level 5): the coarse correction of the smooth mode
+overshoots — divergent as a stationary iteration when the sphere is the only Dirichlet condition.
+Averaging W with the fine s (the variant §12 R7 rejects) contracts at 0.27; Galerkin RAP at 0.36.
+§5.2's argument (rescaling keeps the wall/face ratio level-independent) holds per cell but not for
+the coarse correction of the low modes. This is the note's "revisit" (ii) territory only in part:
+RAP misses 0.3 even WITHOUT a solid (0.334, a property of the average/trilinear pair), so the 0.3
+bound and the RAP smoother are both open (Q-A, Q-B).
+
+**G10: np = 1 bitwise; np > 1 NOT met on G1.**
+- np = 1: field, iterations and wall flux bitwise on `mixed`, `g1`, `singular`; the distributed
+  level table equals VelocityMG::initMpi's.
+- np = 2 / 4: `mixed` 1.56e-12 / 5.52e-12 (iterations equal); `singular` 3.55e-15 / 7.11e-15; `g1` (R/h = 16, walls on
+  all faces) **7.85e-9 / 7.26e-8** of max|c_1| = 1.05, iterations 13 / **15** vs 13 — over the
+  1e-9 bound and the +-1 rule.
+- The V-cycle is not the cause: z = M^-1 r for a fixed global-index r is BITWISE equal np = 2 vs
+  single on `mixed` and `g1` (8.9e-16 on `singular`, its mean sums). At rtol 1e-13 the `g1` fields
+  agree to 6.45e-12 / 3.58e-11 with equal iterations (16): the gap is BiCGStab's sensitivity to the
+  dot-product order, amplified to the stopping error (lambda_min of S ~ 5e-3 for the 64^3
+  Dirichlet box: |c - c*| up to ~ 2e-8 at rtol 1e-10). WO-3's level-0 preconditioner was never run
+  on G1 under MPI. (Q-D)
+
+**Questions (stopped; nothing chosen):**
+- Q-A (Q2 / revisit (ii)): rediscretized ScalarMG misses the 0.3 contraction at the finest G1
+  (0.788) although its iteration counts pass; RAP (0.358) also misses, and so does RAP on a plain
+  Dirichlet box (0.334). Which coarse construction ships, and is 0.3 the right bound for it?
+- Q-B: Galerkin RAP's coarse operator is 27-point, so red-black is not a Gauss-Seidel colouring
+  (same-colour edge neighbours race). Its smoother — 8-colour GS (measured above, 8 exchanges per
+  sweep) or a colour-Jacobi RB, or something else — is not fixed by the note.
+- Q-C: G2's box (ceil(2 Ro/h) + 6) and G5b's ND = 64 (n = 77, odd: a one-level table) make G-iter
+  measure the level table. Round the boxes to MG-friendly sizes in the gates (cells added are
+  solid / the array period changes by < 4 %), or keep them and accept?
+- Q-D: G10's 1e-9 / +-1 on G1 at the default rtol 1e-10 is not reachable by any decomposition-
+  independent preconditioner under BiCGStab (gap = stopping error). Gate at rtol 1e-13 (passes:
+  3.4e-11 rel), or restate the bound relative to rtol / lambda_min?
+- Transient G-iter misses <= 8 by 1-2 iterations (10 cold, 8-9 warm): bound or cycle?
+
+**Battery** (`-LE bench`, 207 tests, OMP 4, -j2, 1155 s): 202 pass; the 5 failures are exactly the
+gate rows above — `scalar_cutcell_g2` (G2 growth), `scalar_cutcell_giter` (transient <= 8),
+`scalar_mg` (contraction), `scalar_cutcell_solve_mpi_np2/_np4` (G10 on `g1`). Committed with those
+gates left failing as evidence (not loosened), pending the answers.
+
+**Not changed:** CutcellMG / VelocityMG sources; the legacy scalar path; the probe operator.

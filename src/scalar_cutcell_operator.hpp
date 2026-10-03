@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <Kokkos_Core.hpp>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,8 @@
 #include "scalar_cutcell_geometry.hpp"
 
 namespace peclet::flow {
+
+class ScalarMG;  // scalar_mg.hpp (WO-4): the preconditioner, one per cut-cell scalar
 
 /// Wall condition per body (§1.1, §8.1 `set_scalar_wall`), in the caller's PHYSICAL units; the
 /// conversion to internal units is done at advance time (§1.2).
@@ -77,6 +80,11 @@ struct ScalarCutState {
   bool converged = true;
   bool warnedNoConv = false;
   double incompatibility = 0.0;  ///< steady singular case: |sum b| / sum |b| before projection
+  // ---- ScalarMG (§5.2): level table per geometry version / block, coefficients per build ----
+  std::shared_ptr<ScalarMG> mg;
+  long mgVersion = -1;  ///< the geometry version its level table was built for
+  std::size_t mgN = 0;  ///< the block size it was built for
+  int mgLevels = 1;     ///< levels the last solve's V-cycle used (census `mg_levels`)
 };
 
 namespace sco {

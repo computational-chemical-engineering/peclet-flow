@@ -429,6 +429,46 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
 #endif
   st.singular = steady && !(sing[0] > 0.0) && !(sing[1] > 0.0);
   st.built = true;
+  // ScalarMG (§5.2): the level table once per geometry version and block (VelocityMG's rule), the
+  // surrogate on every level rebuilt with the operator (ruling D-WO3-3)
+  if (!st.mg || st.mgVersion != gm.version || st.mgN != n_) {
+    st.mg = std::make_shared<ScalarMG>();
+    st.mg->setMetric(u_.w, u_.hp);
+    const bool per[3] = {bc_[0] == 0, bc_[2] == 0, bc_[4] == 0};
+    st.mg->setPeriodic(per);
+    ScalarMG::Fill fill0 = [this](CCField f) { fillGhosts(f); };
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      st.mg->initMpi(*dec_, comm_, og_, fill0);
+    else
+#endif
+      st.mg->init(nx_, ny_, nz_, fill0);
+    st.mgVersion = gm.version;
+    st.mgN = n_;
+  }
+  {
+    ScalarMG::Inputs in;
+    in.lam = lam;
+    in.idt = idt;
+    // the level rule: transient with kappa_A = 1 + 4 dt' D' sum_a w_a < 13 -> level 0 alone
+    const double kA = 1.0 + 4.0 * st.dt * lam * ((u_.w[0] + u_.w[1]) + u_.w[2]);
+    in.fullTable = steady || !(kA < 13.0);
+    in.singular = st.singular;
+    in.SAC = st.SAC;
+    in.kappa = kap;
+    in.unknown = unk;
+    in.sax = CCConst(gm.sax);
+    in.say = CCConst(gm.say);
+    in.saz = CCConst(gm.saz);
+    in.fac = &gm.fac;
+    in.wallType = wt.type;
+    in.wallK = wt.k;
+    in.numBodies = nb;
+    for (int f = 0; f < 6; ++f)
+      in.dirFace[f] = st.dirFace[f];
+    st.mg->build(in);
+    st.mgLevels = st.mg->levelsUsed();
+  }
 
   // ---- reductions (+ MPI) ----
   auto allSum = [&](double* v, int k) {
@@ -490,9 +530,7 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
   ops.e = e_;
   ops.g = G;
   ops.matvec = [&](const ScalarVec& y, const ScalarVec& x) { scalarCutMatvec(sc, y.f, x.f); };
-  // Level 0 of ScalarMG only (WO-3): red-black Gauss-Seidel on the surrogate from z = 0, colours
-  // by GLOBAL parity, an exchange before each colour; 2 sweeps R -> B, then 2 sweeps B -> R, so
-  // the preconditioner is a fixed symmetric linear operator.
+  // One ScalarMG V-cycle on the surrogate (§5.2; level 0 alone under the transient level rule).
   ops.precond = [&](const ScalarVec& z, const ScalarVec& r) {
     CCField rr = r.f;
     if (st.singular) {
@@ -500,20 +538,7 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
       removeMean(st.kq);
       rr = st.kq;
     }
-    Kokkos::deep_copy(CCExec(), z.f, 0.0);
-    auto half = [&](int color) {
-      fillGhosts(z.f);
-      cutcellSmoothColor(z.f, CCConst(rr), st.SAC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, e_,
-                         og_, G, color);
-    };
-    for (int k = 0; k < 2; ++k) {
-      half(0);
-      half(1);
-    }
-    for (int k = 0; k < 2; ++k) {
-      half(1);
-      half(0);
-    }
+    st.mg->apply(z.f, rr);
     if (st.singular)
       removeMean(z.f);
   };

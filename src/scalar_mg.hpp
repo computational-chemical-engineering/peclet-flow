@@ -1,0 +1,1136 @@
+// ScalarMG: the multigrid preconditioner of the cut-cell scalar path (doc/scalar_ibm_design.md
+// §5.2, D10; WO-4 single phase). One instance per cut-cell scalar; it preconditions the SPD
+// lumped-probe SURROGATE S of §4.3 — the BiCGStab of `scalar_krylov.hpp` runs on the true probe
+// operator, and one V-cycle of this class is its z = M^-1 r.
+//
+// Level table (§5.2): VelocityMG::init / initMpi's rule verbatim — in-place coarsening per axis
+// while the global dimension is even and >= 4 and (distributed) every rank's block origin and size
+// are even on that axis, then the shared aspect rule `CutcellMG::mgChooseRatio` (theta = 2, read
+// from setMetric's h'). No depth cap (the "full table"), no telescoping (§13 Q3). Level 0 is the
+// scalar's own G = 2 block (its ghost exchange is the solver's, injected as `Fill`); coarse levels
+// carry g = 1 and their own `GridHalo<double>`.
+//
+// Per level the surrogate is stored in FACE form, double: AC (diagonal) and AFX/AFY/AFZ, AFX(i) the
+// off-diagonal coefficient of cell i's LOW x face (mac_pressure.hpp's face form). Level 0 (§4.3):
+// AC = the WO-3 surrogate diagonal SAC (bands' diagonal + the lumped wall term), AF = -Lam w_a a,
+// guarded toward a cell that is not an unknown exactly as `sco::buildBands` (so the level-0 sweeps
+// are bitwise the WO-3 band sweeps). Coarse level L, coarse cell C (REDISCRETIZED, §5.2):
+//   * face:  t_a = w_a(L) <Lam a>, w_a(L) = w_a / cfac_a^2, <Lam a> the plain average of the fine
+//            sub-faces' products, coarsened recursively by `coarsenOpenAvg`'s cell body;
+//   * mass:  m_C = restrictAvg of the children's m (kappa idt);
+//   * wall:  W_C = (1/N_L) sum over the level-0 facets under C of alpha G(s_L), with
+//            s_L = 1.1 * 1/2 sum_a |n_a| H'_a(L) the probe distance at the level's own cell size
+//            (Dirichlet G = Lam/s, Robin 1/(s/Lam + 1/k), Neumann 0) — a direct gather, one thread
+//            per coarse cell looping over its level-0 descendants in fixed order;
+//   * pins:  C is pinned iff every child is (the unknown flags restricted with max); pinned rows
+//   are
+//            identity rows with zero correction;
+//   * Dirichlet domain faces: 2 w_a(L) <Lam a_bf>, the boundary plane averaged level by level.
+// Ghosts beyond a non-periodic global face are pinned on every level (the record clears the level-0
+// ghost unknown flags; a coarse ghost's children are those ghosts), so a coarse correction is 0
+// there before the trilinear prolongation reads it, and every face coefficient toward them is 0.
+//
+// Smoother: red-black Gauss-Seidel, colour = (gx + gy + gz) mod 2 from GLOBAL indices, an exchange
+// before each colour. V-cycle: pre 2 sweeps R -> B, residual (after a fresh exchange), restrictAvg,
+// (singular: the coarse rhs mean removed), recurse, coarse ghosts filled, prolongAdd (trilinear),
+// pinned cells re-zeroed, post 2 sweeps B -> R. Bottom: 16 sweeps (8 R -> B then 8 B -> R, so the
+// cycle stays symmetric) plus the mean removal when singular. The level rule (§5.2): transient with
+// kappa_A = 1 + 4 dt' D' sum_a w_a < 13 uses level 0 alone (2 + 2 sweeps, the WO-3 preconditioner);
+// otherwise, and always when steady, the full table. The cycle is a fixed linear operator.
+//
+// WO-4 status: the rediscretized coarse levels above are the default (the note's D10). §13 Q2's
+// fallback, Galerkin RAP of S (restrict = average, prolong = trilinear), is implemented for
+// EVALUATION behind the C++-only `setGalerkin` (default off): its coarse operator is 27-point, so
+// red-black is not a Gauss-Seidel colouring for it and its levels are swept with the 8 per-axis-
+// parity colours instead — a smoother the note does not fix (open; see doc/scalar_ibm_log.md WO-4).
+#ifndef PECLET_FLOW_SCALAR_MG_HPP
+#define PECLET_FLOW_SCALAR_MG_HPP
+
+#include <cmath>
+#include <cstdint>
+#include <functional>
+#include <Kokkos_Core.hpp>
+#include <limits>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "mac_cutcell_mg.hpp"  // coarsenOpenAvgCell, restrictAvg, prolongAdd, CutcellMG::mgChooseRatio
+#include "mac_pressure.hpp"  // cutcellSmoothColorFace, cutcellResidualFaceCell, cutcellApplyFaceCell
+#include "peclet/core/scheme/probe_flux.hpp"  // wallConductance, kProbeSigma
+#include "policy.hpp"
+#include "scalar_cutcell_geometry.hpp"  // ScalarFacetOverlay
+
+namespace peclet::flow {
+
+namespace smg {
+
+/// Level-0 guarded face product Lam a (no metric weight): the face between cell i - st and cell i
+/// carries Lam a only when both are unknowns (sco::buildBands' guard). A read-only view-like
+/// functor, so `coarsenOpenAvgCell` coarsens it without a materialized level-0 field.
+struct GuardedProduct {
+  CCConst ap, unk;
+  double lam = 0.0;
+  long st = 1;
+  KOKKOS_INLINE_FUNCTION double operator()(long i) const {
+    return (unk(i) > 0.5 && unk(i - st) > 0.5) ? lam * ap(i) : 0.0;
+  }
+};
+
+/// Level-0 mass m = kappa idt on unknowns, 0 elsewhere (read by `restrictAvgCell`).
+struct MassField {
+  CCConst kappa, unk;
+  double idt = 0.0;
+  KOKKOS_INLINE_FUNCTION double operator()(long i) const {
+    return unk(i) > 0.5 ? kappa(i) * idt : 0.0;
+  }
+};
+
+/// coarse flag = max of the children's flags (1 unknown, 0 pinned), over the coarse inner cells.
+template <class FV>
+inline void restrictMax(CCField coarse, const FV& fine, C3 cext, C3 fext, int gc, int gf, C3 cinner,
+                        C3 ratio) {
+  ccFor3(
+      "peclet::flow::smg_restrict_max", C3{0, 0, 0}, cinner,
+      KOKKOS_LAMBDA(int icx, int icy, int icz) {
+        const long fsy = fext.x, fsz = (long)fext.x * fext.y;
+        double m = 0.0;
+        for (int dz = 0; dz < ratio.z; ++dz)
+          for (int dy = 0; dy < ratio.y; ++dy)
+            for (int dx = 0; dx < ratio.x; ++dx) {
+              const long fi = (long)(ratio.x * icx + dx + gf) +
+                              (long)(ratio.y * icy + dy + gf) * fsy +
+                              (long)(ratio.z * icz + dz + gf) * fsz;
+              m = fine(fi) > m ? fine(fi) : m;
+            }
+        coarse((long)(icx + gc) + (long)(icy + gc) * cext.x +
+               (long)(icz + gc) * (long)cext.x * cext.y) = m > 0.5 ? 1.0 : 0.0;
+      });
+}
+
+/// x(i) = 0 on the inner cells that are not unknowns (re-zero the pinned cells).
+inline void zeroPinned(CCField x, CCConst unk, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::smg_zero_pinned", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+        if (!(unk(i) > 0.5))
+          x(i) = 0.0;
+      });
+}
+
+/// f = 0 on the planes [lo, hi) of axis a (full transverse extent).
+inline void zeroPlanes(CCField f, C3 e, int a, int lo, int hi) {
+  if (hi <= lo)
+    return;
+  const int ext[3] = {e.x, e.y, e.z};
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const long sa = st[a], sb = st[b], sc = st[c];
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::smg_zero_planes", MDRange2<CCExec>(space, {0, 0}, {ext[b], ext[c]}),
+      KOKKOS_LAMBDA(int pb, int pc) {
+        for (int k = lo; k < hi; ++k)
+          f((long)k * sa + (long)pb * sb + (long)pc * sc) = 0.0;
+      });
+  space.fence();
+}
+
+/// Single-rank periodic wrap of the g ghost layers of axis `a` (VelocityMG::fillAxis).
+inline void wrapAxis(CCField f, C3 e, C3 inner, int g, int a) {
+  const int dims[3] = {e.x, e.y, e.z};
+  const int N3[3] = {inner.x, inner.y, inner.z};
+  const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = st[a], sb = st[b], sc = st[c];
+  const int N = N3[a];
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::smg_wrap", MDRange2<CCExec>(space, {0, 0}, {dims[b], dims[c]}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        const long base = (long)p0 * sb + (long)p1 * sc;
+        for (int gl = 0; gl < g; ++gl) {
+          f(base + (long)gl * sa) = f(base + (long)(gl + N) * sa);
+          f(base + (long)(g + N + gl) * sa) = f(base + (long)(g + gl) * sa);
+        }
+      });
+  space.fence();
+}
+
+/// r = b - A x (face form, double), inner cells.
+inline void residualFace(CCField r, CCConst x, CCConst b, CCField AC, CCField AFX, CCField AFY,
+                         CCField AFZ, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::smg_residual", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                                i - sy, i + sz, i - sz);
+      });
+}
+
+using A27View = Kokkos::View<double* [27], Kokkos::LayoutLeft, CCMem>;
+
+KOKKOS_INLINE_FUNCTION long off27(int k, long sy, long sz) {
+  return (long)(k % 3 - 1) + (long)((k / 3) % 3 - 1) * sy + (long)(k / 9 - 1) * sz;
+}
+
+inline void residual27(CCField r, CCConst x, CCConst b, A27View A, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::smg_residual27", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        double s = 0.0;
+        for (int k = 0; k < 27; ++k)
+          s += A(i, k) * x(i + off27(k, sy, sz));
+        r(i) = b(i) - s;
+      });
+}
+
+/// One colour of the 8-colour (per-axis global parity) Gauss-Seidel on a 27-point operator.
+inline void smooth27Color(CCField x, CCConst b, A27View A, C3 e, C3 og, int g, int col) {
+  ccFor3(
+      "peclet::flow::smg_smooth27", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const int cc =
+            ((og.x + lx - g) & 1) | (((og.y + ly - g) & 1) << 1) | (((og.z + lz - g) & 1) << 2);
+        if (cc != col)
+          return;
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double ac = A(i, 13);
+        if (ac < 1e-30)
+          return;
+        double s = 0.0;
+        for (int k = 0; k < 27; ++k)
+          if (k != 13)
+            s += A(i, k) * x(i + off27(k, sy, sz));
+        x(i) = (b(i) - s) / ac;
+      });
+}
+
+}  // namespace smg
+
+class ScalarMG {
+ public:
+  static constexpr int G0 = 2;  ///< level 0: the scalar's own block
+  static constexpr int GC = 1;  ///< coarse levels
+  using Fill = std::function<void(CCField)>;
+
+  struct Level {
+    C3 ext{0, 0, 0}, inner{0, 0, 0}, ratio{1, 1, 1}, cfac{1, 1, 1};
+    C3 og{0, 0, 0};    ///< block inner origin (global red-black parity); {0,0,0} single-rank
+    C3 gdim{0, 0, 0};  ///< GLOBAL dims of this level
+    int g = GC;
+    std::size_t n = 0;
+    CCField x, rhs, res;        ///< level 0: x / rhs are the caller's (z, r); res owned
+    CCField AC, AFX, AFY, AFZ;  ///< the surrogate, face form (level 0: AC = the caller's SAC)
+    CCField unk;                ///< 1 unknown / 0 pinned (level 0: the geometry's flag)
+    CCField mass, px, py, pz;   ///< coarse levels: m and the face products <Lam a>
+    Kokkos::View<double*, CCMem> plane[6];  ///< Dirichlet domain faces: <Lam a_bf> (owning rank)
+    double nUnk = 0.0;                      ///< global count of unknown cells (the singular mean)
+    smg::A27View A27;                       ///< Q2 fallback (evaluation): Galerkin RAP, 27-point
+#ifdef PECLET_FLOW_MPI
+    std::shared_ptr<GridHaloTopology<3>> halo;
+    std::shared_ptr<GridHalo<double>> dev;
+#endif
+  };
+
+  /// §13 Q2's fallback, for EVALUATION only (C++, default off; see the header): build the coarse
+  /// levels by Galerkin RAP of S instead of rediscretizing. Takes effect at the next build.
+  void setGalerkin(bool on) { rap_ = on; }
+  /// Per-axis metric (VelocityMG::setMetric): w_a = 1/h_a'^2 and h_a'. Call before init.
+  void setMetric(const double w[3], const double hp[3]) {
+    for (int a = 0; a < 3; ++a) {
+      w_[a] = w[a];
+      hp_[a] = hp[a];
+    }
+    aniso_ = !(hp_[0] == 1.0 && hp_[1] == 1.0 && hp_[2] == 1.0);
+  }
+  /// Periodicity per axis (the flow's domain faces); a non-periodic axis' ghosts are pinned.
+  void setPeriodic(const bool per[3]) {
+    for (int a = 0; a < 3; ++a)
+      per_[a] = per[a];
+  }
+
+  /// Single-rank level table (VelocityMG::init's rule, no depth cap).
+  void init(int nx, int ny, int nz, Fill fill0) {
+    lv_.clear();
+    distributed_ = false;
+    fill0_ = std::move(fill0);
+    C3 inner{nx, ny, nz}, cf{1, 1, 1};
+    for (int L = 0; L < kMaxLevels; ++L) {
+      Level v;
+      v.g = L == 0 ? G0 : GC;
+      v.inner = inner;
+      v.gdim = inner;
+      v.ext = C3{inner.x + 2 * v.g, inner.y + 2 * v.g, inner.z + 2 * v.g};
+      v.cfac = cf;
+      v.n = (std::size_t)v.ext.x * v.ext.y * v.ext.z;
+      const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
+      const C3 ratio = chooseRatio(canA, cf);
+      const C3 next{ratio.x == 2 ? inner.x / 2 : inner.x, ratio.y == 2 ? inner.y / 2 : inner.y,
+                    ratio.z == 2 ? inner.z / 2 : inner.z};
+      v.ratio = ratio;
+      allocate(v, L);
+      lv_.push_back(v);
+      if (next.x == inner.x && next.y == inner.y && next.z == inner.z)
+        break;
+      inner = next;
+      cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
+    }
+  }
+#ifdef PECLET_FLOW_MPI
+  /// Distributed level table: level 0 on the solver's decomposition `dec0` (inner origin `og0`),
+  /// coarse levels that decomposition coarsened IN PLACE with the even-block gate
+  /// (VelocityMG::initMpi(dec0, ., comm, inPlace = true)'s rule, no depth cap).
+  void initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec0, MPI_Comm comm, C3 og0,
+               Fill fill0) {
+    lv_.clear();
+    distributed_ = true;
+    comm_ = comm;
+    fill0_ = std::move(fill0);
+    int rank = 0;
+    MPI_Comm_rank(comm, &rank);
+    std::array<bool, 3> per{true, true, true};  // periodic everywhere; non-periodic ghosts zeroed
+    const auto& g0 = dec0.globalSize();
+    C3 gs{(int)g0[0], (int)g0[1], (int)g0[2]}, cf{1, 1, 1};
+    auto evenOn = [](const peclet::core::decomp::BlockDecomposer<3>& d, int ax) {
+      for (std::size_t b = 0; b < d.numBlocks(); ++b) {
+        const auto blk = d.block(b);
+        if (blk.origin[ax] % 2 != 0 || blk.size[ax] % 2 != 0)
+          return false;
+      }
+      return true;
+    };
+    peclet::core::decomp::BlockDecomposer<3> dec = dec0;
+    for (int L = 0; L < kMaxLevels; ++L) {
+      Level v;
+      v.g = L == 0 ? G0 : GC;
+      if (L == 0) {
+        const auto blk = dec.block((std::size_t)rank);
+        v.inner = C3{(int)blk.size[0], (int)blk.size[1], (int)blk.size[2]};
+        v.ext = C3{v.inner.x + 2 * G0, v.inner.y + 2 * G0, v.inner.z + 2 * G0};
+        v.og = og0;
+      } else {
+        v.halo = std::make_shared<GridHaloTopology<3>>();
+        v.halo->buildTopology(dec, rank, v.g, per, comm);
+        v.dev = std::make_shared<GridHalo<double>>();
+        v.dev->init(*v.halo);
+        v.dev->setLabel("smg L" + std::to_string(L));
+        const auto& idx = v.halo->indexer();
+        const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
+        v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]};
+        v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
+        v.og = {(int)oig[0] + v.g, (int)oig[1] + v.g, (int)oig[2] + v.g};
+      }
+      v.gdim = gs;
+      v.cfac = cf;
+      v.n = (std::size_t)v.ext.x * v.ext.y * v.ext.z;
+      const bool canA[3] = {can(gs.x) && evenOn(dec, 0), can(gs.y) && evenOn(dec, 1),
+                            can(gs.z) && evenOn(dec, 2)};
+      const C3 ratio = chooseRatio(canA, cf);
+      const C3 next{ratio.x == 2 ? gs.x / 2 : gs.x, ratio.y == 2 ? gs.y / 2 : gs.y,
+                    ratio.z == 2 ? gs.z / 2 : gs.z};
+      v.ratio = ratio;
+      allocate(v, L);
+      lv_.push_back(v);
+      if (next.x == gs.x && next.y == gs.y && next.z == gs.z)
+        break;
+      gs = next;
+      cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
+      dec = dec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
+    }
+  }
+#endif
+
+  int levels() const { return (int)lv_.size(); }
+  /// Levels the last `build` set up for the V-cycle (1: level 0 alone, the transient rule).
+  int levelsUsed() const { return nUse_; }
+  const Level& level(int L) const { return lv_[L]; }
+  /// The per-level coarsening ratios (the level table; equal to VelocityMG's on the same grid).
+  std::vector<C3> levelRatios() const {
+    std::vector<C3> r;
+    for (const auto& v : lv_)
+      r.push_back(v.ratio);
+    return r;
+  }
+
+  /// Everything `build` reads from the scalar operator and the geometry record.
+  struct Inputs {
+    double lam = 0.0;       ///< internal Lam
+    double idt = 0.0;       ///< 1/dt' (0 steady)
+    bool fullTable = true;  ///< the level rule (false: level 0 alone)
+    bool singular = false;  ///< steady pure-Neumann: the mean is removed on every level
+    CCField SAC;            ///< level-0 surrogate diagonal (§4.3)
+    CCConst kappa, unknown, sax, say, saz;
+    const scg::ScalarFacetOverlay* fac = nullptr;
+    Kokkos::View<const int*, CCMem> wallType;  ///< per body: 0 neumann, 1 dirichlet, 2 robin
+    Kokkos::View<const double*, CCMem> wallK;  ///< per body: internal k'
+    int numBodies = 0;
+    bool dirFace[6] = {false, false, false, false, false, false};
+  };
+
+  /// Rebuild the surrogate on every level from the current operator (the level table is kept).
+  void build(const Inputs& in) {
+    singular_ = in.singular;
+    nUse_ = in.fullTable ? (int)lv_.size() : 1;
+    Level& l0 = lv_[0];
+    l0.AC = in.SAC;
+    l0.unk = CCField();  // level 0's flag is the geometry's (const) view
+    unk0_ = in.unknown;
+    buildLevel0Faces(in);
+    l0.nUnk = countUnknown(0);
+    for (int f = 0; f < 6; ++f)
+      dirFace_[f] = in.dirFace[f];
+    if (nUse_ > 1) {
+      buildCutIndex(in);
+      for (int f = 0; f < 6; ++f)
+        if (dirFace_[f] && touches(l0, f))
+          buildPlane0(in, f);
+      for (int L = 1; L < nUse_; ++L)
+        buildCoarse(in, L);
+    }
+  }
+
+  /// z = M^-1 r: one V-cycle on the surrogate (level 0 alone: 2 + 2 sweeps) from z = 0. `r` must
+  /// be 0 on the cells that are not unknowns (the Krylov's identity rows guarantee it); in the
+  /// singular case it must already be mean-free (the caller projects, and removes z's mean after).
+  void apply(CCField z, CCField r) {
+    Level& l0 = lv_[0];
+    l0.x = z;
+    l0.rhs = r;
+    Kokkos::deep_copy(CCExec(), z, 0.0);
+    if (nUse_ == 1) {
+      for (int k = 0; k < 2; ++k) {
+        sweepColor(0, 0);
+        sweepColor(0, 1);
+      }
+      for (int k = 0; k < 2; ++k) {
+        sweepColor(0, 1);
+        sweepColor(0, 0);
+      }
+      return;
+    }
+    vcycle(0);
+  }
+
+  /// y = S x on level 0 (exchanges x first). For the contraction instrument and tests.
+  void applySurrogate(CCField y, CCField x) {
+    Level& l0 = lv_[0];
+    fill(0, x);
+    const C3 e = l0.ext;
+    const int g = l0.g;
+    CCField AC = l0.AC, AFX = l0.AFX, AFY = l0.AFY, AFZ = l0.AFZ;
+    CCConst xx = x;
+    ccFor3(
+        "peclet::flow::smg_apply", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          y(i) = cutcellApplyFaceCell(xx, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                                      i - sy, i + sz, i - sz);
+        });
+  }
+
+  /// Power estimate of the V-cycle's error contraction rho(I - M^-1 S) on the current surrogate
+  /// (§11 G-iter): e <- e - M^-1 S e from a deterministic pseudo-random start on the unknowns
+  /// (a function of the GLOBAL index, so decomposition-independent), mean-free when singular.
+  /// Returns the per-iteration ratios ||e_k|| / ||e_{k-1}|| (2-norm over the unknowns).
+  std::vector<double> contraction(int iters, CCField e, CCField t, CCField z) {
+    Level& l0 = lv_[0];
+    const C3 ext = l0.ext, og = l0.og;
+    const int g = l0.g;
+    CCConst unk = unk0_;
+    ccFor3(
+        "peclet::flow::smg_seed", C3{g, g, g}, C3{ext.x - g, ext.y - g, ext.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
+          std::uint64_t h = (std::uint64_t)(og.x + lx - g) * 0x9E3779B97F4A7C15ull ^
+                            (std::uint64_t)(og.y + ly - g) * 0xC2B2AE3D27D4EB4Full ^
+                            (std::uint64_t)(og.z + lz - g) * 0x165667B19E3779F9ull;
+          h ^= h >> 29;
+          h *= 0xBF58476D1CE4E5B9ull;
+          h ^= h >> 32;
+          e(i) = unk(i) > 0.5 ? (double)(h >> 11) * (1.0 / 9007199254740992.0) - 0.5 : 0.0;
+        });
+    if (singular_)
+      removeMean(0, e);
+    std::vector<double> ratios;
+    double prev = norm2(e);
+    for (int k = 0; k < iters; ++k) {
+      applySurrogate(t, e);
+      apply(z, t);
+      if (singular_)
+        removeMean(0, z);
+      ccFor3(
+          "peclet::flow::smg_err_update", C3{g, g, g}, C3{ext.x - g, ext.y - g, ext.z - g},
+          KOKKOS_LAMBDA(int lx, int ly, int lz) {
+            const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
+            e(i) -= z(i);
+          });
+      if (singular_)  // keep the iterate off the null space (round-off would otherwise grow there)
+        removeMean(0, e);
+      const double cur = norm2(e);
+      ratios.push_back(prev > 0.0 ? cur / prev : 0.0);
+      if (!(cur > 0.0))
+        break;
+      // renormalize (keeps the iterate O(1) over many iterations)
+      const double s = 1.0 / cur;
+      ccFor3(
+          "peclet::flow::smg_err_scale", C3{g, g, g}, C3{ext.x - g, ext.y - g, ext.z - g},
+          KOKKOS_LAMBDA(int lx, int ly, int lz) {
+            const long i = (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
+            e(i) *= s;
+          });
+      prev = 1.0;
+    }
+    return ratios;
+  }
+
+  // ---- (public for nvcc extended lambdas) ----
+  void vcycle(int L) {
+    Level& lv = lv_[L];
+    if (L + 1 == nUse_) {  // bottom: 16 sweeps, symmetric order
+      for (int k = 0; k < kBottom / 2; ++k)
+        sweep(L, true);
+      for (int k = 0; k < kBottom / 2; ++k)
+        sweep(L, false);
+      if (singular_)
+        removeMean(L, lv.x);
+      return;
+    }
+    for (int k = 0; k < kPre; ++k)
+      sweep(L, true);
+    fill(L, lv.x);  // the smoother leaves the ghosts one colour stale
+    if (rap_ && L > 0)
+      smg::residual27(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.A27, lv.ext, lv.g);
+    else
+      smg::residualFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ,
+                        lv.ext, lv.g);
+    Level& cs = lv_[L + 1];
+    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+    if (singular_)
+      removeMean(L + 1, cs.rhs);
+    Kokkos::deep_copy(CCExec(), cs.x, 0.0);
+    vcycle(L + 1);
+    fill(L + 1, cs.x);  // coarse ghosts: exchanged, 0 beyond a non-periodic global face
+    prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+    smg::zeroPinned(lv.x, unkOf(L), lv.ext, lv.g);
+    for (int k = 0; k < kPost; ++k)
+      sweep(L, false);
+  }
+
+  /// One colour of red-black Gauss-Seidel on level L: `rb` = 0 red (global (gx+gy+gz) even), 1
+  /// black. The kernel's colour counts the ghost offset (lx = gx + g on every axis), hence + 3g.
+  void sweepColor(int L, int rb) {
+    Level& lv = lv_[L];
+    fill(L, lv.x);
+    const int kc = (rb + 3 * lv.g) & 1;
+    cutcellSmoothColorFace(lv.x, CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.ext, lv.og,
+                           lv.g, kc);
+  }
+
+  /// One full smoothing sweep: RB (R -> B forward, B -> R backward); on a Galerkin (27-point)
+  /// level the 8 per-axis-parity colours, 0..7 forward or 7..0 backward (race-free).
+  void sweep(int L, bool fwd) {
+    Level& lv = lv_[L];
+    if (rap_ && L > 0) {
+      for (int k = 0; k < 8; ++k) {
+        fill(L, lv.x);
+        smg::smooth27Color(lv.x, CCConst(lv.rhs), lv.A27, lv.ext, lv.og, lv.g, fwd ? k : 7 - k);
+      }
+      return;
+    }
+    sweepColor(L, fwd ? 0 : 1);
+    sweepColor(L, fwd ? 1 : 0);
+  }
+
+  /// Ghost exchange of a level-L field: level 0 the solver's own; coarse levels the per-level halo
+  /// (or the single-rank periodic wrap), then 0 on the ghosts beyond a non-periodic global face.
+  void fill(int L, CCField f) {
+    if (L == 0) {
+      fill0_(f);
+      return;
+    }
+    Level& lv = lv_[L];
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      lv.dev->exchange(f);
+    else
+#endif
+      for (int a = 0; a < 3; ++a)
+        smg::wrapAxis(f, lv.ext, lv.inner, lv.g, a);
+    zeroNonPeriodicGhosts(lv, f);
+  }
+
+  /// Does this rank's block on level `lv` touch global face f (0..5 = -x,+x,-y,+y,-z,+z)?
+  bool touches(const Level& lv, int f) const {
+    const int a = f / 2;
+    const int o = (a == 0) ? lv.og.x : (a == 1) ? lv.og.y : lv.og.z;
+    const int n = (a == 0) ? lv.inner.x : (a == 1) ? lv.inner.y : lv.inner.z;
+    const int gn = (a == 0) ? lv.gdim.x : (a == 1) ? lv.gdim.y : lv.gdim.z;
+    return (f % 2 == 0) ? (o == 0) : (o + n == gn);
+  }
+
+ private:
+  static constexpr int kMaxLevels = 64;  ///< no depth cap in practice (the full table)
+  static constexpr int kPre = 2, kPost = 2, kBottom = 16;
+
+  static bool can(int d) { return (d % 2 == 0) && (d / 2 >= 2); }
+  C3 chooseRatio(const bool canA[3], C3 cf) const {
+    const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
+    return CutcellMG::mgChooseRatio(H, canA, aniso_, kAspectTheta);
+  }
+  static constexpr double kAspectTheta = 2.0;
+
+  void allocate(Level& v, int L) {
+    if (L == 0) {
+      v.res = CCField("smg_res0", v.n);
+      v.AFX = CCField("smg_afx0", v.n);
+      v.AFY = CCField("smg_afy0", v.n);
+      v.AFZ = CCField("smg_afz0", v.n);
+      return;
+    }
+    v.x = CCField("smg_x", v.n);
+    v.rhs = CCField("smg_rhs", v.n);
+    v.res = CCField("smg_res", v.n);
+    v.AC = CCField("smg_ac", v.n);
+    v.AFX = CCField("smg_afx", v.n);
+    v.AFY = CCField("smg_afy", v.n);
+    v.AFZ = CCField("smg_afz", v.n);
+    v.unk = CCField("smg_unk", v.n);
+    v.mass = CCField("smg_mass", v.n);
+    v.px = CCField("smg_px", v.n);
+    v.py = CCField("smg_py", v.n);
+    v.pz = CCField("smg_pz", v.n);
+  }
+
+  CCConst unkOf(int L) const { return L == 0 ? unk0_ : CCConst(lv_[L].unk); }
+
+  void zeroNonPeriodicGhosts(Level& lv, CCField f) {
+    const int ext[3] = {lv.ext.x, lv.ext.y, lv.ext.z};
+    for (int a = 0; a < 3; ++a) {
+      if (per_[a])
+        continue;
+      if (touches(lv, 2 * a))
+        smg::zeroPlanes(f, lv.ext, a, 0, lv.g);
+      if (touches(lv, 2 * a + 1))
+        smg::zeroPlanes(f, lv.ext, a, ext[a] - lv.g, ext[a]);
+    }
+  }
+
+  // ---- reductions ----
+  void allSum(double* v, int k) const {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      std::vector<double> o((std::size_t)k);
+      MPI_Allreduce(v, o.data(), k, MPI_DOUBLE, MPI_SUM, comm_);
+      for (int j = 0; j < k; ++j)
+        v[j] = o[(std::size_t)j];
+    }
+#endif
+    (void)v;
+    (void)k;
+  }
+  double countUnknown(int L) const {
+    const Level& lv = lv_[L];
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    CCConst unk = unkOf(L);
+    double s = 0.0;
+    ccReduce3(
+        "peclet::flow::smg_count", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz, double& acc) {
+          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+          acc += unk(i) > 0.5 ? 1.0 : 0.0;
+        },
+        Kokkos::Sum<double>(s));
+    allSum(&s, 1);
+    return s;
+  }
+  /// f -= its mean over the unknown cells of level L (CutcellMG::removeMean's form, unweighted).
+  void removeMean(int L, CCField f) {
+    const Level& lv = lv_[L];
+    if (!(lv.nUnk > 0.0))
+      return;
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    CCConst unk = unkOf(L);
+    double s = 0.0;
+    ccReduce3(
+        "peclet::flow::smg_mean", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz, double& acc) {
+          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+          if (unk(i) > 0.5)
+            acc += f(i);
+        },
+        Kokkos::Sum<double>(s));
+    allSum(&s, 1);
+    const double mean = s / lv.nUnk;
+    ccFor3(
+        "peclet::flow::smg_mean_sub", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+          if (unk(i) > 0.5)
+            f(i) -= mean;
+        });
+  }
+  double norm2(CCField f) const {
+    const Level& lv = lv_[0];
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    double s = 0.0;
+    ccReduce3(
+        "peclet::flow::smg_norm", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz, double& acc) {
+          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+          acc += f(i) * f(i);
+        },
+        Kokkos::Sum<double>(s));
+    allSum(&s, 1);
+    return std::sqrt(s);
+  }
+
+  // ---- build ----
+  /// Level-0 faces: AF_a(i) = -(Lam w_a a_a(i)) when cells i - st_a and i are both unknowns —
+  /// the same expression as sco::buildBands' AW/AS/AB, so the face-form sweep is bitwise the band
+  /// sweep. Written over the full extent (index 0 of each axis: 0).
+  void buildLevel0Faces(const Inputs& in) {
+    Level& l0 = lv_[0];
+    const C3 e = l0.ext;
+    const double lx = in.lam * w_[0], ly = in.lam * w_[1], lz = in.lam * w_[2];
+    CCConst unk = in.unknown, sax = in.sax, say = in.say, saz = in.saz;
+    CCField AFX = l0.AFX, AFY = l0.AFY, AFZ = l0.AFZ;
+    ccFor3(
+        "peclet::flow::smg_faces0", C3{0, 0, 0}, e, KOKKOS_LAMBDA(int x, int y, int z) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)x + (long)y * sy + (long)z * sz;
+          const bool u = unk(i) > 0.5;
+          const double tw = (x > 0 && u && unk(i - sx) > 0.5) ? lx * sax(i) : 0.0;
+          const double ts = (y > 0 && u && unk(i - sy) > 0.5) ? ly * say(i) : 0.0;
+          const double tb = (z > 0 && u && unk(i - sz) > 0.5) ? lz * saz(i) : 0.0;
+          AFX(i) = -tw;
+          AFY(i) = -ts;
+          AFZ(i) = -tb;
+        });
+  }
+
+  /// cut0_(i) = the CSR row of level-0 cell i in the facet overlay, or -1.
+  void buildCutIndex(const Inputs& in) {
+    const Level& l0 = lv_[0];
+    if (cut0_.extent(0) != l0.n)
+      cut0_ = Kokkos::View<int*, CCMem>("smg_cut0", l0.n);
+    Kokkos::deep_copy(CCExec(), cut0_, -1);
+    auto cut0 = cut0_;
+    auto cutCell = in.fac->cutCell;
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::smg_cut_index", Kokkos::RangePolicy<CCExec>(space, 0, in.fac->nCut),
+        KOKKOS_LAMBDA(const long c) { cut0(cutCell(c)) = (int)c; });
+    space.fence();
+  }
+
+  /// Level-0 Dirichlet boundary plane of face f: <Lam a_bf> = Lam a_bf on unknown boundary cells
+  /// (sco::dirichletFaceFold's aperture), indexed (j1, j2) over the inner tangential cells.
+  void buildPlane0(const Inputs& in, int f) {
+    Level& l0 = lv_[0];
+    const int a = f / 2, side = f % 2;
+    int t1, t2;
+    tangents(a, t1, t2);
+    const int ext[3] = {l0.ext.x, l0.ext.y, l0.ext.z};
+    const long st[3] = {1, (long)l0.ext.x, (long)l0.ext.x * l0.ext.y};
+    const int g = l0.g;
+    const int n1 = ext[t1] - 2 * g, n2 = ext[t2] - 2 * g;
+    const long sa = st[a], s1 = st[t1], s2 = st[t2];
+    const int aInner = side == 0 ? g : ext[a] - g - 1;
+    if (l0.plane[f].extent(0) != (std::size_t)n1 * n2)
+      l0.plane[f] = Kokkos::View<double*, CCMem>("smg_plane0", (long)n1 * n2);
+    auto pl = l0.plane[f];
+    CCConst unk = in.unknown;
+    CCConst saA = a == 0 ? in.sax : (a == 1 ? in.say : in.saz);
+    const double lam = in.lam;
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::smg_plane0", MDRange2<CCExec>(space, {0, 0}, {n1, n2}),
+        KOKKOS_LAMBDA(int j1, int j2) {
+          const long i = (long)aInner * sa + (long)(j1 + g) * s1 + (long)(j2 + g) * s2;
+          const double abf = side == 0 ? saA(i) : saA(i + sa);
+          pl((long)j1 + (long)j2 * n1) = unk(i) > 0.5 ? lam * abf : 0.0;
+        });
+    space.fence();
+  }
+
+  static void tangents(int a, int& t1, int& t2) {
+    t1 = (a == 0) ? 1 : 0;
+    t2 = (a == 2) ? 1 : 2;
+  }
+
+  void buildCoarse(const Inputs& in, int L) {
+    Level& c = lv_[L];
+    Level& fin = lv_[L - 1];
+    const C3 ratio = fin.ratio;
+    // pins: max of the children's unknown flags
+    if (L == 1)
+      smg::restrictMax(c.unk, in.unknown, c.ext, fin.ext, c.g, fin.g, c.inner, ratio);
+    else
+      smg::restrictMax(c.unk, CCConst(fin.unk), c.ext, fin.ext, c.g, fin.g, c.inner, ratio);
+    c.nUnk = countUnknown(L);
+    if (rap_) {
+      fill(L, c.unk);
+      buildRap(L);
+      return;
+    }
+    // face products <Lam a>: coarsenOpenAvg's cell body on the fine products
+    {
+      CCField px = c.px, py = c.py, pz = c.pz;
+      const C3 ce = c.ext, fe = fin.ext;
+      const int gc = c.g, gf = fin.g;
+      if (L == 1) {
+        const long sy0 = fe.x, sz0 = (long)fe.x * fe.y;
+        const smg::GuardedProduct fx{in.sax, in.unknown, in.lam, 1};
+        const smg::GuardedProduct fy{in.say, in.unknown, in.lam, sy0};
+        const smg::GuardedProduct fz{in.saz, in.unknown, in.lam, sz0};
+        ccFor3(
+            "peclet::flow::smg_coarsen_faces", C3{0, 0, 0}, c.inner,
+            KOKKOS_LAMBDA(int icx, int icy, int icz) {
+              coarsenOpenAvgCell(px, py, pz, fx, fy, fz, ce, fe, gc, gf, ratio, icx, icy, icz);
+            });
+      } else {
+        CCConst fx = fin.px, fy = fin.py, fz = fin.pz;
+        ccFor3(
+            "peclet::flow::smg_coarsen_faces", C3{0, 0, 0}, c.inner,
+            KOKKOS_LAMBDA(int icx, int icy, int icz) {
+              coarsenOpenAvgCell(px, py, pz, fx, fy, fz, ce, fe, gc, gf, ratio, icx, icy, icz);
+            });
+      }
+      fill(L, c.px);
+      fill(L, c.py);
+      fill(L, c.pz);
+      // the low domain face of a non-periodic axis: no coupling toward the pinned ghost
+      const CCField P[3] = {c.px, c.py, c.pz};
+      for (int a = 0; a < 3; ++a)
+        if (!per_[a] && touches(c, 2 * a))
+          smg::zeroPlanes(P[a], c.ext, a, 0, c.g + 1);
+    }
+    // mass
+    if (L == 1) {
+      const smg::MassField m0{in.kappa, in.unknown, in.idt};
+      CCField cm = c.mass;
+      const C3 ce = c.ext, fe = fin.ext, ci = c.inner;
+      const int gc = c.g, gf = fin.g;
+      ccFor3(
+          "peclet::flow::smg_restrict_mass", C3{0, 0, 0}, ci,
+          KOKKOS_LAMBDA(int icx, int icy, int icz) {
+            restrictAvgCell(cm, m0, ce, fe, gc, gf, ratio, icx, icy, icz);
+          });
+    } else {
+      restrictAvg(c.mass, CCConst(fin.mass), c.ext, fin.ext, c.g, fin.g, c.inner, ratio);
+    }
+    // Dirichlet boundary planes, averaged from the finer level's
+    for (int f = 0; f < 6; ++f)
+      if (dirFace_[f] && touches(c, f))
+        coarsenPlane(L, f);
+    // the operator
+    assembleCoarse(in, L);
+  }
+
+  void coarsenPlane(int L, int f) {
+    Level& c = lv_[L];
+    Level& fin = lv_[L - 1];
+    const int a = f / 2;
+    int t1, t2;
+    tangents(a, t1, t2);
+    const int cin[3] = {c.inner.x, c.inner.y, c.inner.z};
+    const int fin3[3] = {fin.inner.x, fin.inner.y, fin.inner.z};
+    const int rr[3] = {fin.ratio.x, fin.ratio.y, fin.ratio.z};
+    const int n1 = cin[t1], n2 = cin[t2], f1 = fin3[t1];
+    const int r1 = rr[t1], r2 = rr[t2];
+    if (c.plane[f].extent(0) != (std::size_t)n1 * n2)
+      c.plane[f] = Kokkos::View<double*, CCMem>("smg_plane", (long)n1 * n2);
+    auto pc = c.plane[f];
+    auto pf = fin.plane[f];
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::smg_coarsen_plane", MDRange2<CCExec>(space, {0, 0}, {n1, n2}),
+        KOKKOS_LAMBDA(int j1, int j2) {
+          double s = 0.0;
+          for (int p = 0; p < r1; ++p)
+            for (int q = 0; q < r2; ++q)
+              s += pf((long)(r1 * j1 + p) + (long)(r2 * j2 + q) * f1);
+          pc((long)j1 + (long)j2 * n1) = s / (double)(r1 * r2);
+        });
+    space.fence();
+  }
+
+  /// Coarse face form + diagonal: AF_a = -w_a(L) <Lam a> over the full extent; on unknown inner
+  /// cells AC = m + the six face terms + W (the facet gather at s_L) + the Dirichlet folds; pinned
+  /// cells are identity rows.
+  void assembleCoarse(const Inputs& in, int L) {
+    Level& c = lv_[L];
+    const C3 e = c.ext, ci = c.inner, cf = c.cfac;
+    const int g = c.g;
+    const double wx = w_[0] / ((double)cf.x * cf.x), wy = w_[1] / ((double)cf.y * cf.y),
+                 wz = w_[2] / ((double)cf.z * cf.z);
+    CCField AC = c.AC, AFX = c.AFX, AFY = c.AFY, AFZ = c.AFZ;
+    CCConst px = c.px, py = c.py, pz = c.pz;
+    ccFor3(
+        "peclet::flow::smg_coarse_faces", C3{0, 0, 0}, e, KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          AFX(i) = -(wx * px(i));
+          AFY(i) = -(wy * py(i));
+          AFZ(i) = -(wz * pz(i));
+        });
+    // the wall term at the level's probe distance, gathered from the level-0 facets
+    const Level& l0 = lv_[0];
+    const C3 e0 = l0.ext;
+    const int g0 = l0.g;
+    const double H0 = hp_[0] * cf.x, H1 = hp_[1] * cf.y, H2 = hp_[2] * cf.z;
+    const double invN = 1.0 / ((double)cf.x * cf.y * cf.z);
+    const double lam = in.lam;
+    const double kInf = std::numeric_limits<double>::infinity();
+    const int nb = in.numBodies;
+    auto cut0 = cut0_;
+    CCConst unk0 = in.unknown;
+    CCConst unk = c.unk, mass = c.mass;
+    auto cfs = in.fac->cellFacetStart;
+    auto falpha = in.fac->alpha;
+    auto fnormal = in.fac->normal;
+    auto fbody = in.fac->body;
+    auto wtype = in.wallType;
+    auto wk = in.wallK;
+    ccFor3(
+        "peclet::flow::smg_coarse_diag", C3{0, 0, 0}, ci, KOKKOS_LAMBDA(int icx, int icy, int icz) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)(icx + g) + (long)(icy + g) * sy + (long)(icz + g) * sz;
+          if (!(unk(i) > 0.5)) {
+            AC(i) = 1.0;
+            AFX(i) = AFY(i) = AFZ(i) = 0.0;
+            return;
+          }
+          double W = 0.0;
+          const long s0y = e0.x, s0z = (long)e0.x * e0.y;
+          for (int dz = 0; dz < cf.z; ++dz)
+            for (int dy = 0; dy < cf.y; ++dy)
+              for (int dx = 0; dx < cf.x; ++dx) {
+                const long i0 = (long)(cf.x * icx + dx + g0) + (long)(cf.y * icy + dy + g0) * s0y +
+                                (long)(cf.z * icz + dz + g0) * s0z;
+                const int row = cut0(i0);
+                if (row < 0 || !(unk0(i0) > 0.5))
+                  continue;
+                for (int f = cfs(row); f < cfs(row + 1); ++f) {
+                  int bd = fbody(f);
+                  if (bd < 0 || bd >= nb)
+                    bd = 0;
+                  const int t = wtype(bd);
+                  if (t == 0)
+                    continue;
+                  const double sL =
+                      peclet::core::scheme::kProbeSigma * 0.5 *
+                      ((Kokkos::fabs(fnormal(f, 0)) * H0 + Kokkos::fabs(fnormal(f, 1)) * H1) +
+                       Kokkos::fabs(fnormal(f, 2)) * H2);
+                  W += falpha(f) *
+                       peclet::core::scheme::wallConductance(sL, lam, t == 1 ? kInf : wk(bd));
+                }
+              }
+          W *= invN;
+          const double tw = wx * px(i), te = wx * px(i + sx);
+          const double ts = wy * py(i), tn = wy * py(i + sy);
+          const double tb = wz * pz(i), tt = wz * pz(i + sz);
+          AC(i) = (mass(i) + (((tw + te) + (ts + tn)) + (tb + tt))) + W;
+        });
+    // Dirichlet domain faces: AC += 2 w_a(L) <Lam a_bf> on the unknown boundary cells
+    const double wa[3] = {wx, wy, wz};
+    for (int f = 0; f < 6; ++f) {
+      if (!(dirFace_[f] && touches(c, f)))
+        continue;
+      const int a = f / 2, side = f % 2;
+      int t1, t2;
+      tangents(a, t1, t2);
+      const int ext[3] = {e.x, e.y, e.z};
+      const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+      const int n1 = ext[t1] - 2 * g, n2 = ext[t2] - 2 * g;
+      const long sa = st[a], s1 = st[t1], s2 = st[t2];
+      const int aInner = side == 0 ? g : ext[a] - g - 1;
+      const double tw2 = 2.0 * wa[a];
+      auto pl = c.plane[f];
+      CCExec space;
+      Kokkos::parallel_for(
+          "peclet::flow::smg_coarse_dirichlet", MDRange2<CCExec>(space, {0, 0}, {n1, n2}),
+          KOKKOS_LAMBDA(int j1, int j2) {
+            const long i = (long)aInner * sa + (long)(j1 + g) * s1 + (long)(j2 + g) * s2;
+            if (!(unk(i) > 0.5))
+              return;
+            AC(i) += tw2 * pl((long)j1 + (long)j2 * n1);
+          });
+      space.fence();
+    }
+  }
+
+  std::vector<Level> lv_;
+  Fill fill0_;
+  CCConst unk0_;
+  Kokkos::View<int*, CCMem> cut0_;
+  double w_[3] = {1.0, 1.0, 1.0};
+  double hp_[3] = {1.0, 1.0, 1.0};
+  bool aniso_ = false;
+  bool per_[3] = {true, true, true};
+  bool dirFace_[6] = {false, false, false, false, false, false};
+  bool singular_ = false;
+  int nUse_ = 1;
+  bool distributed_ = false;
+  bool rap_ = false;
+#ifdef PECLET_FLOW_MPI
+  MPI_Comm comm_ = MPI_COMM_NULL;
+#endif
+
+ public:
+  /// Q2 fallback (evaluation): Galerkin RAP of the level L-1 surrogate, A_c = R S_f Z P with R the
+  /// average over the children, P the trilinear prolongation (0 beyond a non-periodic global face)
+  /// and Z the re-zeroing of the pinned fine cells — exactly the transfer pair the V-cycle uses.
+  /// The coarse operator is 27-point (and not symmetric: R != P^T / N).
+  void buildRap(int L) {
+    Level& c = lv_[L];
+    Level& fin = lv_[L - 1];
+    if (c.A27.extent(0) != c.n)
+      c.A27 = smg::A27View("smg_a27", c.n);
+    auto A = c.A27;
+    const C3 ce = c.ext, fe = fin.ext, ci = c.inner, ratio = fin.ratio;
+    const int gc = c.g, gf = fin.g;
+    const bool f27 = L >= 2;
+    smg::A27View AF = f27 ? fin.A27 : smg::A27View();
+    CCField AC0 = fin.AC, AFX = fin.AFX, AFY = fin.AFY, AFZ = fin.AFZ;
+    CCConst unkf = unkOf(L - 1);
+    CCConst unkc = c.unk;
+    bool lowDead[3], highDead[3];
+    for (int a = 0; a < 3; ++a) {
+      lowDead[a] = !per_[a] && touches(c, 2 * a);
+      highDead[a] = !per_[a] && touches(c, 2 * a + 1);
+    }
+    const bool ldx = lowDead[0], ldy = lowDead[1], ldz = lowDead[2];
+    const bool hdx = highDead[0], hdy = highDead[1], hdz = highDead[2];
+    const double invN = 1.0 / (double)(ratio.x * ratio.y * ratio.z);
+    ccFor3(
+        "peclet::flow::smg_rap", C3{0, 0, 0}, ci, KOKKOS_LAMBDA(int icx, int icy, int icz) {
+          const long csy = ce.x, csz = (long)ce.x * ce.y;
+          const long C = (long)(icx + gc) + (long)(icy + gc) * csy + (long)(icz + gc) * csz;
+          if (!(unkc(C) > 0.5)) {
+            for (int k = 0; k < 27; ++k)
+              A(C, k) = 0.0;
+            A(C, 13) = 1.0;
+            return;
+          }
+          double acc[27];
+          for (int k = 0; k < 27; ++k)
+            acc[k] = 0.0;
+          const long fsy = fe.x, fsz = (long)fe.x * fe.y;
+          const int rr[3] = {ratio.x, ratio.y, ratio.z};
+          const int icv[3] = {icx, icy, icz};
+          const int ncv[3] = {ci.x, ci.y, ci.z};
+          const bool ld[3] = {ldx, ldy, ldz}, hd[3] = {hdx, hdy, hdz};
+          for (int cz = 0; cz < ratio.z; ++cz)
+            for (int cy = 0; cy < ratio.y; ++cy)
+              for (int cx = 0; cx < ratio.x; ++cx) {
+                const int fq[3] = {ratio.x * icx + cx, ratio.y * icy + cy, ratio.z * icz + cz};
+                const long fi =
+                    (long)(fq[0] + gf) + (long)(fq[1] + gf) * fsy + (long)(fq[2] + gf) * fsz;
+                if (!(unkf(fi) > 0.5))
+                  continue;
+                const int nk = f27 ? 27 : 7;
+                for (int kk = 0; kk < nk; ++kk) {
+                  int d[3];
+                  double coef;
+                  if (f27) {
+                    d[0] = kk % 3 - 1;
+                    d[1] = (kk / 3) % 3 - 1;
+                    d[2] = kk / 9 - 1;
+                    coef = AF(fi, kk);
+                  } else {
+                    d[0] = d[1] = d[2] = 0;
+                    switch (kk) {
+                      case 0:
+                        coef = AC0(fi);
+                        break;
+                      case 1:
+                        d[0] = -1;
+                        coef = AFX(fi);
+                        break;
+                      case 2:
+                        d[0] = 1;
+                        coef = AFX(fi + 1);
+                        break;
+                      case 3:
+                        d[1] = -1;
+                        coef = AFY(fi);
+                        break;
+                      case 4:
+                        d[1] = 1;
+                        coef = AFY(fi + fsy);
+                        break;
+                      case 5:
+                        d[2] = -1;
+                        coef = AFZ(fi);
+                        break;
+                      default:
+                        d[2] = 1;
+                        coef = AFZ(fi + fsz);
+                        break;
+                    }
+                  }
+                  if (coef == 0.0)
+                    continue;
+                  const long gi = fi + (long)d[0] + (long)d[1] * fsy + (long)d[2] * fsz;
+                  if (!(unkf(gi) > 0.5))
+                    continue;
+                  int pD[3][2];
+                  double pw[3][2];
+                  int np[3];
+                  for (int a = 0; a < 3; ++a) {
+                    const int q = fq[a] + d[a];
+                    if (rr[a] == 1) {
+                      np[a] = 1;
+                      pD[a][0] = q;
+                      pw[a][0] = 1.0;
+                    } else {
+                      const int k = (q >= 0) ? q / 2 : -((-q + 1) / 2);
+                      np[a] = 2;
+                      if (q - 2 * k == 0) {
+                        pD[a][0] = k - 1;
+                        pw[a][0] = 0.25;
+                        pD[a][1] = k;
+                        pw[a][1] = 0.75;
+                      } else {
+                        pD[a][0] = k;
+                        pw[a][0] = 0.75;
+                        pD[a][1] = k + 1;
+                        pw[a][1] = 0.25;
+                      }
+                    }
+                    for (int m = 0; m < np[a]; ++m)
+                      if ((pD[a][m] < 0 && ld[a]) || (pD[a][m] >= ncv[a] && hd[a]))
+                        pw[a][m] = 0.0;
+                  }
+                  for (int mz = 0; mz < np[2]; ++mz)
+                    for (int my = 0; my < np[1]; ++my)
+                      for (int mx = 0; mx < np[0]; ++mx) {
+                        const double wgt = pw[0][mx] * pw[1][my] * pw[2][mz];
+                        if (wgt == 0.0)
+                          continue;
+                        const int rx = pD[0][mx] - icv[0] + 1, ry = pD[1][my] - icv[1] + 1,
+                                  rz = pD[2][mz] - icv[2] + 1;
+                        acc[rx + 3 * ry + 9 * rz] += coef * wgt;
+                      }
+                }
+              }
+          for (int k = 0; k < 27; ++k)
+            A(C, k) = acc[k] * invN;
+        });
+  }
+};
+
+}  // namespace peclet::flow
+
+#endif  // PECLET_FLOW_SCALAR_MG_HPP

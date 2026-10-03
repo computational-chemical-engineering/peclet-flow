@@ -49,6 +49,7 @@
 #include "scalar_cutcell_geometry.hpp"  // cut-cell scalars: the geometry record (WO-2)
 #include "scalar_cutcell_operator.hpp"  // cut-cell scalars: operator + per-scalar state (WO-3)
 #include "scalar_krylov.hpp"            // cut-cell scalars: BiCGStab (WO-3)
+#include "scalar_mg.hpp"                // cut-cell scalars: ScalarMG preconditioner (WO-4)
 #include "scalar_transport.hpp"
 #include "staggered_advection.hpp"
 #include "vof/advect_wy.hpp"    // VoF rung V1: the Weymouth-Yue colour advector (its own g=3 block)

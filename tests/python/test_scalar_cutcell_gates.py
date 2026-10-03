@@ -1,8 +1,9 @@
 #!/usr/bin/env python
-"""Cut-cell scalar transport: the accuracy gates of WO-3 (doc/scalar_ibm_design.md §11).
+"""Cut-cell scalar transport: the accuracy and iteration gates of WO-3/WO-4 (doc/scalar_ibm_design.md §11).
 
-Single phase, diffusion only, the level-0 (2 + 2 red-black Gauss-Seidel) preconditioner of WO-3.
-Every case is in PHYSICAL units (an extent), so the unit conversions of §1.2 are on the path.
+Single phase, diffusion only, BiCGStab preconditioned by one ScalarMG V-cycle (WO-4; level 0 alone
+under the transient level rule). Every case is in PHYSICAL units (an extent), so the unit
+conversions of §1.2 are on the path.
 
   api  the opt-in, the refusals and the name checks (cheap).
   g1   Dirichlet sphere, steady: Nu -> 2 (order >= 1.7), field L1 / Linf orders (>= 1.8 / 1.5),
@@ -16,10 +17,14 @@ Every case is in PHYSICAL units (an extent), so the unit conversions of §1.2 ar
   g7   pipe (an SDF along z, nz = 4 periodic): Dirichlet decay j01^2 and Neumann dipole decay
        j'11^2 (BE ratio), and the Graetz number Nu_T = 3.656793 by inverse iteration with
        solve_scalar_steady (G7a, G7b).
+  giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 8 per step,
+       warm start) and the singular steady problem on G5b's geometry (periodic simple-cubic array,
+       c = 0.3, insulating + flux + source; <= 30, growth <= 5 per doubling).
 
-Ruling D-WO3-1: the STEADY gates (g1, g2, g3a, g7) run on the TWO COARSEST rungs with maxit 3000
-(the full ladder reruns with ScalarMG in WO-4); g3b runs its full ladder. "Order" is between
-successive rungs of the RMS error over 3 random grid offsets. Iteration counts are printed.
+Every gate runs its FULL resolution ladder (WO-4; ruling D-WO3-1 had deferred the steady ones).
+"Order" is between successive rungs of the RMS error over 3 random grid offsets; every successive
+pair is gated. G-iter on g1/g2/g3a (Da = 1): <= 20 BiCGStab iterations at every rung, growth <= 3
+per doubling (the max over the offsets of each rung). Iteration counts are printed.
 
 Run: OMP_NUM_THREADS=4 PYTHONPATH=<build> python tests/python/test_scalar_cutcell_gates.py <gate>
 Exit 0 pass, 1 fail, 77 skipped (no module).
@@ -38,7 +43,6 @@ except ImportError:
 
 FACES = ("-x", "+x", "-y", "+y", "-z", "+z")
 OFFSETS = np.random.default_rng(20261003).uniform(-0.5, 0.5, size=(3, 3))
-MAXIT_STEADY = 3000
 failures = []
 
 
@@ -87,14 +91,21 @@ def walled(cells, extent, origin=(0.0, 0.0, 0.0), periodic_z=False):
     return s
 
 
-def add_cc(s, D, steady_maxit=True, box="neumann", periodic_z=False):
+def add_cc(s, D, box="neumann", periodic_z=False):
     s.add_scalar("c", diffusivity=D, cutcell=True)
     for f in FACES:
         if periodic_z and f in ("-z", "+z"):
             continue
         s.set_scalar_bc("c", f, box)
-    if steady_maxit:
-        s.diagnostics.set_scalar_max_iterations("c", MAXIT_STEADY)
+
+
+def giter_check(tag, its):
+    """§11 G-iter on a ladder: {rung: [iterations per offset]} -> <= 20 each, growth <= 3."""
+    rungs = sorted(its)
+    mx = [max(its[k]) for k in rungs]
+    check(max(mx) <= 20, f"{tag}: G-iter <= 20 iterations at every rung ({mx})")
+    gr = [b - a for a, b in zip(mx, mx[1:])]
+    check(all(g <= 3 for g in gr), f"{tag}: G-iter growth <= 3 per doubling ({gr})")
 
 
 def field_errors(s, exact):
@@ -138,9 +149,9 @@ def g1_case(Rh, off, aniso=False):
 
 
 def gate_g1():
-    print("G1 Dirichlet sphere (steady), R/h in {8, 16}, box 4R")
+    print("G1 Dirichlet sphere (steady), R/h in {8, 16, 32}, box 4R")
     res = {}
-    for Rh in (8, 16):
+    for Rh in (8, 16, 32):
         rows = [g1_case(Rh, off) for off in OFFSETS]
         res[Rh] = rows
         idr = max(abs(r["b"]["identity_error"]) / abs(r["b"]["wall_in"]) for r in rows)
@@ -162,9 +173,12 @@ def gate_g1():
     e = {k: rms([r["err"] for r in v]) for k, v in res.items()}
     l1 = {k: rms([r["l1"] for r in v]) for k, v in res.items()}
     li = {k: rms([r["linf"] for r in v]) for k, v in res.items()}
-    check(order(e[8], e[16]) >= 1.7, f"Nu order {order(e[8], e[16]):.2f} >= 1.7 (rms {e[8]:.3e} -> {e[16]:.3e})")
-    check(order(l1[8], l1[16]) >= 1.8, f"field L1 order {order(l1[8], l1[16]):.2f} >= 1.8")
-    check(order(li[8], li[16]) >= 1.5, f"field Linf order {order(li[8], li[16]):.2f} >= 1.5")
+    for a, b in ((8, 16), (16, 32)):
+        check(order(e[a], e[b]) >= 1.7, f"Nu order {a}->{b} {order(e[a], e[b]):.2f} >= 1.7 (rms {e[a]:.3e} -> {e[b]:.3e})")
+        check(order(l1[a], l1[b]) >= 1.8, f"field L1 order {a}->{b} {order(l1[a], l1[b]):.2f} >= 1.8 ({l1[a]:.3e} -> {l1[b]:.3e})")
+        check(order(li[a], li[b]) >= 1.5, f"field Linf order {a}->{b} {order(li[a], li[b]):.2f} >= 1.5 ({li[a]:.3e} -> {li[b]:.3e})")
+    check(e[32] <= 2e-3, f"|Nu/2 - 1| {e[32]:.2e} <= 2e-3 at R/h = 32 (prov.)")
+    giter_check("G1", {k: [r["it"] for r in v] for k, v in res.items()})
     print("G1 anisotropic h' = (1, 1, 2), R/h_min in {16, 32}")
     ea = {}
     for Rh in (16, 32):
@@ -229,20 +243,24 @@ def g2_case(Rih, off):
 
 
 def gate_g2():
-    print("G2 concentric shells (steady), Neumann q inner, Dirichlet outer Ro = 2.5 Ri, Ri/h in {6, 12}")
-    e, l1 = {}, {}
-    for Rih in (6, 12):
+    print("G2 concentric shells (steady), Neumann q inner, Dirichlet outer Ro = 2.5 Ri, Ri/h in {6, 12, 24}")
+    e, l1, its = {}, {}, {}
+    for Rih in (6, 12, 24):
         rows = [g2_case(Rih, off) for off in OFFSETS]
         e[Rih] = rms([r["err"] for r in rows])
         l1[Rih] = rms([r["l1"] for r in rows])
+        its[Rih] = [r["it"] for r in rows]
         print(f"  Ri/h={Rih:3d}  c_Gamma rel err {[f'{r['err']:+.3e}' for r in rows]}  L1 {l1[Rih]:.3e}"
               f"  inner flux/(q area)-1 {[f'{r['fin']:+.1e}' for r in rows]}  iters {[r['it'] for r in rows]}")
         for r in rows:
             check(r["conv"], f"Ri/h={Rih}: converged ({r['it']} iterations)")
             check(r["rungs"][1] + r["rungs"][2] + r["rungs"][3] == 0, f"Ri/h={Rih}: R0 = 100 % ({r['rungs']})")
             check(abs(r["fin"]) <= 1e-12, f"Ri/h={Rih}: inner flux = q x discrete area ({r['fin']:+.1e})")
-    check(order(e[6], e[12]) >= 1.7, f"c_Gamma order {order(e[6], e[12]):.2f} >= 1.7 (rms {e[6]:.3e} -> {e[12]:.3e})")
-    check(order(l1[6], l1[12]) >= 1.8, f"field L1 order {order(l1[6], l1[12]):.2f} >= 1.8")
+    for a, b in ((6, 12), (12, 24)):
+        check(order(e[a], e[b]) >= 1.7, f"c_Gamma order {a}->{b} {order(e[a], e[b]):.2f} >= 1.7 (rms {e[a]:.3e} -> {e[b]:.3e})")
+        check(order(l1[a], l1[b]) >= 1.8, f"field L1 order {a}->{b} {order(l1[a], l1[b]):.2f} >= 1.8 ({l1[a]:.3e} -> {l1[b]:.3e})")
+    check(abs(e[24]) <= 2e-3, f"|c_Gamma err| {e[24]:.2e} <= 2e-3 at Ri/h = 24 (prov.)")
+    giter_check("G2", its)
 
 
 # --------------------------------------------------------------------------------------- G3a ----
@@ -271,17 +289,22 @@ def g3a_case(Rh, off, Da):
 
 
 def gate_g3a():
-    print("G3a Robin external sphere (steady), R/h in {8, 16}")
+    print("G3a Robin external sphere (steady), R/h in {8, 16, 32}")
     for Da in (0.1, 1.0, 10.0, 100.0):
-        e = {}
-        for Rh in (8, 16):
+        e, its = {}, {}
+        for Rh in (8, 16, 32):
             rows = [g3a_case(Rh, off, Da) for off in OFFSETS]
             e[Rh] = rms([r["err"] for r in rows])
+            its[Rh] = [r["it"] for r in rows]
             print(f"  Da={Da:6.1f} R/h={Rh:3d}  Sh rel err {[f'{r['err']:+.3e}' for r in rows]}  iters {[r['it'] for r in rows]}")
             for r in rows:
                 check(r["conv"], f"Da={Da} R/h={Rh}: converged ({r['it']} iterations)")
                 check(r["rungs"][1] + r["rungs"][2] + r["rungs"][3] == 0, f"Da={Da} R/h={Rh}: R0 = 100 %")
-        check(order(e[8], e[16]) >= 1.7, f"Da={Da}: Sh order {order(e[8], e[16]):.2f} >= 1.7 (rms {e[8]:.3e} -> {e[16]:.3e})")
+        for a, b in ((8, 16), (16, 32)):
+            check(order(e[a], e[b]) >= 1.7, f"Da={Da}: Sh order {a}->{b} {order(e[a], e[b]):.2f} >= 1.7 (rms {e[a]:.3e} -> {e[b]:.3e})")
+        check(e[32] <= 3e-3, f"Da={Da}: |Sh err| {e[32]:.2e} <= 3e-3 at R/h = 32 (prov.)")
+        if Da == 1.0:
+            giter_check("G3a Da=1", its)
 
 
 # --------------------------------------------------------------------------------------- G3b ----
@@ -313,8 +336,7 @@ def g3b_case(Rh, off, Bi, nsteps=30):
     X, Y, Z = grid(s)
     r = np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2 + (Z - c0[2]) ** 2)
     s.set_solid(np.asfortranarray(R - r))  # the fluid is INSIDE the sphere
-    add_cc(s, D, steady_maxit=False, box="neumann")
-    s.diagnostics.set_scalar_max_iterations("c", MAXIT_STEADY)
+    add_cc(s, D, box="neumann")
     if math.isinf(Bi):
         s.set_scalar_wall("c", "dirichlet", 0.0)
     else:
@@ -454,10 +476,10 @@ def g7b_case(Rh, off, iters=25):
 
 
 def gate_g7():
-    print("G7a pipe decay (BE ratio, dt mu = 1, 30 steps), R/h in {16, 32}")
+    print("G7a pipe decay (BE ratio, dt mu = 1, 30 steps), R/h in {16, 32, 64}")
     for neumann in (False, True):
         e = {}
-        for Rh in (16, 32):
+        for Rh in (16, 32, 64):
             rows = [g7a_case(Rh, off, neumann) for off in OFFSETS]
             e[Rh] = rms([r["err"] for r in rows])
             print(f"  {'neumann  j11p^2' if neumann else 'dirichlet j01^2'} R/h={Rh:3d}  rel err "
@@ -466,19 +488,86 @@ def gate_g7():
                 check(r["conv"], f"R/h={Rh}: converged")
                 check(r["rungs"][1] + r["rungs"][2] + r["rungs"][3] == 0, f"R/h={Rh}: R0 = 100 %")
         tag = "neumann" if neumann else "dirichlet"
-        check(order(e[16], e[32]) >= 1.8, f"{tag}: order {order(e[16], e[32]):.2f} >= 1.8 (rms {e[16]:.3e} -> {e[32]:.3e})")
+        for a, b in ((16, 32), (32, 64)):
+            check(order(e[a], e[b]) >= 1.8, f"{tag}: order {a}->{b} {order(e[a], e[b]):.2f} >= 1.8 (rms {e[a]:.3e} -> {e[b]:.3e})")
         check(e[32] <= 5e-4, f"{tag}: |err| {e[32]:.2e} <= 5e-4 at R/h = 32")
-    print("G7b Graetz Nu_T (inverse iteration with solve_scalar_steady), R/h in {16, 32}")
+    print("G7b Graetz Nu_T (inverse iteration with solve_scalar_steady), R/h in {16, 32, 64}")
     e = {}
-    for Rh in (16, 32):
+    for Rh in (16, 32, 64):
         rows = [g7b_case(Rh, off) for off in OFFSETS]
         e[Rh] = rms([r["err"] for r in rows])
         print(f"  R/h={Rh:3d}  Nu_T rel err {[f'{r['err']:+.3e}' for r in rows]}  iters/solve "
               f"{min(min(r['its']) for r in rows)}..{max(max(r['its']) for r in rows)}")
         for r in rows:
             check(r["conv"], f"R/h={Rh}: converged")
-    check(order(e[16], e[32]) >= 1.7, f"Graetz order {order(e[16], e[32]):.2f} >= 1.7 (rms {e[16]:.3e} -> {e[32]:.3e})")
+    for a, b in ((16, 32), (32, 64)):
+        check(order(e[a], e[b]) >= 1.7, f"Graetz order {a}->{b} {order(e[a], e[b]):.2f} >= 1.7 (rms {e[a]:.3e} -> {e[b]:.3e})")
     check(e[32] <= 1e-3, f"Graetz |err| {e[32]:.2e} <= 1e-3 at R/h = 32 (prov.)")
+
+
+# ------------------------------------------------------------------------------------- G-iter ----
+def giter_transient_case(Rh, off, nsteps=6):
+    """G1's sphere, transient at dt D/h^2 = 1 from c = 0 (Dirichlet wall c = 1, box c = 0)."""
+    R, D = 1.0, 0.7
+    L = 4.0 * R
+    h = R / Rh
+    n = int(round(L / h))
+    s = walled((n, n, n), (L, L, L))
+    s.set_dt(h * h / D)
+    c0 = np.array([0.5 * L, 0.5 * L, 0.5 * L]) + np.asarray(off) * h
+    X, Y, Z = grid(s)
+    r = np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2 + (Z - c0[2]) ** 2)
+    s.set_solid(np.asfortranarray(r - R))
+    add_cc(s, D, box="dirichlet")
+    s.set_scalar_wall("c", "dirichlet", 1.0)
+    its, lv = [], []
+    for k in range(nsteps):
+        s.advance_scalars()
+        c = s.diagnostics.scalar_census("c")
+        its.append(c["krylov_iterations"])
+        lv.append(c["mg_levels"])
+    return its, lv
+
+
+def g5b_geometry_case(n, off):
+    """G5b's geometry (periodic simple-cubic array, c = 0.3) on an n^3 grid, insulating walls with a
+    flux and a source, steady: the singular case of §5.1 (same surrogate as G5b's closure)."""
+    L = 1.0
+    h = L / n
+    s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    R = 0.5 * L * (0.3 * 6.0 / math.pi) ** (1.0 / 3.0)
+    c0 = np.array([0.5 * L, 0.5 * L, 0.5 * L]) + np.asarray(off) * h
+    X, Y, Z = grid(s)
+    r = np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2 + (Z - c0[2]) ** 2)
+    s.set_solid(np.asfortranarray(r - R))
+    s.add_scalar("c", diffusivity=0.6, cutcell=True)
+    s.set_scalar_wall("c", "neumann", 0.2)
+    s.set_scalar_source("c", -0.5)
+    s.solve_scalar_steady("c")
+    c = s.diagnostics.scalar_census("c")
+    return c["krylov_iterations"], c["krylov_converged"], c["mg_levels"], 2.0 * R / h
+
+
+def gate_giter():
+    print("G-iter transient: G1's sphere at dt D/h^2 = 1, 6 steps from c = 0, R/h in {8, 16, 32}")
+    for Rh in (8, 16, 32):
+        rows = [giter_transient_case(Rh, off) for off in OFFSETS]
+        mx = max(max(its) for its, _ in rows)
+        print(f"  R/h={Rh:3d}  iterations/step {[its for its, _ in rows]}  mg levels {rows[0][1][0]}")
+        check(mx <= 8, f"R/h={Rh}: <= 8 iterations per step ({mx})")
+    print("G-iter singular steady: G5b's geometry (periodic SC array, c = 0.3), n in {20, 40, 80}")
+    mx = []
+    for n in (20, 40, 80):
+        rows = [g5b_geometry_case(n, off) for off in OFFSETS]
+        mx.append(max(r[0] for r in rows))
+        print(f"  n={n:3d} (ND {rows[0][3]:.1f})  iterations {[r[0] for r in rows]}  mg levels {rows[0][2]}")
+        for r in rows:
+            check(r[1], f"n={n}: converged ({r[0]} iterations)")
+    check(max(mx) <= 30, f"singular: <= 30 iterations at every rung ({mx})")
+    gr = [b - a for a, b in zip(mx, mx[1:])]
+    check(all(g <= 5 for g in gr), f"singular: growth <= 5 per doubling ({gr})")
 
 
 # --------------------------------------------------------------------------------------- API ----
@@ -524,7 +613,9 @@ def gate_api():
     s.set_scalar_wall("c", "dirichlet", 1.0)
     s.advance_scalars()  # the periodic box: one step runs
     c = s.diagnostics.scalar_census("c")
-    check(c["krylov_converged"] and c["mg_levels"] == 1, f"one step converged ({c['krylov_iterations']} iterations)")
+    # dt D/h^2 = 14.4 -> kappa_A > 13: the full ScalarMG table, 12 -> 6 -> 3
+    check(c["krylov_converged"] and c["mg_levels"] == 3,
+          f"one step converged ({c['krylov_iterations']} iterations, {c['mg_levels']} MG levels)")
     s.set_scalar_bc("c", "-x", "dirichlet", 0.5)  # the flow -x face is periodic
     raises(RuntimeError, s.advance_scalars, "a scalar Dirichlet face against a periodic flow face is refused")
     s.set_scalar_bc("c", "-x", "periodic")
@@ -532,7 +623,8 @@ def gate_api():
     raises(RuntimeError, s.advance_scalars, "porous continuity is refused")
 
 
-GATES = {"api": gate_api, "g1": gate_g1, "g2": gate_g2, "g3a": gate_g3a, "g3b": gate_g3b, "g7": gate_g7}
+GATES = {"api": gate_api, "g1": gate_g1, "g2": gate_g2, "g3a": gate_g3a, "g3b": gate_g3b, "g7": gate_g7,
+         "giter": gate_giter}
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(GATES)

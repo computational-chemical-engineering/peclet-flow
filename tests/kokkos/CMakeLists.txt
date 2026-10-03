@@ -77,6 +77,15 @@ target_include_directories(test_scalar_cutcell_operator PRIVATE ${CMAKE_CURRENT_
 target_link_libraries(test_scalar_cutcell_operator PRIVATE Kokkos::kokkos)
 add_test(NAME scalar_cutcell_operator COMMAND test_scalar_cutcell_operator)
 
+# ScalarMG (doc/scalar_ibm_design.md §5.2; WO-4): the level table equals VelocityMG's, the coarse
+# rediscretized surrogate (identity rows, M-matrix, face rule), the level rule, and the V-cycle
+# contraction at the finest G1 grid and on the G5b geometry (§11 G-iter, <= 0.3).
+add_executable(test_scalar_mg test_scalar_mg.cpp)
+target_include_directories(test_scalar_mg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_scalar_mg PRIVATE Kokkos::kokkos)
+add_test(NAME scalar_mg COMMAND test_scalar_mg)
+
 # Property closures + per-cell body force (LinearMix / Boussinesq / Arrhenius vs host oracle).
 add_executable(test_closures test_closures.cpp)
 target_include_directories(test_closures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
