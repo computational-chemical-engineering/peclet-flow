@@ -1470,3 +1470,7 @@ path (bitwise above).
     - resolution requirement only.
   - Recommendation: a body-aware geometry record (per-body SDF at face samples) plus a lubrication-
     type contact conductance, designed by the architect after Frank's input.
+
+**D-WO8-2 applied.** In `gate_g13` the conjugate contact row prints "OPEN: contact model pending (§13 Q4,
+Frank)", and its clauses print as `info` (order −2.84, numbers unchanged). The Dirichlet rows and the
+thin plate stay gated. Rerun: ctest `scalar_cutcell_g13` passes; G12 12/12 hashes equal at OMP 1.

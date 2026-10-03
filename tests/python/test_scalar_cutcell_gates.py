@@ -2099,6 +2099,17 @@ def g13_thin_plate():
 def gate_g13(cases=G13_CASES, rungs=(8, 16, 32)):
     print("G13 contacts: two spheres R = 1 in a box (6R, 4R, 4R), R/h in {8, 16, 32}, steady")
     for case in cases:
+        # ruling D-WO8-2: the conjugate contact row is INFO (its discrete solid bridge is
+        # pre-asymptotic; §13 Q4 triggered); the Dirichlet rows and the thin plate stay gated
+        info = case == "conj"
+        if info:
+            print("  OPEN: contact model pending (§13 Q4, Frank) -- the conjugate contact row is INFO")
+
+        def check(cond, msg, _info=info):
+            if _info:
+                print(("  info  ok    " if cond else "  info  MISS  ") + msg)
+            else:
+                globals()["check"](cond, msg)
         F, its = {}, {}
         for Rh in rungs:
             rows = [g13_case(Rh, off, case) for off in OFFSETS]
