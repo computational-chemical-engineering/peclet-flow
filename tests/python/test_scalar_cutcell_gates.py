@@ -17,14 +17,17 @@ conversions of §1.2 are on the path.
   g7   pipe (an SDF along z, nz = 4 periodic): Dirichlet decay j01^2 and Neumann dipole decay
        j'11^2 (BE ratio), and the Graetz number Nu_T = 3.656793 by inverse iteration with
        solve_scalar_steady (G7a, G7b).
-  giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 8 per step,
-       warm start) and the singular steady problem on G5b's geometry (periodic simple-cubic array,
-       c = 0.3, insulating + flux + source; <= 30, growth <= 5 per doubling).
+  giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 10 per step,
+       the cold first step included — ruling of WO-4, restating the provisional 8) and the singular
+       steady problem on G5b's geometry (periodic simple-cubic array, c = 0.3, insulating + flux +
+       source; <= 30, growth <= 5 per rung) on multigrid-friendly n.
 
 Every gate runs its FULL resolution ladder (WO-4; ruling D-WO3-1 had deferred the steady ones).
 "Order" is between successive rungs of the RMS error over 3 random grid offsets; every successive
 pair is gated. G-iter on g1/g2/g3a (Da = 1): <= 20 BiCGStab iterations at every rung, growth <= 3
-per doubling (the max over the offsets of each rung). Iteration counts are printed.
+per doubling (the max over the offsets of each rung). Ruling Q-C (WO-4): G-iter is gated on
+multigrid-friendly boxes (n rounded up to a multiple of 2^(rungs + 1) = 16); a box with few factors
+of two stays gated for correctness only (G2's native box). Iteration counts are printed.
 
 Run: OMP_NUM_THREADS=4 PYTHONPATH=<build> python tests/python/test_scalar_cutcell_gates.py <gate>
 Exit 0 pass, 1 fail, 77 skipped (no module).
@@ -214,11 +217,20 @@ def two_body_scene(c0, Ri, Ro):
     return ni, nr, ii, ir
 
 
-def g2_case(Rih, off):
+def mg_box(n, rungs=3):
+    """Ruling Q-C (WO-4): G-iter is gated on a multigrid-friendly box — n rounded UP to a multiple
+    of 2^(levels + 1) per axis, read as levels = the number of ladder rungs (3 -> 16)."""
+    m = 2 ** (rungs + 1)
+    return ((n + m - 1) // m) * m
+
+
+def g2_case(Rih, off, mgbox=False):
     Ri, D, q, co = 1.0, 0.8, 0.3, 0.0
     Ro = 2.5 * Ri
     h = Ri / Rih
     n = int(math.ceil(2.0 * Ro / h)) + 6
+    if mgbox:  # the added cells lie outside Ro: solid (the record's identity rows)
+        n = mg_box(n)
     L = n * h
     s = walled((n, n, n), (L, L, L))
     c0 = np.array([0.5 * L, 0.5 * L, 0.5 * L]) + np.asarray(off) * h
@@ -260,7 +272,17 @@ def gate_g2():
         check(order(e[a], e[b]) >= 1.7, f"c_Gamma order {a}->{b} {order(e[a], e[b]):.2f} >= 1.7 (rms {e[a]:.3e} -> {e[b]:.3e})")
         check(order(l1[a], l1[b]) >= 1.8, f"field L1 order {a}->{b} {order(l1[a], l1[b]):.2f} >= 1.8 ({l1[a]:.3e} -> {l1[b]:.3e})")
     check(abs(e[24]) <= 2e-3, f"|c_Gamma err| {e[24]:.2e} <= 2e-3 at Ri/h = 24 (prov.)")
-    giter_check("G2", its)
+    print("  G-iter on multigrid-friendly boxes (ruling Q-C): n rounded up to a multiple of 16")
+    itm = {}
+    for Rih in (6, 12, 24):
+        rows = [g2_case(Rih, off, mgbox=True) for off in OFFSETS]
+        itm[Rih] = [r["it"] for r in rows]
+        print(f"  Ri/h={Rih:3d}  n={mg_box(int(math.ceil(5.0 * Rih)) + 6)}  c_Gamma rel err "
+              f"{[f'{r['err']:+.3e}' for r in rows]}  iters {itm[Rih]}")
+        for r in rows:
+            check(r["conv"], f"Ri/h={Rih} (mg box): converged ({r['it']} iterations)")
+    print(f"  (native boxes, correctness only: iters {[max(its[k]) for k in sorted(its)]})")
+    giter_check("G2 (mg box)", itm)
 
 
 # --------------------------------------------------------------------------------------- G3a ----
@@ -556,10 +578,12 @@ def gate_giter():
         rows = [giter_transient_case(Rh, off) for off in OFFSETS]
         mx = max(max(its) for its, _ in rows)
         print(f"  R/h={Rh:3d}  iterations/step {[its for its, _ in rows]}  mg levels {rows[0][1][0]}")
-        check(mx <= 8, f"R/h={Rh}: <= 8 iterations per step ({mx})")
-    print("G-iter singular steady: G5b's geometry (periodic SC array, c = 0.3), n in {20, 40, 80}")
+        # ruling (WO-4): the provisional <= 8 restated as <= 10, the cold first step included
+        check(mx <= 10, f"R/h={Rh}: <= 10 iterations per step, cold first step included ({mx})")
+    print("G-iter singular steady: G5b's geometry (periodic SC array, c = 0.3), n in {32, 48, 80}"
+          " (n = 20/40/80 rounded up to multiples of 16, ruling Q-C)")
     mx = []
-    for n in (20, 40, 80):
+    for n in (mg_box(20), mg_box(40), mg_box(80)):
         rows = [g5b_geometry_case(n, off) for off in OFFSETS]
         mx.append(max(r[0] for r in rows))
         print(f"  n={n:3d} (ND {rows[0][3]:.1f})  iterations {[r[0] for r in rows]}  mg levels {rows[0][2]}")

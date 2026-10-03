@@ -1,11 +1,14 @@
 // Cut-cell scalar solve under MPI (doc/scalar_ibm_design.md §5.1, §5.2, §5.4; WO-3, WO-4).
 //
 // np = 1, 2, 4 on the production ORB. Each problem is solved on the distributed solver and on a
-// single-rank reference of the same problem; the parallel contract of §5.4 (G10) is checked:
-// np = 1 in the MPI build is BITWISE equal to the single-rank build (field, iterations, wall flux);
-// np > 1 agrees to the Krylov reduction-order floor, max |c - c_1| <= 1e-9 max |c_1|, iterations
-// within +-1 per solve, the wall flux to the same floor; the budget identity closes on every rank
-// count. Every solve runs the ScalarMG V-cycle of WO-4 (the transient steps have dt D/h^2 > 1).
+// single-rank reference of the same problem; the parallel contract of §5.4 (G10) is checked at
+// rtol 1e-13 (ruling Q-D of WO-4, the vardensity_mpi precedent): np = 1 in the MPI build is BITWISE
+// equal to the single-rank build (field, iterations, wall flux); np > 1: max |c - c_1| <= 1e-10
+// max |c_1|, iterations within +-1 per solve, the wall flux to the same bound; the budget identity
+// closes on every rank count. At the default rtol 1e-10 the np > 1 gap is the BiCGStab stopping
+// error (the V-cycle is decomposition-independent): `g1` is also run there and printed for
+// information only. Every solve runs the ScalarMG V-cycle of WO-4 (the transient steps have
+// dt D/h^2 > 1).
 //
 //   mixed     — an off-centre solid sphere, no-slip flow walls on +-x carrying scalar Dirichlet
 //               values (one a per-face profile), y and z periodic: one steady solve with Dirichlet
@@ -80,7 +83,7 @@ static void record(IbmSolver& s, Run& r, bool transient) {
 }
 
 static void compare(const char* tag, int n, const std::vector<double>& gsdf, FlowSetup flow,
-                    ScalarSetup scalar, Solve solve, bool checkLevels = false) {
+                    ScalarSetup scalar, Solve solve, bool checkLevels = false, bool gated = true) {
   peclet::core::decomp::BlockDecomposer<3> dec =
       peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size_), n, n, n);
   const auto blk = dec.block(rank_);
@@ -102,6 +105,10 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
   flow(sr);
   sr.setSolid(gsdf, false);
   scalar(sr, Block{{0, 0, 0}, {n, n, n}});
+  if (gated) {  // ruling Q-D: G10 is gated at rtol 1e-13
+    sd.setScalarTolerance("c", 1e-13);
+    sr.setScalarTolerance("c", 1e-13);
+  }
   const Run D = solve(sd);
   const Run R = solve(sr);
   auto cd = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sd.scalarField("c").c);
@@ -126,9 +133,10 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
   const int lvD = sd.scalarField("c").cut->mgLevels, lvR = sr.scalarField("c").cut->mgLevels;
   if (rank_ == 0) {
     std::printf(
-        "[%s] np=%d: max|c - c_1| = %.2e (max|c_1| %.3f), %ld cells not bitwise; "
+        "[%s%s] np=%d: max|c - c_1| = %.2e (max|c_1| %.3f), %ld cells not bitwise; "
         "mg levels np %d single %d\n",
-        tag, size_, gg[0], gg[1], ns, lvD, lvR);
+        tag, gated ? "" : " @ default rtol 1e-10, information only", size_, gg[0], gg[1], ns, lvD,
+        lvR);
     std::printf("  iterations np:");
     for (int it : D.iters)
       std::printf(" %d", it);
@@ -141,6 +149,8 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
       idm = std::fmax(idm, std::fmax(std::fabs(D.identity[k]), std::fabs(R.identity[k])));
     std::printf("  budget identity (rel) <= %.1e\n", idm);
   }
+  if (!gated)
+    return;
   CHECK(D.iters.size() == R.iters.size());
   for (std::size_t k = 0; k < D.identity.size(); ++k) {
     CHECK(std::fabs(D.identity[k]) <= 1e-12);
@@ -153,11 +163,11 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
     for (std::size_t k = 0; k < D.flux.size(); ++k)
       CHECK(same(D.flux[k], R.flux[k]));
   } else {
-    CHECK(gg[0] <= 1e-9 * gg[1]);
+    CHECK(gg[0] <= 1e-10 * gg[1]);
     for (std::size_t k = 0; k < D.iters.size(); ++k)
       CHECK(std::abs(D.iters[k] - R.iters[k]) <= 1);
     for (std::size_t k = 0; k < D.flux.size(); ++k)
-      CHECK(std::fabs(D.flux[k] - R.flux[k]) <= 1e-9 * std::fabs(R.flux[k]));
+      CHECK(std::fabs(D.flux[k] - R.flux[k]) <= 1e-10 * std::fabs(R.flux[k]));
   }
   if (checkLevels) {
     // ScalarMG's distributed level table == VelocityMG::initMpi(dec, ., comm, inPlace)'s
@@ -230,44 +240,46 @@ int main(int argc, char** argv) {
     {
       const int N = 64;
       const double R = 16.0, c0[3] = {31.87, 32.21, 31.66};
-      compare(
-          "g1", N, sphereSdf(N, c0[0], c0[1], c0[2], R),
-          [](IbmSolver& s) {
-            s.setRho(1.0);
-            s.setMu(1.0);
-            s.setDt(1.0);
-            for (int f = 0; f < 6; ++f)
-              s.setDomainBc(f, 1, 0.0, 0.0, 0.0);
-          },
-          [&](IbmSolver& s, const Block& B) {
-            s.addScalar("c", 0.7, 1, 50, true);
-            for (int f = 0; f < 6; ++f) {
-              const int a = f / 2;
-              const int t1 = (a == 0) ? 1 : 0, t2 = (a == 2) ? 1 : 2;
-              const double xa = (f % 2 == 0) ? -0.5 : N - 0.5;
-              std::vector<double> prof((std::size_t)B.l[t1] * B.l[t2]);
-              for (int j2 = 0; j2 < B.l[t2]; ++j2)
-                for (int j1 = 0; j1 < B.l[t1]; ++j1) {
-                  double p[3];
-                  p[a] = xa;
-                  p[t1] = j1 + B.o[t1];
-                  p[t2] = j2 + B.o[t2];
-                  const double r =
-                      std::sqrt((p[0] - c0[0]) * (p[0] - c0[0]) + (p[1] - c0[1]) * (p[1] - c0[1]) +
-                                (p[2] - c0[2]) * (p[2] - c0[2]));
-                  prof[(std::size_t)j1 + (std::size_t)j2 * B.l[t1]] = R / r;
-                }
-              s.setScalarBc("c", f, 2, 0.0);
-              s.setScalarBcProfile("c", f, prof, B.l[t1], B.l[t2]);
-            }
-            s.setScalarWall("c", 1, 1.0, 0.0, -1);
-          },
-          [](IbmSolver& s) {
-            Run r;
-            s.solveScalarSteady("c");
-            record(s, r, false);
-            return r;
-          });
+      for (const bool gated : {true, false})
+        compare(
+            "g1", N, sphereSdf(N, c0[0], c0[1], c0[2], R),
+            [](IbmSolver& s) {
+              s.setRho(1.0);
+              s.setMu(1.0);
+              s.setDt(1.0);
+              for (int f = 0; f < 6; ++f)
+                s.setDomainBc(f, 1, 0.0, 0.0, 0.0);
+            },
+            [&](IbmSolver& s, const Block& B) {
+              s.addScalar("c", 0.7, 1, 50, true);
+              for (int f = 0; f < 6; ++f) {
+                const int a = f / 2;
+                const int t1 = (a == 0) ? 1 : 0, t2 = (a == 2) ? 1 : 2;
+                const double xa = (f % 2 == 0) ? -0.5 : N - 0.5;
+                std::vector<double> prof((std::size_t)B.l[t1] * B.l[t2]);
+                for (int j2 = 0; j2 < B.l[t2]; ++j2)
+                  for (int j1 = 0; j1 < B.l[t1]; ++j1) {
+                    double p[3];
+                    p[a] = xa;
+                    p[t1] = j1 + B.o[t1];
+                    p[t2] = j2 + B.o[t2];
+                    const double r = std::sqrt((p[0] - c0[0]) * (p[0] - c0[0]) +
+                                               (p[1] - c0[1]) * (p[1] - c0[1]) +
+                                               (p[2] - c0[2]) * (p[2] - c0[2]));
+                    prof[(std::size_t)j1 + (std::size_t)j2 * B.l[t1]] = R / r;
+                  }
+                s.setScalarBc("c", f, 2, 0.0);
+                s.setScalarBcProfile("c", f, prof, B.l[t1], B.l[t2]);
+              }
+              s.setScalarWall("c", 1, 1.0, 0.0, -1);
+            },
+            [](IbmSolver& s) {
+              Run r;
+              s.solveScalarSteady("c");
+              record(s, r, false);
+              return r;
+            },
+            false, gated);
     }
     // ---- G10 on the singular case (periodic, insulating + flux + source, steady) ----
     {

@@ -582,3 +582,45 @@ gate rows above — `scalar_cutcell_g2` (G2 growth), `scalar_cutcell_giter` (tra
 gates left failing as evidence (not loosened), pending the answers.
 
 **Not changed:** CutcellMG / VelocityMG sources; the legacy scalar path; the probe operator.
+
+## 2026-10-03 — WO-4 rulings (orchestrator) and their reruns
+
+**Decisions.**
+- **D-WO4-1 (Q-C).** G-iter and its growth are gated on multigrid-friendly boxes: each box rounded
+  UP to a multiple of 2^(levels+1) per axis (the register's factors-of-two rule for benchmark grids,
+  docs/DECOMPOSITION_AND_MULTIGRID.md §3.1). A box with few factors of two stays gated for
+  correctness only. Applied to G2 and to G5b's geometry. *Reading (implementer's, reversible in
+  `mg_box()` of the gates test):* "levels" = the number of ladder rungs, 3 -> multiples of 16 —
+  the rounding the WO-4 evidence used. G2: 36/66/126 -> 48/80/128 (the added cells lie outside
+  R_o: solid; c_Gamma errors identical to 4 digits). G5b geometry: 20/40/80 -> 32/48/80 (the box is
+  the array period, so ND becomes 26.6/39.9/66.4; the rungs are no longer doublings).
+- **D-WO4-2 (Q-D).** G10 is gated at rtol 1e-13: np = 1 bitwise; np = 2, 4 fields within 1e-10 of
+  the single-rank run (read as <= 1e-10 max|c_1|; every case also passes it absolute), wall flux
+  to the same bound, iterations +-1 (the vardensity_mpi_np4 precedent). At the default rtol the
+  np > 1 gap is printed as information only.
+- **D-WO4-3.** Transient G-iter at dt D/h^2 = 1: the provisional <= 8 is restated as <= 10 per
+  step, the cold first step included (§13 Q1: about 2x measured).
+- **D-WO4-4 (Q-A / Q-B held).** The shipped coarse construction stays the note's rediscretized
+  levels (c1e312e). The contraction <= 0.3 row stays FAILING (ctest `scalar_mg`) pending the
+  architect; no switch to RAP or to the R7 (averaged-W) variant. The RAP evaluation path stays
+  C++-only and off.
+
+**Reruns** (OMP 4).
+- G2 G-iter on the mg boxes: 12-13 / 15 / 17 (growth +2, +2) — pass; native boxes 13 / 11 / 17,
+  correctness only.
+- G5b geometry, singular, n = 32/48/80: 5 / 5 / 5-6 — pass.
+- Transient: 10 (cold) then 8-9, every rung R/h 8/16/32 — pass at <= 10.
+- G10 at rtol 1e-13 (np = 1 / 2 / 4):
+  - mixed: bitwise / 5.33e-15 / 5.55e-15; iterations 15 7 7 7 vs 14 7 7 7 at np 2, 4 (+-1).
+  - g1: bitwise / 6.45e-12 / 3.58e-11 of max 1.053; iterations 16 = 16.
+  - singular: bitwise / 3.55e-15 / 7.11e-15; iterations 6 = 6.
+  - Information, g1 at rtol 1e-10: 7.85e-9 / 7.26e-8, iterations 13 / 15 vs 13.
+- G12: 12/12 hashes equal at OMP_NUM_THREADS=1.
+- ctest: `scalar_cutcell_g2`, `scalar_cutcell_giter` and `scalar_cutcell_solve_mpi_np{1,2,4}`
+  pass; `scalar_mg` fails only on the held contraction row (0.788).
+
+**Extra measurement (requested).** Periodic box 4R with a Dirichlet sphere (c = 1) and a source,
+steady — the case where the stand-alone rediscretized V-cycle diverges (rho = 3.1 at 64^3). With
+the V-cycle as the BiCGStab preconditioner it converges at every offset: R/h = 16 (64^3, 6 levels)
+13 / 14 / 14 iterations, true residual 3e-11 .. 9e-11 of the reference; R/h = 32 (128^3, 7 levels)
+15 / 16 / 16, 1e-11 .. 6e-11. The diverging mode is few-dimensional and the Krylov method removes it.
