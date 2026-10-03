@@ -1148,11 +1148,11 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     ScalarMG::Inputs in;
     in.lam = lam;
     in.idt = idt;
-    // the level rule: transient with kappa_A = 1 + 4 dt' D' sum_a w_a < 13 -> level 0 alone
-    // (WO-7: max(D', D_s') over the conjugate materials, D_s = Lam_s/(C_s K))
+    // the level rule: transient with kappa_A = 1 + 4 dt' D' sum_a w_a < ScalarMG::kFullTableKappa
+    // -> level 0 alone (WO-7: max(D', D_s') over the conjugate materials, D_s = Lam_s/(C_s K))
     const double kA = 1.0 + 4.0 * st.dt * (st.conj ? std::fmax(lam, st.maxSolidD) : lam) *
                                 ((u_.w[0] + u_.w[1]) + u_.w[2]);
-    in.fullTable = steady || !(kA < 13.0);
+    in.fullTable = steady || !(kA < ScalarMG::kFullTableKappa);
     in.singular = st.singular;
     in.SAC = st.SAC;
     in.kappa = kap;

@@ -41,8 +41,9 @@
 // (singular: the coarse rhs mean removed), recurse, coarse ghosts filled, prolongAdd (trilinear),
 // pinned cells re-zeroed, post 2 sweeps B -> R. Bottom: 16 sweeps (8 R -> B then 8 B -> R, so the
 // cycle stays symmetric) plus the mean removal when singular. The level rule (§5.2): transient with
-// kappa_A = 1 + 4 dt' D' sum_a w_a < 13 uses level 0 alone (2 + 2 sweeps, the WO-3 preconditioner);
-// otherwise, and always when steady, the full table. The cycle is a fixed linear operator.
+// kappa_A = 1 + 4 dt' D' sum_a w_a < kFullTableKappa = 13 uses level 0 alone (2 + 2 sweeps, the
+// WO-3 preconditioner); otherwise, and always when steady, the full table. The cycle is a fixed
+// linear operator.
 //
 // Steady mode WITH advection (design Amendment A2, §6.7; `Inputs::advective`, the same on every
 // rank): the cycle runs on the ADVECTIVE surrogate S_adv, in band form (AC, AW..AT). Level 0 is
@@ -576,6 +577,15 @@ class ScalarMG {
  public:
   static constexpr int G0 = 2;  ///< level 0: the scalar's own block
   static constexpr int GC = 1;  ///< coarse levels
+  /// The transient level rule (design §5.2, Amendment A3): kappa_A = 1 + 4 dt' D' sum_a w_a below
+  /// this uses level 0 alone (2 + 2 sweeps), at or above it the full table; steady always the full
+  /// table. Measured (D-WO9-2, 128^3 bed, koren, host OpenMP 2 threads, per advance, level 0 vs
+  /// full): kappa 7: 1.05-1.24 vs 1.93 s; 13: 1.23 vs 1.69 s (10/9 vs 9 iterations); 25: 1.35-1.55
+  /// vs 1.86-2.04 s; 49: tie (15 vs 10 iterations); 97: 2.5 vs 2.05 s (21 vs 12). Level 0 is
+  /// cheaper up to kappa ~ 49, but at 13 it fails G-iter (11 > 10 BiCGStab iterations, R/h 16,
+  /// cold first step), and G-iter and G-perf both sit at kappa = 13 exactly: 13 is the largest
+  /// value that keeps every gate.
+  static constexpr double kFullTableKappa = 13.0;
   using Fill = std::function<void(CCField)>;
 
   struct Level {
