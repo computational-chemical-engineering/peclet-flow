@@ -826,7 +826,10 @@ void gateInert() {
 // with non-periodic y (the clamp pass of the ghost policy), the wisp guard on (so the residue pass
 // runs) and the block CSF on (curvature cascade, CSF face force and its scatter, the debris
 // removal). Compared: the union, every block's own colour, box and every VofBlockStats field, the
-// three scattered CSF face-force fields and the curvature census.
+// three scattered CSF face-force fields and the curvature census. Since C2 (§5.10, WO-9) the
+// batched path measures with team reductions, so the measured statistics (volume, centroid,
+// velocity, moments, area) are held to 1e-12 relative instead of bitwise; everything else is
+// still bitwise.
 void gateBatched() {
   std::printf("\n=== C1 batched container stages == per-block stages, BITWISE\n");
   const int gn = 48;
@@ -907,23 +910,45 @@ void gateBatched() {
       double worst = 0.0;
       const long d = gridDiff(got, ref, &worst);
       long db = 0, ds = 0;
+      double c2worst = 0.0;  // C2: the measured statistics, relative (vectors: max-norm relative)
+      // The centroid velocity is the difference quotient (c^n - c^{n-1}) / dt of two centroids, so
+      // a centroid held to 1e-12 relative bounds it by 2e-12 |c| / dt, not by 1e-12 |v|: c2vel is
+      // its difference expressed as that centroid error, |dv| dt / (2 |c|).
+      double c2vel = 0.0;
+      auto rel = [](const double* x, const double* y, int m) {
+        double dn = 0.0, yn = 0.0;
+        for (int k = 0; k < m; ++k) {
+          dn = std::fmax(dn, std::fabs(x[k] - y[k]));
+          yn = std::fmax(yn, std::fabs(y[k]));
+        }
+        return yn > 0.0 ? dn / yn : dn;
+      };
       for (std::size_t b = 0; b < blk.size(); ++b) {
         db += (blk[b].size() == refBlk[b].size() &&
                std::memcmp(blk[b].data(), refBlk[b].data(), blk[b].size() * sizeof(double)) == 0)
                   ? 0
                   : 1;
         const auto &x = st[b], &y = refSt[b];
-        bool same = x.volume == y.volume && x.area == y.area && x.discarded == y.discarded &&
+        c2worst = std::fmax(c2worst, rel(&x.volume, &y.volume, 1));
+        c2worst = std::fmax(c2worst, rel(&x.area, &y.area, 1));
+        c2worst = std::fmax(c2worst, rel(x.centroid, y.centroid, 3));
+        {
+          double dv = 0.0, cm = 0.0;
+          for (int k = 0; k < 3; ++k) {
+            dv = std::fmax(dv, std::fabs(x.velocity[k] - y.velocity[k]));
+            cm = std::fmax(cm, std::fabs(y.centroid[k]));
+          }
+          c2vel = std::fmax(c2vel, cm > 0.0 ? dv * dt / (2.0 * cm) : dv);
+        }
+        c2worst = std::fmax(c2worst, rel(x.moment, y.moment, 6));
+        bool same = x.discarded == y.discarded &&
                     x.debrisCells == y.debrisCells && x.debrisVolume == y.debrisVolume &&
                     x.debrisReturned == y.debrisReturned && x.debrisLost == y.debrisLost &&
                     x.debrisUnresolved == y.debrisUnresolved && x.fullAxis == y.fullAxis &&
                     x.residueReturned == y.residueReturned && x.recentred == y.recentred &&
                     x.cells == y.cells;
         for (int k = 0; k < 3; ++k)
-          same = same && x.lo[k] == y.lo[k] && x.hi[k] == y.hi[k] &&
-                 x.centroid[k] == y.centroid[k] && x.velocity[k] == y.velocity[k];
-        for (int k = 0; k < 6; ++k)
-          same = same && x.moment[k] == y.moment[k];
+          same = same && x.lo[k] == y.lo[k] && x.hi[k] == y.hi[k];
         ds += same ? 0 : 1;
       }
       long df = 0;
@@ -940,9 +965,9 @@ void gateBatched() {
                           cs.pv == refCs.pv && cs.pvReduced == refCs.pvReduced &&
                           cs.noEstimate == refCs.noEstimate && cs.clipped == refCs.clipped;
       std::printf("  %s, per-block vs batched: union %ld cells differ, block colours %ld, "
-                  "stats %ld, CSF force fields %ld (max|f| %.3e), curvature census %s "
-                  "(interfacial %ld, pv %ld)\n",
-                  geo == 0 ? "periodic" : "y walls", d, db, ds, df, fmax,
+                  "stats %ld (C2 measured stats rel %.2e, velocity as a centroid error %.2e), CSF force fields %ld "
+                  "(max|f| %.3e), curvature census %s (interfacial %ld, pv %ld)\n",
+                  geo == 0 ? "periodic" : "y walls", d, db, ds, c2worst, c2vel, df, fmax,
                   sameCs ? "same" : "DIFFERS", cs.interfacial, cs.pv);
       CHECK(df == 0);
       CHECK(sameCs);
@@ -951,6 +976,8 @@ void gateBatched() {
       CHECK(d == 0);
       CHECK(db == 0);
       CHECK(ds == 0);
+      CHECK(c2worst <= 1e-12);
+      CHECK(c2vel <= 1e-12);
     }
   }
 }

@@ -27,6 +27,8 @@ Usage:
                 algebraic (§13: the A/B of the two bottom engines on one build)
     --div       with --dump: also store each timed step's max_open_divergence_projected() (div),
                 read after the step (G-NUM item 3)
+    --stats     with --dump: also store every timed step's measured block statistics (st_volume,
+                st_area, st_centroid, st_velocity, st_moments; WO-9's gate, C2 §5.10)
 """
 import os
 import sys
@@ -94,6 +96,8 @@ if "--bottom-solver" in A:
     s.diagnostics.set_pressure_bottom_solver(arg("--bottom-solver", "auto"))
 DIV = "--div" in A
 divs = []
+STATS = "--stats" in A
+stats = {k: [] for k in ("volume", "area", "centroid", "velocity", "moments")}
 print(f"build {time.time()-t_b:.2f} s", flush=True)
 
 S = rp.S
@@ -125,6 +129,10 @@ def one(timed):
         iters.append(s.diagnostics.last_pressure_iterations())
         if DIV:
             divs.append(s.max_open_divergence_projected())
+        if STATS:
+            st = s.diagnostics.vof_block_stats()
+            for k in stats:
+                stats[k].append([b[k] for b in st])
     t += dt
     return dt
 
@@ -155,5 +163,6 @@ if DUMP:
             for b in s.diagnostics.vof_block_stats()}
     np.savez(DUMP, u=s.get_u(), v=s.get_v(), w=s.get_w(), p=s.get_field("p"), C=s.get_field("C"),
              dts=np.array(dts), iters=np.array(iters, dtype=np.int64), **cols,
-             **({"div": np.array(divs)} if DIV else {}))
+             **({"div": np.array(divs)} if DIV else {}),
+             **({f"st_{k}": np.array(v) for k, v in stats.items()} if STATS else {}))
     print("dumped", DUMP, f"({len(cols)} block colours)")

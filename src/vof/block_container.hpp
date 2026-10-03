@@ -439,6 +439,7 @@ class VofBlockSet {
     rank_ = rank;
     size_ = size < 1 ? 1 : size;
     blocks_.clear();
+    statsPend_.clear();
     step_ = 0;
   }
 
@@ -573,7 +574,12 @@ class VofBlockSet {
   double cellSize() const { return h_; }
 
   std::size_t count() const { return blocks_.size(); }
-  std::vector<VofBlock>& blocks() { return blocks_; }
+  /// The block table. The non-const accessor first applies any deferred statistics (C2), so a
+  /// caller reading `blocks()[i].stats()` sees the last step's values; the const one does not.
+  std::vector<VofBlock>& blocks() {
+    flushStats();
+    return blocks_;
+  }
   const std::vector<VofBlock>& blocks() const { return blocks_; }
   long step() const { return step_; }
   void setStep(long s) { step_ = s; }
@@ -590,6 +596,7 @@ class VofBlockSet {
   /// @param extraPad  cells added to the box beyond the margin (0 for production; a large value
   ///                   makes a block that never has to re-centre, which is the G3 reference).
   void seedSphere(double cx, double cy, double cz, double r, int subLevels = 4, int extraPad = 0) {
+    flushStats();  // C2: deferred statistics are indexed by block; apply them before the table grows
     VofBox bb;
     const double c[3] = {cx, cy, cz};
     for (int d = 0; d < 3; ++d) {
@@ -641,7 +648,9 @@ class VofBlockSet {
     std::vector<VofBlock*> deb;
     const bool batch = batchEligible();
     if (batch)
-      advectBatched(dt);
+      advectBatched(dt);  // read #1 also applies the previous step's deferred statistics (C2)
+    else
+      flushStats();
     for (auto& b : blocks_) {
       if (!b.mine_)
         continue;
@@ -677,9 +686,13 @@ class VofBlockSet {
     if (reassignEvery > 0 && ((step_ + 1) % reassignEvery) == 0)
       lastReassigned_ = assignMasters();
     exch_->scatterColourMax(blocks_, cLocal);
-    for (auto& b : blocks_)
-      if (b.mine_)
-        measure(b, dt);
+    if (batch) {
+      measureBatched(dt);  // C2 (§5.10): one launch, no host read; applied at the next read #1
+    } else {
+      for (auto& b : blocks_)
+        if (b.mine_)
+          measure(b, dt);
+    }
     ++step_;
   }
 
@@ -850,6 +863,7 @@ class VofBlockSet {
   /// losing ranks. Returns the number of blocks that changed master. A no-op — and no message —
   /// when the assignment is unchanged, which is the common case once the swarm has settled.
   long assignMasters() {
+    flushStats();  // C2: a migrating block carries its previous centroid (serializeAux)
     if (blocks_.empty() || size_ <= 1)
       return 0;
     const std::vector<int> want = plannedMasters();
@@ -900,6 +914,7 @@ class VofBlockSet {
   /// shape (a quasi-2-D cylinder, a Hysing bubble, a scanned geometry) enters the container.
   /// Call `finishSeeding(cLocal)` once after the last `seedBox` to perform the gather.
   void seedBox(const VofBox& bb, int extraPad = 0) {
+    flushStats();  // C2, as in seedSphere
     VofBlock b;
     b.id = static_cast<long>(blocks_.size());
     b.master = static_cast<int>(b.id % size_);
@@ -919,6 +934,7 @@ class VofBlockSet {
   void finishSeeding(SField cLocal) {
     if (!exch_)
       throw std::runtime_error("peclet::flow::vof::VofBlockSet: no exchange installed");
+    flushStats();  // C2: its per-block measure() must not be overwritten by an older packet
     exch_->gatherColour(blocks_, cLocal);
     for (auto& b : blocks_)
       if (b.mine_) {
@@ -982,6 +998,7 @@ class VofBlockSet {
   /// `blockColourHost` was paired with) and whose colour is the given host array, x-fastest over
   /// `bb`. No seed clip runs -- the colour is given, not gathered out of a union.
   void seedBoxWithColour(const VofBox& bb, const std::vector<double>& colour) {
+    flushStats();  // C2, as in seedSphere
     VofBlock b;
     b.id = static_cast<long>(blocks_.size());
     b.master = masterOf(b.id);
@@ -1069,7 +1086,8 @@ class VofBlockSet {
   }
 
   /// Per-bubble census on the master (empty entries on a non-master).
-  std::vector<VofBlockStats> statsAll() const {
+  std::vector<VofBlockStats> statsAll() {
+    flushStats();  // C2: the last batched measure's values reach the host here or at read #1
     // `id`, `master` and the box come from the REPLICATED table, so they are reported on every
     // rank; only the measured entries (volume, centroid, velocity, moments, area) are the
     // master's.  Filling them here rather than in `measure()` is what makes that promise true on
@@ -2009,6 +2027,100 @@ class VofBlockSet {
       vofBatchClamp(T, gs_, per_[0], per_[1], per_[2]);
   }
 
+  /// Grow read #1's packet to `len` doubles, KEEPING its contents (deferred statistics may wait in
+  /// the front of it).
+  void ensureRead1(std::size_t len) {
+    if (static_cast<std::size_t>(bRead1_.extent(0)) >= len)
+      return;
+    if (bRead1_.extent(0) == 0)
+      bRead1_ = SField("vof::block::batch_read1", len);
+    else
+      Kokkos::resize(bRead1_, len);
+    bRead1Host_ = Kokkos::create_mirror_view(bRead1_);
+  }
+
+  /// C2 (§5.10): `measure()` for every master block in one launch (`vofBatchStats`), with NO host
+  /// read -- the values stay in the front of read #1's packet and reach the blocks' `st_` at the
+  /// next container step's read #1, or at `flushStats()` (statsAll, blocks(), the seeding paths,
+  /// assignMasters), whichever comes first; nothing reads them in between. The table fields
+  /// (id, master, box, cells) are set now, as `measure()` sets them. The previous centroid rides
+  /// in the launch by value from the host copy, which is current: the last packet was applied at
+  /// this step's read #1.
+  void measureBatched(double dt) {
+    flushStats();
+    std::vector<std::size_t> idx;
+    for (std::size_t k = 0; k < blocks_.size(); ++k)
+      if (blocks_[k].mine_)
+        idx.push_back(k);
+    const std::size_t nb = idx.size();
+    if (nb == 0)
+      return;
+    std::vector<VofBlockJob> jobs(nb);
+    for (std::size_t k = 0; k < nb; ++k) {
+      VofBlock& b = blocks_[idx[k]];
+      jobs[k] = makeJob(b, 0.0);
+      b.st_.id = b.id;
+      b.st_.master = b.master;
+      for (int d = 0; d < 3; ++d) {
+        b.st_.lo[d] = b.box.lo[d];
+        b.st_.hi[d] = b.box.hi[d];
+      }
+      b.st_.cells = b.box.cells();
+    }
+    ensureRead1(kVofStats * nb);
+    for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch) {
+      const VofBlockTable T = batchTable(jobs, j0);
+      VofStatsPrev P;
+      for (int k = 0; k < T.nj; ++k) {
+        const VofBlock& b = blocks_[idx[j0 + k]];
+        for (int d = 0; d < 3; ++d)
+          P.c[k][d] = b.prevCentroid_[d];
+        P.valid[k] = b.hasPrev_ ? 1u : 0u;
+      }
+      vofBatchStats(T, P, h_, areaEps, dt, bRead1_, 0);
+    }
+    statsPend_ = std::move(idx);
+  }
+
+  /// Apply the deferred statistics in `hs` (host, `kVofStats` doubles per pending block) exactly
+  /// as `measure()` applies its reductions, and clear the pending list.
+  void applyStats(const double* hs) {
+    for (std::size_t k = 0; k < statsPend_.size(); ++k) {
+      VofBlock& b = blocks_[statsPend_[k]];
+      const double* q = hs + kVofStats * k;
+      b.st_.volume = q[0];
+      if (q[0] <= 0.0) {
+        b.st_.area = 0.0;
+        for (int d = 0; d < 3; ++d)
+          b.st_.centroid[d] = b.st_.velocity[d] = 0.0;
+        for (int d = 0; d < 6; ++d)
+          b.st_.moment[d] = 0.0;
+        continue;
+      }
+      for (int d = 0; d < 3; ++d) {
+        b.st_.velocity[d] = q[4 + d];
+        b.prevCentroid_[d] = q[1 + d];
+        b.st_.centroid[d] = q[1 + d];
+      }
+      b.hasPrev_ = true;
+      b.st_.area = q[7];
+      for (int d = 0; d < 6; ++d)
+        b.st_.moment[d] = q[8 + d];
+    }
+    statsPend_.clear();
+  }
+
+  /// Bring deferred statistics to the host now (a separate read; the step itself folds it into
+  /// read #1). No-op when nothing is pending.
+  void flushStats() {
+    if (statsPend_.empty())
+      return;
+    const std::size_t len = kVofStats * statsPend_.size();
+    Kokkos::deep_copy(Kokkos::subview(bRead1Host_, std::make_pair(std::size_t(0), len)),
+                      Kokkos::subview(bRead1_, std::make_pair(std::size_t(0), len)));
+    applyStats(bRead1Host_.data());
+  }
+
   /// Stages 1-3 of §5.9 for every master block: the Courant numbers in one launch and ONE host
   /// read (the throw needs it), the frozen dilation flag, then the three sweeps -- worklist scan,
   /// PLIC over the device count, fluxes, update, ghost fill -- each one launch per chunk of
@@ -2019,8 +2131,10 @@ class VofBlockSet {
     for (auto& b : blocks_)
       if (b.mine_)
         mb.push_back(&b);
-    if (mb.empty())
+    if (mb.empty()) {
+      flushStats();
       return;
+    }
     const std::size_t nb = mb.size();
     std::vector<VofBlockJob> jobs(nb);
     bool anyMask = false;
@@ -2028,19 +2142,24 @@ class VofBlockSet {
       jobs[k] = makeJob(*mb[k], dt);
       anyMask = anyMask || (jobs[k].outside != nullptr);
     }
-    if (static_cast<std::size_t>(bCfl_.extent(0)) < nb) {
-      bCfl_ = SField("vof::block::batch_cfl", nb);
-      bCflHost_ = Kokkos::create_mirror_view(bCfl_);
+    if (static_cast<std::size_t>(bStart_.extent(0)) < nb) {
       bStart_ = LField("vof::block::batch_start", nb);
       bEnd_ = LField("vof::block::batch_end", nb);
     }
+    // read #1's packet: the deferred statistics of the last batched measure (C2) first, then this
+    // step's Courant numbers -- one device->host copy for both
+    const std::size_t off = kVofStats * statsPend_.size();
+    ensureRead1(off + nb);
+    auto cfl = Kokkos::subview(bRead1_, std::make_pair(off, off + nb));
     ensurePacket(nb);
     // (1) Courant numbers: one launch, one read, the throw before any block moves (R4)
     for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch)
-      vofBatchCfl(batchTable(jobs, j0), bCfl_);
-    Kokkos::deep_copy(bCflHost_, bCfl_);
+      vofBatchCfl(batchTable(jobs, j0), cfl);
+    Kokkos::deep_copy(Kokkos::subview(bRead1Host_, std::make_pair(std::size_t(0), off + nb)),
+                      Kokkos::subview(bRead1_, std::make_pair(std::size_t(0), off + nb)));
+    applyStats(bRead1Host_.data());
     for (std::size_t k = 0; k < nb; ++k)
-      mb[k]->adv_.enforceCfl(bCflHost_(k), dt);
+      mb[k]->adv_.enforceCfl(bRead1Host_(off + k), dt);
     Kokkos::deep_copy(SExec(), pk_, 0.0);  // the WO-R ledger slots accumulate over the sweeps
     const int* perm = kWySweepPerm[static_cast<int>(step_ % 6)];
     for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch) {
@@ -2247,8 +2366,9 @@ class VofBlockSet {
   SField debrisOut_;  ///< the batched sums, 6 per acting block (debrisPassBatch)
   SField::host_mirror_type debrisOutHost_;
   // C1 batched stages: per-job device scalars (indexed by the job's place among the master blocks)
-  SField bCfl_;
-  SField::host_mirror_type bCflHost_;
+  SField bRead1_;  ///< read #1's packet: deferred statistics (C2), then the Courant numbers
+  SField::host_mirror_type bRead1Host_;
+  std::vector<std::size_t> statsPend_;  ///< blocks whose statistics wait in bRead1_ (C2), in order
   LField bList_, bStart_, bEnd_;  ///< the concatenated worklist and each job's range in it
   LField dRange_[6];              ///< the debris lists' per-job ranges: sD, eD, sR, eR, sA, eA
   Kokkos::View<int*, SMem> dCap_; ///< per job: some attached cell was capped at 1
