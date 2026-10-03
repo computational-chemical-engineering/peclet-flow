@@ -21,6 +21,7 @@
 #define PECLET_FLOW_SCALAR_TRANSPORT_HPP
 
 #include <Kokkos_Core.hpp>
+#include <memory>
 #include <string>
 
 #include "mac_cutcell.hpp"
@@ -33,6 +34,10 @@ namespace peclet::flow {
 // Per-scalar BC on a domain face: 0 periodic (via the halo/periodic fill), 1 Neumann zero-flux
 // (ghost = inner, i.e. adiabatic wall), 2 Dirichlet value (ghost = 2*value - inner reflection).
 enum class ScalarBc { Periodic = 0, Neumann = 1, Dirichlet = 2 };
+
+// The cut-cell scalar state (doc/scalar_ibm_design.md §5.5; defined in
+// scalar_cutcell_operator.hpp).
+struct ScalarCutState;
 
 // One transported scalar. `c` aliases the Solver's registered field (fields_); the rest is private
 // scratch on the same G=2 block. Bands are double (a scalar is cheap; no float-quantization
@@ -62,6 +67,11 @@ struct ScalarField {
   bool energy = false;
   CCField kcell, rcp;  // k(C) and (rho c_p)(C) on the cells, refreshed by the solver each step
   CCField gfmB;        // WO-P23: the plane-anchored Dirichlet RHS contribution (allocated with it)
+  // Cut-cell scalar (doc/scalar_ibm_design.md, opt-in `add_scalar(..., cutcell=True)`): advanced by
+  // `advanceScalarCutCell` instead of the kernels above, which a cut-cell scalar never reaches
+  // (§5.5). Neither member enters any legacy arithmetic.
+  bool cutcell = false;
+  std::shared_ptr<ScalarCutState> cut;
 };
 
 // Variable-coefficient sibling of `scalarBuildDiffusionOpen` (WO-P23):

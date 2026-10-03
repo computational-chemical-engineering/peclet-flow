@@ -47,6 +47,8 @@
 #include "peclet/core/field/field_set.hpp"
 #include "property_closures.hpp"
 #include "scalar_cutcell_geometry.hpp"  // cut-cell scalars: the geometry record (WO-2)
+#include "scalar_cutcell_operator.hpp"  // cut-cell scalars: operator + per-scalar state (WO-3)
+#include "scalar_krylov.hpp"            // cut-cell scalars: BiCGStab (WO-3)
 #include "scalar_transport.hpp"
 #include "staggered_advection.hpp"
 #include "vof/advect_wy.hpp"    // VoF rung V1: the Weymouth-Yue colour advector (its own g=3 block)
@@ -217,6 +219,12 @@ class Solver {
     /// energy unit is rhoRef*hRef^5/tRef^2.
     double energyToPhys() const { return rhoRef * volToPhys() * hRef * hRef / (tRef * tRef); }
     double powerToPhys() const { return energyToPhys() / tRef; }
+
+    // ---- Cut-cell scalars (doc/scalar_ibm_design.md §1.2, WO-3) -------------------------------
+    // A speed L/T — the Robin transfer coefficient k and the Neumann wall flux q (c L/T) — on the
+    // internal lattice: k' = k tRef/hRef. ISOTROPIC by construction (the wall closure divides by a
+    // probe distance in hRef units), unlike the per-axis velToInt(a). Exactly 1.0 unarmed.
+    double speedToInt() const { return tRef / hRef; }
   };
 
   /// The map between the solver's INDEX coordinates and the coordinate system the analytic scene
@@ -2583,7 +2591,10 @@ class Solver {
   // 1 Koren TVD (default), 2 SOU. iters = RB-GS sweeps for the implicit diffusion solve. Its field
   // is registered in the directory (get_field/set_field/field_view). Openness (set_solid /
   // set_pressure_geometry) must be established for transport to occur.
-  void addScalar(const std::string& name, double D, int scheme, int iters);
+  // cutcell = true selects the cut-cell discretization (doc/scalar_ibm_design.md, §8.1): `iters`
+  // is then unused (the solve is BiCGStab to a residual tolerance) and every other cut-cell setter
+  // below applies.
+  void addScalar(const std::string& name, double D, int scheme, int iters, bool cutcell = false);
 
 
   bool hasScalar(const std::string& name) const;
@@ -2615,6 +2626,61 @@ class Solver {
   std::vector<double> scalarGeometryField(int which);
   // The geometry census, summed over ranks (collective under MPI); sealedVolume physical.
   scg::ScalarCutCensus scalarCutCensus();
+
+  // --- Cut-cell scalar transport: operator, Krylov, steady + transient diffusion (WO-3) --------
+  // doc/scalar_ibm_design.md §1.4, §4, §5.1, §8. A cut-cell scalar is advanced by
+  // `advanceScalarCutCell` (the first statement of advanceScalars' per-scalar loop, §5.5); the
+  // legacy kernels never see it. Every setter stores PHYSICAL values verbatim; they are converted
+  // and folded into the operator at the next advance or steady solve, which rebuilds the operator
+  // (ruling D-WO3-3). Advection is not yet part of the operator (WO-5).
+  bool isCutcellScalar(const std::string& name) const;
+  // Wall condition of one scene instance (instance >= 0, needs a scene) or of every body
+  // (instance = -1, which also clears the per-instance overrides): type 0 neumann (value = flux
+  // into the fluid, c L/T), 1 dirichlet (value = wall c), 2 robin (coefficient = k, L/T; value = g).
+  void setScalarWall(const std::string& name, int type, double value, double coefficient,
+                     int instance);
+  // Volumetric source S (c/T): uniform, or per cell (this rank's inner block, x-fastest).
+  void setScalarSource(const std::string& name, double S);
+  void setScalarSourceField(const std::string& name, const std::vector<double>& S);
+  // Max-norm relative residual tolerance of the solve (default 1e-10, §5.1).
+  void setScalarTolerance(const std::string& name, double rtol);
+  // BiCGStab iteration cap (default 200, §5.1). Diagnostics tier.
+  void setScalarMaxIterations(const std::string& name, int maxit);
+  // Dirichlet value of a domain face as a per-face profile: n1 x n2 values over this rank's face
+  // cells in the face's tangential axes in x, y, z order, the first fastest (§8.1).
+  void setScalarBcProfile(const std::string& name, int face, const std::vector<double>& prof,
+                          int n1, int n2);
+  // Steady solve now (§1.4 steady mode): kappa/dt and c^n dropped; initial guess = the field.
+  void solveScalarSteady(const std::string& name);
+  // Bodies the wall table distinguishes: the scene's instances, or 1 for raw-SDF geometry.
+  int scalarNumBodies() const;
+  // Integrated flux INTO the fluid per body over the last advance/solve (c L^3/T, physical),
+  // summed on the host in facet order, then over ranks (collective under MPI).
+  std::vector<double> scalarWallFlux(const std::string& name);
+  /// `diagnostics.scalar_budget` (§8.2), physical; collective under MPI.
+  struct ScalarCutBudget {
+    double mass = 0.0, massSolid = 0.0, dMass = 0.0, wallIn = 0.0, boundaryIn = 0.0,
+           sourceIn = 0.0, defect = 0.0, identityError = 0.0;
+  };
+  ScalarCutBudget scalarBudget(const std::string& name);
+  /// `diagnostics.scalar_facets` (§8.2): this rank's facets, physical; per facet 3 values for the
+  /// centroid and the normal.
+  struct ScalarCutFacets {
+    std::vector<double> centroid, normal, area, wallValue, flux;
+    std::vector<int> instance, rung;
+  };
+  ScalarCutFacets scalarFacets(const std::string& name);
+  // The cut-cell scalar of this name (throws std::invalid_argument when it is not one).
+  ScalarField& cutcellScalar(const std::string& name, const char* who);
+  // The transient advance of one cut-cell scalar (from advanceScalars).
+  void advanceScalarCutCell(ScalarField& sc);
+  // The refusals of §8.1, checked at every advance / steady solve (std::runtime_error).
+  void scalarCutRefusals(const ScalarField& sc) const;
+  // Assemble (bands, overlay coefficients, surrogate diagonal, rhs) and solve; the field's
+  // non-unknown cells are zeroed first and its ghosts filled after.
+  void scalarCutAssembleSolve(ScalarField& sc, bool steady);
+  // y = A x for the stored operator of `sc` (exchanges x's ghosts).
+  void scalarCutMatvec(ScalarField& sc, CCField y, CCField x);
   // setSuperficialVelocity's per-step shift (the tail of step()); no-op when off.
   void applySuperficialVelocity();
   void superficialVelocityPrecheck() const;

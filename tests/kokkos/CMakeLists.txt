@@ -68,6 +68,15 @@ target_include_directories(test_scalar_cutcell_geometry PRIVATE ${CMAKE_CURRENT_
 target_link_libraries(test_scalar_cutcell_geometry PRIVATE Kokkos::kokkos)
 add_test(NAME scalar_cutcell_geometry COMMAND test_scalar_cutcell_geometry)
 
+# Cut-cell scalar operator and solve (doc/scalar_ibm_design.md §1.4, §4, §5.1; WO-3): the band guard
+# is a no-op, the 7-point part is symmetric, identity rows, constant preservation, the singular
+# steady case, the budget identity, the periodic/non-periodic refusals.
+add_executable(test_scalar_cutcell_operator test_scalar_cutcell_operator.cpp)
+target_include_directories(test_scalar_cutcell_operator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_scalar_cutcell_operator PRIVATE Kokkos::kokkos)
+add_test(NAME scalar_cutcell_operator COMMAND test_scalar_cutcell_operator)
+
 # Property closures + per-cell body force (LinearMix / Boussinesq / Arrhenius vs host oracle).
 add_executable(test_closures test_closures.cpp)
 target_include_directories(test_closures PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src

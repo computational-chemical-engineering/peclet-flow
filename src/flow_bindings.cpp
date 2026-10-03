@@ -142,6 +142,7 @@ static const std::vector<std::string> kBcTypes{"periodic", "wall", "inflow", "ou
 static const std::vector<std::string> kScalarBcTypes{"periodic", "neumann", "dirichlet"};
 static const std::vector<std::string> kAdvSchemes{"sou", "koren"};
 static const std::vector<std::string> kScalarSchemes{"fou", "koren", "sou"};
+static const std::vector<std::string> kScalarWallTypes{"neumann", "dirichlet", "robin"};
 static const std::vector<std::string> kFluidOnly{"off", "filter", "star"};
 static const std::vector<std::string> kCsfModes{"face", "cell"};
 static const std::vector<std::string> kPivots{"volume", "centroid", "projected-centroid",
@@ -462,8 +463,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "scalar_geometry",
           [](D& diag, const std::string& name) {
-            if (!diag.s->hasScalar(name))
-              throw std::invalid_argument("scalar_geometry: no scalar named '" + name + "'");
+            diag.s->cutcellScalar(name, "scalar_geometry");
             nb::dict d;
             d["kappa"] = field_out(*diag.s, diag.s->scalarGeometryField(0));
             d["aperture_x"] = field_out(*diag.s, diag.s->scalarGeometryField(1));
@@ -482,8 +482,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "scalar_census",
           [](D& diag, const std::string& name) {
-            if (!diag.s->hasScalar(name))
-              throw std::invalid_argument("scalar_census: no scalar named '" + name + "'");
+            const auto& st = *diag.s->cutcellScalar(name, "scalar_census").cut;
             const auto c = diag.s->scalarCutCensus();
             nb::dict d;
             d["num_unknowns"] = c.numUnknowns;
@@ -496,15 +495,86 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             nb::dict rungs;
             rungs["fluid"] = nb::make_tuple(c.rungs[0], c.rungs[1], c.rungs[2], c.rungs[3]);
             d["probe_rungs"] = rungs;
+            d["num_solid_unknowns"] = 0L;
+            d["krylov_iterations"] = st.iterations;
+            d["krylov_residual"] = st.residual;
+            d["krylov_converged"] = st.converged;
+            d["mg_levels"] = 1;
+            d["steady_incompatibility"] = st.incompatibility;
             return d;
           },
           nb::arg("name"),
-          "Census of the cut-cell scalar (collective under MPI, summed over ranks). The geometry "
+          "Census of the cut-cell scalar (collective under MPI, summed over ranks). The solve "
+          "part, of the last advance or steady solve: 'krylov_iterations', 'krylov_residual' "
+          "(the true max-norm residual over the reference max(max|b|, max|A c0|)), "
+          "'krylov_converged', 'mg_levels' (1: the level-0 preconditioner of WO-3), "
+          "'steady_incompatibility' (|sum b| / sum|b| of a singular steady problem before its "
+          "projection, else 0), 'num_solid_unknowns' (0: single phase). The geometry "
           "part: 'num_unknowns' (fluid unknowns), 'num_cut_cells' (cells carrying a facet), "
           "'num_facets', 'num_two_sided' (cells with two facets), 'num_thin_solid' (two-facet "
           "cells with solid between two fluids -- a resolution warning), 'num_sealed' / "
           "'sealed_volume' (kappa > 0 behind closed faces; physical volume), 'probe_rungs' "
           "({'fluid': (R0, R1a, R1b, R2)} facet counts of the probe ladder).")
+      .def(
+          "scalar_budget",
+          [](D& diag, const std::string& name) {
+            const auto b = diag.s->scalarBudget(name);
+            nb::dict d;
+            d["mass"] = b.mass;
+            d["mass_solid"] = b.massSolid;
+            d["d_mass"] = b.dMass;
+            d["wall_in"] = b.wallIn;
+            d["boundary_in"] = b.boundaryIn;
+            d["source_in"] = b.sourceIn;
+            d["defect"] = b.defect;
+            d["identity_error"] = b.identityError;
+            return d;
+          },
+          nb::arg("name"),
+          "Budget of a cut-cell scalar over the last advance (collective under MPI), physical: "
+          "'mass' = sum kappa V c, 'mass_solid' (0: single phase), 'd_mass' = the change over the "
+          "advance, 'wall_in' / 'boundary_in' / 'source_in' = the rates INTO the fluid from the "
+          "immersed walls, the Dirichlet domain faces and the source, 'defect' = dt sum V r (r the "
+          "linear-solver residual), and 'identity_error' = d_mass - dt (wall_in + boundary_in + "
+          "source_in) + defect, which is round-off for a correct discretization. After a steady "
+          "solve it is the rate balance: d_mass = 0, defect = sum V r and identity_error = "
+          "defect - (wall_in + boundary_in + source_in). Computed on request from the stored "
+          "state.")
+      .def(
+          "scalar_facets",
+          [](D& diag, const std::string& name) {
+            auto f = diag.s->scalarFacets(name);
+            const std::size_t n = f.area.size();
+            nb::dict d;
+            d["centroid"] = peclet::core::python::vector_to_ndarray(std::move(f.centroid), {n, 3},
+                                                                    {3, 1});
+            d["normal"] = peclet::core::python::vector_to_ndarray(std::move(f.normal), {n, 3},
+                                                                  {3, 1});
+            d["area"] = peclet::core::python::vector_to_ndarray(std::move(f.area), {n}, {1});
+            d["instance"] = peclet::core::python::vector_to_ndarray(std::move(f.instance), {n}, {1});
+            d["wall_value"] =
+                peclet::core::python::vector_to_ndarray(std::move(f.wallValue), {n}, {1});
+            d["flux"] = peclet::core::python::vector_to_ndarray(std::move(f.flux), {n}, {1});
+            d["probe_rung"] = peclet::core::python::vector_to_ndarray(std::move(f.rung), {n}, {1});
+            return d;
+          },
+          nb::arg("name"),
+          "Per-facet arrays of a cut-cell scalar on this rank (facet order = x-fastest cell "
+          "order): 'centroid' (n, 3) physical coordinates, 'normal' (n, 3) into the fluid, 'area' "
+          "(physical), 'instance' (scene body; 0 for raw-SDF geometry), 'wall_value' (c at the "
+          "wall from the elimination: robin (D u_p + k s g)/(D + k s), dirichlet g, neumann "
+          "u_p + q s/D; NaN on a facet whose cell is not an unknown), 'flux' (into the fluid per "
+          "area, c L/T physical, after the last advance or steady solve; local Nu/Sh maps, first "
+          "order in the max norm) and 'probe_rung' (0..3 = R0, R1a, R1b, R2).")
+      .def(
+          "set_scalar_max_iterations",
+          [](D& diag, const std::string& name, int maxit) {
+            diag.s->setScalarMaxIterations(name, maxit);
+          },
+          nb::arg("name"), nb::arg("maxit"),
+          "Cut-cell scalars: the BiCGStab iteration cap (default 200). On non-convergence the "
+          "iterate is kept, diagnostics.scalar_census reports it and a one-time warning is "
+          "printed.")
       .def(
           "outflow_backflow",
           [](D& diag) {
@@ -2514,18 +2584,30 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "add_scalar",
           [](S& s, const std::string& name, double diffusivity, const std::string& scheme,
-             int iters) {
+             std::optional<int> iters, bool cutcell) {
+            if (cutcell && iters)
+              throw std::invalid_argument(
+                  "add_scalar: iters must be None for a cut-cell scalar (it solves to a residual "
+                  "tolerance, set_scalar_tolerance)");
             s.addScalar(name, diffusivity,
-                        enum_index(scheme, kScalarSchemes, "add_scalar", "scheme"), iters);
+                        enum_index(scheme, kScalarSchemes, "add_scalar", "scheme"),
+                        iters ? *iters : 50, cutcell);
           },
           nb::arg("name"), nb::arg("diffusivity") = 0.0, nb::arg("scheme") = "koren",
-          nb::arg("iters") = 50,
+          nb::arg("iters") = nb::none(), nb::arg("cutcell") = false,
           "Register a transported scalar (temperature/concentration/...): constant diffusivity "
           "(length^2/time, in the solver's physical units -- cells^2 per time unit without an "
           "extent), advection scheme 'fou' (first-order upwind), 'koren' (Koren TVD, the "
-          "default) or 'sou' (second-order upwind), and RB-GS diffusion sweeps. The scalar is a "
-          "registered field (get_field/set_field/diagnostics.field_view). Requires geometry "
-          "(set_solid/set_pressure_geometry) for the openness-weighted operators.")
+          "default) or 'sou' (second-order upwind), and RB-GS diffusion sweeps (iters, default "
+          "50). The scalar is a registered field (get_field/set_field/diagnostics.field_view). "
+          "Requires geometry (set_solid/set_pressure_geometry) for the openness-weighted "
+          "operators.\n\n"
+          "cutcell=True selects the cut-cell discretization (doc/scalar_ibm_design.md): kappa "
+          "(fluid fraction) storage, the scalar's own apertures, wall conditions per body "
+          "(set_scalar_wall, default insulating), sources (set_scalar_source), BiCGStab to a "
+          "residual tolerance (set_scalar_tolerance; iters must then be None), a steady solve "
+          "(solve_scalar_steady) and per-body wall fluxes (scalar_wall_flux). Cells that are not "
+          "fluid unknowns hold 0. Advection is not yet part of the cut-cell operator.")
       .def(
           "set_scalar_bc",
           [](S& s, const std::string& name, const std::string& face, const std::string& type,
@@ -2536,7 +2618,81 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           nb::arg("name"), nb::arg("face"), nb::arg("type"), nb::arg("value") = 0.0,
           "Scalar boundary condition on a domain face ('-x', '+x', '-y', '+y', '-z', '+z'): "
           "type 'periodic', 'neumann' (zero flux, adiabatic) or 'dirichlet' (the given value, in "
-          "the scalar's own units: the solver never rescales a transported scalar). Single-rank.")
+          "the scalar's own units: the solver never rescales a transported scalar). Single-rank "
+          "for a legacy scalar; a cut-cell scalar takes it under MPI too, and its periodic / "
+          "non-periodic faces must match set_domain_bc (checked at the first advance). For a "
+          "cut-cell scalar `value` may also be a per-face profile (next overload).")
+      .def(
+          "set_scalar_bc",
+          [](S& s, const std::string& name, const std::string& face, const std::string& type,
+             nb::ndarray<double, nb::ndim<2>, nb::device::cpu> value) {
+            if (enum_index(type, kScalarBcTypes, "set_scalar_bc", "type") != 2)
+              throw std::invalid_argument("set_scalar_bc: a profile is a 'dirichlet' value");
+            const int n1 = static_cast<int>(value.shape(0)), n2 = static_cast<int>(value.shape(1));
+            std::vector<double> prof(static_cast<std::size_t>(n1) * n2);
+            auto v = value.view();
+            for (int j2 = 0; j2 < n2; ++j2)
+              for (int j1 = 0; j1 < n1; ++j1)
+                prof[static_cast<std::size_t>(j1) + static_cast<std::size_t>(j2) * n1] = v(j1, j2);
+            s.setScalarBcProfile(name, face_index(face, "set_scalar_bc"), prof, n1, n2);
+          },
+          nb::arg("name"), nb::arg("face"), nb::arg("type"), nb::arg("value"),
+          "Cut-cell scalars: a Dirichlet domain face with a per-face PROFILE, shape (N_t1, N_t2) "
+          "over this rank's face cells in the face's tangential axes in x, y, z order (-x/+x: "
+          "(ny, nz); -y/+y: (nx, nz); -z/+z: (nx, ny)), as set_domain_bc_profile. The value is "
+          "the scalar at the boundary face centre.")
+      .def(
+          "set_scalar_wall",
+          [](S& s, const std::string& name, const std::string& type, double value,
+             double coefficient, std::optional<int> instance) {
+            s.setScalarWall(name, enum_index(type, kScalarWallTypes, "set_scalar_wall", "type"),
+                            value, coefficient, instance ? *instance : -1);
+          },
+          nb::arg("name"), nb::arg("type"), nb::arg("value") = 0.0, nb::arg("coefficient") = 0.0,
+          nb::arg("instance") = nb::none(),
+          "Cut-cell scalars: the condition on the immersed walls of one scene instance "
+          "(instance=int, needs a scene) or of every body (instance=None, which also clears the "
+          "per-instance settings). 'neumann': value = the flux INTO the fluid per area (c L/T; 0, "
+          "the default for every body, is insulating). 'dirichlet': value = the wall "
+          "concentration. 'robin': flux into the fluid = coefficient * (value - c_wall), "
+          "coefficient = k (L/T, >= 0; a first-order surface reaction is k_r with value 0). "
+          "Physical units under an extent; takes effect at the next advance or steady solve.")
+      .def(
+          "set_scalar_source",
+          [](S& s, const std::string& name, double source) { s.setScalarSource(name, source); },
+          nb::arg("name"), nb::arg("source"),
+          "Cut-cell scalars: a uniform volumetric source S (c/T, physical), weighted by the fluid "
+          "fraction kappa.")
+      .def(
+          "set_scalar_source",
+          [](S& s, const std::string& name, nb::ndarray<double, nb::f_contig> source) {
+            s.setScalarSourceField(name, grid_in(source));
+          },
+          nb::arg("name"), nb::arg("source"),
+          "Cut-cell scalars: a per-cell volumetric source S (c/T, physical), an (nx, ny, nz) "
+          "F-order array on this rank's block, weighted by kappa.")
+      .def(
+          "set_scalar_tolerance",
+          [](S& s, const std::string& name, double rtol) { s.setScalarTolerance(name, rtol); },
+          nb::arg("name"), nb::arg("rtol"),
+          "Cut-cell scalars: the max-norm relative residual tolerance of the solve, "
+          "max|b - A c| <= rtol * max(max|b|, max|A c0|) (default 1e-10).")
+      .def(
+          "solve_scalar_steady",
+          [](S& s, const std::string& name) { s.solveScalarSteady(name); }, nb::arg("name"),
+          "Cut-cell scalars: solve the steady problem now (no storage term) from the current "
+          "field as the initial guess. Statistics in diagnostics.scalar_census.")
+      .def(
+          "scalar_wall_flux",
+          [](S& s, const std::string& name) {
+            std::vector<double> v = s.scalarWallFlux(name);
+            const std::size_t n = v.size();
+            return peclet::core::python::vector_to_ndarray(std::move(v), {n}, {1});
+          },
+          nb::arg("name"),
+          "Cut-cell scalars: the integrated flux INTO the fluid per body over the last advance or "
+          "steady solve, shape (num_bodies,) (one body without a scene), in c L^3/T (physical). "
+          "Collective under MPI.")
       .def(
           "has_scalar", [](S& s, const std::string& name) { return s.hasScalar(name); },
           nb::arg("name"), "Whether a transported scalar of this name is registered.")

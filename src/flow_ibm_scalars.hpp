@@ -11,7 +11,8 @@
 namespace peclet::flow {
 
 template <class Grid>
-void Solver<Grid>::addScalar(const std::string& name, double D, int scheme, int iters) {
+void Solver<Grid>::addScalar(const std::string& name, double D, int scheme, int iters,
+                             bool cutcell) {
   ScalarField sc;
   sc.name = name;
   sc.c = addField(name);  // registered, zero-initialised, on the G=2 block
@@ -32,6 +33,10 @@ void Solver<Grid>::addScalar(const std::string& name, double D, int scheme, int 
   sc.D = D * u_.diffToInt();
   sc.scheme = scheme;
   sc.iters = iters < 1 ? 1 : iters;
+  if (cutcell) {  // doc/scalar_ibm_design.md: the operator state lives beside the legacy bands
+    sc.cutcell = true;
+    sc.cut = std::make_shared<ScalarCutState>();
+  }
   scalars_.push_back(sc);
 }
 
@@ -49,6 +54,8 @@ void Solver<Grid>::setScalarBc(const std::string& name, int face, int type, doub
     if (sc.name == name) {
       sc.bc[face] = type;
       sc.bcVal[face] = value;
+      if (sc.cutcell)  // a constant value replaces an earlier per-face profile
+        sc.cut->hasProfile[face] = false;
       return;
     }
   throw std::runtime_error("set_scalar_bc: no scalar named '" + name + "'");
@@ -76,6 +83,10 @@ void Solver<Grid>::advanceScalars() {
   // Laplacian weights are `u_.w[a]` — Phase 2's, passed at each call site in its own spelling.
   const vof::VofMetric gmS = u_.vofMetric();
   for (auto& sc : scalars_) {
+    if (sc.cutcell) {  // doc/scalar_ibm_design.md §5.5: the cut-cell path, legacy untouched
+      advanceScalarCutCell(sc);
+      continue;
+    }
     // WO-P23: the CONSISTENT-ENERGY branch — per-cell k(C) in the bands, a rho c_p(C) time term,
     // and NO advective term (the transport was already done geometrically with the colour's own
     // fluxes in advectVof). Taken OUTSIDE the kernels, so a scalar without `energy` executes the
@@ -163,6 +174,11 @@ ScalarField& Solver<Grid>::scalarField(const std::string& name) {
 template <class Grid>
 void Solver<Grid>::scalarDirichletMask(const std::string& name) {
   ScalarField& sc = scalarField(name);
+  if (sc.cutcell)
+    throw std::invalid_argument(
+        "the per-cell Dirichlet mask is not available on the cut-cell "
+        "scalar '" +
+        name + "' (doc/scalar_ibm_design.md §8.1)");
   if (sc.dmask.extent(0) != n_) {
     sc.dmask = CCField(name + "_dmask", n_);
     sc.dval = CCField(name + "_dval", n_);

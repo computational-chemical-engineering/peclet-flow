@@ -130,6 +130,10 @@ void Solver<Grid>::setPhaseChangeThermal(const std::string& tname, double Tsat, 
   if (!hasScalar(tname))
     throw std::runtime_error("set_phase_change_thermal: no scalar named '" + tname +
                              "' (call add_scalar first)");
+  if (isCutcellScalar(tname))
+    throw std::invalid_argument("set_phase_change_thermal: '" + tname +
+                                "' is a cut-cell scalar; the phase-change energy path takes a "
+                                "legacy scalar only (doc/scalar_ibm_design.md §8.1)");
   pcTName_ = tname;
   pcTsat_ = Tsat;  // a temperature: never rescaled
   pcKgPhys_ = kg;

@@ -327,6 +327,17 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(hydro_force_units PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # Cut-cell scalar transport (doc/scalar_ibm_design.md §11, WO-3): the accuracy gates G1, G2, G3a,
+  # G3b (+ its budget identity) and G7, one ctest each, and the API refusals. The steady ones run on the two coarsest rungs
+  # (ruling D-WO3-1: the level-0 preconditioner needs O(N) iterations until ScalarMG, WO-4).
+  foreach(g api g1 g2 g3a g3b g7)
+    add_test(NAME scalar_cutcell_${g}
+             COMMAND ${Python_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_scalar_cutcell_gates.py ${g}
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    set_tests_properties(scalar_cutcell_${g} PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                         LABELS verify SKIP_RETURN_CODE 77 TIMEOUT 7200)
+  endforeach()
   # QUALITY_PLAN D3: `src/` carries no environment variable that can change a result (package E).
   add_test(NAME no_env_knobs
            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_env_knobs.py

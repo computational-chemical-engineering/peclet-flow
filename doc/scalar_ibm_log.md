@@ -363,3 +363,90 @@ The handoff is in `doc/scalar_ibm_wo3_handoff.md` (untracked by repo convention)
 - **D-WO3-2.** `scalar_geometry`/`scalar_census` reject non-cut-cell names.
 - **D-WO3-3.** Rebuild the operator every advance; caching → WO-9.
 - **D-WO3-4.** A no-op guard for faces toward non-unknown cells is allowed.
+
+## 2026-10-03 — WO-3: single-phase operator, Krylov, steady + transient diffusion
+
+**Built.**
+- `src/scalar_cutcell_operator.hpp` (new): `ScalarCutState` (settings verbatim/physical, the
+  operator of the last advance, Krylov scratch + statistics) and the block kernels — the 7 bands
+  with the D-WO3-4 guard and identity rows, the per-facet `cw/rw` from a resolved per-body wall
+  table (`wallConductance`), the CSR overlay matvec and rhs, the lumped surrogate diagonal (§4.3),
+  the Dirichlet domain-face fold (constant or profile), per-facet probe value + influx, the
+  inner-cell reductions.
+- `src/scalar_krylov.hpp` (new): `ScalarVec {f, s, solid}`, `ScalarKrylovOps`, `scalarBiCGStab` —
+  `CutcellMG::solveBiCGStab`'s recurrence, breakdown and stagnation guards and singular mean
+  projection, with the §5.1 stop (ref = max(max|b|, max|A x0|), max-norm, both half-steps), one
+  true-residual check + one restart, non-finite raises.
+- `flow_ibm_scalars_cutcell.hpp`: the setters, refusals, `scalarCutAssembleSolve` (zero
+  non-unknowns, c^n, bands, wall table, rhs, domain folds, surrogate, singular detection +
+  projection + gauge, level-0 preconditioner = 2 + 2 RB-GS sweeps by global parity on the
+  surrogate, exchange before each colour), `scalarWallFlux`, `scalarBudget`, `scalarFacets`.
+- `flow_ibm_scalars.hpp`: the one-line dispatch (§5.5); `addScalar(..., cutcell)`; `setScalarBc`
+  clears a profile; `scalarDirichletMask` refuses a cut-cell scalar. `flow_ibm_phase_change.hpp`:
+  `set_phase_change_thermal` naming a cut-cell scalar is a ValueError. `flow_ibm.hpp`: declarations,
+  the includes, `UnitScales::speedToInt()` appended. `scalar_transport.hpp`: `ScalarField` gains
+  `cutcell` + `cut` (struct members only; no kernel touched).
+- Bindings: `add_scalar(iters=None, cutcell=False)`, `set_scalar_bc` profile overload,
+  `set_scalar_wall`, `set_scalar_source` (float / array), `set_scalar_tolerance`,
+  `solve_scalar_steady`, `scalar_wall_flux`; diagnostics `scalar_budget`, `scalar_facets`,
+  `set_scalar_max_iterations`, the solve part of `scalar_census`; `scalar_geometry` /
+  `scalar_census` reject non-cut-cell names (D-WO3-2).
+- Tests: `tests/python/test_scalar_cutcell_gates.py` (ctests `scalar_cutcell_{api,g1,g2,g3a,g3b,g7}`),
+  `tests/kokkos/test_scalar_cutcell_operator.cpp`, `tests/kokkos_mpi/test_scalar_cutcell_solve_mpi.cpp`
+  (np 1, 2, 4).
+
+**Gates** (host-openmp, OMP_NUM_THREADS=4; RMS over 3 offsets; every case in physical units;
+steady gates on the two coarsest rungs, D-WO3-1):
+
+| gate | coarse | fine | order | bound | iterations |
+|---|---|---|---|---|---|
+| G1 Nu/2 − 1, R/h 8 → 16 | −2.488e-2 | −6.510e-3 | 1.93 | ≥ 1.7 | 20–21 / 40–43 |
+| G1 field L1 / L∞ | 3.12e-3 / 3.75e-2 | 8.11e-4 / 9.62e-3 | 1.94 / 1.96 | ≥ 1.8 / 1.5 | |
+| G1 aniso (1,1,2), R/h_min 16 → 32 | −1.185e-2 | −3.056e-3 | 1.95 | ≥ 1.7 | 35–37 / 69–76 |
+| G2 c_Γ rel, R_i/h 6 → 12 | +2.315e-2 | +6.266e-3 | 1.89 | ≥ 1.7 | 19–20 / 35–37 |
+| G2 field L1 | 1.54e-3 | 3.79e-4 | 2.02 | ≥ 1.8 | |
+| G3a Sh rel, Da 0.1 / 1 / 10 / 100 | −9.90e-3 / −1.48e-2 / −2.26e-2 / −2.46e-2 | −2.48e-3 / −3.80e-3 / −5.88e-3 / −6.44e-3 | 2.00 / 1.97 / 1.94 / 1.93 | ≥ 1.7 | 19–23 / 37–54 |
+| G3b μ rel, Bi 0.1, R/h 8/16/32 | 2.43e-4, 7.16e-5 | 2.06e-5 | 1.76, 1.80 | ≥ 1.7; ≤ 2e-3 | 20–22 / 33–39 / 58–70 per step |
+| G3b Bi 1 | −1.25e-3, −2.48e-4 | −5.29e-5 | 2.34, 2.23 | | 12–14 / 24–26 / 47–56 |
+| G3b Bi 10 | 1.46e-2, 3.73e-3 | 9.51e-4 | 1.97, 1.97 | | 9–10 / 16–19 / 30–35 |
+| G3b Bi 100 | 2.27e-2, 5.60e-3 | 1.41e-3 | 2.02, 1.99 | | 9–10 / 16–18 / 27–34 |
+| G3b Bi ∞ | 2.36e-2, 5.81e-3 | 1.46e-3 | 2.02, 1.99 | | 10–12 / 16–18 / 28–33 |
+| G7a Dirichlet j01², R/h 16 → 32 | 1.640e-3 | 4.19e-4 | 1.97 | ≥ 1.8; ≤ 5e-4 | 19–20 / 35–38 per step |
+| G7a Neumann j′11² | −2.05e-4 | −5.17e-5 | 1.99 | ≥ 1.8; ≤ 5e-4 | 32–36 / 59–72 |
+| G7b Graetz Nu_T | 8.83e-4 | 2.18e-4 | 2.02 | ≥ 1.7; ≤ 1e-3 | 21–26 / 39–44 per solve |
+
+- Budget: G1 |wall − box − defect| ≤ 2.2e-15 |wall|, |defect| ≤ 3.2e-10 |wall|; G3b identity
+  ≤ 2.8e-14 |d_mass| on every step of every case (bound 1e-13). G2: the inner wall's flux equals
+  q × its discrete facet area to 4e-15. R0 = 100 % on every isotropic sphere and pipe; aniso R1b
+  on ≤ 4 of 12 650 facets, no R2 (D-WO2-2).
+- Operator test: guard fires on 0 interior faces; 7-point part bitwise symmetric; identity rows
+  exact; steady Neumann row sums ≤ 2e-16 AC; Dirichlet g = 1 → max|c − 1| = 7.6e-12; insulating
+  transient c = 5 exact; singular steady (flux + source, periodic box): incompatibility 1.0, 24
+  iterations, gauge Σκc = 4e-13; budget identity (Robin + source + Dirichlet faces) 4e-14 / 5e-14
+  relative, transient / steady.
+- MPI (`scalar_cutcell_solve_mpi`): np = 1 bitwise (field, iterations 30/11/11/11, wall flux);
+  np = 2, 4: max|c − c₁| = 1.6e-15 (max c 1.46), identical iteration counts.
+- G12: 12/12 hashes equal at OMP_NUM_THREADS=1. Battery: 205/205 (`-LE bench`, 628 s).
+- Iterations: the level-0 preconditioner needs about 2.3 × R/h per steady solve, not the O(N)
+  feared in D-WO3-1 — maxit 3000 is never approached.
+
+**Readings / decisions (none changes a gate):**
+- `ScalarField` is defined in `scalar_transport.hpp`, so its two new members and a forward
+  declaration of `ScalarCutState` went there (the note says `flow_ibm.hpp`); `ScalarCutState`
+  lives in `scalar_cutcell_operator.hpp`.
+- D-WO3-1's maxit is raised through a diagnostics-tier setter, `diagnostics.set_scalar_max_
+  iterations(name, maxit)` (default 200) — a new name for WO-10's NAMING rows.
+- The restart runs within the same iteration budget; `krylov_converged` = true residual
+  ≤ 10 rtol ref; `krylov_residual` = true residual / ref.
+- `scalar_budget` after a steady solve is the rate balance: d_mass = 0, defect = Σ V r,
+  identity_error = defect − (wall_in + boundary_in + source_in).
+- The budget evaluates r = b − A c in FLUX form (Σ t (c_i − c_nb), the same t as the bands): exactly
+  the band-form residual in exact arithmetic, but the band form's round-off (ε t |c|) gave 2–9e-13
+  |d_mass| at Bi = 0.1 (dt D/h² ≈ 3500), over the 1e-13 gate; the flux form gives ≤ 2.8e-14. The
+  solve itself uses the band form.
+- G7a Neumann: the dipole has zero mass, so the BE ratio is taken on the first moment Σ κ V x c.
+  G7a and G7b both ran on {16, 32} (D-WO3-1 lists G7 among the steady gates).
+- `scalar_facets` centroids follow `cell_centers()` (origin + (i + ½) h, also in cell units).
+- The per-cell source refuses a block that changed size (redistribute) rather than dropping it.
+- Not in WO-3: the advection census keys (`num_small_cells`, `num_implicit_faces`,
+  `bulk_courant`, WO-5), the §9 resolution warnings (WO-8), dirty-flag caching (D-WO3-3, WO-9).
