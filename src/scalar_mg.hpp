@@ -255,6 +255,121 @@ inline void sweepColorBand(CCField x, CCConst rhs, BV AC, BV AW, BV AE, BV AS, B
       });
 }
 
+/// The face-form neighbour sum of cutcellSmoothFaceCell, in its order.
+template <class XV, class OV>
+KOKKOS_INLINE_FUNCTION double faceOff(const XV& x, const OV& AFX, const OV& AFY, const OV& AFZ,
+                                      long i, long sx, long sy, long sz) {
+  return AFX(i + sx) * x(i + sx) + AFX(i) * x(i - sx) + AFY(i + sy) * x(i + sy) +
+         AFY(i) * x(i - sy) + AFZ(i + sz) * x(i + sz) + AFZ(i) * x(i - sz);
+}
+
+/// The two-field cell update of the conjugate V-cycle (§5.2, WO-7; design A2's WO-7 note): where
+/// both phases are unknown and the same-cell coupling W > 0, the 2x2 block
+/// [S_ff, -W; -W, S_ss][x_f; x_s] = [rhs_f - N_f; rhs_s - N_s] is solved exactly (guard: det <=
+/// 1e-300 S_ff S_ss -> a point update, fluid then solid); elsewhere each phase takes its point
+/// update. N_f is the fluid neighbour sum: from the BANDS on the advective path (`Band`), from the
+/// faces otherwise; the solid is always in face form (it never advects). The face-form fluid
+/// point update is cutcellSmoothFaceCell's (skipped where AC < 1e-30), the band-form one the
+/// unknown-cell update of sweepColorBand.
+template <bool Band, class XV, class BV>
+KOKKOS_INLINE_FUNCTION void twoPhaseCell(const XV& x, const XV& rhs, const BV& AC, const BV& AFX,
+                                         const BV& AFY, const BV& AFZ, const BV& AW, const BV& AE,
+                                         const BV& AS, const BV& AN, const BV& AB, const BV& AT,
+                                         const XV& xs, const XV& rhss, const BV& ACs,
+                                         const BV& AFXs, const BV& AFYs, const BV& AFZs,
+                                         const BV& W, const CCConst& unkF, long i, long sx, long sy,
+                                         long sz) {
+  const double wc = W(i);
+  const double af = AC(i), as = ACs(i);
+  if (wc > 0.0) {
+    const double nf = Band ? bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)
+                           : faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz);
+    const double rf = rhs(i) - nf;
+    const double rs = rhss(i) - faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz);
+    const double det = af * as - wc * wc;
+    if (det > 1e-300 * af * as) {
+      x(i) = (as * rf + wc * rs) / det;
+      xs(i) = (wc * rf + af * rs) / det;
+    } else {
+      x(i) = (rf + wc * xs(i)) / af;
+      xs(i) = (rs + wc * x(i)) / as;
+    }
+    return;
+  }
+  if constexpr (Band) {
+    if (unkF(i) > 0.5)
+      x(i) = (rhs(i) - bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)) / af;
+  } else {
+    if (!(af < 1e-30))
+      x(i) = (rhs(i) - faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz)) / af;
+  }
+  if (!(as < 1e-30))
+    xs(i) = (rhss(i) - faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz)) / as;
+}
+
+/// One colour of the two-field red-black sweep (same launch forms as cutcellSmoothColorFace).
+template <bool Band>
+inline void sweepColorTwo(CCField x, CCField rhs, CCField AC, CCField AFX, CCField AFY, CCField AFZ,
+                          CCField AW, CCField AE, CCField AS, CCField AN, CCField AB, CCField AT,
+                          CCField xs, CCField rhss, CCField ACs, CCField AFXs, CCField AFYs,
+                          CCField AFZs, CCField W, CCConst unkF, C3 e, C3 og, int g, int color) {
+  CCExec space;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
+    const long cells = (long)nyi * nzi * (e.x - 2 * g);
+    auto pencil = KOKKOS_LAMBDA(long t) {
+      const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        twoPhaseCell<Band>(x, rhs, AC, AFX, AFY, AFZ, AW, AE, AS, AN, AB, AT, xs, rhss, ACs, AFXs,
+                           AFYs, AFZs, W, unkF, i, sx, sy, sz);
+      }
+    };
+    if (hostRunSerial(cells)) {
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::smg_smooth_two",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+    return;
+  }
+  using MD = MDRange3<CCExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::smg_smooth_two", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        twoPhaseCell<Band>(x, rhs, AC, AFX, AFY, AFZ, AW, AE, AS, AN, AB, AT, xs, rhss, ACs, AFXs,
+                           AFYs, AFZs, W, unkF, i, sx, sy, sz);
+      });
+}
+
+/// The two-field residual: r_f = rhs_f - (S_ff x_f + N_f) + W x_s (N_f from the bands or the
+/// faces), r_s = rhs_s - (S_ss x_s + N_s) + W x_f.
+template <bool Band>
+inline void residualTwo(CCField r, CCConst x, CCConst b, CCField AC, CCField AFX, CCField AFY,
+                        CCField AFZ, CCField AW, CCField AE, CCField AS, CCField AN, CCField AB,
+                        CCField AT, CCField rs, CCConst xs, CCConst bs, CCField ACs, CCField AFXs,
+                        CCField AFYs, CCField AFZs, CCField W, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::smg_residual_two", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        const double ax = Band ? AC(i) * x(i) + bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)
+                               : AC(i) * x(i) + faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz);
+        const double axs = ACs(i) * xs(i) + faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz);
+        const double wc = W(i);
+        r(i) = (b(i) - ax) + wc * xs(i);
+        rs(i) = (bs(i) - axs) + wc * x(i);
+      });
+}
+
 /// r = b - (AC x + bandOff) over the inner cells (A2's band-form residual).
 inline void residualBand(CCField r, CCConst x, CCConst b, CCField AC, CCField AW, CCField AE,
                          CCField AS, CCField AN, CCField AB, CCField AT, C3 e, int g) {
@@ -293,6 +408,11 @@ class ScalarMG {
     /// i - e_a into i), qm[a] toward -a.
     CCField AW, AE, AS, AN, AB, AT;
     CCField qp[3], qm[3];
+    /// Conjugate (WO-7): the solid phase in face form (level 0: x/rhs the caller's, AC = SAC_s,
+    /// the faces from the operator's products) and the same-cell coupling W (level 0: the
+    /// operator's W0; coarse: A1's average of the level-0 cc at the fine probe distances).
+    CCField xs, rhss, ress, ACs, AFXs, AFYs, AFZs, unks, masss, pxs, pys, pzs, W;
+    double nUnkS = 0.0;  ///< global count of solid unknowns
 #ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;
     std::shared_ptr<GridHalo<double>> dev;
@@ -441,6 +561,14 @@ class ScalarMG {
     CCField AW, AE, AS, AN, AB, AT;  ///< the operator's level-0 bands
     CCConst phi[3];                  ///< F/V through the low a-face (st.phi, guarded)
     CCConst omegaOpen;               ///< the open faces' implicit outflow per level-0 cell
+    /// Conjugate (WO-7, §5.2): the coupled two-field levels. The solid's level-0 surrogate
+    /// diagonal, its unknown flags, its face products Lam_face a_s (low faces, guarded), its mass
+    /// C K kappa_s idt, the same-cell coupling W0 = sum cc and the per-facet cc (gathered onto the
+    /// coarse levels at the fine probe distances, Amendment A1).
+    bool twoPhase = false;
+    CCField SACs, W0;
+    CCConst sunk, spx, spy, spz, ms0;
+    Kokkos::View<const double*, CCMem> facetC;
   };
 
   /// Rebuild the surrogate on every level from the current operator (the level table is kept).
@@ -462,6 +590,14 @@ class ScalarMG {
     unk0_ = in.unknown;
     buildLevel0Faces(in);
     l0.nUnk = countUnknown(0);
+    two_ = in.twoPhase;
+    if (two_) {  // WO-7: the solid phase and the coupling on level 0
+      l0.ACs = in.SACs;
+      l0.W = in.W0;
+      unkS0_ = in.sunk;
+      buildLevel0SolidFaces(in);
+      l0.nUnkS = countUnknownS(0);
+    }
     for (int f = 0; f < 6; ++f)
       dirFace_[f] = in.dirFace[f];
     if (nUse_ > 1) {
@@ -494,6 +630,58 @@ class ScalarMG {
       return;
     }
     vcycle(0);
+  }
+
+  /// The two-field z = M^-1 r (WO-7): one V-cycle on the coupled surrogate from z = 0 (level 0
+  /// alone: 2 + 2 two-field sweeps). r must be 0 on each phase's non-unknown cells; in the singular
+  /// case mean-free over both phases' unknowns.
+  void applyTwo(CCField zf, CCField zs, CCField rf, CCField rs) {
+    Level& l0 = lv_[0];
+    l0.x = zf;
+    l0.rhs = rf;
+    l0.xs = zs;
+    l0.rhss = rs;
+    Kokkos::deep_copy(CCExec(), zf, 0.0);
+    Kokkos::deep_copy(CCExec(), zs, 0.0);
+    if (nUse_ == 1) {
+      for (int k = 0; k < 2; ++k) {
+        sweepColor(0, 0);
+        sweepColor(0, 1);
+      }
+      for (int k = 0; k < 2; ++k) {
+        sweepColor(0, 1);
+        sweepColor(0, 0);
+      }
+      return;
+    }
+    vcycleTwo(0);
+  }
+
+  /// y = S x for the two-field surrogate on level 0 (exchanges x first): y_f = S_ff x_f - W x_s,
+  /// y_s = S_ss x_s - W x_f. For tests.
+  void applySurrogateTwo(CCField yf, CCField ys, CCField xf, CCField xs) {
+    Level& l0 = lv_[0];
+    fill(0, xf);
+    fill(0, xs);
+    const C3 e = l0.ext;
+    const int g = l0.g;
+    CCField AC = l0.AC, AFX = l0.AFX, AFY = l0.AFY, AFZ = l0.AFZ, ACs = l0.ACs, AFXs = l0.AFXs,
+            AFYs = l0.AFYs, AFZs = l0.AFZs, W = l0.W, AW = l0.AW, AE = l0.AE, AS = l0.AS,
+            AN = l0.AN, AB = l0.AB, AT = l0.AT;
+    const bool band = adv_;
+    CCConst x = xf, s = xs;
+    ccFor3(
+        "peclet::flow::smg_apply_two", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const double ax =
+              band ? AC(i) * x(i) + smg::bandOff(x, AW, AE, AS, AN, AB, AT, i, sx, sy, sz)
+                   : AC(i) * x(i) + smg::faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz);
+          const double axs = ACs(i) * s(i) + smg::faceOff(s, AFXs, AFYs, AFZs, i, sx, sy, sz);
+          yf(i) = ax - W(i) * s(i);
+          ys(i) = axs - W(i) * x(i);
+        });
   }
 
   /// y = S x on level 0 (exchanges x first). For the contraction instrument and tests.
@@ -607,12 +795,70 @@ class ScalarMG {
       sweep(L, false);
   }
 
+  /// The two-field V-cycle (WO-7): vcycle's structure on both phases — the same sweeps (the 2x2
+  /// block update), restrictAvg / trilinear prolongAdd per phase with its own pins, the mean over
+  /// BOTH phases' unknowns removed when singular (the null vector is constant in psi).
+  void vcycleTwo(int L) {
+    Level& lv = lv_[L];
+    if (L + 1 == nUse_) {
+      for (int k = 0; k < kBottom / 2; ++k)
+        sweep(L, true);
+      for (int k = 0; k < kBottom / 2; ++k)
+        sweep(L, false);
+      if (singular_)
+        removeMeanTwo(L, lv.x, lv.xs);
+      return;
+    }
+    for (int k = 0; k < kPre; ++k)
+      sweep(L, true);
+    fill(L, lv.x);
+    fill(L, lv.xs);
+    if (adv_)
+      smg::residualTwo<true>(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ,
+                             lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT, lv.ress, CCConst(lv.xs),
+                             CCConst(lv.rhss), lv.ACs, lv.AFXs, lv.AFYs, lv.AFZs, lv.W, lv.ext,
+                             lv.g);
+    else
+      smg::residualTwo<false>(lv.res, CCConst(lv.x), CCConst(lv.rhs), lv.AC, lv.AFX, lv.AFY, lv.AFZ,
+                              lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT, lv.ress, CCConst(lv.xs),
+                              CCConst(lv.rhss), lv.ACs, lv.AFXs, lv.AFYs, lv.AFZs, lv.W, lv.ext,
+                              lv.g);
+    Level& cs = lv_[L + 1];
+    restrictAvg(cs.rhs, CCConst(lv.res), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+    restrictAvg(cs.rhss, CCConst(lv.ress), cs.ext, lv.ext, cs.g, lv.g, cs.inner, lv.ratio);
+    if (singular_)
+      removeMeanTwo(L + 1, cs.rhs, cs.rhss);
+    Kokkos::deep_copy(CCExec(), cs.x, 0.0);
+    Kokkos::deep_copy(CCExec(), cs.xs, 0.0);
+    vcycleTwo(L + 1);
+    fill(L + 1, cs.x);
+    fill(L + 1, cs.xs);
+    prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+    prolongAdd(lv.xs, CCConst(cs.xs), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+    smg::zeroPinned(lv.x, unkOf(L), lv.ext, lv.g);
+    smg::zeroPinned(lv.xs, unkSOf(L), lv.ext, lv.g);
+    for (int k = 0; k < kPost; ++k)
+      sweep(L, false);
+  }
+
   /// One colour of red-black Gauss-Seidel on level L: `rb` = 0 red (global (gx+gy+gz) even), 1
   /// black. The kernel's colour counts the ghost offset (lx = gx + g on every axis), hence + 3g.
   void sweepColor(int L, int rb) {
     Level& lv = lv_[L];
     fill(L, lv.x);
     const int kc = (rb + 3 * lv.g) & 1;
+    if (two_) {  // WO-7: the coupled two-field update (one more exchange: the solid's)
+      fill(L, lv.xs);
+      if (adv_)
+        smg::sweepColorTwo<true>(lv.x, lv.rhs, lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.AW, lv.AE, lv.AS,
+                                 lv.AN, lv.AB, lv.AT, lv.xs, lv.rhss, lv.ACs, lv.AFXs, lv.AFYs,
+                                 lv.AFZs, lv.W, unkOf(L), lv.ext, lv.og, lv.g, kc);
+      else
+        smg::sweepColorTwo<false>(lv.x, lv.rhs, lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.AW, lv.AE, lv.AS,
+                                  lv.AN, lv.AB, lv.AT, lv.xs, lv.rhss, lv.ACs, lv.AFXs, lv.AFYs,
+                                  lv.AFZs, lv.W, unkOf(L), lv.ext, lv.og, lv.g, kc);
+      return;
+    }
     if (adv_) {
       smg::sweepColorBand(lv.x, CCConst(lv.rhs), lv.AC, lv.AW, lv.AE, lv.AS, lv.AN, lv.AB, lv.AT,
                           unkOf(L), lv.ext, lv.og, lv.g, kc);
@@ -689,6 +935,160 @@ class ScalarMG {
   }
 
   CCConst unkOf(int L) const { return L == 0 ? unk0_ : CCConst(lv_[L].unk); }
+  CCConst unkSOf(int L) const { return L == 0 ? unkS0_ : CCConst(lv_[L].unks); }
+
+  /// WO-7: the solid-phase arrays of level L (and W on coarse levels), on the first two-field
+  /// build.
+  void allocateSolid(Level& v, int L) {
+    if (v.ress.extent(0) == v.n)
+      return;
+    v.ress = CCField("smg_ress", v.n);
+    v.AFXs = CCField("smg_afxs", v.n);
+    v.AFYs = CCField("smg_afys", v.n);
+    v.AFZs = CCField("smg_afzs", v.n);
+    if (L == 0)
+      return;
+    v.xs = CCField("smg_xs", v.n);
+    v.rhss = CCField("smg_rhss", v.n);
+    v.ACs = CCField("smg_acs", v.n);
+    v.unks = CCField("smg_unks", v.n);
+    v.masss = CCField("smg_masss", v.n);
+    v.pxs = CCField("smg_pxs", v.n);
+    v.pys = CCField("smg_pys", v.n);
+    v.pzs = CCField("smg_pzs", v.n);
+    v.W = CCField("smg_w", v.n);
+  }
+
+  double countUnknownS(int L) const {
+    const Level& lv = lv_[L];
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    CCConst unk = unkSOf(L);
+    double s = 0.0;
+    ccReduce3(
+        "peclet::flow::smg_count_s", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz, double& acc) {
+          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+          acc += unk(i) > 0.5 ? 1.0 : 0.0;
+        },
+        Kokkos::Sum<double>(s));
+    allSum(&s, 1);
+    return s;
+  }
+
+  /// f, s -= their joint mean over both phases' unknown cells of level L (the singular two-field
+  /// problem: the null vector is constant in psi on both phases).
+  void removeMeanTwo(int L, CCField f, CCField s) {
+    const Level& lv = lv_[L];
+    const double nTot = lv.nUnk + lv.nUnkS;
+    if (!(nTot > 0.0))
+      return;
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    CCConst uf = unkOf(L), us = unkSOf(L);
+    double sum = 0.0;
+    ccReduce3(
+        "peclet::flow::smg_mean_two", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz, double& acc) {
+          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+          acc += (uf(i) > 0.5 ? f(i) : 0.0) + (us(i) > 0.5 ? s(i) : 0.0);
+        },
+        Kokkos::Sum<double>(sum));
+    allSum(&sum, 1);
+    const double mean = sum / nTot;
+    ccFor3(
+        "peclet::flow::smg_mean_two_sub", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+          if (uf(i) > 0.5)
+            f(i) -= mean;
+          if (us(i) > 0.5)
+            s(i) -= mean;
+        });
+  }
+
+  /// WO-7, level 0: the solid faces AF_a(i) = -(w_a P_a(i)) from the operator's guarded products —
+  /// the expression of sco::solidBands' AW/AS/AB, so the face form is the band form.
+  void buildLevel0SolidFaces(const Inputs& in) {
+    Level& l0 = lv_[0];
+    allocateSolid(l0, 0);
+    const C3 e = l0.ext;
+    const double wx = w_[0], wy = w_[1], wz = w_[2];
+    CCConst px = in.spx, py = in.spy, pz = in.spz;
+    CCField AFX = l0.AFXs, AFY = l0.AFYs, AFZ = l0.AFZs;
+    ccFor3(
+        "peclet::flow::smg_faces0_solid", C3{0, 0, 0}, e, KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          AFX(i) = -(wx * px(i));
+          AFY(i) = -(wy * py(i));
+          AFZ(i) = -(wz * pz(i));
+        });
+  }
+
+  /// WO-7: the coarse solid phase of level L (after assembleCoarse, which gathered W): pins = max
+  /// of the children's solid flags; faces = coarsenOpenAvg of the products, w_a(L) times; mass =
+  /// restrictAvg; AC_s = m + faces + W on solid unknowns; identity rows and W = 0 elsewhere.
+  void buildCoarseSolid(const Inputs& in, int L) {
+    Level& c = lv_[L];
+    Level& fin = lv_[L - 1];
+    const C3 ratio = fin.ratio;
+    if (L == 1)
+      smg::restrictMax(c.unks, in.sunk, c.ext, fin.ext, c.g, fin.g, c.inner, ratio);
+    else
+      smg::restrictMax(c.unks, CCConst(fin.unks), c.ext, fin.ext, c.g, fin.g, c.inner, ratio);
+    c.nUnkS = countUnknownS(L);
+    {
+      CCField px = c.pxs, py = c.pys, pz = c.pzs;
+      const C3 ce = c.ext, fe = fin.ext;
+      const int gc = c.g, gf = fin.g;
+      const CCConst fx = L == 1 ? in.spx : CCConst(fin.pxs),
+                    fy = L == 1 ? in.spy : CCConst(fin.pys),
+                    fz = L == 1 ? in.spz : CCConst(fin.pzs);
+      ccFor3(
+          "peclet::flow::smg_coarsen_faces_solid", C3{0, 0, 0}, c.inner,
+          KOKKOS_LAMBDA(int icx, int icy, int icz) {
+            coarsenOpenAvgCell(px, py, pz, fx, fy, fz, ce, fe, gc, gf, ratio, icx, icy, icz);
+          });
+      fill(L, c.pxs);
+      fill(L, c.pys);
+      fill(L, c.pzs);
+      const CCField P[3] = {c.pxs, c.pys, c.pzs};
+      for (int a = 0; a < 3; ++a)
+        if (!per_[a] && touches(c, 2 * a))
+          smg::zeroPlanes(P[a], c.ext, a, 0, c.g + 1);
+    }
+    restrictAvg(c.masss, L == 1 ? in.ms0 : CCConst(fin.masss), c.ext, fin.ext, c.g, fin.g, c.inner,
+                ratio);
+    const C3 e = c.ext, ci = c.inner, cf = c.cfac;
+    const int g = c.g;
+    const double wx = w_[0] / ((double)cf.x * cf.x), wy = w_[1] / ((double)cf.y * cf.y),
+                 wz = w_[2] / ((double)cf.z * cf.z);
+    CCField AC = c.ACs, AFX = c.AFXs, AFY = c.AFYs, AFZ = c.AFZs, W = c.W;
+    CCConst px = c.pxs, py = c.pys, pz = c.pzs, unk = c.unks, mass = c.masss;
+    ccFor3(
+        "peclet::flow::smg_coarse_faces_solid", C3{0, 0, 0}, e, KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          AFX(i) = -(wx * px(i));
+          AFY(i) = -(wy * py(i));
+          AFZ(i) = -(wz * pz(i));
+        });
+    ccFor3(
+        "peclet::flow::smg_coarse_diag_solid", C3{0, 0, 0}, ci,
+        KOKKOS_LAMBDA(int icx, int icy, int icz) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)(icx + g) + (long)(icy + g) * sy + (long)(icz + g) * sz;
+          if (!(unk(i) > 0.5)) {
+            AC(i) = 1.0;
+            AFX(i) = AFY(i) = AFZ(i) = 0.0;
+            W(i) = 0.0;
+            return;
+          }
+          const double tw = wx * px(i), te = wx * px(i + sx);
+          const double ts = wy * py(i), tn = wy * py(i + sy);
+          const double tb = wz * pz(i), tt = wz * pz(i + sz);
+          AC(i) = (mass(i) + (((tw + te) + (ts + tn)) + (tb + tt))) + W(i);
+        });
+  }
 
   void zeroNonPeriodicGhosts(Level& lv, CCField f) {
     const int ext[3] = {lv.ext.x, lv.ext.y, lv.ext.z};
@@ -913,7 +1313,13 @@ class ScalarMG {
       if (dirFace_[f] && touches(c, f))
         coarsenPlane(L, f);
     // the operator
+    if (two_) {
+      allocateSolid(c, L);
+      Kokkos::deep_copy(CCExec(), c.W, 0.0);
+    }
     assembleCoarse(in, L);
+    if (two_)  // WO-7: the solid phase, W gathered by assembleCoarse
+      buildCoarseSolid(in, L);
     if (adv_) {  // A2: the coarse advection, then the 7 bands
       coarsenAdvection(in, L);
       assembleBands(L);
@@ -1083,6 +1489,12 @@ class ScalarMG {
     CCConst unk = c.unk, mass = c.mass;
     auto cfs = in.fac->cellFacetStart;
     auto cw = in.facetW;
+    // WO-7 (A1 for the interface): the coupling W_c is the plain average of the level-0 cc at the
+    // fine probe distances, gathered in the same order; it enters the fluid diagonal and is stored
+    // as the level's W (the solid diagonal and the off-diagonal -W follow in buildCoarseSolid).
+    const bool two = two_;
+    auto ccv = in.facetC;
+    CCField Wl = c.W;
     ccFor3(
         "peclet::flow::smg_coarse_diag", C3{0, 0, 0}, ci, KOKKOS_LAMBDA(int icx, int icy, int icz) {
           const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
@@ -1092,7 +1504,7 @@ class ScalarMG {
             AFX(i) = AFY(i) = AFZ(i) = 0.0;
             return;
           }
-          double W = 0.0;
+          double W = 0.0, Wc = 0.0;
           const long s0y = e0.x, s0z = (long)e0.x * e0.y;
           for (int dz = 0; dz < cf.z; ++dz)
             for (int dy = 0; dy < cf.y; ++dy)
@@ -1102,14 +1514,23 @@ class ScalarMG {
                 const int row = cut0(i0);
                 if (row < 0 || !(unk0(i0) > 0.5))
                   continue;
-                for (int f = cfs(row); f < cfs(row + 1); ++f)
+                for (int f = cfs(row); f < cfs(row + 1); ++f) {
                   W += cw(f);
+                  if (two)
+                    Wc += ccv(f);
+                }
               }
           W *= invN;
           const double tw = wx * px(i), te = wx * px(i + sx);
           const double ts = wy * py(i), tn = wy * py(i + sy);
           const double tb = wz * pz(i), tt = wz * pz(i + sz);
-          AC(i) = (mass(i) + (((tw + te) + (ts + tn)) + (tb + tt))) + W;
+          if (two) {
+            Wc *= invN;
+            AC(i) = ((mass(i) + (((tw + te) + (ts + tn)) + (tb + tt))) + W) + Wc;
+            Wl(i) = Wc;
+          } else {
+            AC(i) = (mass(i) + (((tw + te) + (ts + tn)) + (tb + tt))) + W;
+          }
         });
     // Dirichlet domain faces: AC += 2 w_a(L) <Lam a_bf> on the unknown boundary cells
     const double wa[3] = {wx, wy, wz};
@@ -1142,6 +1563,8 @@ class ScalarMG {
   std::vector<Level> lv_;
   Fill fill0_;
   CCConst unk0_;
+  CCConst unkS0_;     ///< WO-7: level 0's solid-unknown flags (the operator's)
+  bool two_ = false;  ///< WO-7: the last build was the coupled two-field surrogate
   Kokkos::View<int*, CCMem> cut0_;
   double w_[3] = {1.0, 1.0, 1.0};
   double hp_[3] = {1.0, 1.0, 1.0};

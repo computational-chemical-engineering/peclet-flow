@@ -1153,3 +1153,145 @@ later ruling.
   (bound 1e-3; INFO face-centre samples 4.20e-3 → 1.03e-3); mg-box iterations 6 / 6 / 9.
   `scalar_cutcell_operator` PASS at OMP 1, 2, 4, 8 (identity 1.1e-13 of the gross budget at OMP 1,
   2.7e-14 at OMP 4). G12 12/12 at OMP_NUM_THREADS=1. **WO-6 done.**
+
+## 2026-10-03 — WO-7: conjugate transport (§1.1, §1.3, §1.4, §2.7, §3.4, §5.2 + A1, A2's WO-7 note, §8) — built; G4, G10, G-adv(b) conjugate, G12 pass; stopped on two questions (Q-L, Q-M)
+
+**Built** (per the note; ψ = c/K inside the solver, two fields on one grid, D8).
+- `UnitScales::resistToInt()` = hRef/tRef appended (R_c, exactly 1.0 unarmed).
+- `scalar_cutcell_operator.hpp`: `ScalarWallSpec` type 3 (conjugate: D_s, C_s, K, R_c); `ScalarCutState`
+  gains the solid field `solid` (= the registered `<name>_solid`, ψ_s), the per-scalar solid record
+  (material `mat`, solid flags `sunk`, the conjugate facets `conjF`, the solid probes `sS/offS/wS/rungS`)
+  and the solid operator (face products P_a = Λ_face a_s, a_s = 1 − a^snap, guarded on two solid
+  unknowns, Λ_face the harmonic mean when the materials differ; mass C_s K κ_s idt; 7 bands; rhs; per
+  facet cc = α G_c with `interfaceConductance(s_f, Λ_f, R_c, s_s, Λ_s)`; SAC_s and W0 = Σ cc). Kernels:
+  `buildSolidMaterial` (§2.7), `buildSolidProbes` (§3.4: the ladder with −n, the solid flags, −φ),
+  `solidFaceProducts`, `solidMass`, `solidBands`, `solidRhs`, `conjugateCoefficients`, `conjOverlayApply`
+  (one thread per cut cell: y_f += Σ cw u_pf + Σ cc (u_pf − u_ps), y_s += Σ cc (u_ps − u_pf)),
+  `conjSurrogate`, `conjMeanGradientShift`, `solidMeanGradientFaceRhs`, `solidResidualFluxForm`,
+  `solidMomentsLocal`, `conjFacetFlux`, the two-field dots, `solidMeanFluxLocal`. `facetCoefficients`:
+  a conjugate facet carries cw = rw = 0.
+- `scalar_mg.hpp`: the coupled two-field levels (§5.2): per level the solid phase in face form (x, rhs,
+  res, AC, AF, pins, mass, face products) and W. Coarse W_c = A1's plain average of the level-0 cc
+  (fine probe distances), gathered in the wall term's loop and order; it enters the fluid diagonal,
+  the solid diagonal and the off-diagonal −W. `twoPhaseCell<Band>`: the 2×2 block update where W > 0
+  (guard det ≤ 1e-300 S_ff S_ss → point update, fluid then solid), the point updates elsewhere; the
+  fluid neighbour sum from the bands on the advective path (`Band = true`) and from the faces
+  otherwise — the face-form fluid point update is `cutcellSmoothFaceCell`'s expression (A2's WO-7
+  note). `residualTwo<Band>`, `vcycleTwo` (vcycle's structure on both phases, the singular mean over
+  both phases' unknowns), `applyTwo`, `applySurrogateTwo`. The single-phase paths are untouched.
+- `flow_ibm_scalars_cutcell.hpp`: `setScalarSolid` (validation of §8.1; registers the solid field;
+  last call wins against `setScalarWall`), `scalarMaterialTable` (internal Λ_s' = C_s D_s K diffToInt,
+  C_s K, K, R_c' = R_c resistToInt), `ensureScalarSolidRecord` (keyed on the geometry version and the
+  conjugate set), `getScalarSolid` (K ψ_s, NaN elsewhere), `scalarSolidGeometryField`,
+  `scalarCutMatvecTwo`; in `scalarCutAssembleSolve` the two-field branch (operator, surrogate, level
+  rule with max(D', D_s'), MG inputs, BiCGStab on ScalarVec {c, ψ_s}, singular projection and gauge over
+  both phases with weights κ and C_s K κ_s). Budget, wall flux, facets and mean flux carry the solid
+  terms. The two-field path runs only while some body is conjugate.
+- `flow_ibm_mpi.hpp`: `redistribute` re-binds `<name>_solid` (as it does `<name>`).
+- Bindings: `set_scalar_solid`, `get_scalar_solid`; census `num_solid_unknowns`, `probe_rungs['solid']`;
+  `scalar_geometry` `kappa_solid`, `solid_unknown`; budget `mass_solid`.
+- Tests: gates `conj_unit`, `g4`, `g5a`, `g6_1..g6_6`, `gadv_conj` (ctests `scalar_cutcell_*`), api
+  rows; MPI problem `g6 case 1` in `scalar_cutcell_solve_mpi`.
+
+**Inert proof** (vs the unmodified f7397f5 build, saved before any change; harness in the scratchpad):
+450/450 arrays `np.array_equal` — G1-like steady with Dirichlet faces, transient Robin + source at
+level 0 and on the full table (3 steps each), G2's two-body scene, the singular closure (G5b geometry,
+mean gradient), G-adv (a) / (b) / (c) at Pe_h 1, the G9 annulus (koren, 10 steps); fields, census,
+budget, wall flux, facet wall values and fluxes, mean flux. **G12:** 12/12 hashes =
+`doc/scalar_ibm_baseline_hashes.txt` at OMP_NUM_THREADS=1.
+
+**The k_s = k_f checks** (`conj_unit`, the brief's early test). Λ_s = Λ_f, K = 1 and 3, R_c = 0, box
+Dirichlet profile G·x: max|ψ_f − G·x| 1.5e-10, max|ψ_s − G·x| 2.2e-10 over the coupled solid unknowns
+(bound 1e-10 |G| L = 6e-10), 10 iterations, R0 = 100 % on both sides. Closure mode on the SC array at
+Λ_s = Λ_f: k* − 1 = +3.5e-14, max|θ| 6.5e-13.
+- **Note erratum (§1.5, conjugate rows).** The rule ("the G·x part goes to the RHS") applied to the
+  fluid row's + cc (u_pf − u_ps) gives b_f += cc (Σ_s w G·x − Σ_f w G·x) and b_s −= the same; the
+  printed "RHS ∓= α G_c (Σ_s w G·x − Σ_f w G·x) in the fluid/solid rows" has the opposite sign. The
+  rule is implemented; k* = 1 to 3.5e-14 above gates it.
+
+**G4** Maxwell conjugate sphere (box 6R, steady, R/h 6 / 12 / 24, 3 offsets; interior gradient by a
+least-squares fit over full solid cells against 3G/(ratio + 2)):
+
+| Λ_s/Λ_f | rel err R/h 6 / 12 / 24 | orders | iterations |
+|---|---|---|---|
+| 1e-2 | 1.65e-2 / 4.44e-3 / 1.16e-3 | 1.89, 1.94 | 7 / 8 / 8–9 |
+| 1 | 7e-12 … 2.9e-11 (exact, (a)) | — | 7 / 7 / 7 |
+| 10 | 2.48e-2 / 6.89e-3 / 1.82e-3 | 1.85, 1.92 | 8 / 8 / 8–9 |
+| 1e3 | 3.29e-2 / 9.20e-3 / 2.43e-3 | 1.84, 1.92 | 14–15 / 14–15 / 15 |
+
+(b) ≤ 5e-3 at R/h 24 (prov.): pass. (c) K = 3 with the same Λ_s at R/h 12, rtol 1e-13: ψ identical to
+K = 1 to 0.0 (both fields), c_s = 3 ψ_s exactly. (d) ratios 1e-2 / 1e3: ≤ 9 / ≤ 15 against
+2 × 7 + 5 = 19. Probe rungs R0 = 100 % fluid and solid. The ratio-1 row is gated as exactness
+(≤ 1e-9), not as an order (its error is round-off) — a reading of (a)/(b).
+
+**G5a** (conducting SC array, c = 0.3, Λ_s/Λ_f = 1e4, mean gradient e_x; n = 20 / 40 / 80, ND 16.6 /
+33.2 / 66.4; reference Andrianov–Topol eq. 157 = 2.33258): k* = 2.25503 / 2.31137 / 2.32691 (mean of
+3 offsets), rel err −3.32e-2 / −9.09e-3 / −2.43e-3; self-convergence order 1.86 (≥ 1.5 pass);
+Richardson extrapolate 2.3328 (+1e-4 against the reference, its finite-contrast offset is ~2e-4).
+Iterations 7–9 (singular steady ≤ 30). **|err| ≤ 3e-3 at ND ~ 32 (prov.) FAILS: 9.1e-3** (Q-M).
+
+**G6** (composite sphere, core R conjugate + immersed Dirichlet sphere 2R, a two-instance scene; BE
+late-time ratio, dt μ = 1, 30 steps, the exact mode as initial state; RMS over 3 offsets):
+
+| case (Λ_s, C_sK, K, R_c) | gated: total mass, R/h 8 / 16 / 32 | INFO: fluid mass, R/h 8 / 16 / 32 | orders (fluid) | it/step |
+|---|---|---|---|---|
+| 1 (10, 1, 1, 0) | 0.75 / 0.56 / 0.44 | 7.36e-3 / 1.88e-3 / 4.78e-4 | 1.97, 1.98 | 8–21 |
+| 2 (0.1, 1, 1, 0) | 2.6 / 0.11 / 0.18 | 1.68e-2 / 4.22e-3 / 1.07e-3 | 2.00, 1.98 | 8–18 |
+| 3 (100, 0.5, 1, 0) | 0.63 / 0.41 / 0.30 | 8.06e-3 / 2.08e-3 / 5.30e-4 | 1.95, 1.97 | 9–26 |
+| 4 (3, 3, 3, 0) | 0.83 / 0.70 / 0.61 | 1.74e-3 / 4.56e-4 / 1.18e-4 | 1.93, 1.95 | 7–19 |
+| 5 (1, 1, 1, 0.2) | 0.75 / 0.58 / 0.47 | 3.78e-3 / 1.00e-3 / 2.58e-4 | 1.91, 1.96 | 8–18 |
+| 6 (5, 1, 0.5, 0.5) | 0.80 / 0.64 / 0.53 | 3.70e-3 / 9.50e-4 / 2.41e-4 | 1.96, 1.98 | 7–21 |
+
+Budget identity ≤ 8.8e-14 |d_mass| every step (d_mass = the total, fluid + solid); R0 = 100 % on both
+sides; G-iter conjugate ≤ 30: pass (max 26). The gated reading FAILS everywhere — the isolated solid
+unknowns of Q-L (11–14 / 47–50 / 182–192 per rung) keep their initial ψ_s (their transient rows are
+m (ψ − ψ^n) = 0) and their frozen mass swamps the mode's after 30 halvings. The fluid mass of the same
+runs, a functional of the same mode without those cells, is second order in every case; at R/h 16 it
+reads ≤ 2e-3 except cases 2 (4.2e-3) and 3 (2.1e-3) — the provisional bound is not met either (Q-M).
+
+**G10 on G6 case 1** (`scalar_cutcell_solve_mpi`, problem `g6 case 1`: cell units, N = 40, R = 8, Ro =
+16, 20 BE steps, rtol 1e-13): np 1 bitwise (both fields, iterations 13 14 … 14 13, both bodies' fluxes);
+np 2 / 4: max|c − c₁| 5.4e-21 / 2.5e-21 and max|ψ_s − ψ_s1| 5.1e-21 / 2.9e-21 (the fields have decayed
+to ~1e-6; the solid maximum 0.703 is a frozen isolated cell), iterations identical, fluxes to 1e-14
+relative, identity ≤ 1.5e-14. All earlier problems of the ctest unchanged (mixed 1.33e-15, g1 2.13e-14,
+singular 7.11e-15, g9 6.9e-17, g9c 6.7e-16, steady_adv 3.07e-12, g8 1.12e-13 at np 4).
+
+**G-adv(b), conducting spheres** (A2's WO-7 row; Λ_s/Λ_f = 10, K = 1, mean gradient, the advective
+two-field V-cycle): iterations conjugate / insulating at Pe_h 1 and 10: 32³ 9 / 8 and 14 / 12; 64³ 12 / 10
+and 17 / 17 (≤ 1.5×: pass), all converged, steady identity ≤ 4.1e-14.
+
+**Readings (none chosen against the note; listed for confirmation):**
+- Budget: `d_mass` is the change of mass + mass_solid; `wall_in` keeps the wall facets only (a
+  conjugate facet's flux enters both rows, §1.6.1); `defect` sums both phases' rows. `scalar_wall_flux`
+  of a conjugate body is its interface flux into the fluid, cc (u_ps − u_pf) (with the G·x parts in the
+  mean-gradient mode). `scalar_facets` wall value on a conjugate facet: ψ_Γf = u_pf + q s_f/Λ_f.
+- G_c of a facet uses its own body's material (§4.2 per-material arrays, per-facet cc); cc = 0 when the
+  cell lacks either phase's unknown (the coupling must enter both rows). A cut cell with no conjugate
+  facet takes the larger facet's body as material (it is then not a solid unknown).
+- The 2×2 guard's point update is fluid then solid.
+
+**Questions (stopped; nothing chosen):**
+- **Q-L (§1.3, the solid unknown set).** "κ_s > 0 and conjugate" admits solid unknowns that nothing
+  couples: κ_s ~1e-9 … 4e-6, all six solid apertures 1 − a^snap = 0 (every fluid aperture snapped to 1,
+  hence also no facet): 6–12 / 25–35 / 95–110 per G4 rung, 9–19 / 46–52 / 155–182 per G5a rung,
+  11–14 / 47–50 / 182–192 per G6 rung. Steady: their rows
+  are empty, the iterate there is whatever the V-cycle left (G4 linear case: error 0.32 there, 2e-10
+  elsewhere; the solve converges because their residual is identically 0). Transient: they never change
+  (G6 above). Singular steady: they receive −mean(b) in the projection (round-off; G5a converged in
+  7–9). The fluid has the mirror rule (sealed: κ > 0 with all apertures 0 is not an unknown, §2.4),
+  the solid does not. Options: (a) mirror it — κ_s > 0 ∧ Σ a_s > 0 (also drops solid cells coupled only
+  through a facet, as the fluid's sealed rule drops fluid cells with a facet); (b) κ_s > 0 ∧ (Σ a_s > 0
+  ∨ a conjugate facet); (c) keep §1.3 and measure G6 on the fluid mass (gates only).
+- **Q-M (provisional bounds, §11 Q1).** G5a: 9.1e-3 at ND 33 against ≤ 3e-3 (order 1.86, extrapolate
+  within 1e-4 of the reference; G4 at contrast 1e3 sits at the same level, 9.2e-3 at R/h 12). G6 (fluid
+  mass): 4.2e-3 / 2.1e-3 at R/h 16 for cases 2 / 3 against ≤ 2e-3, every order ≥ 1.91. Not loosened
+  (an architect consult per §11).
+
+**Battery** (`-LE bench` without the six `scalar_cutcell_g6_*`, which ran separately above; OMP 2,
+-j4, OMP_WAIT_POLICY=passive / OMPI_MCA_mpi_yield_when_idle=1 on a host at load 50–90, 1366 s): 216/217
+pass; the one failure is `scalar_cutcell_g5a`, exactly its held absolute bound (Q-M). The six G6 ctests
+fail on their gated total-mass reading (Q-L) and are left failing as evidence, not loosened. Inert proof
+and G12 rerun on the final (clang-formatted) build: 450/450 arrays bitwise, 12/12 hashes.
+
+**Not changed:** the single-phase paths (bitwise above), CutcellMG / VelocityMG, the projection, the
+legacy scalar kernels, core.

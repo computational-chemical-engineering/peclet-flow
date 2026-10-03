@@ -256,8 +256,11 @@ void Solver<Grid>::rebindFieldAliases() {
   static const char* fn[3] = {"force_x", "force_y", "force_z"};
   for (int c = 0; c < 3; ++c)
     bind(cellForce_[c], fn[c]);
-  for (auto& sc : scalars_)
+  for (auto& sc : scalars_) {
     bind(sc.c, sc.name);
+    if (sc.cut && sc.cut->solid.extent(0) > 0)  // WO-7: a conjugate scalar's solid field
+      bind(sc.cut->solid, sc.name + "_solid");
+  }
   for (auto& cl : closures_) {  // property_closures.hpp keeps the registry keys for exactly this
     if (fields_.has(cl.outName))
       cl.out = fields_.at(cl.outName).data;

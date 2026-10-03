@@ -190,6 +190,234 @@ void Solver<Grid>::setScalarWall(const std::string& name, int type, double value
 }
 
 template <class Grid>
+void Solver<Grid>::setScalarSolid(const std::string& name, double D, double capacity,
+                                  double partition, double contactResistance, int instance) {
+  ScalarField& sc = cutcellScalar(name, "set_scalar_solid");
+  ScalarCutState& st = *sc.cut;
+  if (!std::isfinite(D) || !(D >= 0.0))
+    throw std::invalid_argument("set_scalar_solid: diffusivity must be finite and >= 0");
+  if (!std::isfinite(capacity) || !(capacity > 0.0))
+    throw std::invalid_argument("set_scalar_solid: capacity must be finite and > 0");
+  if (!std::isfinite(partition) || !(partition > 0.0))
+    throw std::invalid_argument("set_scalar_solid: partition must be finite and > 0");
+  if (!std::isfinite(contactResistance) || !(contactResistance >= 0.0))
+    throw std::invalid_argument("set_scalar_solid: contact_resistance must be finite and >= 0");
+  if (instance >= 0 && !hasScene_)
+    throw std::invalid_argument(
+        "set_scalar_solid: instance= needs a scene (set_scene + set_solid_from_scene); raw-SDF "
+        "geometry has one body, set with instance=None");
+  if (instance >= 0 && instance >= nInst_)
+    throw std::invalid_argument("set_scalar_solid: instance " + std::to_string(instance) +
+                                " out of range (the scene has " + std::to_string(nInst_) + ")");
+  ScalarWallSpec w;
+  w.type = 3;
+  w.solidD = D;
+  w.solidC = capacity;
+  w.solidK = partition;
+  w.solidRc = contactResistance;
+  if (st.solid.extent(0) != n_)  // §1.3: the solid field, registered, on the first call
+    st.solid = addField(name + "_solid");
+  if (instance < 0) {
+    st.wallDefault = w;
+    st.wallInstance.clear();
+    return;
+  }
+  for (auto it = st.wallInstance.begin(); it != st.wallInstance.end(); ++it)
+    if (it->first == instance) {
+      st.wallInstance.erase(it);
+      break;
+    }
+  st.wallInstance.emplace_back(instance, w);
+}
+
+template <class Grid>
+sco::MaterialTable Solver<Grid>::scalarMaterialTable(ScalarField& sc, std::vector<char>& conj) {
+  ScalarCutState& st = *sc.cut;
+  const int nb = scalarNumBodies();
+  std::vector<ScalarWallSpec> spec((std::size_t)nb, st.wallDefault);
+  for (const auto& [inst, w] : st.wallInstance)
+    if (inst >= 0 && inst < nb)
+      spec[(std::size_t)inst] = w;
+  conj.assign((std::size_t)nb, 0);
+  st.mtLam.assign((std::size_t)nb, 0.0);
+  st.mtCK.assign((std::size_t)nb, 1.0);
+  st.mtK.assign((std::size_t)nb, 1.0);
+  st.mtRc.assign((std::size_t)nb, 0.0);
+  st.maxSolidD = 0.0;
+  const double dI = u_.diffToInt(), rI = u_.resistToInt();
+  for (int b = 0; b < nb; ++b) {
+    const ScalarWallSpec& w = spec[(std::size_t)b];
+    if (w.type != 3)
+      continue;
+    conj[(std::size_t)b] = 1;
+    // psi form (§1.1): Lam_s = C_s D_s K, capacity C_s K; internal by §1.2 at use time
+    st.mtLam[(std::size_t)b] = (w.solidC * w.solidD * w.solidK) * dI;
+    st.mtCK[(std::size_t)b] = w.solidC * w.solidK;
+    st.mtK[(std::size_t)b] = w.solidK;
+    st.mtRc[(std::size_t)b] = w.solidRc * rI;
+    st.maxSolidD = std::fmax(st.maxSolidD, w.solidD * dI);
+  }
+  sco::MaterialTable mt;
+  mt.nb = nb;
+  mt.conj = Kokkos::View<int*, CCMem>("peclet::flow::sco_mt_conj", nb);
+  mt.lam = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_lam", nb);
+  mt.ck = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_ck", nb);
+  mt.kp = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_k", nb);
+  mt.rc = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_rc", nb);
+  auto hc = Kokkos::create_mirror_view(mt.conj);
+  auto hl = Kokkos::create_mirror_view(mt.lam);
+  auto hk = Kokkos::create_mirror_view(mt.ck);
+  auto hp = Kokkos::create_mirror_view(mt.kp);
+  auto hr = Kokkos::create_mirror_view(mt.rc);
+  for (int b = 0; b < nb; ++b) {
+    hc(b) = conj[(std::size_t)b];
+    hl(b) = st.mtLam[(std::size_t)b];
+    hk(b) = st.mtCK[(std::size_t)b];
+    hp(b) = st.mtK[(std::size_t)b];
+    hr(b) = st.mtRc[(std::size_t)b];
+  }
+  Kokkos::deep_copy(mt.conj, hc);
+  Kokkos::deep_copy(mt.lam, hl);
+  Kokkos::deep_copy(mt.ck, hk);
+  Kokkos::deep_copy(mt.kp, hp);
+  Kokkos::deep_copy(mt.rc, hr);
+  return mt;
+}
+
+template <class Grid>
+void Solver<Grid>::ensureScalarSolidRecord(ScalarField& sc, const std::vector<char>& conj) {
+  ensureScalarCutGeometry();
+  ScalarCutState& st = *sc.cut;
+  if (st.solidVersion == scg_.version && st.solidKey == conj && st.mat.extent(0) == n_)
+    return;
+  const scg::ScalarCutGeometry& gm = scg_;
+  const auto& fo = gm.fac;
+  if (st.mat.extent(0) != n_) {
+    st.mat = CCField(sc.name + "_cc_mat", n_);
+    st.sunk = CCField(sc.name + "_cc_sunk", n_);
+  }
+  // the material table needs only the conjugate flags here (§2.7)
+  sco::MaterialTable mt;
+  const int nb = (int)conj.size();
+  mt.nb = nb;
+  mt.conj = Kokkos::View<int*, CCMem>("peclet::flow::sco_rec_conj", nb);
+  {
+    auto hc = Kokkos::create_mirror_view(mt.conj);
+    for (int b = 0; b < nb; ++b)
+      hc(b) = conj[(std::size_t)b];
+    Kokkos::deep_copy(mt.conj, hc);
+  }
+  const std::size_t nInner = (std::size_t)nx_ * ny_ * nz_;
+  const bool hasOwner = hasScene_ && cutOwner_.extent(0) == nInner;
+  sco::buildSolidMaterial(st.mat, st.sunk, CCConst(gm.kappa), fo,
+                          Kokkos::View<const int*, CCMem>(cutOwner_), hasOwner, mt, e_, G);
+  fillGhosts(st.mat);
+  fillGhosts(st.sunk);
+  for (int face = 0; face < 6; ++face)
+    if (bc_[face] != 0 && touchesGlobalFace(face))
+      scg::zeroGhostSlab(st.sunk, e_, G, face);
+  // the facets of conjugate bodies, and their solid probes (§3.4)
+  st.conjF = Kokkos::View<std::uint8_t*, CCMem>(sc.name + "_cc_conjF", fo.n);
+  st.sS = Kokkos::View<double*, CCMem>(sc.name + "_cc_sS", fo.n);
+  st.offS = decltype(st.offS)(sc.name + "_cc_offS", fo.n);
+  st.wS = decltype(st.wS)(sc.name + "_cc_wS", fo.n);
+  st.rungS = Kokkos::View<std::uint8_t*, CCMem>(sc.name + "_cc_rungS", fo.n);
+  {
+    auto cf = st.conjF;
+    auto fbody = fo.body;
+    auto cj = mt.conj;
+    CCExec space;
+    Kokkos::parallel_for(
+        "peclet::flow::sco_conj_facets", Kokkos::RangePolicy<CCExec>(space, 0, fo.n),
+        KOKKOS_LAMBDA(const long f) {
+          cf(f) = cj(sco::bodyIndex((double)fbody(f), nb)) != 0 ? 1 : 0;
+        });
+    space.fence();
+  }
+  sco::buildSolidProbes(st.sS, st.offS, st.wS, st.rungS,
+                        Kokkos::View<const std::uint8_t*, CCMem>(st.conjF), fo, CCConst(sdf_),
+                        CCConst(st.sunk), e_, u_.hp);
+  // census: solid unknowns (inner) and the solid rungs (conjugate facets)
+  long cnt[5] = {0, 0, 0, 0, 0};
+  {
+    CCConst su(st.sunk);
+    const C3 e = e_;
+    const int g = G;
+    double nsu = 0.0;
+    ccReduce3(
+        "peclet::flow::sco_count_solid", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          acc += su((long)x + (long)y * e.x + (long)z * (long)e.x * e.y) > 0.5 ? 1.0 : 0.0;
+        },
+        nsu);
+    cnt[0] = (long)nsu;
+    auto rs = st.rungS;
+    auto cf = st.conjF;
+    for (int k = 0; k < 4; ++k) {
+      long c = 0;
+      Kokkos::parallel_reduce(
+          "peclet::flow::sco_solid_rungs", Kokkos::RangePolicy<CCExec>(0, fo.n),
+          KOKKOS_LAMBDA(const long f, long& acc) {
+            acc += (cf(f) != 0 && (int)rs(f) == k) ? 1 : 0;
+          },
+          c);
+      cnt[1 + k] = c;
+    }
+  }
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    long o[5];
+    MPI_Allreduce(cnt, o, 5, MPI_LONG, MPI_SUM, comm_);
+    for (int k = 0; k < 5; ++k)
+      cnt[k] = o[k];
+  }
+#endif
+  st.numSolidUnknowns = cnt[0];
+  for (int k = 0; k < 4; ++k)
+    st.solidRungs[k] = cnt[1 + k];
+  st.solidVersion = gm.version;
+  st.solidKey = conj;
+}
+
+template <class Grid>
+std::vector<double> Solver<Grid>::getScalarSolid(const std::string& name) {
+  ScalarField& sc = cutcellScalar(name, "get_scalar_solid");
+  ScalarCutState& st = *sc.cut;
+  const std::size_t nInner = (std::size_t)nx_ * ny_ * nz_;
+  std::vector<double> out(nInner, std::numeric_limits<double>::quiet_NaN());
+  if (!st.built || !st.conj || st.solid.extent(0) != n_ || st.sunk.extent(0) != n_)
+    return out;
+  const auto ps = gatherInner(st.solid);
+  const auto su = gatherInner(st.sunk);
+  const auto mt = gatherInner(st.mat);
+  const int nb = (int)st.mtK.size();
+  for (std::size_t i = 0; i < nInner; ++i) {
+    if (!(su[i] > 0.5))
+      continue;
+    int b = (int)mt[i];
+    if (b < 0 || b >= nb)
+      b = 0;
+    out[i] = st.mtK[(std::size_t)b] * ps[i];
+  }
+  return out;
+}
+
+template <class Grid>
+std::vector<double> Solver<Grid>::scalarSolidGeometryField(const std::string& name, int which) {
+  ScalarField& sc = cutcellScalar(name, "scalar_geometry");
+  ScalarCutState& st = *sc.cut;
+  std::vector<char> conj;
+  (void)scalarMaterialTable(sc, conj);
+  ensureScalarSolidRecord(sc, conj);
+  if (which == 1)
+    return gatherInner(st.sunk);
+  std::vector<double> k = gatherInner(scg_.kappa);
+  for (auto& v : k)
+    v = 1.0 - v;
+  return k;
+}
+
+template <class Grid>
 void Solver<Grid>::setScalarSource(const std::string& name, double S) {
   ScalarCutState& st = *cutcellScalar(name, "set_scalar_source").cut;
   if (!std::isfinite(S))
@@ -262,6 +490,14 @@ std::array<double, 3> Solver<Grid>::scalarMeanFlux(const std::string& name) {
                      CCConst(gm.say), CCConst(gm.saz), CCConst(adv ? st.phi[0] : sc.c),
                      CCConst(adv ? st.phi[1] : sc.c), CCConst(adv ? st.phi[2] : sc.c), adv, st.lam,
                      st.gInt, u_.hp, st.ubar, e_, G, d, v);
+  if (st.conj) {  // WO-7: the solid faces' diffusive flux (§8.1: "over both phases")
+    double ds[3];
+    fillGhosts(st.solid);
+    sco::solidMeanFluxLocal(CCConst(st.solid), CCConst(st.sunk), CCConst(st.spx), CCConst(st.spy),
+                            CCConst(st.spz), st.gInt, u_.hp, e_, G, ds);
+    for (int a = 0; a < 3; ++a)
+      d[a] += ds[a];
+  }
   double s[6] = {d[0], d[1], d[2], v[0], v[1], v[2]};
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
@@ -375,6 +611,17 @@ void Solver<Grid>::scalarCutMatvec(ScalarField& sc, CCField y, CCField x) {
   fillGhosts(x);  // one G = 2 exchange covers the 7-point part and the +-2-reach probes
   applyCutcellOp(y, CCConst(x), sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, e_, G);
   sco::overlayApply(y, CCConst(x), scg_.fac, st.cw);
+}
+
+template <class Grid>
+void Solver<Grid>::scalarCutMatvecTwo(ScalarField& sc, CCField yf, CCField ys, CCField xf,
+                                      CCField xs) {
+  ScalarCutState& st = *sc.cut;
+  fillGhosts(xf);  // one G = 2 exchange per phase field (§4.1)
+  fillGhosts(xs);
+  applyCutcellOp(yf, CCConst(xf), sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, e_, G);
+  applyCutcellOp(ys, CCConst(xs), st.ASC, st.ASW, st.ASE, st.ASS, st.ASN, st.ASB, st.AST, e_, G);
+  sco::conjOverlayApply(yf, ys, CCConst(xf), CCConst(xs), scg_.fac, st.cw, st.cc, st.offS, st.wS);
 }
 
 template <class Grid>
@@ -677,6 +924,18 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
   sco::facetCoefficients(st.cw, st.rw, gm.fac, unk, wt, lam);
   if (st.meanGradOn)  // §1.5: rw = alpha G_phi (g - sum_k w_k G.x_k) on Dirichlet/Robin facets
     sco::meanGradientProbeShift(st.rw, gm.fac, st.cw, mgPos);
+  // WO-7: a conjugate body makes this a two-field solve (§1.1, D8); without one the single-phase
+  // path below runs unchanged
+  st.conj = false;
+  for (int b = 0; b < nb; ++b)
+    st.conj = st.conj || st.wtType[(std::size_t)b] == 3;
+  st.conj = st.conj && st.solid.extent(0) == n_;
+  sco::MaterialTable mt;
+  if (st.conj) {
+    std::vector<char> conjB;
+    mt = scalarMaterialTable(sc, conjB);
+    ensureScalarSolidRecord(sc, conjB);
+  }
   // right-hand side: kappa (idt c^n + S') + the walls' rw
   if (st.sourceIsField && st.sourceField.extent(0) != n_)
     throw std::runtime_error("cut-cell scalar '" + sc.name +
@@ -699,8 +958,7 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     const int n[3] = {nx_, ny_, nz_};
     const long nf = (long)n[t1] * n[t2];
     Kokkos::View<double*, CCMem> gv(sc.name + "_cc_gface", nf);
-    if (st.hasProfile[f] &&
-        (st.profileN[f][0] != n[t1] || st.profileN[f][1] != n[t2]))
+    if (st.hasProfile[f] && (st.profileN[f][0] != n[t1] || st.profileN[f][1] != n[t2]))
       throw std::runtime_error("cut-cell scalar '" + sc.name +
                                "': the domain-face profile no longer matches this rank's block");
     if (st.hasProfile[f] || st.meanGradOn) {
@@ -793,8 +1051,53 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
       sco::meanGradientAdvectionRhs(sc.b, px, py, pz, kap, unk, st.gInt, hh, st.ubar, e_, G);
     }
   }
-  // the level-0 surrogate diagonal (§4.3)
-  sco::surrogateDiagonal(st.SAC, CCConst(sc.AC), gm.fac, st.cw);
+  if (st.conj) {
+    // WO-7: the solid phase's operator (§1.4 solid row, §4.1): psi_s^n, the face products, the
+    // mass C_s K kappa_s idt, the 7 bands, the rhs; the per-facet interface coupling cc; the
+    // mean-gradient terms of §1.5 on the solid faces and the conjugate facets
+    const CCConst sunk(st.sunk), matv(st.mat);
+    alloc(st.spx, "_cc_spx");
+    alloc(st.spy, "_cc_spy");
+    alloc(st.spz, "_cc_spz");
+    alloc(st.ms, "_cc_ms");
+    alloc(st.ASC, "_cc_asc");
+    alloc(st.ASW, "_cc_asw");
+    alloc(st.ASE, "_cc_ase");
+    alloc(st.ASS, "_cc_ass");
+    alloc(st.ASN, "_cc_asn");
+    alloc(st.ASB, "_cc_asb");
+    alloc(st.AST, "_cc_ast");
+    alloc(st.bS, "_cc_bs");
+    alloc(st.sOld, "_cc_sold");
+    alloc(st.SACs, "_cc_sacs");
+    alloc(st.W0, "_cc_w0");
+    if (st.cc.extent(0) != (std::size_t)gm.fac.n)
+      st.cc = Kokkos::View<double*, CCMem>(sc.name + "_cc_cc", gm.fac.n);
+    sco::zeroNonUnknown(st.solid, sunk, e_, G);
+    Kokkos::deep_copy(CCExec(), st.sOld, st.solid);
+    sco::solidFaceProducts(st.spx, st.spy, st.spz, sunk, matv, CCConst(gm.sax), CCConst(gm.say),
+                           CCConst(gm.saz), mt, e_);
+    sco::solidMass(st.ms, kap, sunk, matv, mt, idt, e_, G);
+    sco::solidBands(st.ASC, st.ASW, st.ASE, st.ASS, st.ASN, st.ASB, st.AST, CCConst(st.ms), sunk,
+                    CCConst(st.spx), CCConst(st.spy), CCConst(st.spz), u_.w, e_, G);
+    sco::solidRhs(st.bS, CCConst(st.ms), CCConst(st.sOld), e_, G);
+    sco::conjugateCoefficients(st.cc, gm.fac, Kokkos::View<const std::uint8_t*, CCMem>(st.conjF),
+                               Kokkos::View<const double*, CCMem>(st.sS), unk, sunk, mt, lam);
+    if (st.meanGradOn) {
+      double gs[3];
+      for (int a = 0; a < 3; ++a)
+        gs[a] = u_.w[a] * u_.hp[a] * st.gInt[a];
+      sco::solidMeanGradientFaceRhs(st.bS, sunk, CCConst(st.spx), CCConst(st.spy), CCConst(st.spz),
+                                    gs, e_, G);
+      sco::conjMeanGradientShift(sc.b, st.bS, gm.fac, st.cc, st.offS, st.wS, mgPos);
+    }
+    // the two-field level-0 surrogate (§4.3)
+    sco::conjSurrogate(st.SAC, st.SACs, st.W0, CCConst(sc.AC), CCConst(st.ASC), gm.fac, st.cw,
+                       st.cc);
+  } else {
+    // the level-0 surrogate diagonal (§4.3)
+    sco::surrogateDiagonal(st.SAC, CCConst(sc.AC), gm.fac, st.cw);
+  }
   // the singular case (§5.1): steady, no facet with G > 0, no Dirichlet domain face anywhere
   double sing[2] = {sco::maxFacetLocal(st.cw), anyDir ? 1.0 : 0.0};
 #ifdef PECLET_FLOW_MPI
@@ -829,7 +1132,9 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     in.lam = lam;
     in.idt = idt;
     // the level rule: transient with kappa_A = 1 + 4 dt' D' sum_a w_a < 13 -> level 0 alone
-    const double kA = 1.0 + 4.0 * st.dt * lam * ((u_.w[0] + u_.w[1]) + u_.w[2]);
+    // (WO-7: max(D', D_s') over the conjugate materials, D_s = Lam_s/(C_s K))
+    const double kA = 1.0 + 4.0 * st.dt * (st.conj ? std::fmax(lam, st.maxSolidD) : lam) *
+                                ((u_.w[0] + u_.w[1]) + u_.w[2]);
     in.fullTable = steady || !(kA < 13.0);
     in.singular = st.singular;
     in.SAC = st.SAC;
@@ -859,6 +1164,17 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     } else if (st.advecting) {  // the lumped implicit outflow onto the coarse levels (§5.2)
       in.outflow = CCConst(st.outflow);
       in.hasOutflow = true;
+    }
+    if (st.conj) {  // WO-7: the coupled two-field levels (§5.2)
+      in.twoPhase = true;
+      in.SACs = st.SACs;
+      in.W0 = st.W0;
+      in.sunk = CCConst(st.sunk);
+      in.spx = CCConst(st.spx);
+      in.spy = CCConst(st.spy);
+      in.spz = CCConst(st.spz);
+      in.ms0 = CCConst(st.ms);
+      in.facetC = st.cc;
     }
     st.mg->build(in);
     st.mgLevels = st.mg->levelsUsed();
@@ -895,76 +1211,198 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     if (nUnk > 0.0)
       sco::addOnUnknown(a, unk, -s[0] / nUnk, e_, G);
   };
-  // the right-hand side the Krylov sees: b, or (singular) its projection onto the range
-  CCField bK = sc.b;
-  st.incompatibility = 0.0;
-  if (st.singular) {
-    alloc(st.kb, "_cc_bproj");
-    alloc(st.kq, "_cc_q");
-    Kokkos::deep_copy(CCExec(), st.kb, sc.b);
-    double s[2];
-    sco::sumUnknownLocal(CCConst(st.kb), unk, e_, G, s[0], s[1]);
-    allSum(s, 2);
-    st.incompatibility = s[1] > 0.0 ? std::fabs(s[0]) / s[1] : 0.0;
-    if (nUnk > 0.0)
-      sco::addOnUnknown(st.kb, unk, -s[0] / nUnk, e_, G);
-    bK = st.kb;
-  }
-  // gauge of the singular solve: sum kappa V c is kept at its pre-solve value (§5.1)
-  // (in mean-gradient mode the target is 0: sum kappa V theta = 0, §5.1)
-  double kc0 = 0.0, k0 = 0.0;
-  if (st.singular) {
-    double m[2];
-    sco::kappaMomentsLocal(CCConst(sc.c), kap, unk, e_, G, m[0], m[1]);
-    allSum(m, 2);
-    kc0 = st.meanGradOn ? 0.0 : m[0];
-    k0 = m[1];
-  }
-
-  ScalarKrylovOps ops;
-  ops.e = e_;
-  ops.g = G;
-  ops.matvec = [&](const ScalarVec& y, const ScalarVec& x) { scalarCutMatvec(sc, y.f, x.f); };
-  // One ScalarMG V-cycle on the surrogate (§5.2; level 0 alone under the transient level rule).
-  ops.precond = [&](const ScalarVec& z, const ScalarVec& r) {
-    CCField rr = r.f;
+  ScalarKrylovResult kr;
+  if (!st.conj) {
+    // the right-hand side the Krylov sees: b, or (singular) its projection onto the range
+    CCField bK = sc.b;
+    st.incompatibility = 0.0;
     if (st.singular) {
-      Kokkos::deep_copy(CCExec(), st.kq, r.f);
-      removeMean(st.kq);
-      rr = st.kq;
+      alloc(st.kb, "_cc_bproj");
+      alloc(st.kq, "_cc_q");
+      Kokkos::deep_copy(CCExec(), st.kb, sc.b);
+      double s[2];
+      sco::sumUnknownLocal(CCConst(st.kb), unk, e_, G, s[0], s[1]);
+      allSum(s, 2);
+      st.incompatibility = s[1] > 0.0 ? std::fabs(s[0]) / s[1] : 0.0;
+      if (nUnk > 0.0)
+        sco::addOnUnknown(st.kb, unk, -s[0] / nUnk, e_, G);
+      bK = st.kb;
     }
-    st.mg->apply(z.f, rr);
-    if (st.singular)
-      removeMean(z.f);
-  };
-  ops.dot = [&](const ScalarVec& a, const ScalarVec& b) {
-    double s = sco::dotLocal(CCConst(a.f), CCConst(b.f), e_, G);
-    allSum(&s, 1);
-    return s;
-  };
-  ops.dot2 = [&](const ScalarVec& a, const ScalarVec& b, const ScalarVec& c, double& ab,
-                 double& cc) {
-    double s[2];
-    sco::dot2Local(CCConst(a.f), CCConst(b.f), CCConst(c.f), e_, G, s[0], s[1]);
-    allSum(s, 2);
-    ab = s[0];
-    cc = s[1];
-  };
-  ops.maxabs = [&](const ScalarVec& a) { return allMax(sco::maxabsLocal(CCConst(a.f), e_, G)); };
-  ops.removeMean = [&](const ScalarVec& a) { removeMean(a.f); };
-  auto vec = [](CCField f) {
-    ScalarVec v;
-    v.f = f;
-    return v;
-  };
-  const ScalarKrylovResult kr =
-      scalarBiCGStab(ops, vec(bK), vec(sc.c), vec(st.kr), vec(st.krh), vec(st.kp), vec(st.kv),
-                     vec(st.kt), vec(st.kz), vec(st.kz2), st.maxit, st.rtol, st.singular);
-  if (st.singular && k0 > 0.0) {
-    double m[2];
-    sco::kappaMomentsLocal(CCConst(sc.c), kap, unk, e_, G, m[0], m[1]);
-    allSum(m, 2);
-    sco::addOnUnknown(sc.c, unk, (kc0 - m[0]) / k0, e_, G);
+    // gauge of the singular solve: sum kappa V c is kept at its pre-solve value (§5.1)
+    // (in mean-gradient mode the target is 0: sum kappa V theta = 0, §5.1)
+    double kc0 = 0.0, k0 = 0.0;
+    if (st.singular) {
+      double m[2];
+      sco::kappaMomentsLocal(CCConst(sc.c), kap, unk, e_, G, m[0], m[1]);
+      allSum(m, 2);
+      kc0 = st.meanGradOn ? 0.0 : m[0];
+      k0 = m[1];
+    }
+
+    ScalarKrylovOps ops;
+    ops.e = e_;
+    ops.g = G;
+    ops.matvec = [&](const ScalarVec& y, const ScalarVec& x) { scalarCutMatvec(sc, y.f, x.f); };
+    // One ScalarMG V-cycle on the surrogate (§5.2; level 0 alone under the transient level rule).
+    ops.precond = [&](const ScalarVec& z, const ScalarVec& r) {
+      CCField rr = r.f;
+      if (st.singular) {
+        Kokkos::deep_copy(CCExec(), st.kq, r.f);
+        removeMean(st.kq);
+        rr = st.kq;
+      }
+      st.mg->apply(z.f, rr);
+      if (st.singular)
+        removeMean(z.f);
+    };
+    ops.dot = [&](const ScalarVec& a, const ScalarVec& b) {
+      double s = sco::dotLocal(CCConst(a.f), CCConst(b.f), e_, G);
+      allSum(&s, 1);
+      return s;
+    };
+    ops.dot2 = [&](const ScalarVec& a, const ScalarVec& b, const ScalarVec& c, double& ab,
+                   double& cc) {
+      double s[2];
+      sco::dot2Local(CCConst(a.f), CCConst(b.f), CCConst(c.f), e_, G, s[0], s[1]);
+      allSum(s, 2);
+      ab = s[0];
+      cc = s[1];
+    };
+    ops.maxabs = [&](const ScalarVec& a) { return allMax(sco::maxabsLocal(CCConst(a.f), e_, G)); };
+    ops.removeMean = [&](const ScalarVec& a) { removeMean(a.f); };
+    auto vec = [](CCField f) {
+      ScalarVec v;
+      v.f = f;
+      return v;
+    };
+    kr = scalarBiCGStab(ops, vec(bK), vec(sc.c), vec(st.kr), vec(st.krh), vec(st.kp), vec(st.kv),
+                        vec(st.kt), vec(st.kz), vec(st.kz2), st.maxit, st.rtol, st.singular);
+    if (st.singular && k0 > 0.0) {
+      double m[2];
+      sco::kappaMomentsLocal(CCConst(sc.c), kap, unk, e_, G, m[0], m[1]);
+      allSum(m, 2);
+      sco::addOnUnknown(sc.c, unk, (kc0 - m[0]) / k0, e_, G);
+    }
+
+  } else {
+    // WO-7: the two-field solve (§5.1 on both phases): the same BiCGStab, ScalarVec {c, psi_s};
+    // dots and maxima over both fields; the singular projection and gauge over both phases'
+    // unknowns (the null vector is constant in psi), the gauge weights kappa and C_s K kappa_s
+    const CCConst sunk(st.sunk), matv(st.mat);
+    alloc(st.krS, "_cc_rs");
+    alloc(st.krhS, "_cc_rhs");
+    alloc(st.kpS, "_cc_ps");
+    alloc(st.kvS, "_cc_vs");
+    alloc(st.ktS, "_cc_ts");
+    alloc(st.kzS, "_cc_zs");
+    alloc(st.kz2S, "_cc_z2s");
+    const double nTot = (double)st.numUnknowns + (double)st.numSolidUnknowns;
+    auto removeMeanTwo = [&](CCField a, CCField as) {
+      double sf[2], ss[2];
+      sco::sumUnknownLocal(CCConst(a), unk, e_, G, sf[0], sf[1]);
+      sco::sumUnknownLocal(CCConst(as), sunk, e_, G, ss[0], ss[1]);
+      double v[1] = {sf[0] + ss[0]};
+      allSum(v, 1);
+      if (nTot > 0.0) {
+        sco::addOnUnknown(a, unk, -v[0] / nTot, e_, G);
+        sco::addOnUnknown(as, sunk, -v[0] / nTot, e_, G);
+      }
+    };
+    CCField bKf = sc.b, bKs = st.bS;
+    st.incompatibility = 0.0;
+    if (st.singular) {
+      alloc(st.kb, "_cc_bproj");
+      alloc(st.kq, "_cc_q");
+      alloc(st.kbS, "_cc_bprojs");
+      alloc(st.kqS, "_cc_qs");
+      Kokkos::deep_copy(CCExec(), st.kb, sc.b);
+      Kokkos::deep_copy(CCExec(), st.kbS, st.bS);
+      double sf[2], ss[2];
+      sco::sumUnknownLocal(CCConst(st.kb), unk, e_, G, sf[0], sf[1]);
+      sco::sumUnknownLocal(CCConst(st.kbS), sunk, e_, G, ss[0], ss[1]);
+      double v[2] = {sf[0] + ss[0], sf[1] + ss[1]};
+      allSum(v, 2);
+      st.incompatibility = v[1] > 0.0 ? std::fabs(v[0]) / v[1] : 0.0;
+      if (nTot > 0.0) {
+        sco::addOnUnknown(st.kb, unk, -v[0] / nTot, e_, G);
+        sco::addOnUnknown(st.kbS, sunk, -v[0] / nTot, e_, G);
+      }
+      bKf = st.kb;
+      bKs = st.kbS;
+    }
+    // gauge (§5.1): sum kappa V c + sum C_s K kappa_s V psi_s kept (0 in mean-gradient mode)
+    auto moments = [&](double m[2]) {
+      double a[2], b2[2];
+      sco::kappaMomentsLocal(CCConst(sc.c), kap, unk, e_, G, a[0], a[1]);
+      sco::solidMomentsLocal(CCConst(st.solid), kap, sunk, matv, mt, e_, G, b2[0], b2[1]);
+      m[0] = a[0] + b2[0];
+      m[1] = a[1] + b2[1];
+      allSum(m, 2);
+    };
+    double kc0 = 0.0, k0 = 0.0;
+    if (st.singular) {
+      double m[2];
+      moments(m);
+      kc0 = st.meanGradOn ? 0.0 : m[0];
+      k0 = m[1];
+    }
+    ScalarKrylovOps ops;
+    ops.e = e_;
+    ops.g = G;
+    ops.matvec = [&](const ScalarVec& y, const ScalarVec& x) {
+      scalarCutMatvecTwo(sc, y.f, y.s, x.f, x.s);
+    };
+    ops.precond = [&](const ScalarVec& z, const ScalarVec& r) {
+      CCField rf = r.f, rs = r.s;
+      if (st.singular) {
+        Kokkos::deep_copy(CCExec(), st.kq, r.f);
+        Kokkos::deep_copy(CCExec(), st.kqS, r.s);
+        removeMeanTwo(st.kq, st.kqS);
+        rf = st.kq;
+        rs = st.kqS;
+      }
+      st.mg->applyTwo(z.f, z.s, rf, rs);
+      if (st.singular)
+        removeMeanTwo(z.f, z.s);
+    };
+    ops.dot = [&](const ScalarVec& a, const ScalarVec& b) {
+      double v = sco::dotTwoLocal(CCConst(a.f), CCConst(b.f), CCConst(a.s), CCConst(b.s), e_, G);
+      allSum(&v, 1);
+      return v;
+    };
+    ops.dot2 = [&](const ScalarVec& a, const ScalarVec& b, const ScalarVec& c, double& ab,
+                   double& cc) {
+      double v[2];
+      sco::dot2TwoLocal(CCConst(a.f), CCConst(b.f), CCConst(c.f), CCConst(a.s), CCConst(b.s),
+                        CCConst(c.s), e_, G, v[0], v[1]);
+      allSum(v, 2);
+      ab = v[0];
+      cc = v[1];
+    };
+    ops.maxabs = [&](const ScalarVec& a) {
+      return allMax(
+          std::fmax(sco::maxabsLocal(CCConst(a.f), e_, G), sco::maxabsLocal(CCConst(a.s), e_, G)));
+    };
+    ops.removeMean = [&](const ScalarVec& a) { removeMeanTwo(a.f, a.s); };
+    auto vec2 = [](CCField f, CCField s2) {
+      ScalarVec v;
+      v.f = f;
+      v.s = s2;
+      v.solid = true;
+      return v;
+    };
+    kr = scalarBiCGStab(ops, vec2(bKf, bKs), vec2(sc.c, st.solid), vec2(st.kr, st.krS),
+                        vec2(st.krh, st.krhS), vec2(st.kp, st.kpS), vec2(st.kv, st.kvS),
+                        vec2(st.kt, st.ktS), vec2(st.kz, st.kzS), vec2(st.kz2, st.kz2S), st.maxit,
+                        st.rtol, st.singular);
+    if (st.singular && k0 > 0.0) {
+      double m[2];
+      moments(m);
+      const double d = (kc0 - m[0]) / k0;
+      sco::addOnUnknown(sc.c, unk, d, e_, G);
+      sco::addOnUnknown(st.solid, sunk, d, e_, G);
+    }
+    fillGhosts(st.solid);
   }
   fillGhosts(sc.c);
   st.iterations = kr.iterations;
@@ -1000,7 +1438,15 @@ std::vector<double> Solver<Grid>::scalarWallFlux(const std::string& name) {
   const auto& fo = scg_.fac;
   Kokkos::View<double*, CCMem> up("peclet::flow::sco_up", fo.n), qin("peclet::flow::sco_qin", fo.n);
   fillGhosts(sc.c);
-  sco::facetFlux(up, qin, CCConst(sc.c), fo, st.cw, st.rw);
+  if (st.conj) {  // WO-7: a conjugate body's flux into the fluid is its interface flux cc (u_ps -
+                  // u_pf)
+    Kokkos::View<double*, CCMem> us("peclet::flow::sco_us", fo.n);
+    fillGhosts(st.solid);
+    sco::conjFacetFlux(up, us, qin, CCConst(sc.c), CCConst(st.solid), fo, st.cw, st.rw, st.cc,
+                       st.offS, st.wS, scalarMeanGradPosition(st.gPhys), st.meanGradOn);
+  } else {
+    sco::facetFlux(up, qin, CCConst(sc.c), fo, st.cw, st.rw);
+  }
   auto hq = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), qin);
   auto hb = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fo.body);
   for (long f = 0; f < fo.n; ++f) {  // facet order: deterministic
@@ -1037,7 +1483,16 @@ typename Solver<Grid>::ScalarCutBudget Solver<Grid>::scalarBudget(const std::str
   fillGhosts(sc.c);
   sco::residualFluxForm(st.kt, CCConst(sc.c), CCConst(sc.b), kap, unk, CCConst(gm.sax),
                         CCConst(gm.say), CCConst(gm.saz), st.lam, st.idt, u_.w, e_, G);
-  sco::overlayApply(st.kt, CCConst(sc.c), gm.fac, st.cw, /*subtract=*/true);
+  if (st.conj) {  // WO-7: the solid rows (flux form) and the two-field overlay, both subtracted
+    fillGhosts(st.solid);
+    sco::solidResidualFluxForm(st.ktS, CCConst(st.solid), CCConst(st.bS), CCConst(st.ms),
+                               CCConst(st.sunk), CCConst(st.spx), CCConst(st.spy), CCConst(st.spz),
+                               u_.w, e_, G);
+    sco::conjOverlayApply(st.kt, st.ktS, CCConst(sc.c), CCConst(st.solid), gm.fac, st.cw, st.cc,
+                          st.offS, st.wS, /*subtract=*/true);
+  } else {
+    sco::overlayApply(st.kt, CCConst(sc.c), gm.fac, st.cw, /*subtract=*/true);
+  }
   if (st.advecting)  // the implicit faces' outflow (the explicit faces' sits in b)
     sco::advectionResidual(st.kt, CCConst(sc.c), CCConst(st.phi[0]), CCConst(st.phi[1]),
                            CCConst(st.phi[2]), CCConst(st.small), unk, st.steady, e_, G);
@@ -1102,10 +1557,37 @@ typename Solver<Grid>::ScalarCutBudget Solver<Grid>::scalarBudget(const std::str
   }
 #endif
   // internal: per unit V sums times V
-  const double sumR = V * v[0], mass = V * v[1], massOld = V * v[2], wall = V * v[3],
-               bnd = V * v[4], src = V * v[5];
+  double sumR = V * v[0];
+  const double mass = V * v[1], massOld = V * v[2], wall = V * v[3], bnd = V * v[4], src = V * v[5];
+  // WO-7: the solid rows' residual and the solid mass sum C_s K kappa_s V psi_s (now and at the
+  // time base). The conjugate facets' flux is internal (it enters both rows), so `wall_in` keeps
+  // the wall facets alone and `d_mass` is the change of the TOTAL (fluid + solid) mass.
+  double massS = 0.0, massSOld = 0.0;
+  if (st.conj) {
+    sco::MaterialTable mt;
+    std::vector<char> conjB;
+    mt = scalarMaterialTable(sc, conjB);
+    double vs[3] = {0.0, 0.0, 0.0}, sAbs = 0.0, w = 0.0;
+    sco::sumUnknownLocal(CCConst(st.ktS), CCConst(st.sunk), e_, G, vs[0], sAbs);
+    sco::solidMomentsLocal(CCConst(st.solid), kap, CCConst(st.sunk), CCConst(st.mat), mt, e_, G,
+                           vs[1], w);
+    sco::solidMomentsLocal(CCConst(st.sOld), kap, CCConst(st.sunk), CCConst(st.mat), mt, e_, G,
+                           vs[2], w);
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      double o[3];
+      MPI_Allreduce(vs, o, 3, MPI_DOUBLE, MPI_SUM, comm_);
+      for (int j = 0; j < 3; ++j)
+        vs[j] = o[j];
+    }
+#endif
+    sumR = V * (v[0] + vs[0]);
+    massS = V * vs[1];
+    massSOld = V * vs[2];
+  }
   const double toMass = u_.volToPhys(), toRate = u_.volToPhys() * u_.divToPhys();
   out.mass = mass * toMass;
+  out.massSolid = massS * toMass;
   out.wallIn = wall * toRate;
   out.boundaryIn = bnd * toRate;
   out.sourceIn = src * toRate;
@@ -1114,7 +1596,7 @@ typename Solver<Grid>::ScalarCutBudget Solver<Grid>::scalarBudget(const std::str
     out.defect = sumR * toRate;
     out.identityError = (-(wall + bnd + src) + sumR) * toRate;
   } else {
-    const double dm = mass - massOld;
+    const double dm = st.conj ? (mass + massS) - (massOld + massSOld) : mass - massOld;
     out.dMass = dm * toMass;
     out.defect = st.dt * sumR * toMass;
     out.identityError = (dm - st.dt * (wall + bnd + src) + st.dt * sumR) * toMass;
@@ -1146,10 +1628,18 @@ typename Solver<Grid>::ScalarCutFacets Solver<Grid>::scalarFacets(const std::str
   auto hr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fo.rungF);
   auto hu = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), scg_.unknown);
   Kokkos::View<double*, CCMem> up("peclet::flow::sco_up", n), qin("peclet::flow::sco_qin", n);
+  Kokkos::View<double*, CCMem> usv("peclet::flow::sco_us", n);
   const bool have = st.built && st.cw.extent(0) == (std::size_t)n;
+  const bool conj = have && st.conj && st.cc.extent(0) == (std::size_t)n;
   if (have) {
     fillGhosts(sc.c);
-    sco::facetFlux(up, qin, CCConst(sc.c), fo, st.cw, st.rw);
+    if (conj) {
+      fillGhosts(st.solid);
+      sco::conjFacetFlux(up, usv, qin, CCConst(sc.c), CCConst(st.solid), fo, st.cw, st.rw, st.cc,
+                         st.offS, st.wS, scalarMeanGradPosition(st.gPhys), st.meanGradOn);
+    } else {
+      sco::facetFlux(up, qin, CCConst(sc.c), fo, st.cw, st.rw);
+    }
   }
   auto hup = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), up);
   auto hq = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), qin);
@@ -1184,7 +1674,10 @@ typename Solver<Grid>::ScalarCutFacets Solver<Grid>::scalarFacets(const std::str
     const double a = halpha(f), s = hs(f), lam = st.lam;
     const int t = st.wtType[(std::size_t)b];
     double cG;
-    if (t == 1)
+    if (t == 3) {  // WO-7, conjugate: psi_Gamma,f = u_pf + q s_f / Lam_f, q = flux into the fluid
+      const double q = a > 0.0 ? hq(f) / a : 0.0;
+      cG = lam > 0.0 ? u + q * s / lam : u;
+    } else if (t == 1)
       cG = st.wtG[(std::size_t)b];
     else if (t == 2) {
       const double k = st.wtK[(std::size_t)b];

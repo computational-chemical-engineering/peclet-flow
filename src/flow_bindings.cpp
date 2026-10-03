@@ -470,6 +470,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             d["aperture_y"] = field_out(*diag.s, diag.s->scalarGeometryField(2));
             d["aperture_z"] = field_out(*diag.s, diag.s->scalarGeometryField(3));
             d["unknown"] = field_out(*diag.s, diag.s->scalarGeometryField(4));
+            if (diag.s->cutcellScalar(name, "scalar_geometry").cut->solid.extent(0) > 0) {
+              d["kappa_solid"] = field_out(*diag.s, diag.s->scalarSolidGeometryField(name, 0));
+              d["solid_unknown"] = field_out(*diag.s, diag.s->scalarSolidGeometryField(name, 1));
+            }
             return d;
           },
           nb::arg("name"),
@@ -478,7 +482,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "model), 'aperture_x/y/z' (the SNAPPED, ungated scalar aperture of the -x/-y/-z face of "
           "each cell -- the scalar's own, never the pressure openness), 'unknown' (1 where the "
           "cell is a fluid unknown: kappa > 1e-14 with an open face). Built on first use after "
-          "the geometry; shared by every cut-cell scalar.")
+          "the geometry; shared by every cut-cell scalar. A scalar with a solid field "
+          "(set_scalar_solid) also gets 'kappa_solid' (1 - kappa) and 'solid_unknown' (1 where the "
+          "cell is a solid unknown: kappa_solid > 0 and the cell's material conjugate, §2.7).")
       .def(
           "scalar_census",
           [](D& diag, const std::string& name) {
@@ -495,7 +501,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             nb::dict rungs;
             rungs["fluid"] = nb::make_tuple(c.rungs[0], c.rungs[1], c.rungs[2], c.rungs[3]);
             d["probe_rungs"] = rungs;
-            d["num_solid_unknowns"] = 0L;
+            d["num_solid_unknowns"] = st.conj ? st.numSolidUnknowns : 0L;
+            if (st.conj)
+              rungs["solid"] = nb::make_tuple(st.solidRungs[0], st.solidRungs[1], st.solidRungs[2],
+                                              st.solidRungs[3]);
             d["krylov_iterations"] = st.iterations;
             d["krylov_residual"] = st.residual;
             d["krylov_converged"] = st.converged;
@@ -515,7 +524,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(the true max-norm residual over the reference max(max|b|, max|A c0|)), "
           "'krylov_converged', 'mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 alone), "
           "'steady_incompatibility' (|sum b| / sum|b| of a singular steady problem before its "
-          "projection, else 0), 'num_solid_unknowns' (0: single phase). The advection part "
+          "projection, else 0), 'num_solid_unknowns' (0: single phase; the solid unknowns of a "
+          "conjugate scalar, whose 'probe_rungs' then carries a 'solid' tuple too). The advection part "
           "(design §6.3, the last advance or steady solve): 'num_small_cells' (cut cells whose "
           "explicit outflow would exceed the bulk's), 'num_implicit_faces' / 'num_flux_faces' "
           "(faces carrying flux that took implicit upwind / all faces carrying flux; steady: all "
@@ -546,9 +556,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           },
           nb::arg("name"),
           "Budget of a cut-cell scalar over the last advance (collective under MPI), physical: "
-          "'mass' = sum kappa V c, 'mass_solid' (0: single phase), 'd_mass' = the change over the "
-          "advance, 'wall_in' / 'boundary_in' / 'source_in' = the rates INTO the fluid from the "
-          "immersed walls, the domain faces (the Dirichlet faces' diffusive flux plus the advective "
+          "'mass' = sum kappa V c, 'mass_solid' (= sum C_s kappa_s V c_s of a conjugate scalar; 0 "
+          "single phase), 'd_mass' = the change of mass + mass_solid over the advance, 'wall_in' / 'boundary_in' / 'source_in' = the rates INTO the fluid from the "
+          "immersed walls (the conjugate interfaces are internal: not in it), the domain faces (the Dirichlet faces' diffusive flux plus the advective "
           "flux through inflow/outflow faces) and the source, 'defect' = dt sum V r (r the "
           "linear-solver residual), and 'identity_error' = d_mass - dt (wall_in + boundary_in + "
           "source_in) + defect, which is round-off for a correct discretization. After a steady "
@@ -2672,6 +2682,33 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "concentration. 'robin': flux into the fluid = coefficient * (value - c_wall), "
           "coefficient = k (L/T, >= 0; a first-order surface reaction is k_r with value 0). "
           "Physical units under an extent; takes effect at the next advance or steady solve.")
+      .def(
+          "set_scalar_solid",
+          [](S& s, const std::string& name, double diffusivity, double capacity, double partition,
+             double contact_resistance, std::optional<int> instance) {
+            s.setScalarSolid(name, diffusivity, capacity, partition, contact_resistance,
+                             instance ? *instance : -1);
+          },
+          nb::arg("name"), nb::arg("diffusivity"), nb::arg("capacity") = 1.0,
+          nb::arg("partition") = 1.0, nb::arg("contact_resistance") = 0.0,
+          nb::arg("instance") = nb::none(),
+          "Cut-cell scalars, conjugate transport (doc/scalar_ibm_design.md §1.1): the solid "
+          "interior of one scene instance (instance=int, needs a scene) or of every body "
+          "(instance=None, which also clears the per-instance settings) carries the scalar too. "
+          "diffusivity = D_s (L^2/T, the solid's own, >= 0), capacity = C_s (> 0; heat: "
+          "(rho c_p)_s/(rho c_p)_f, a porous particle: its porosity), partition = K (> 0; c_s = K c "
+          "at equilibrium), contact_resistance = R_c (T/L, >= 0; the interface flux is "
+          "(c_s/K - c)/R_c). The solid field is the registered field '<name>_solid' (it holds "
+          "c_s/K, internal; get_scalar_solid returns c_s). A later set_scalar_wall for the same "
+          "instance makes it a wall again (last call wins). Takes effect at the next advance or "
+          "steady solve.")
+      .def(
+          "get_scalar_solid",
+          [](S& s, const std::string& name) { return field_out(s, s.getScalarSolid(name)); },
+          nb::arg("name"),
+          "Cut-cell scalars: a copy of the solid concentration c_s = K psi_s of a conjugate scalar, "
+          "(nx, ny, nz) F-order on this rank's block, NaN outside the solid unknowns (all NaN before "
+          "the first advance or steady solve with a conjugate body).")
       .def(
           "set_scalar_source",
           [](S& s, const std::string& name, double source) { s.setScalarSource(name, source); },

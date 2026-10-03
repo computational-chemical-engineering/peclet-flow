@@ -226,6 +226,10 @@ class Solver {
     // internal lattice: k' = k tRef/hRef. ISOTROPIC by construction (the wall closure divides by a
     // probe distance in hRef units), unlike the per-axis velToInt(a). Exactly 1.0 unarmed.
     double speedToInt() const { return tRef / hRef; }
+    // A contact resistance R_c, T/L (doc/scalar_ibm_design.md §1.2, WO-7): the conjugate
+    // interface's q = (psi_s - psi_f)/R_c sits in series with s/Lam (T/L), so R_c' = R_c
+    // hRef/tRef = 1/speedToInt(). Exactly 1.0 unarmed.
+    double resistToInt() const { return hRef / tRef; }
   };
 
   /// The map between the solver's INDEX coordinates and the coordinate system the analytic scene
@@ -2641,6 +2645,20 @@ class Solver {
   // into the fluid, c L/T), 1 dirichlet (value = wall c), 2 robin (coefficient = k, L/T; value = g).
   void setScalarWall(const std::string& name, int type, double value, double coefficient,
                      int instance);
+  // Conjugate transport (§1.1, §8.1, WO-7): make one scene instance (instance >= 0, needs a
+  // scene) or every body (instance = -1, which also clears the per-instance settings) conjugate:
+  // its solid interior carries the scalar too, in the registered field `<name>_solid` (psi_s =
+  // c_s / K, allocated by the first call). D_s (L^2/T) the solid's own diffusivity, C_s the
+  // capacity ratio, K the partition coefficient (c_s = K c at equilibrium), R_c the contact
+  // resistance (T/L, on psi). A later setScalarWall for the same instance makes it a wall again.
+  void setScalarSolid(const std::string& name, double D, double capacity, double partition,
+                      double contactResistance, int instance);
+  // `get_scalar_solid` (§8.1): this rank's inner block (x-fastest) of c_s = K psi_s, NaN outside
+  // the solid unknowns (all NaN before the first advance or steady solve with a conjugate body).
+  std::vector<double> getScalarSolid(const std::string& name);
+  // The solid geometry of a conjugate scalar (diagnostics.scalar_geometry): inner copies of
+  // kappa_s = 1 - kappa (which = 0) and the solid-unknown flag (which = 1).
+  std::vector<double> scalarSolidGeometryField(const std::string& name, int which);
   // Volumetric source S (c/T): uniform, or per cell (this rank's inner block, x-fastest).
   void setScalarSource(const std::string& name, double S);
   void setScalarSourceField(const std::string& name, const std::vector<double>& S);
@@ -2692,6 +2710,14 @@ class Solver {
   void scalarCutAssembleSolve(ScalarField& sc, bool steady);
   // y = A x for the stored operator of `sc` (exchanges x's ghosts).
   void scalarCutMatvec(ScalarField& sc, CCField y, CCField x);
+  // WO-7: the two-field y = A x of a conjugate scalar (exchanges both fields' ghosts).
+  void scalarCutMatvecTwo(ScalarField& sc, CCField yf, CCField ys, CCField xf, CCField xs);
+  // WO-7: the per-scalar solid record (§2.7 materials, §1.3 solid unknowns, §3.4 solid probes),
+  // rebuilt when the geometry or the set of conjugate bodies changed; `conj` the resolved
+  // conjugate flag per body.
+  void ensureScalarSolidRecord(ScalarField& sc, const std::vector<char>& conj);
+  // WO-7: the per-body material table (internal units) of the current settings.
+  sco::MaterialTable scalarMaterialTable(ScalarField& sc, std::vector<char>& conj);
   /// The ONE predicate for the cut-cell scalar's advective face flux (doc/scalar_ibm_design.md
   /// §6.1, D5): the face field the projection in force made discretely divergence-free and the
   /// openness ITS divergence kernel weights it with, so that F_a/V = open * vel through the low

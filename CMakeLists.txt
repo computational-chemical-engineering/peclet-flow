@@ -330,7 +330,10 @@ if(PECLET_FLOW_BUILD_TESTS)
   # Cut-cell scalar transport (doc/scalar_ibm_design.md §11, WO-3): the accuracy gates G1, G2, G3a,
   # G3b (+ its budget identity) and G7, one ctest each, and the API refusals; WO-5 G9, G9b, WO-5b G9c, WO-5c G-adv, WO-6 G8, G5b. The steady ones run on the two coarsest rungs
   # (ruling D-WO3-1: the level-0 preconditioner needs O(N) iterations until ScalarMG, WO-4).
-  foreach(g api g1 g2 g3a g3b g7 giter g9 g9b g9c gadv g8 g5b)
+  # WO-7 (conjugate): the k_s = k_f unit checks, G4, G5a, G6 (one ctest per case), and the
+  # conducting-sphere G-adv(b) row.
+  foreach(g api g1 g2 g3a g3b g7 giter g9 g9b g9c gadv g8 g5b conj_unit g4 g5a g6_1 g6_2 g6_3 g6_4
+            g6_5 g6_6 gadv_conj)
     add_test(NAME scalar_cutcell_${g}
              COMMAND ${Python_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_scalar_cutcell_gates.py ${g}

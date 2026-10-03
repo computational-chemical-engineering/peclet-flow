@@ -27,6 +27,9 @@
 //   g8        — G8 (WO-6): the Taylor-Aris closure in the mean-gradient mode (a pipe, Poiseuille
 //               face velocities, insulating walls, G = e_z), steady, advecting and singular; the
 //               compared output is the box-averaged flux along G (scalar_mean_flux).
+//   g6 case 1 — G6 (WO-7): the conjugate composite sphere (a scene: a conjugate core inside an
+//               immersed Dirichlet sphere), 20 backward-Euler steps; both fields and both bodies'
+//               fluxes compared per step.
 //   steady_adv — G-adv(a) (WO-5c, design Amendment A2): the periodic C3 problem (a Dirichlet sphere
 //               R/h = 16 in a 64^3 box with a source) advected by a projected Stokes field
 //               rescaled to census Pe_h 1, steady: the advective V-cycle. Plus its z = M^-1 r
@@ -681,14 +684,160 @@ int main(int argc, char** argv) {
             r.identity.push_back(s.scalarBudget("c").identityError / gg);
             const auto& st = *sc.cut;
             if (rank_ == 0)
-              std::printf("  [g8] census max_cell_peclet %.6g, singular %d, %d levels, %d iterations, "
-                          "mean flux z %.15e\n",
-                          st.maxCellPeclet, (int)st.singular, st.mgLevels, st.iterations,
-                          r.flux.back());
+              std::printf(
+                  "  [g8] census max_cell_peclet %.6g, singular %d, %d levels, %d iterations, "
+                  "mean flux z %.15e\n",
+                  st.maxCellPeclet, (int)st.singular, st.mgLevels, st.iterations, r.flux.back());
             CHECK(st.advecting && st.steady && st.singular && st.meanGradOn);
             return r;
           },
           false, true, true, nullptr, 1e-11);
+    }
+    // ---- G10 on G6 case 1 (WO-7): the conjugate composite sphere, 20 backward-Euler steps ----
+    // A conjugate core (instance 0: Lam_s = 10, C_s K = 1, K = 1, R_c = 0) inside an immersed
+    // Dirichlet sphere (instance 1, psi = 0), walls on every face, cell units, R = 8, Ro = 16,
+    // dt mu = 1. Both fields and both bodies' fluxes compared per step (the two-field Krylov, the
+    // coupled two-field V-cycle, the solid probes and the material halo under the decomposition).
+    {
+      const int N = 40;
+      const double R = 8.0, Ro = 16.0, c0[3] = {19.83, 20.17, 19.71};
+      const double mu = 2.6588142379399775 / (R * R);  // case 1, test_scalar_cutcell_gates.g6_exact
+      std::vector<int> ni = {1, -1, -1, 3, -1, -1, 1, -1, -1, 34, 1, 2};
+      std::vector<double> nr(4 * 16, 0.0);
+      for (int k = 0; k < 4; ++k) {
+        nr[16 * k + 14] = 1.0;
+        nr[16 * k + 15] = 1.0;
+      }
+      nr[0] = R;
+      nr[16 + 0] = nr[16 + 1] = nr[16 + 2] = 1e3;
+      nr[32 + 0] = Ro;
+      std::vector<int> ii = {0, -1, 3, -1};
+      std::vector<double> ir(2 * 18, 0.0);
+      for (int k = 0; k < 2; ++k) {
+        for (int d = 0; d < 3; ++d)
+          ir[18 * k + d] = c0[d];
+        ir[18 * k + 6] = 1.0;
+        ir[18 * k + 7] = 1.0;
+      }
+      peclet::core::decomp::BlockDecomposer<3> dec =
+          peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size_), N, N, N);
+      const auto blk = dec.block(rank_);
+      const Block B{{(int)blk.origin[0], (int)blk.origin[1], (int)blk.origin[2]},
+                    {(int)blk.size[0], (int)blk.size[1], (int)blk.size[2]}};
+      auto build = [&](IbmSolver& s, const Block& b, bool dist) {
+        s.setRho(1.0);
+        s.setMu(1.0);
+        s.setDt(1.0 / mu);
+        for (int f = 0; f < 6; ++f)
+          s.setDomainBc(f, 1, 0.0, 0.0, 0.0);
+        if (dist)
+          s.initMpi(N, N, N, MPI_COMM_WORLD);
+        s.setScene(ni, nr, ii, ir, false);
+        s.setSolidFromScene(false);
+        s.addScalar("c", 1.0, 1, 50, true);
+        for (int f = 0; f < 6; ++f)
+          s.setScalarBc("c", f, 1, 0.0);
+        s.setScalarWall("c", 1, 0.0, 0.0, 1);
+        s.setScalarSolid("c", 10.0, 1.0, 1.0, 0.0, 0);
+        s.setScalarTolerance("c", 1e-13);
+        // a smooth positive initial state in both fields: 1 - (r/Ro)^2
+        for (const char* nm : {"c", "c_solid"}) {
+          auto f = s.fieldView(nm);
+          auto h = Kokkos::create_mirror_view(f);
+          const long sy = b.l[0] + 2 * G, sz = sy * (b.l[1] + 2 * G);
+          for (int z = 0; z < b.l[2]; ++z)
+            for (int y = 0; y < b.l[1]; ++y)
+              for (int x = 0; x < b.l[0]; ++x) {
+                const double dx = x + b.o[0] - c0[0], dy = y + b.o[1] - c0[1],
+                             dz = z + b.o[2] - c0[2];
+                h((x + G) + (y + G) * sy + (z + G) * sz) =
+                    1.0 - (dx * dx + dy * dy + dz * dz) / (Ro * Ro);
+              }
+          Kokkos::deep_copy(f, h);
+        }
+      };
+      IbmSolver sd(B.l[0], B.l[1], B.l[2]);
+      build(sd, B, true);
+      IbmSolver sr(N, N, N);
+      build(sr, Block{{0, 0, 0}, {N, N, N}}, false);
+      std::vector<int> itD, itR;
+      std::vector<double> fxD, fxR, idD, idR;
+      for (int k = 0; k < 20; ++k) {
+        for (int w = 0; w < 2; ++w) {
+          IbmSolver& s = w == 0 ? sd : sr;
+          s.advanceScalars();
+          const auto fl = s.scalarWallFlux("c");
+          const auto bu = s.scalarBudget("c");
+          (w == 0 ? itD : itR).push_back(s.scalarField("c").cut->iterations);
+          (w == 0 ? fxD : fxR).push_back(fl[0]);
+          (w == 0 ? fxD : fxR).push_back(fl[1]);
+          (w == 0 ? idD : idR).push_back(bu.identityError / std::fabs(bu.dMass));
+        }
+      }
+      double gg[4] = {0, 0, 0, 0};
+      long ns = 0;
+      for (int ph = 0; ph < 2; ++ph) {
+        const char* nm = ph == 0 ? "c" : "c_solid";
+        auto cd = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sd.fieldView(nm));
+        auto cr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sr.fieldView(nm));
+        const long dsy = B.l[0] + 2 * G, dsz = dsy * (B.l[1] + 2 * G), rsy = N + 2 * G,
+                   rsz = rsy * (N + 2 * G);
+        double md = 0.0, mr = 0.0;
+        long nsl = 0;
+        for (int z = 0; z < B.l[2]; ++z)
+          for (int y = 0; y < B.l[1]; ++y)
+            for (int x = 0; x < B.l[0]; ++x) {
+              const double a = cd((x + G) + (y + G) * dsy + (z + G) * dsz);
+              const double b =
+                  cr((x + B.o[0] + G) + (y + B.o[1] + G) * rsy + (z + B.o[2] + G) * rsz);
+              md = std::fmax(md, std::fabs(a - b));
+              mr = std::fmax(mr, std::fabs(b));
+              nsl += same(a, b) ? 0 : 1;
+            }
+        double g2[2] = {md, mr}, o2[2];
+        MPI_Allreduce(g2, o2, 2, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+        gg[2 * ph] = o2[0];
+        gg[2 * ph + 1] = o2[1];
+        long o = 0;
+        MPI_Allreduce(&nsl, &o, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+        ns += o;
+      }
+      double idm = 0.0;
+      for (std::size_t k = 0; k < idD.size(); ++k)
+        idm = std::fmax(idm, std::fmax(std::fabs(idD[k]), std::fabs(idR[k])));
+      const auto& st = *sd.scalarField("c").cut;
+      if (rank_ == 0) {
+        std::printf(
+            "[g6 case 1] np=%d: max|c - c_1| = %.2e (max %.3f), max|psi_s - psi_s1| = %.2e "
+            "(max %.3f), %ld cells not bitwise; %ld solid unknowns, %d levels\n",
+            size_, gg[0], gg[1], gg[2], gg[3], ns, st.numSolidUnknowns, st.mgLevels);
+        std::printf("  iterations np:");
+        for (int it : itD)
+          std::printf(" %d", it);
+        std::printf("   single:");
+        for (int it : itR)
+          std::printf(" %d", it);
+        std::printf("\n  last fluxes np: %.15e %.15e   single: %.15e %.15e\n", fxD[fxD.size() - 2],
+                    fxD.back(), fxR[fxR.size() - 2], fxR.back());
+        std::printf("  budget identity (rel to |d_mass|) <= %.1e\n", idm);
+      }
+      CHECK(st.conj && st.numSolidUnknowns > 0);
+      CHECK(itD.size() == itR.size());
+      CHECK(idm <= 1e-12);
+      if (size_ == 1) {
+        CHECK(ns == 0);
+        for (std::size_t k = 0; k < itD.size(); ++k)
+          CHECK(itD[k] == itR[k]);
+        for (std::size_t k = 0; k < fxD.size(); ++k)
+          CHECK(same(fxD[k], fxR[k]));
+      } else {
+        CHECK(gg[0] <= 1e-10 * gg[1]);
+        CHECK(gg[2] <= 1e-10 * gg[3]);
+        for (std::size_t k = 0; k < itD.size(); ++k)
+          CHECK(std::abs(itD[k] - itR[k]) <= 1);
+        for (std::size_t k = 0; k < fxD.size(); ++k)
+          CHECK(std::fabs(fxD[k] - fxR[k]) <= 1e-10 * std::fmax(std::fabs(fxR[k]), 1e-300));
+      }
     }
   }
   Kokkos::finalize();

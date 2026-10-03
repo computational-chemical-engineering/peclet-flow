@@ -1467,6 +1467,352 @@ def gate_gadv():
     print(f"  [(c): {time.time() - t0:.0f} s]")
 
 
+# --------------------------------------------------------------------------- conjugate (WO-7) ----
+def fmt(v, spec):
+    """A list of numbers formatted with `spec` (no nested f-string quotes: Python 3.10)."""
+    return "[" + ", ".join(format(x, spec) for x in v) + "]"
+
+
+def conj_box(n, L):
+    """A walled box of physical size L (no flow)."""
+    return walled((n, n, n), (L, L, L))
+
+
+def solid_isolated(s, name="c"):
+    """Solid unknowns that no solid face and no facet couple: kappa_s > 0, every solid aperture
+    1 - a^snap = 0 (all six fluid apertures snapped to 1, hence no facet). Their steady rows are
+    empty (§1.3's rule kappa_s > 0 admits them; INFO, see the WO-7 log)."""
+    geo = s.diagnostics.scalar_geometry(name)
+    us = geo["solid_unknown"] > 0.5
+    ax, ay, az = geo["aperture_x"], geo["aperture_y"], geo["aperture_z"]
+    allopen = np.ones(us.shape, dtype=bool)
+    for a, ap in ((0, ax), (1, ay), (2, az)):
+        allopen &= (ap >= 1.0) & (np.roll(ap, -1, axis=a) >= 1.0)
+    return us & allopen
+
+
+def maxwell_fields(X, Y, Z, c0, R, G, ratio):
+    """Maxwell's conducting sphere in a uniform gradient G (psi form, Lam_f = 1, Lam_s = ratio):
+    outside G.x' (1 + A R^3/r^3), inside B G.x', A = (1 - ratio)/(ratio + 2), B = 3/(ratio + 2),
+    x' = x - c0."""
+    xs, ys, zs = X - c0[0], Y - c0[1], Z - c0[2]
+    r = np.sqrt(xs * xs + ys * ys + zs * zs)
+    gx = G[0] * xs + G[1] * ys + G[2] * zs
+    A, B = (1.0 - ratio) / (ratio + 2.0), 3.0 / (ratio + 2.0)
+    out = gx * (1.0 + A * R**3 / np.maximum(r, 1e-300) ** 3)
+    return np.where(r >= R, out, B * gx), B * gx, out
+
+
+def g4_case(Rh, off, ratio, K=1.0, rtol=None, G=(0.3, -0.5, 0.8)):
+    """G4: a conjugate sphere R = 1 (Lam_s = ratio, C_s = 1, partition K) in a box 6R, Lam_f = D =
+    1, the exact exterior field as the box Dirichlet profile, steady."""
+    R, D = 1.0, 1.0
+    h = R / Rh
+    n = 6 * Rh
+    L = n * h
+    s = conj_box(n, L)
+    c0 = np.array([0.5 * L, 0.5 * L, 0.5 * L]) + np.asarray(off) * h
+    X, Y, Z = grid(s)
+    r = np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2 + (Z - c0[2]) ** 2)
+    s.set_solid(np.asfortranarray(r - R))
+    add_cc(s, D, box="neumann")
+    for f in FACES:
+        P = face_points(s, f)
+        _, _, out = maxwell_fields(P[0], P[1], P[2], c0, R, G, ratio)
+        s.set_scalar_bc("c", f, "dirichlet", out)
+    s.set_scalar_solid("c", diffusivity=ratio * D / K, capacity=1.0, partition=K)
+    if rtol is not None:
+        s.set_scalar_tolerance("c", rtol)
+    s.solve_scalar_steady("c")
+    geo = s.diagnostics.scalar_geometry("c")
+    cen = s.diagnostics.scalar_census("c")
+    return s, X, Y, Z, c0, geo, cen
+
+
+def interior_gradient(X, Y, Z, psi, mask):
+    """Least-squares fit psi = a + g.x over the masked cells; returns g."""
+    A = np.stack([np.ones(mask.sum()), X[mask], Y[mask], Z[mask]], axis=1)
+    sol, *_ = np.linalg.lstsq(A, psi[mask], rcond=None)
+    return sol[1:]
+
+
+def gate_conj_unit():
+    """The k_s = k_f checks (the brief's early unit test): with Lam_s = Lam_f, K = 1, R_c = 0 the
+    composite must reproduce the homogeneous solution — a linear field to round-off (§1.6.3, G4(a))
+    and, in the closure mode, k* = 1 (theta = const)."""
+    print("conjugate unit: Lam_s = Lam_f, K = 1, R_c = 0 reproduces the homogeneous solution")
+    G = (0.3, -0.5, 0.8)
+    for K in (1.0, 3.0):
+        s, X, Y, Z, c0, geo, cen = g4_case(6, OFFSETS[0], 1.0, K=K, rtol=1e-12, G=G)
+        ex = G[0] * (X - c0[0]) + G[1] * (Y - c0[1]) + G[2] * (Z - c0[2])
+        uf = geo["unknown"] > 0.5
+        us = geo["solid_unknown"] > 0.5
+        iso = solid_isolated(s)
+        ef = float(np.max(np.abs(s.get_field("c") - ex)[uf]))
+        cs = s.get_scalar_solid("c")
+        es = float(np.max(np.abs(cs / K - ex)[us & ~iso]))
+        ei = float(np.max(np.abs(cs / K - ex)[iso])) if iso.any() else 0.0
+        scale = float(np.linalg.norm(G)) * 6.0
+        print(f"  K={K}: max|psi_f - G.x| {ef:.2e}, max|psi_s - G.x| {es:.2e} (coupled solid unknowns); "
+              f"isolated solid unknowns {int(iso.sum())} of {int(us.sum())}, max err there {ei:.2e} (INFO); "
+              f"{cen['krylov_iterations']} it, rungs {cen['probe_rungs']}")
+        check(cen["krylov_converged"], f"K={K}: converged")
+        check(ef <= 1e-10 * scale and es <= 1e-10 * scale,
+              f"K={K}: linear field reproduced to 1e-10 |G| L in both phases ({ef:.1e}, {es:.1e})")
+        check(bool(np.all(np.isnan(cs[~us]))), f"K={K}: get_scalar_solid NaN outside the solid unknowns")
+    n, D = 24, 0.6
+    s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    R = 0.5 * (0.3 * 6.0 / math.pi) ** (1.0 / 3.0)
+    X, Y, Z = grid(s)
+    s.set_solid(np.asfortranarray(np.sqrt((X - 0.51) ** 2 + (Y - 0.49) ** 2 + (Z - 0.505) ** 2) - R))
+    s.add_scalar("c", diffusivity=D, cutcell=True)
+    s.set_scalar_solid("c", diffusivity=D)
+    s.set_scalar_mean_gradient("c", (1.0, 0.0, 0.0))
+    s.solve_scalar_steady("c")
+    J = np.asarray(s.scalar_mean_flux("c"))
+    th = s.get_field("c")
+    print(f"  closure, SC array c = 0.3: k* - 1 = {-J[0] / D - 1.0:+.2e}, J_y,z = {J[1]:+.1e}, {J[2]:+.1e},"
+          f" max|theta| {float(np.max(np.abs(th))):.1e}")
+    check(abs(-J[0] / D - 1.0) <= 1e-12 and abs(J[1]) <= 1e-12 and abs(J[2]) <= 1e-12,
+          "closure at Lam_s = Lam_f: k* = 1 to 1e-12 (the mean-gradient conjugate terms, §1.5)")
+
+
+def gate_g4():
+    print("G4 Maxwell conjugate sphere (steady), box 6R, R/h in {6, 12, 24}")
+    G = (0.3, -0.5, 0.8)
+    Gn = float(np.linalg.norm(G))
+    e, its = {}, {}
+    for ratio in (1e-2, 1.0, 10.0, 1e3):
+        e[ratio], its[ratio] = {}, {}
+        for Rh in (6, 12, 24):
+            rows = []
+            for off in OFFSETS:
+                s, X, Y, Z, c0, geo, cen = g4_case(Rh, off, ratio, G=G)
+                us = geo["solid_unknown"] > 0.5
+                full = us & (geo["kappa_solid"] >= 1.0)
+                gfit = interior_gradient(X, Y, Z, s.get_field("c_solid"), full)
+                Bg = 3.0 / (ratio + 2.0) * np.asarray(G)
+                rows.append(dict(err=float(np.linalg.norm(gfit - Bg) / np.linalg.norm(Bg)),
+                                 it=cen["krylov_iterations"], conv=cen["krylov_converged"],
+                                 rungs=cen["probe_rungs"], iso=int(solid_isolated(s).sum())))
+            e[ratio][Rh] = rms([r["err"] for r in rows])
+            its[ratio][Rh] = [r["it"] for r in rows]
+            print(f"  ratio={ratio:g} R/h={Rh:3d}  interior gradient rel err {fmt([r['err'] for r in rows], '.3e')}"
+                  f"  iters {its[ratio][Rh]}  rungs {rows[0]['rungs']}  isolated solid {[r['iso'] for r in rows]}")
+            for r in rows:
+                check(r["conv"], f"ratio={ratio} R/h={Rh}: converged ({r['it']} iterations)")
+                check(r["it"] <= 30, f"ratio={ratio} R/h={Rh}: G-iter conjugate <= 30 ({r['it']})")
+        if ratio == 1.0:  # (a): the composite is exact here (a linear field), so no order exists
+            check(max(e[ratio].values()) <= 1e-9,
+                  f"ratio=1: interior gradient exact to round-off ({max(e[ratio].values()):.1e} <= 1e-9)")
+            continue
+        o1, o2 = order(e[ratio][6], e[ratio][12]), order(e[ratio][12], e[ratio][24])
+        check(o1 >= 1.7 and o2 >= 1.7, f"ratio={ratio}: interior-gradient orders {o1:.2f}, {o2:.2f} >= 1.7")
+        check(e[ratio][24] <= 5e-3, f"ratio={ratio}: |err| {e[ratio][24]:.2e} <= 5e-3 at R/h = 24 (prov.)")
+    for ratio in (1e-2, 1e3):
+        for Rh in (6, 12, 24):
+            b = 2 * max(its[1.0][Rh]) + 5
+            check(max(its[ratio][Rh]) <= b,
+                  f"(d) ratio={ratio} R/h={Rh}: iterations {max(its[ratio][Rh])} <= 2 x ratio-1 + 5 = {b}")
+    print("G4(c) K = 3 with the same Lam_s: psi identical, c_s = 3 psi_s")
+    for ratio in (10.0,):
+        s1, X, Y, Z, c0, geo, _ = g4_case(12, OFFSETS[0], ratio, K=1.0, rtol=1e-13, G=G)
+        s3, _, _, _, _, _, _ = g4_case(12, OFFSETS[0], ratio, K=3.0, rtol=1e-13, G=G)
+        us = geo["solid_unknown"] > 0.5
+        iso = solid_isolated(s1)
+        p1, p3 = s1.get_field("c_solid"), s3.get_field("c_solid")
+        d = float(np.max(np.abs(p1 - p3)[us & ~iso]) / np.max(np.abs(p1)[us]))
+        df = float(np.max(np.abs(s1.get_field("c") - s3.get_field("c"))) / np.max(np.abs(s1.get_field("c"))))
+        c3 = s3.get_scalar_solid("c")
+        k3 = float(np.max(np.abs(c3[us] - 3.0 * p3[us])))
+        print(f"  ratio={ratio}: max|psi_s(K=3) - psi_s(K=1)| {d:.1e}, fluid {df:.1e} (rel); "
+              f"max|c_s - 3 psi_s| {k3:.1e}")
+        check(d <= 1e-9 and df <= 1e-9, f"K = 3: psi identical to K = 1 within 1e-9 ({d:.1e}, {df:.1e})")
+        check(k3 == 0.0, "K = 3: get_scalar_solid = 3 psi_s exactly")
+
+
+def a_t_keff_sc(c):
+    """k* of perfectly conducting spheres on the simple-cubic lattice, Andrianov & Topol eq. 157
+    (L3 §2 B6)."""
+    a1, a2, a3, a4, a5, a6 = 1.305, 0.231, 0.405, 0.0723, 0.153, 0.0105
+    den = (-1.0 + c + a1 * c ** (10 / 3) * (1.0 + a2 * c ** (11 / 3)) / (1.0 - a3 * c ** (7 / 3)) +
+           a4 * c ** (14 / 3) + a5 * c**6 + a6 * c ** (22 / 3))
+    return 1.0 - 3.0 * c / den
+
+
+def g5a_case(n, off, D=0.6, ratio=1e4):
+    L = 1.0
+    h = L / n
+    s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    R = 0.5 * L * (0.3 * 6.0 / math.pi) ** (1.0 / 3.0)
+    c0 = np.array([0.5 * L, 0.5 * L, 0.5 * L]) + np.asarray(off) * h
+    X, Y, Z = grid(s)
+    r = np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2 + (Z - c0[2]) ** 2)
+    s.set_solid(np.asfortranarray(r - R))
+    s.add_scalar("c", diffusivity=D, cutcell=True)
+    s.set_scalar_solid("c", diffusivity=ratio * D)
+    s.set_scalar_mean_gradient("c", (1.0, 0.0, 0.0))
+    s.solve_scalar_steady("c")
+    J = np.asarray(s.scalar_mean_flux("c"))
+    c = s.diagnostics.scalar_census("c")
+    return dict(k=-J[0] / D, its=c["krylov_iterations"], conv=c["krylov_converged"], nd=2.0 * R / h,
+                iso=int(solid_isolated(s).sum()), res=c["krylov_residual"])
+
+
+def gate_g5a():
+    ref = a_t_keff_sc(0.3)
+    print(f"G5a conducting periodic SC array, c = 0.3, Lam_s/Lam_f = 1e4, mean gradient e_x; "
+          f"reference k* (Andrianov-Topol eq. 157, perfect conductor) = {ref:.5f}")
+    k, its = {}, {}
+    for n in (20, 40, 80):
+        rows = [g5a_case(n, off) for off in OFFSETS]
+        k[n] = float(np.mean([r["k"] for r in rows]))
+        its[n] = [r["its"] for r in rows]
+        print(f"  n={n} (ND {rows[0]['nd']:.1f})  k* {fmt([r['k'] for r in rows], '.6f')}  "
+              f"rel err vs ref {k[n] / ref - 1.0:+.2e}  iters {its[n]}  residual {fmt([r['res'] for r in rows], '.1e')}"
+              f"  isolated solid {[r['iso'] for r in rows]}")
+        for r in rows:
+            check(r["conv"], f"n={n}: converged ({r['its']} iterations)")
+            check(r["its"] <= 30, f"n={n}: G-iter singular steady <= 30 ({r['its']})")
+    p = math.log2(abs(k[20] - k[40]) / abs(k[40] - k[80])) if k[40] != k[80] else float("inf")
+    check(p >= 1.5, f"self-convergence order {p:.2f} >= 1.5")
+    check(abs(k[40] / ref - 1.0) <= 3e-3, f"|k*/ref - 1| {abs(k[40] / ref - 1.0):.2e} <= 3e-3 at ND ~ 32 (prov.)")
+
+
+def g6_exact(Ls, CK, Rc, R=1.0, Ro=2.0):
+    """The slowest decay rate mu and the mode (P, B, C) of the composite sphere in the psi form
+    (Lam_f = C_f = 1): solid r < R, psi_s = P sin(k_s r)/r; fluid R < r < Ro, psi_f = (B sin(k_f r)
+    + C cos(k_f r))/r; psi_f(Ro) = 0, Lam_s psi_s' = psi_f' and psi_s - psi_f + R_c Lam_s psi_s' = 0
+    at R (the l = 0 analogue of conj.py's exact())."""
+    def mat(mu):
+        ks, kf = math.sqrt(CK * mu / Ls), math.sqrt(mu)
+        S = lambda k, r: math.sin(k * r) / r
+        C = lambda k, r: math.cos(k * r) / r
+        dS = lambda k, r: (k * math.cos(k * r) * r - math.sin(k * r)) / (r * r)
+        dC = lambda k, r: (-k * math.sin(k * r) * r - math.cos(k * r)) / (r * r)
+        return np.array([[0.0, S(kf, Ro), C(kf, Ro)],
+                         [Ls * dS(ks, R), -dS(kf, R), -dC(kf, R)],
+                         [S(ks, R) + Rc * Ls * dS(ks, R), -S(kf, R), -C(kf, R)]])
+    det = lambda m: float(np.linalg.det(mat(m)))
+    mus = np.linspace(1e-4, 40.0, 40000)
+    d = [det(m) for m in mus]
+    for i in range(len(mus) - 1):
+        if d[i] * d[i + 1] < 0:
+            a, b = mus[i], mus[i + 1]
+            for _ in range(200):
+                m = 0.5 * (a + b)
+                if det(a) * det(m) <= 0:
+                    b = m
+                else:
+                    a = m
+            mu = 0.5 * (a + b)
+            _, _, vt = np.linalg.svd(mat(mu))
+            return mu, vt[-1], math.sqrt(CK * mu / Ls), math.sqrt(mu)
+    raise RuntimeError("no root")
+
+
+G6_CASES = ((10.0, 1.0, 1.0, 0.0), (0.1, 1.0, 1.0, 0.0), (100.0, 0.5, 1.0, 0.0), (3.0, 3.0, 3.0, 0.0),
+            (1.0, 1.0, 1.0, 0.2), (5.0, 1.0, 0.5, 0.5))
+
+
+def g6_case(Rh, off, case, nsteps=30):
+    """G6: a conjugate core R = 1 (instance 0) inside an immersed Dirichlet sphere Ro = 2 (instance
+    1, psi = 0); psi form (Lam_s, C_s K, K, R_c), Lam_f = C_f = 1; BE late-time ratio of the total
+    mass (fluid + solid) with dt mu = 1, the exact mode as the initial condition."""
+    Ls, CK, K, Rc = case
+    R, Ro = 1.0, 2.0
+    h = R / Rh
+    n = int(math.ceil(2.0 * Ro / h)) + 6
+    L = n * h
+    s = walled((n, n, n), (L, L, L))
+    c0 = np.array([0.5 * L, 0.5 * L, 0.5 * L]) + np.asarray(off) * h
+    s.set_scene(*two_body_scene(c0, R, Ro), periodic=False)
+    s.set_solid_from_scene(cutcell_pressure=False)
+    mu, (P, B, C), ks, kf = g6_exact(Ls, CK, Rc)
+    dt = 1.0 / mu
+    s.set_dt(dt)
+    add_cc(s, 1.0, box="neumann")
+    s.set_scalar_wall("c", "dirichlet", 0.0, instance=1)
+    s.set_scalar_solid("c", diffusivity=Ls / CK, capacity=CK / K, partition=K, contact_resistance=Rc,
+                       instance=0)
+    X, Y, Z = grid(s)
+    r = np.maximum(np.sqrt((X - c0[0]) ** 2 + (Y - c0[1]) ** 2 + (Z - c0[2]) ** 2), 1e-12)
+    s.set_field("c", np.asfortranarray((B * np.sin(kf * r) + C * np.cos(kf * r)) / r))
+    s.set_field("c_solid", np.asfortranarray(P * np.sin(ks * r) / r))
+    masses, mfl, its, idmax = [], [], [], 0.0
+    iso = int(solid_isolated(s).sum())
+    for _ in range(nsteps):
+        s.advance_scalars()
+        b = s.diagnostics.scalar_budget("c")
+        masses.append(b["mass"] + b["mass_solid"])
+        mfl.append(b["mass"])
+        idmax = max(idmax, abs(b["identity_error"]) / max(abs(b["d_mass"]), 1e-300))
+        cen = s.diagnostics.scalar_census("c")
+        its.append(cen["krylov_iterations"])
+        if not cen["krylov_converged"]:
+            return dict(err=float("nan"), its=its, conv=False, idrel=idmax, rungs=cen["probe_rungs"])
+    mu_h = (masses[-2] / masses[-1] - 1.0) / dt
+    mu_f = (mfl[-2] / mfl[-1] - 1.0) / dt  # INFO: the fluid mass alone (same mode, no solid cells)
+    return dict(err=mu_h / mu - 1.0, errf=mu_f / mu - 1.0, its=its, conv=True, idrel=idmax,
+                rungs=cen["probe_rungs"], nsolid=cen["num_solid_unknowns"], iso=iso)
+
+
+def gate_g6(cases=None):
+    print("G6 transient composite sphere (conjugate core R, immersed Dirichlet sphere 2R), "
+          "BE late-time ratio, dt mu = 1, 30 steps; R/h in {8, 16, 32}")
+    for ci, case in enumerate(G6_CASES):
+        if cases is not None and ci not in cases:
+            continue
+        mu = g6_exact(case[0], case[1], case[3])[0]
+        e = {}
+        for Rh in (8, 16, 32):
+            t0 = time.time()
+            rows = [g6_case(Rh, off, case) for off in OFFSETS]
+            e[Rh] = rms([r["err"] for r in rows])
+            print(f"  case {ci + 1} (Lam_s, CK, K, Rc) = {case} mu = {mu:.6f}  R/h={Rh:3d}  "
+                  f"mu rel err {fmt([r['err'] for r in rows], '+.3e')}  (INFO fluid mass: "
+                  f"{fmt([r.get('errf', float('nan')) for r in rows], '+.3e')}; isolated solid "
+                  f"{[r.get('iso') for r in rows]})  identity/|dM| <= "
+                  f"{max(r['idrel'] for r in rows):.1e}  iters/step {min(min(r['its']) for r in rows)}.."
+                  f"{max(max(r['its']) for r in rows)}  rungs {rows[0]['rungs']}  ({time.time() - t0:.0f} s)")
+            for r in rows:
+                check(r["conv"], f"case {ci + 1} R/h={Rh}: every step converged")
+                check(r["idrel"] <= 1e-13, f"case {ci + 1} R/h={Rh}: budget identity {r['idrel']:.1e} <= 1e-13 |d_mass|")
+                check(max(r["its"]) <= 30, f"case {ci + 1} R/h={Rh}: G-iter conjugate <= 30 ({max(r['its'])})")
+        o1, o2 = order(e[8], e[16]), order(e[16], e[32])
+        check(o1 >= 1.7 and o2 >= 1.7, f"case {ci + 1}: orders {o1:.2f}, {o2:.2f} >= 1.7")
+        check(e[16] <= 2e-3, f"case {ci + 1}: |err| {e[16]:.2e} <= 2e-3 at R/h = 16 (prov.)")
+
+
+def gate_gadv_conj():
+    """WO-7's extra G-adv row (design A2): G-adv(b) with conducting spheres, Lam_s/Lam_f = 10, K = 1,
+    at Pe_h 1 and 10 (the mean-gradient mode, G = e_x): converged, in <= 1.5x the insulating (b)
+    count of the same field."""
+    print("G-adv(b) conjugate: conducting spheres Lam_s/Lam_f = 10 vs insulating, Pe_h 1 and 10")
+    for n in (32, 64):
+        for pe in (1.0, 10.0):
+            si = gadv_b_case(n, pe, "neumann")
+            ci = si.diagnostics.scalar_census("c")
+            s = sc_array(n)
+            s.add_scalar("c", diffusivity=0.05, cutcell=True)
+            s.set_scalar_solid("c", diffusivity=0.5)
+            s.set_scalar_mean_gradient("c", (1.0, 0.0, 0.0))
+            rescale_peclet(s, "c", pe)
+            s.solve_scalar_steady("c")
+            cc = s.diagnostics.scalar_census("c")
+            b = s.diagnostics.scalar_budget("c")
+            print(f"  n={n} Pe_h {cc['max_cell_peclet']:.3g}: conjugate {cc['krylov_iterations']} it "
+                  f"(converged {cc['krylov_converged']}, residual {cc['krylov_residual']:.1e}), insulating "
+                  f"{ci['krylov_iterations']} it; identity_error {b['identity_error']:.1e}")
+            check(cc["krylov_converged"], f"n={n} Pe_h={pe}: conjugate converged")
+            check(cc["krylov_iterations"] <= 1.5 * ci["krylov_iterations"],
+                  f"n={n} Pe_h={pe}: {cc['krylov_iterations']} <= 1.5 x {ci['krylov_iterations']}")
+
+
 # --------------------------------------------------------------------------------------- API ----
 def raises(exc, fn, msg):
     try:
@@ -1578,11 +1924,48 @@ def gate_api():
                   ("'gauge-exact'", "'plain'", "'embed'", "staggered Solver"),
                   "the 'ghost' scheme is refused, listing gauge-exact, plain, embed and the staggered "
                   "Solver (D-WO5-4)")
+    # WO-7 (§8.1): set_scalar_solid's validation, the registered solid field, get_scalar_solid
+    s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_rho(1.0)
+    s.set_mu(1.0)
+    s.set_dt(0.1)
+    X, Y, Z = grid(s)
+    s.set_solid(np.asfortranarray(np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2) - 0.2))
+    s.add_scalar("legacy", 1.0)
+    s.add_scalar("c", 1.0, cutcell=True)
+    raises(ValueError, lambda: s.set_scalar_solid("legacy", 1.0), "set_scalar_solid on a legacy scalar")
+    for kw, nm in (({"diffusivity": -1.0}, "diffusivity < 0"), ({"capacity": 0.0}, "capacity = 0"),
+                   ({"partition": 0.0}, "partition = 0"), ({"contact_resistance": -1.0}, "R_c < 0"),
+                   ({"instance": 0}, "instance= without a scene")):
+        args = {"diffusivity": 1.0}
+        args.update(kw)
+        raises(ValueError, lambda a=args: s.set_scalar_solid("c", **a), f"set_scalar_solid: {nm} is a ValueError")
+    check("c_solid" not in s.field_names(), "no solid field before set_scalar_solid")
+    s.set_scalar_solid("c", 2.0, capacity=0.5, partition=3.0)
+    check("c_solid" in s.field_names(), "set_scalar_solid registers 'c_solid'")
+    check(bool(np.all(np.isnan(s.get_scalar_solid("c")))), "get_scalar_solid before a solve: all NaN")
+    s.set_field("c", np.asfortranarray(np.ones((n, n, n))))
+    s.set_field("c_solid", np.asfortranarray(np.ones((n, n, n))))  # psi = 1 in both: equilibrium
+    s.advance_scalars()
+    c = s.diagnostics.scalar_census("c")
+    cs = s.get_scalar_solid("c")
+    geo = s.diagnostics.scalar_geometry("c")
+    us = geo["solid_unknown"] > 0.5
+    check(c["krylov_converged"] and c["num_solid_unknowns"] == int(us.sum()) > 0,
+          f"a conjugate step converged ({c['krylov_iterations']} it, {c['num_solid_unknowns']} solid unknowns)")
+    check(float(np.max(np.abs(cs[us] - 3.0))) <= 1e-9 and float(np.max(np.abs(s.get_field("c")[geo["unknown"] > 0.5] - 1.0))) <= 1e-9,
+          "psi = 1 in both phases is an equilibrium: c = 1, c_s = K = 3")
+    s.set_scalar_wall("c", "neumann", 0.0)  # every body a wall again: the single-phase path
+    s.advance_scalars()
+    check(s.diagnostics.scalar_census("c")["num_solid_unknowns"] == 0, "set_scalar_wall(instance=None) ends the conjugate path")
 
 
 GATES = {"api": gate_api, "g1": gate_g1, "g2": gate_g2, "g3a": gate_g3a, "g3b": gate_g3b, "g7": gate_g7,
          "giter": gate_giter, "g9": gate_g9, "g9b": gate_g9b, "g9c": gate_g9c, "gadv": gate_gadv,
-         "g8": gate_g8, "g5b": gate_g5b}
+         "g8": gate_g8, "g5b": gate_g5b, "conj_unit": gate_conj_unit, "g4": gate_g4, "g5a": gate_g5a,
+         "g6": gate_g6, "gadv_conj": gate_gadv_conj}
+for _ci in range(len(G6_CASES)):  # one ctest per G6 case (each runs the full ladder)
+    GATES[f"g6_{_ci + 1}"] = (lambda c=_ci: gate_g6(cases=(c,)))
 
 if __name__ == "__main__":
     names = sys.argv[1:] or list(GATES)

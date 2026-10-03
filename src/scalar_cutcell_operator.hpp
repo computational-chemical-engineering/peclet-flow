@@ -41,9 +41,13 @@ class ScalarMG;  // scalar_mg.hpp (WO-4): the preconditioner, one per cut-cell s
 /// Wall condition per body (§1.1, §8.1 `set_scalar_wall`), in the caller's PHYSICAL units; the
 /// conversion to internal units is done at advance time (§1.2).
 struct ScalarWallSpec {
-  int type = 0;              ///< 0 neumann, 1 dirichlet, 2 robin
+  int type = 0;              ///< 0 neumann, 1 dirichlet, 2 robin, 3 conjugate (WO-7)
   double value = 0.0;        ///< neumann: q (flux into the fluid, c L/T); dirichlet/robin: g
   double coefficient = 0.0;  ///< robin: k (L/T)
+  // conjugate (§1.1, §8.1 `set_scalar_solid`): the solid's own diffusivity D_s (L^2/T), the
+  // capacity ratio C_s, the partition coefficient K (= c_s / c at equilibrium) and the contact
+  // resistance R_c (T/L, on psi). psi form: Lam_s = C_s D_s K, capacity C_s K.
+  double solidD = 0.0, solidC = 1.0, solidK = 1.0, solidRc = 0.0;
 };
 
 /// The per-cut-cell-scalar state (`ScalarField::cut`). Settings are stored verbatim (physical);
@@ -112,6 +116,33 @@ struct ScalarCutState {
   long numFluxFaces = 0;      ///< faces carrying flux (the implicit fraction's denominator)
   long numGuardedFaces = 0;   ///< faces whose projection flux the guard zeroed (a no-op reading)
   double bulkCourant = 0.0;   ///< census `bulk_courant`: C_bulk of §6.3 (0 steady)
+  // ---- conjugate (WO-7, §1.1, §1.3, §2.7, §3.4, §4): the solid field psi_s = c_s / K ----------
+  // Allocated by the first set_scalar_solid; the two-field path runs only while some body is
+  // conjugate (`conj` of the last build), so a scalar without a conjugate body takes the
+  // single-phase path above, bitwise.
+  CCField solid;      ///< the registered field `<name>_solid` (psi_s), when allocated
+  bool conj = false;  ///< the last operator had a conjugate body (two fields)
+  // the per-scalar solid record (§2.7, §3.4), rebuilt when the geometry or the conjugate set moves
+  long solidVersion = -1;           ///< geometry version of the record
+  std::vector<char> solidKey;       ///< the conjugate flag per body it was built for
+  CCField mat;                      ///< material (body id) per cell, haloed; -1: no solid
+  CCField sunk;                     ///< solid-unknown flags (haloed, 0 beyond non-periodic faces)
+  Kokkos::View<double*, CCMem> sS;  ///< solid probe distance per facet (conjugate facets)
+  Kokkos::View<int* [8], Kokkos::LayoutLeft, CCMem> offS;
+  Kokkos::View<double* [8], Kokkos::LayoutLeft, CCMem> wS;
+  Kokkos::View<std::uint8_t*, CCMem> rungS;
+  Kokkos::View<std::uint8_t*, CCMem> conjF;  ///< 1 on a facet of a conjugate body
+  long numSolidUnknowns = 0;                 ///< census `num_solid_unknowns` (global)
+  long solidRungs[4] = {0, 0, 0, 0};         ///< census probe_rungs['solid'] (global)
+  // the solid operator of the last build (§4.1: the solid phase's own 7 bands)
+  CCField spx, spy, spz;  ///< level-0 solid face products Lam_face a_s (guarded), low faces
+  CCField ms;             ///< solid mass C_s K kappa_s idt on solid unknowns
+  CCField ASC, ASW, ASE, ASS, ASN, ASB, AST, bS, sOld;
+  CCField SACs, W0;                 ///< solid surrogate diagonal; the same-cell coupling sum cc
+  Kokkos::View<double*, CCMem> cc;  ///< per facet: alpha G_c (conjugate facets, else 0)
+  std::vector<double> mtLam, mtCK, mtK, mtRc;  ///< internal per-body material (conjugate bodies)
+  double maxSolidD = 0.0;  ///< max internal D_s' = Lam_s'/(C_s K) (the level rule)
+  CCField krS, krhS, kpS, kvS, ktS, kzS, kz2S, kbS, kqS;  ///< Krylov scratch, solid phase
 };
 
 namespace sco {
@@ -350,6 +381,11 @@ inline void facetCoefficients(Kokkos::View<double*, CCMem> cw, Kokkos::View<doub
         if (t == 0) {
           cw(f) = 0.0;
           rw(f) = al * qq(bd);
+          return;
+        }
+        if (t == 3) {  // conjugate (WO-7): the interface coupling is `cc`, not a wall term
+          cw(f) = 0.0;
+          rw(f) = 0.0;
           return;
         }
         const double G = peclet::core::scheme::wallConductance(sF(f), lam, t == 1 ? kInf : kk(bd));
@@ -1084,7 +1120,8 @@ inline void meanGradientFaceRhs(CCField b, CCConst unk, CCConst sax, CCConst say
 /// Dirichlet/Robin probes (§1.5): rw(f) -= cw(f) sum_k w_k G.x_k, so that rw = alpha G_phi (g -
 /// sum_k w_k G.x_k); x_k the global centres of the stencil cells. Neumann facets (cw = 0) and
 /// facets of non-unknown cells (cw = rw = 0) are unchanged.
-inline void meanGradientProbeShift(Kokkos::View<double*, CCMem> rw, const scg::ScalarFacetOverlay& fo,
+inline void meanGradientProbeShift(Kokkos::View<double*, CCMem> rw,
+                                   const scg::ScalarFacetOverlay& fo,
                                    Kokkos::View<const double*, CCMem> cw,
                                    const MeanGradPosition& pos) {
   auto fcell = fo.cell;
@@ -1222,6 +1259,530 @@ inline void meanFluxLocal(CCConst th, CCConst kappa, CCConst unk, CCConst sax, C
   adv[0] = a0;
   adv[1] = a1;
   adv[2] = a2;
+}
+
+// ---- conjugate transport (WO-7; §1.1, §1.3, §1.4, §2.7, §3.4, §4) -------------------------------
+//
+// Two fields on one grid: the fluid c and the solid psi_s = c_s / K (the psi form of §1.1, in which
+// the interface conditions are flux continuity and q = (psi_s - psi_f)/R_c). Per phase the 7 bands
+// of §4.1; the solid's hold C_s K kappa_s idt and the face diffusion Lam_face w_a a_s, a_s = 1 -
+// a^snap, on faces whose two cells are solid unknowns (Lam_face the harmonic mean of the two
+// cells' Lam_s when their materials differ). The overlay adds, per conjugate facet, cc = alpha G_c
+// times (u_pf - u_ps) to the fluid row and its negative to the solid row of the same cell: one
+// number entering two rows with opposite signs (§1.6.1).
+
+/// The per-body material of a conjugate scalar, internal units (§4.2): conj 1 on a conjugate body;
+/// lam = Lam_s' = C_s D_s K diffToInt, ck = C_s K, kp = K, rc = R_c resistToInt.
+struct MaterialTable {
+  Kokkos::View<int*, CCMem> conj;
+  Kokkos::View<double*, CCMem> lam, ck, kp, rc;
+  int nb = 0;
+};
+
+/// A body id clamped into the table (out of range -> 0, as facetCoefficients does).
+KOKKOS_INLINE_FUNCTION int bodyIndex(double m, int nb) {
+  const int b = (int)m;
+  return (b < 0 || b >= nb) ? 0 : b;
+}
+
+/// Lam_face of a solid face between materials ma and mb (§1.4): Lam_s of the material when equal,
+/// the harmonic mean when they differ.
+KOKKOS_INLINE_FUNCTION double solidFaceLam(const Kokkos::View<double*, CCMem>& lam, int ma,
+                                           int mb) {
+  const double la = lam(ma);
+  if (ma == mb)
+    return la;
+  const double lb = lam(mb);
+  return (la + lb) > 0.0 ? 2.0 * la * lb / (la + lb) : 0.0;
+}
+
+/// The material per cell and the solid-unknown flags on the inner cells (§1.3, §2.7). A cell with a
+/// facet takes the body of its conjugate facet (the larger-area one if both are conjugate), or the
+/// larger facet's body when neither is; a cell without a facet takes the scene owner `owner`
+/// (compact inner index; absent: 0). A cell is a solid unknown iff kappa_s = 1 - kappa > 0 and its
+/// material is conjugate. The caller exchanges both fields and clears the flags beyond a
+/// non-periodic global face.
+inline void buildSolidMaterial(CCField mat, CCField sunk, CCConst kappa,
+                               const scg::ScalarFacetOverlay& fo,
+                               Kokkos::View<const int*, CCMem> owner, bool hasOwner,
+                               const MaterialTable& mt, C3 e, int g) {
+  const int nx = e.x - 2 * g, ny = e.y - 2 * g;
+  Kokkos::deep_copy(CCExec(), mat, -1.0);
+  ccFor3(
+      "peclet::flow::sco_solid_owner", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        const long ii = (long)(x - g) + (long)(y - g) * nx + (long)(z - g) * (long)nx * ny;
+        mat(i) = hasOwner ? (double)owner(ii) : 0.0;
+      });
+  auto cutCell = fo.cutCell;
+  auto cfs = fo.cellFacetStart;
+  auto alpha = fo.alpha;
+  auto body = fo.body;
+  auto conj = mt.conj;
+  const int nb = mt.nb;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_solid_facet_material", Kokkos::RangePolicy<CCExec>(space, 0, fo.nCut),
+      KOKKOS_LAMBDA(const long c) {
+        int best = -1, bestAny = -1;
+        double aBest = -1.0, aAny = -1.0;
+        for (int f = cfs(c); f < cfs(c + 1); ++f) {
+          const int b = bodyIndex((double)body(f), nb);
+          if (alpha(f) > aAny) {
+            aAny = alpha(f);
+            bestAny = b;
+          }
+          if (conj(b) != 0 && alpha(f) > aBest) {
+            aBest = alpha(f);
+            best = b;
+          }
+        }
+        mat(cutCell(c)) = (double)(best >= 0 ? best : bestAny);
+      });
+  space.fence();
+  ccFor3(
+      "peclet::flow::sco_solid_flags", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        const double m = mat(i);
+        sunk(i) = (kappa(i) < 1.0 && m >= 0.0 && conj(bodyIndex(m, nb)) != 0) ? 1.0 : 0.0;
+      });
+}
+
+/// The solid probe ladder (§3.4): per facet of a conjugate body (`conjF`), the ladder of §3.3 with
+/// -n, the solid-unknown flags and -phi. Other facets get s = 0, no stencil, rung 0.
+inline void buildSolidProbes(Kokkos::View<double*, CCMem> sS,
+                             Kokkos::View<int* [8], Kokkos::LayoutLeft, CCMem> offS,
+                             Kokkos::View<double* [8], Kokkos::LayoutLeft, CCMem> wS,
+                             Kokkos::View<std::uint8_t*, CCMem> rungS,
+                             Kokkos::View<const std::uint8_t*, CCMem> conjF,
+                             const scg::ScalarFacetOverlay& fo, CCConst sdf, CCConst sunk, C3 e,
+                             const double hp[3]) {
+  CCExec space;
+  const long sy = e.x, sz = (long)e.x * e.y;
+  const double h0 = hp[0], h1 = hp[1], h2 = hp[2];
+  auto fcell = fo.cell;
+  auto fnormal = fo.normal;
+  auto fcen = fo.centroid;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_solid_probes", Kokkos::RangePolicy<CCExec>(space, 0, fo.n),
+      KOKKOS_LAMBDA(const long f) {
+        if (conjF(f) == 0) {
+          sS(f) = 0.0;
+          rungS(f) = 0;
+          for (int k = 0; k < 8; ++k) {
+            offS(f, k) = 0;
+            wS(f, k) = 0.0;
+          }
+          return;
+        }
+        const double h[3] = {h0, h1, h2};
+        const double xw[3] = {fcen(f, 0), fcen(f, 1), fcen(f, 2)};
+        const double n[3] = {-fnormal(f, 0), -fnormal(f, 1), -fnormal(f, 2)};
+        const scg::BlockLookup L{sdf, sunk, fcell(f), sy, sz, -1.0};
+        const peclet::core::scheme::ProbeResult r = peclet::core::scheme::buildProbe(xw, n, h, L);
+        sS(f) = r.s;
+        rungS(f) = (std::uint8_t)r.rung;
+        for (int k = 0; k < 8; ++k) {
+          const bool used = k < r.n;
+          offS(f, k) =
+              used ? (int)((long)r.off[k][0] + (long)r.off[k][1] * sy + (long)r.off[k][2] * sz) : 0;
+          wS(f, k) = used ? r.w[k] : 0.0;
+        }
+      });
+  space.fence();
+}
+
+/// The level-0 solid face products P_a(i) = Lam_face a_s on the LOW a-face of cell i when cells
+/// i - s_a and i are both solid unknowns, else 0 (0 on the block's lowest layer). The solid bands
+/// carry w_a P_a; ScalarMG coarsens P (§5.2: the plain average of the product Lam a).
+inline void solidFaceProducts(CCField spx, CCField spy, CCField spz, CCConst sunk, CCConst mat,
+                              CCConst sax, CCConst say, CCConst saz, const MaterialTable& mt,
+                              C3 e) {
+  auto lam = mt.lam;
+  const int nb = mt.nb;
+  ccFor3(
+      "peclet::flow::sco_solid_face_products", C3{0, 0, 0}, e, KOKKOS_LAMBDA(int x, int y, int z) {
+        const long st[3] = {1, (long)e.x, (long)e.x * e.y};
+        const long i = (long)x + (long)y * st[1] + (long)z * st[2];
+        const int xa[3] = {x, y, z};
+        const bool ui = sunk(i) > 0.5;
+        double P[3];
+        for (int a = 0; a < 3; ++a) {
+          const long j = i - st[a];
+          if (xa[a] < 1 || !ui || !(sunk(j) > 0.5)) {
+            P[a] = 0.0;
+            continue;
+          }
+          const double ap = a == 0 ? sax(i) : (a == 1 ? say(i) : saz(i));
+          P[a] = solidFaceLam(lam, bodyIndex(mat(i), nb), bodyIndex(mat(j), nb)) * (1.0 - ap);
+        }
+        spx(i) = P[0];
+        spy(i) = P[1];
+        spz(i) = P[2];
+      });
+}
+
+/// The solid mass m_s = C_s K kappa_s idt on the solid unknowns, 0 elsewhere (inner cells).
+inline void solidMass(CCField ms, CCConst kappa, CCConst sunk, CCConst mat, const MaterialTable& mt,
+                      double idt, C3 e, int g) {
+  auto ck = mt.ck;
+  const int nb = mt.nb;
+  Kokkos::deep_copy(CCExec(), ms, 0.0);
+  ccFor3(
+      "peclet::flow::sco_solid_mass", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        if (sunk(i) > 0.5)
+          ms(i) = ck(bodyIndex(mat(i), nb)) * (1.0 - kappa(i)) * idt;
+      });
+}
+
+/// The solid phase's 7 bands (§4.1): AC = m_s + the six face terms w_a P, off-diagonals -w_a P;
+/// identity rows on the cells that are not solid unknowns.
+inline void solidBands(CCField AC, CCField AW, CCField AE, CCField AS, CCField AN, CCField AB,
+                       CCField AT, CCConst ms, CCConst sunk, CCConst spx, CCConst spy, CCConst spz,
+                       const double w[3], C3 e, int g) {
+  const double wx = w[0], wy = w[1], wz = w[2];
+  ccFor3(
+      "peclet::flow::sco_solid_bands", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(sunk(i) > 0.5)) {
+          AC(i) = 1.0;
+          AW(i) = AE(i) = AS(i) = AN(i) = AB(i) = AT(i) = 0.0;
+          return;
+        }
+        const double tw = wx * spx(i), te = wx * spx(i + sx);
+        const double ts = wy * spy(i), tn = wy * spy(i + sy);
+        const double tb = wz * spz(i), tt = wz * spz(i + sz);
+        AW(i) = -tw;
+        AE(i) = -te;
+        AS(i) = -ts;
+        AN(i) = -tn;
+        AB(i) = -tb;
+        AT(i) = -tt;
+        AC(i) = ms(i) + (((tw + te) + (ts + tn)) + (tb + tt));
+      });
+}
+
+/// The solid right-hand side b_s = m_s psi_s^n (no solid source in v1, §13 Q17); 0 elsewhere.
+inline void solidRhs(CCField bs, CCConst ms, CCConst sOld, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::sco_solid_rhs", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        bs(i) = ms(i) * sOld(i);
+      });
+}
+
+/// Per facet (§1.4, §4.1): cc = alpha G_c, G_c = 1/(s_f/Lam_f + R_c + s_s/Lam_s), on a facet of a
+/// conjugate body whose cell is both a fluid and a solid unknown (the material of the facet's
+/// body); 0 elsewhere (a facet that cannot enter both rows carries no coupling: conservation).
+inline void conjugateCoefficients(Kokkos::View<double*, CCMem> cc,
+                                  const scg::ScalarFacetOverlay& fo,
+                                  Kokkos::View<const std::uint8_t*, CCMem> conjF,
+                                  Kokkos::View<const double*, CCMem> sS, CCConst unk, CCConst sunk,
+                                  const MaterialTable& mt, double lamF) {
+  auto fcell = fo.cell;
+  auto falpha = fo.alpha;
+  auto fbody = fo.body;
+  auto sF = fo.sF;
+  auto lam = mt.lam;
+  auto rc = mt.rc;
+  const int nb = mt.nb;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_conj_coeffs", Kokkos::RangePolicy<CCExec>(space, 0, fo.n),
+      KOKKOS_LAMBDA(const long f) {
+        const long i = fcell(f);
+        if (conjF(f) == 0 || !(unk(i) > 0.5) || !(sunk(i) > 0.5)) {
+          cc(f) = 0.0;
+          return;
+        }
+        const int b = bodyIndex((double)fbody(f), nb);
+        cc(f) = falpha(f) *
+                peclet::core::scheme::interfaceConductance(sF(f), lamF, rc(b), sS(f), lam(b));
+      });
+  space.fence();
+}
+
+/// The two-field overlay (§4.1 step 3), one thread per cut cell, facets in CSR order:
+/// y_f(i) += sum cw u_pf + sum cc (u_pf - u_ps), y_s(i) += sum cc (u_ps - u_pf). `subtract` gives
+/// the negatives (the budget's flux-form residual).
+inline void conjOverlayApply(CCField yf, CCField ys, CCConst xf, CCConst xs,
+                             const scg::ScalarFacetOverlay& fo,
+                             Kokkos::View<const double*, CCMem> cw,
+                             Kokkos::View<const double*, CCMem> cc,
+                             Kokkos::View<int* [8], Kokkos::LayoutLeft, CCMem> offS,
+                             Kokkos::View<double* [8], Kokkos::LayoutLeft, CCMem> wS,
+                             bool subtract = false) {
+  auto cutCell = fo.cutCell;
+  auto cfs = fo.cellFacetStart;
+  auto offF = fo.offF;
+  auto wF = fo.wF;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_conj_overlay_apply", Kokkos::RangePolicy<CCExec>(space, 0, fo.nCut),
+      KOKKOS_LAMBDA(const long c) {
+        const long i = cutCell(c);
+        double af = 0.0, as = 0.0;
+        for (int f = cfs(c); f < cfs(c + 1); ++f) {
+          double upf = 0.0;
+          for (int k = 0; k < 8; ++k)
+            upf += wF(f, k) * xf(i + (long)offF(f, k));
+          af += cw(f) * upf;
+          if (cc(f) != 0.0) {
+            double ups = 0.0;
+            for (int k = 0; k < 8; ++k)
+              ups += wS(f, k) * xs(i + (long)offS(f, k));
+            const double q = cc(f) * (upf - ups);
+            af += q;
+            as -= q;
+          }
+        }
+        if (subtract) {
+          yf(i) -= af;
+          ys(i) -= as;
+        } else {
+          yf(i) += af;
+          ys(i) += as;
+        }
+      });
+  space.fence();
+}
+
+/// The two-field level-0 surrogate (§4.3): SAC_f = AC_f + sum (cw + cc), SAC_s = AC_s + sum cc,
+/// W0 = sum cc (the same-cell coupling, S_{i_f, i_s} = -W0) on the cut cells; W0 = 0 elsewhere.
+inline void conjSurrogate(CCField SACf, CCField SACs, CCField W0, CCConst ACf, CCConst ACs,
+                          const scg::ScalarFacetOverlay& fo, Kokkos::View<const double*, CCMem> cw,
+                          Kokkos::View<const double*, CCMem> cc) {
+  Kokkos::deep_copy(CCExec(), SACf, ACf);
+  Kokkos::deep_copy(CCExec(), SACs, ACs);
+  Kokkos::deep_copy(CCExec(), W0, 0.0);
+  auto cutCell = fo.cutCell;
+  auto cfs = fo.cellFacetStart;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_conj_surrogate", Kokkos::RangePolicy<CCExec>(space, 0, fo.nCut),
+      KOKKOS_LAMBDA(const long c) {
+        double aw = 0.0, ac = 0.0;
+        for (int f = cfs(c); f < cfs(c + 1); ++f) {
+          aw += cw(f) + cc(f);
+          ac += cc(f);
+        }
+        const long i = cutCell(c);
+        SACf(i) += aw;
+        SACs(i) += ac;
+        W0(i) = ac;
+      });
+  space.fence();
+}
+
+/// Mean-gradient mode, conjugate facets (§1.5): the fluid row carries + cc (u_pf - u_ps) with
+/// u = theta + G.x, so its G.x part, cc (GxF - GxS), moves to the right-hand side —
+/// b_f += cc (GxS - GxF) and b_s -= cc (GxS - GxF), GxF = sum_k wF_k G.x_k, GxS = sum_k wS_k G.x_k.
+inline void conjMeanGradientShift(CCField bf, CCField bs, const scg::ScalarFacetOverlay& fo,
+                                  Kokkos::View<const double*, CCMem> cc,
+                                  Kokkos::View<int* [8], Kokkos::LayoutLeft, CCMem> offS,
+                                  Kokkos::View<double* [8], Kokkos::LayoutLeft, CCMem> wS,
+                                  const MeanGradPosition& pos) {
+  auto cutCell = fo.cutCell;
+  auto cfs = fo.cellFacetStart;
+  auto offF = fo.offF;
+  auto wF = fo.wF;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_conj_mg_shift", Kokkos::RangePolicy<CCExec>(space, 0, fo.nCut),
+      KOKKOS_LAMBDA(const long c) {
+        const long i = cutCell(c);
+        double d = 0.0;
+        for (int f = cfs(c); f < cfs(c + 1); ++f) {
+          if (cc(f) == 0.0)
+            continue;
+          double gf = 0.0, gs = 0.0;
+          for (int k = 0; k < 8; ++k) {
+            gf += wF(f, k) * pos(i + (long)offF(f, k));
+            gs += wS(f, k) * pos(i + (long)offS(f, k));
+          }
+          d += cc(f) * (gs - gf);
+        }
+        bf(i) += d;
+        bs(i) -= d;
+      });
+  space.fence();
+}
+
+/// Mean-gradient mode, solid faces (§1.5): b_s(i) += sum_a gs_a (P_a(i + s_a) - P_a(i)), gs_a =
+/// w_a h'_a G'_a, over the solid-coupled faces (P is guarded) — the G.x part of w_a P (psi_i -
+/// psi_nb). Solid unknowns only.
+inline void solidMeanGradientFaceRhs(CCField bs, CCConst sunk, CCConst spx, CCConst spy,
+                                     CCConst spz, const double gs[3], C3 e, int g) {
+  const double gx = gs[0], gy = gs[1], gz = gs[2];
+  ccFor3(
+      "peclet::flow::sco_solid_mg_face_rhs", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(sunk(i) > 0.5))
+          return;
+        bs(i) += (gx * (spx(i + sx) - spx(i)) + gy * (spy(i + sy) - spy(i))) +
+                 gz * (spz(i + sz) - spz(i));
+      });
+}
+
+/// The solid residual in FLUX form (the budget, §9): r = b - m_s psi - sum_faces t (psi_i -
+/// psi_nb); the caller subtracts the overlay. Identity rows: r = 0.
+inline void solidResidualFluxForm(CCField r, CCConst x, CCConst b, CCConst ms, CCConst sunk,
+                                  CCConst spx, CCConst spy, CCConst spz, const double w[3], C3 e,
+                                  int g) {
+  const double wx = w[0], wy = w[1], wz = w[2];
+  ccFor3(
+      "peclet::flow::sco_solid_residual_flux", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        if (!(sunk(i) > 0.5)) {
+          r(i) = 0.0;
+          return;
+        }
+        const double ci = x(i);
+        const double flux =
+            ((wx * spx(i) * (ci - x(i - sx)) + wx * spx(i + sx) * (ci - x(i + sx))) +
+             (wy * spy(i) * (ci - x(i - sy)) + wy * spy(i + sy) * (ci - x(i + sy)))) +
+            (wz * spz(i) * (ci - x(i - sz)) + wz * spz(i + sz) * (ci - x(i + sz)));
+        r(i) = b(i) - ms(i) * ci - flux;
+      });
+}
+
+/// (sum C_s K kappa_s psi_s, sum C_s K kappa_s) over the solid unknowns (times V by the caller):
+/// the solid mass and the gauge weight.
+inline void solidMomentsLocal(CCConst xs, CCConst kappa, CCConst sunk, CCConst mat,
+                              const MaterialTable& mt, C3 e, int g, double& m, double& w) {
+  auto ck = mt.ck;
+  const int nb = mt.nb;
+  CCExec space;
+  double s1 = 0.0, s2 = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_solid_moments",
+      MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& p1, double& p2) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        if (sunk(i) > 0.5) {
+          const double wk = ck(bodyIndex(mat(i), nb)) * (1.0 - kappa(i));
+          p1 += wk * xs(i);
+          p2 += wk;
+        }
+      },
+      s1, s2);
+  m = s1;
+  w = s2;
+}
+
+/// Per facet: the probe values and the flux INTO the fluid per unit cell volume per internal time,
+/// rw - cw u_pf on a wall facet, cc (u_ps - u_pf) on a conjugate one (`scalar_wall_flux`,
+/// `scalar_facets`). up = u_pf, us = u_ps (0 on a wall facet).
+inline void conjFacetFlux(Kokkos::View<double*, CCMem> up, Kokkos::View<double*, CCMem> us,
+                          Kokkos::View<double*, CCMem> qin, CCConst xf, CCConst xs,
+                          const scg::ScalarFacetOverlay& fo, Kokkos::View<const double*, CCMem> cw,
+                          Kokkos::View<const double*, CCMem> rw,
+                          Kokkos::View<const double*, CCMem> cc,
+                          Kokkos::View<int* [8], Kokkos::LayoutLeft, CCMem> offS,
+                          Kokkos::View<double* [8], Kokkos::LayoutLeft, CCMem> wS,
+                          const MeanGradPosition& pos, bool mgOn) {
+  auto fcell = fo.cell;
+  auto offF = fo.offF;
+  auto wF = fo.wF;
+  CCExec space;
+  Kokkos::parallel_for(
+      "peclet::flow::sco_conj_facet_flux", Kokkos::RangePolicy<CCExec>(space, 0, fo.n),
+      KOKKOS_LAMBDA(const long f) {
+        const long i = fcell(f);
+        double u = 0.0, v = 0.0;
+        for (int k = 0; k < 8; ++k)
+          u += wF(f, k) * xf(i + (long)offF(f, k));
+        for (int k = 0; k < 8; ++k)
+          v += wS(f, k) * xs(i + (long)offS(f, k));
+        up(f) = u;
+        us(f) = v;
+        if (cc(f) != 0.0) {
+          // in mean-gradient mode the probes hold theta: the flux is that of theta + G.x (§1.5)
+          double d = v - u;
+          if (mgOn) {
+            double gf = 0.0, gs = 0.0;
+            for (int k = 0; k < 8; ++k) {
+              gf += wF(f, k) * pos(i + (long)offF(f, k));
+              gs += wS(f, k) * pos(i + (long)offS(f, k));
+            }
+            d += gs - gf;
+          }
+          qin(f) = cc(f) * d;
+        } else {
+          qin(f) = rw(f) - cw(f) * u;
+        }
+      });
+  space.fence();
+}
+
+/// sum over inner cells of af bf + as bs (the two-field dot).
+inline double dotTwoLocal(CCConst af, CCConst bf, CCConst as, CCConst bs, C3 e, int g) {
+  double s = 0.0;
+  ccReduce3(
+      "peclet::flow::sco_dot_two", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        acc += af(i) * bf(i) + as(i) * bs(i);
+      },
+      s);
+  return s;
+}
+
+/// (sum a b, sum c c) over inner cells, both fields, in one pass.
+inline void dot2TwoLocal(CCConst af, CCConst bf, CCConst cf, CCConst as, CCConst bs, CCConst cs,
+                         C3 e, int g, double& ab, double& cc) {
+  CCExec space;
+  double s1 = 0.0, s2 = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_dot2_two", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& p1, double& p2) {
+        const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+        p1 += af(i) * bf(i) + as(i) * bs(i);
+        p2 += cf(i) * cf(i) + cs(i) * cs(i);
+      },
+      s1, s2);
+  ab = s1;
+  cc = s2;
+}
+
+/// The solid part of `scalar_mean_flux`'s diffusive sum (§8.1): over the low faces of the inner
+/// cells whose two cells are solid unknowns, sum -P (theta_i - theta_{i - s_a} + G'_a h'_a)/h'_a.
+inline void solidMeanFluxLocal(CCConst th, CCConst sunk, CCConst spx, CCConst spy, CCConst spz,
+                               const double gi[3], const double hp[3], C3 e, int g,
+                               double diff[3]) {
+  CCExec space;
+  const double g0 = gi[0], g1 = gi[1], g2 = gi[2], hp0 = hp[0], hp1 = hp[1], hp2 = hp[2];
+  double d0 = 0.0, d1 = 0.0, d2 = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::sco_solid_mean_flux",
+      MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& p1, double& p2, double& p3) {
+        const long sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)x + (long)y * sy + (long)z * sz;
+        if (!(sunk(i) > 0.5))
+          return;
+        if (spx(i) != 0.0)
+          p1 += -spx(i) * ((th(i) - th(i - 1)) + g0 * hp0) / hp0;
+        if (spy(i) != 0.0)
+          p2 += -spy(i) * ((th(i) - th(i - sy)) + g1 * hp1) / hp1;
+        if (spz(i) != 0.0)
+          p3 += -spz(i) * ((th(i) - th(i - sz)) + g2 * hp2) / hp2;
+      },
+      d0, d1, d2);
+  diff[0] = d0;
+  diff[1] = d1;
+  diff[2] = d2;
 }
 
 }  // namespace sco
