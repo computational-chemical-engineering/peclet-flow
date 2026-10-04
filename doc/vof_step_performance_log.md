@@ -735,3 +735,82 @@ staging a whole Q_k (64 KB at b = 128) — R-D1 lever 1 — is not available thr
    the never-released `'geometric'` (B1, branch-only); additive on the release line, no alias owed."
 4. Register entries: §13.10 text, items 1-4 as written there; item 5's spelling `'direct'` checked
    against NAMING.md (no conflict).
+
+## 2026-10-03 — WO-12 (D3), WO-9 (C2), WO-10 (B2): gates (package vof-perf3)
+
+Branch `vof-perf3` (worktree `suite/flow-vof-perf3`), on origin/main 6719f01 (no code change
+since d02d3b0, the baseline build `flow-main-base`). Raw output:
+`~/Codes/bubble_column_perf/perf3/{wo12,wo9,wo10,hash,timing,kp}/`. Conditions throughout: the
+RTX 5080 shared with the D1-on-main study (88-99 % busy), host load 23-95 on 48 cores, so every
+timing is indicative; the bitwise and G-NUM gates are unaffected.
+
+**WO-12 (D3, §5.13), recorded.** Warm power iterations (k_w = 5 from the kept v_max / v_min)
+after a coefficient rebuild; guard = cap or r(3) > r0 -> cold re-estimate + redo, counted in
+`diagnostics.num_pressure_chebyshev_restarts`.
+
+| gate | result |
+|---|---|
+| V-cycles / step, bubble column, Chebyshev rtol 1e-10 | 44.15 -> 24.05 (solve 14.15 -> 14.05, estimate 30 -> 10) |
+| projection ms / step (20 steps, min of 3 interleaved rounds) | 172.0 -> 96.8 (MG-PCG 53.8) |
+| 2000 Chebyshev steps from ckpt_t43 | 0 guard firings; solve V-cycles 16.30 mean (14..20) |
+| G-NUM 1 (50 steps, vs main) | max rel 2.186e-12 (p) <= N50(Chebyshev, 1e-10 vs 1e-9) 2.523e-09 |
+| G-NUM 2 | per step within +-1; total 704 -> 723 = **+2.7 % (> +-2 %: literal miss)** |
+| G-NUM 3 | <= 2x main at 44/50 steps; 6 steps up to 5.97x where main stopped one V-cycle later; max over the run 1.154e-10 vs main 1.193e-10 |
+| G-NUM 4 (Chebyshev runs, CUDA) | static drop max|u| equal to 12 digits; Hysing vmax 0.28429521077005615 vs 0.2842952107700561, t(vmax) equal, yc equal to 2e-16; max V-cycles / solve 23 -> 16 |
+| vardensity suite | hydrostatic ratios 3 / 1000 and walls-z / jump-z np 1, 2, 4 pass (np 1 bit-exact) |
+| state_hash | only vof_droplet (variable-density Chebyshev) changes, CUDA and host; MG-PCG column dump bitwise |
+
+**WO-9 (C2, §5.10), recorded.** One TeamPolicy launch (team per master block) for measure();
+values deferred to read #1 / flushStats().
+
+| gate | result |
+|---|---|
+| state, 50 steps (u v w p C, dts, iterations, 16 colours) | bitwise vs main on CUDA, host 1x8 and 1x24 (also with stats read every step) |
+| stats vs main's per-block reductions, 50 steps x 16 blocks | CUDA rel volume 4.2e-16, area 2.7e-16, centroid 5.6e-16, moments 8.4e-16; host <= 9.2e-15. Velocity rel 1.7e-11 (CUDA) / 2.3e-10 (host) = a centroid error of 3.5e-16 / 4.7e-15: the difference quotient amplifies by \|c\|/\|Δc\| ~ 5e4 |
+| state_hash | identical to WO-12's (CUDA, host) |
+| VoF block ctests (23, MPI np 1-8) | pass, CUDA and host; the C1 gate now holds the measured stats to 1e-12 (velocity as a centroid error) |
+| launches | moments1 + moments2 + area 48 / step -> batch_stats 1 (2.43 ms fenced, 16 teams) |
+| G-PERF (shared GPU) | block_advect 31.1 -> 8.7-9.1 ms / step: the 48 fenced syncs were expensive under time-slicing; a quiet-GPU figure is owed (model -0.5 to -1.5) |
+
+**WO-10 (B2, §5.8), recorded.** Host ccReduce3 and mgmeanr = pencil reduction.
+
+| gate | result |
+|---|---|
+| CUDA | state_hash and the 50-step dump identical to WO-9 |
+| host 50 steps vs WO-9 | max rel 2.543e-14 (1x8), 2.626e-14 (1x24) <= N50 host 2.522e-09; iterations identical; div ratio <= 1.000 |
+| host physics | static drop and Hysing equal to WO-9 to 10 / 16 digits |
+| host state_hash | 11 of 12 cases + np 2 re-baselined (porous unchanged); table in the commit |
+| G-PERF | not resolvable at this host load; Snellius |
+
+**Two WO-12 defects the batteries found, fixed in follow-up commits.**
+1. The kept iterates are cross-step state; a repartition dropped them (MG rebuild), so an np = 1
+   rebalance was no longer bit-exact (porous_redistribute_mpi_np1 rel 1.78e-13 vs tol 0;
+   balanced_force_mpi_np1 colo-vof-rebalance V-cycles 71 vs 69). `redistribute` now carries them
+   in the registry exchange (step 2b) and hands them back after the MG rebuild (5b), per the
+   register rule "redistribute must carry every piece of cross-step state".
+2. A first estimate on a zero right-hand side (a drop at rest) kept zero iterates; the warm
+   estimate then returned bounds [0, 0] and the solve NaN, invisible to the 3-iteration guard
+   because `maxabs` skips NaN (vof_collocated_mpi np 1/2/4 on CUDA: P, C NaN after step 1). Kept
+   iterates are now usable only from a non-degenerate estimate (non-zero seeds, finite lmax > 0);
+   a degenerate warm estimate is replaced at once by the cold one.
+Neither touches a non-degenerate, non-redistributed path: state hashes (CUDA, host) and the
+50-step Chebyshev column dump are unchanged by them.
+
+**Batteries** (`ctest -LE bench`, OMP 2 per rank, load up to 147): host 192/194 and CUDA 189/194
+on the tree before the follow-ups, every failure one of the two defects above; after them the
+affected tests pass: host 29/29 (redistribute_mpi, porous_redistribute_mpi, balanced_force(_mpi),
+vof_redistribute_mpi, vof_phase_change(_mpi), predict_weighted_mpi, telescope_mpi, vof_collocated
+(_mpi), vardensity*), CUDA 32/32 (the same families); state hashes and the Chebyshev column dump
+unchanged by the follow-ups on both backends.
+
+**Readings taken where the note was not explicit (each isolated, reversible):**
+1. D3 warm start only after a coefficient rebuild that drops VALID bounds; any setter
+   invalidation or hierarchy rebuild -> cold. The guard's 3-iteration test aborts the solve at
+   iteration 3 (the redo replaces it anyway); the abandoned V-cycles count in
+   last_pressure_iterations. Under `set_pressure_warmstart` the redo restarts from the saved
+   previous phi. Counter name `diagnostics.num_pressure_chebyshev_restarts` (NAMING §1.3).
+2. C2's previous centroid travels by value in the launch from the host copy (current after read
+   #1), not as a separate device array: same values, no extra sync path for migration.
+3. B2 keeps the registered rule that reductions are never cut over to serial below 8192 cells.
+4. §14 Q-H4 (fold "4 fixed x-lanes per row" into B2): arrived after WO-10 was committed
+   (locally, unpushed); per the coordinator's instruction WO-10 is left as is, H-5 follows.
