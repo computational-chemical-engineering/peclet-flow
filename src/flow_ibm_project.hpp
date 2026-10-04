@@ -254,8 +254,7 @@ void Solver<Grid>::step() {
       project();  // cut-cell projection -> incompressible
     tProjection_ += phaseTick() - tp2;
     if (hasBc_)
-      for (int c = 0; c < 3; ++c)
-        applyVelocityBcComp(c, 0, false);  // re-impose domain BCs (keep outflow)
+      applyVelocityBcAll(0, false);  // re-impose domain BCs (keep outflow), components 0, 1, 2
     // WO-5b: a cut-cell scalar's open-face flux is the one this projection constrained; keep it
     // before any ghost fill wraps the high-side plane (no-op without one; the last iteration wins).
     if (cutcellPressure_)

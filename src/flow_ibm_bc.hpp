@@ -264,26 +264,80 @@ void Solver<Grid>::applyVelocityBcCompTo(CCField f, int comp, int fold, bool doO
       }
     return;
   }
-  for (int a = 0; a < 3; ++a)
-    for (int s = 0; s < 2; ++s) {
-      const int ff = 2 * a + s;
-      const int t = bc_[ff];
-      if (t == 0 || !touchesGlobalFace(ff))
-        continue;  // interior rank boundary: the halo exchange owns those ghosts
-      if (t == 3) {
-        if (doOutflow)
-          bcOutflowComp(f, e, G, a, s, comp, fold);
-        continue;
+  for (int a = 0; a < 3; ++a) {
+    if (bcVelFacePair(a)) {  // §14 H-3(e): both faces of this axis in one launch
+      BcVelFaces J;
+      for (int s = 0; s < 2; ++s) {
+        const int ff = 2 * a + s;
+        J.j[J.n++] = BcVelFace{f, bcProf_[ff], bcVel_[ff][comp], comp, s, bcProfNc_[ff]};
       }
-      if (t == 4) {  // free-slip / symmetry (mac_bc.hpp bcSlipComp)
-        bcSlipComp(f, e, G, a, s, comp, fold);
-        continue;
-      }
-      if (bcProf_[ff].extent(0) > 0)
-        bcVelocityComp(f, e, G, a, s, comp, 0.0, fold, bcProf_[ff], bcProfNc_[ff]);
-      else
-        bcVelocityComp(f, e, G, a, s, comp, bcVel_[ff][comp], fold);
+      bcVelocityFaces(J, e, G, a, fold);
+      continue;
     }
+    for (int s = 0; s < 2; ++s)
+      applyVelocityBcFace(f, comp, a, s, fold, doOutflow);
+  }
+}
+
+template <class Grid>
+bool Solver<Grid>::bcVelFacePair(int a) const {
+  const int e[3] = {e_.x, e_.y, e_.z};
+  for (int s = 0; s < 2; ++s) {
+    const int t = bc_[2 * a + s];
+    if (t == 0 || t == 3 || t == 4 || !touchesGlobalFace(2 * a + s))
+      return false;  // not a bcVelocityComp face on this rank
+  }
+  return e[a] > 2 * G;  // the two ghost planes are disjoint
+}
+
+template <class Grid>
+void Solver<Grid>::applyVelocityBcFace(CCField f, int comp, int a, int s, int fold,
+                                       bool doOutflow) {
+  B3 e{e_.x, e_.y, e_.z};
+  const int ff = 2 * a + s;
+  const int t = bc_[ff];
+  if (t == 0 || !touchesGlobalFace(ff))
+    return;  // interior rank boundary: the halo exchange owns those ghosts
+  if (t == 3) {
+    if (doOutflow)
+      bcOutflowComp(f, e, G, a, s, comp, fold);
+    return;
+  }
+  if (t == 4) {  // free-slip / symmetry (mac_bc.hpp bcSlipComp)
+    bcSlipComp(f, e, G, a, s, comp, fold);
+    return;
+  }
+  if (bcProf_[ff].extent(0) > 0)
+    bcVelocityComp(f, e, G, a, s, comp, 0.0, fold, bcProf_[ff], bcProfNc_[ff]);
+  else
+    bcVelocityComp(f, e, G, a, s, comp, bcVel_[ff][comp], fold);
+}
+
+template <class Grid>
+void Solver<Grid>::applyVelocityBcAll(int fold, bool doOutflow) {
+  if (Grid::collocated || !hasBc_) {
+    for (int c = 0; c < 3; ++c)
+      applyVelocityBcComp(c, fold, doOutflow);
+    return;
+  }
+  // Axis-major instead of component-major: each component's faces keep their order (axis by axis,
+  // s = 0 before s = 1) and the three components are different fields, so the result is identical.
+  B3 e{e_.x, e_.y, e_.z};
+  for (int a = 0; a < 3; ++a) {
+    if (bcVelFacePair(a)) {  // §14 H-3(e): 3 components x 2 faces in one launch
+      BcVelFaces J;
+      for (int c = 0; c < 3; ++c)
+        for (int s = 0; s < 2; ++s) {
+          const int ff = 2 * a + s;
+          J.j[J.n++] = BcVelFace{C[c].u, bcProf_[ff], bcVel_[ff][c], c, s, bcProfNc_[ff]};
+        }
+      bcVelocityFaces(J, e, G, a, fold);
+      continue;
+    }
+    for (int c = 0; c < 3; ++c)
+      for (int s = 0; s < 2; ++s)
+        applyVelocityBcFace(C[c].u, c, a, s, fold, doOutflow);
+  }
 }
 
 template <class Grid>

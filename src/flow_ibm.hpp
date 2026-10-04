@@ -2517,6 +2517,13 @@ class Solver {
   // separately consistent) and only visible in the pressure. Single-rank the test is always true,
   // so this is byte-identical there.
   void applyVelocityBcCompTo(CCField f, int comp, int fold, bool doOutflow);
+  // §14 H-3(e) (staggered): one face's velocity BC (the per-face body of applyVelocityBcCompTo);
+  // whether both faces of axis a take bcVelocityComp on this rank with disjoint ghost planes (one
+  // launch then covers both); and the three components back to back (applyVelocityBcComp for
+  // c = 0, 1, 2), one launch per such axis.
+  void applyVelocityBcFace(CCField f, int comp, int a, int s, int fold, bool doOutflow);
+  bool bcVelFacePair(int a) const;
+  void applyVelocityBcAll(int fold, bool doOutflow);
 
 
   // implicit-diffusion wall fold (CUDA setup_bc_diffusion): dcorr += (wall:+beta tangential /
