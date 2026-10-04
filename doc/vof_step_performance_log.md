@@ -814,3 +814,42 @@ unchanged by the follow-ups on both backends.
 3. B2 keeps the registered rule that reductions are never cut over to serial below 8192 cells.
 4. §14 Q-H4 (fold "4 fixed x-lanes per row" into B2): arrived after WO-10 was committed
    (locally, unpushed); per the coordinator's instruction WO-10 is left as is, H-5 follows.
+
+## 2026-10-04 — §14 WO-H0 … WO-H3 (worktree flow-cpu14, branch cpu14 on 935ffaf; not pushed)
+
+Workstation load 35-160 on 48 cores throughout: timings below are ratios or launch counts; the
+absolute numbers are not baselines. Raw output in the session scratchpad (gates, A/B, kernel
+listings); the commit messages carry the same numbers.
+
+**WO-H0** (protocol). `run_mpi.py` at np 1 skips `mpi_block`/`init_mpi`, `--rtol` (default 1e-8),
+`--dump`; `bench_cpu.sh` passes RTOL (1e-8). Kernel listing of `run_mpi.py` np 1, 1x8: selfCopy 0,
+cc_smooth_box 0 (the old script: both present, 13.0 vs 10.0 pressure iterations = rtol 1e-10 vs
+1e-8). np 1 dump vs `prof.py --rtol 1e-8 --flux device` dump: bitwise. Baselines on 8e5fc53: rtol
+1e-8 dumps 1x8 and 1x24, 10 iterations every step; L3 (GraphAMG incl. buildAmg) 0.492 / 0.384 s
+per 250 V-cycles = 1.97 / 1.54 ms per V-cycle (load ~150); container kernels OMP 1 / OMP 8
+(load ~150, so indicative only): batch_curv_list 207.4 / 134.6 ms/step (ratio 1.54),
+gather_local_sum 1.98, batch_clamp 1.77, batch_debris_mark 1.77, batch_plic 1.42, batch_worklist
+1.10, batch_flux 0.98, batch_ghost_zero 1.07, batch_update 1.13, move_local 0.49.
+
+**WO-H1** (`'direct'` bottom on host; recorded). G-NUM-H all pass (commit message): N50-type
+difference 3.3e-14, iterations identical (653; 500 at rtol 1e-8), divergence ratio <= 1.00025,
+300-step FCG max 2 / mean 1.02 / restarts 0, solids battery iterations identical with velocities
+<= 3.1e-12 against floors up to 4.7e-10, static drop and Hysing unchanged, host state_hash
+unchanged (no case selects the direct bottom), CUDA bitwise. U3 on OpenMP: factor + M and the
+whole FCG bitwise for T in {1, 2, 4, 8}. **G-PERF open:** L3 per V-cycle, 1x8 -- load 60-150:
+'direct' 18.6 and 182 ms (barrier-bound single team under oversubscription) vs GraphAMG 1.5-2.0;
+load ~35: 'direct' 2.3-2.5 ms at T = 8, 1.04-1.08 ms at T = 4 (OMP 4), 1.74-1.80 serial (OMP 1)
+vs GraphAMG 1.29-1.50. The <= 0.35 ms gate needs the 8-lane factor to scale on a quiet node: S-1.
+
+**WO-H2, WO-H3 (a)-(e)** (bitwise): G-BIT PASS on every commit (host state_hash 12/12 + np2, column
+50 steps 1x8 and 1x24; CUDA state_hash + np2, column dump). After the rebase onto 935ffaf: CUDA
+bitwise to origin/main; host state_hash + np2 identical and `--bottom-solver algebraic` bitwise to
+origin/main at 1x8 and 1x24. Launches per step (1x8): ibm_pfill 159.5 -> ibm_pfill3 75.25 (/ 2.12:
+66 of the 75 fills cover the two periodic axes only -- walls in y -- so / 3 is out of reach; the
+two-axis sites are an implementer DECISION in their own commit); bc_vel 138.5 -> 67.25 (gate <= 30
+missed: 66 of 69 calls re-impose ONE component inside the momentum sweeps). Interleaved A/B (min of
+3, loaded host; 8 threads / 1 thread): prolong 1.06 / 0.85 (gate 0.45), copyInner 0.25 / 0.09
+(0.15), gather_local_sum 0.37 / 0.22 (0.2), rhs_var 0.85 / 0.75 and ibm_build_diff_var 0.90 / 0.89
+(0.75; controls moved 0.74-1.04) -- all to be re-measured in S-1.
+Batteries (`ctest -LE bench`, final tree): host 194/194; CUDA 193/194 + collocated_stability_guard
+passed alone (110 s; it timed out at 3600 s in the battery with 32 processes on the GPU).
