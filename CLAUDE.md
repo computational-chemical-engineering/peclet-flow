@@ -83,12 +83,12 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 228 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # ~232 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-228 registered / **225 with `-LE bench`** (counted 2026-10-04, branch `scalar-ibm`): 57 from
+228 registered / **225 with `-LE bench`** on branch `scalar-ibm` (counted 2026-10-04), plus main's `march_to_steady` and `anderson_mpi` (np = 1, 2, 4) since the 2026-10-04 merge (recount): 57 from
 `tests/kokkos` — of which `bench_rbgs`, `vof_timing` and `bench_scalar_cutcell` carry the `bench`
 label and are instruments, not gates — 133 from `tests/kokkos_mpi` (44 cases at np = 1, 2, 4 plus one
 np = 8 rung), and 38 Python ctests on the module built in that tree: `regression_staggered`,
@@ -97,7 +97,9 @@ np = 8 rung), and 38 Python ctests on the module built in that tree: `regression
 `balanced_force_restart`, `mirror_symmetry`, `velocity_solver_variable_mu`, `hydro_force_units`,
 `no_env_knobs`, `no_float_operator_casts`, `iteration_order`, and the 24 `scalar_cutcell_*` gates of
 the cut-cell scalar (below). The six `scalar_cutcell_g6_*` take 20–35 min each on a loaded host.
-Always bound the OpenMP pool — an unbounded one on a many-core host is an hour-long trap.
+Always bound the OpenMP pool — an unbounded one on a many-core host is an hour-long trap. On a
+shared, loaded host run the `_np*` tests with `OMP_NUM_THREADS=2` (threads per RANK): at 8 per rank
+and load ~110 on 48 cores, `velocitymg_bc_mpi_np2` took 45 min instead of seconds (2026-10-02).
 
 More verification lives in `scripts/verify_*_sdflow.py` and `validate_zick_homsy_sdflow.py` (the
 external ground truth), run with `PYTHONPATH=<tree>`. `tests/regression/sdflow_regression.py` is
@@ -140,7 +142,8 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
   post-repartition field-resize passes; `#ifdef PECLET_FLOW_MPI`-guarded), `flow_ibm_diagnostics.hpp`
   (state getters, divergence probes, timers, the outflow/backflow census). `src/flow_bindings.cpp`
   — the nanobind module. `src/flow_solver_staggered.cpp` / `src/flow_solver_colocated.cpp` — the
-  two explicit instantiations of the class, the only TUs that compile it (see "Build").
+  two explicit instantiations of the class, the only TUs that compile it (see "Build"), and of
+  `AndersonAccelerator<Grid>` (`src/anderson_accelerator.hpp`, the steady-march accelerator).
 - `src/mac_cutcell_mg.hpp` (`CutcellMG`, pressure MG), `src/mac_velocity_mg.hpp` (`VelocityMG`),
   the `src/mac_*.hpp` operators, `src/cut_cell_ibm.hpp` (the Robust-Scaled overlay: `poly_*`,
   K/M/X/Nbc/R, `D_rescale`), `src/staggered_advection.hpp` (`sadv::advect`),
@@ -372,6 +375,21 @@ deselected on its own; name the driver you want instead.
   agglomerates the coarsest level into a global, decomposition-independent operator and solves it
   exactly whenever that grid exceeds `set_pressure_bottom_extent` (4) cells on any axis. Porous and
   variable-ρ rebuild it every step; avoid `auto` with a badly-factored grid there.
+- **Two engines solve an agglomerated bottom** (`doc/vof_step_performance_design.md` §13): the
+  host GraphAMG (every host backend, every multi-rank run, every ineligible case) and, on a GPU
+  backend, the **device bottom** — one single-team launch of flexible CG in FP64 on the bottom's own
+  operator, inner tolerance 1e-5 (relative, ∞-norm; E3), cap 100, preconditioned by a
+  **block-tridiagonal FP32 direct factor** (`src/mg_bottom_direct.hpp`: planes along one axis, each
+  plane's Schur complement inverted explicitly, the null space lifted by an exact plane-local
+  rank-1 term per component; refactored by its own launch once per operator change, keyed on a host
+  flag), no host transfer. A float factor is admissible only because A·1 = 0, the mean projections
+  and the stopping residual stay FP64 — an unrefined float bottom is not. Eligible: single rank, the
+  singular operator (no outflow face), `auto`/`agglomerated` bottom, ≤ 8192 bottom cells with 1–64
+  fluid components (labelled on the device at geometry time; solids keep x = 0), and an axis whose
+  planes hold ≤ 192 cells (`directBottomIneligible()` names the first failure).
+  `diagnostics.set_pressure_bottom_solver('auto' | 'direct' | 'algebraic')` A/Bs them on one build;
+  `'direct'` raises where ineligible. Host results are untouched by it; on the GPU it is a recorded
+  numerics change. B1's V-cycle-preconditioned engine (`'geometric'`) is retired (history: the WO-6 / WO-11 commits).
 - **Depth follows the factors of two, per axis.** An axis coarsens only while it stays even, so an
   **odd dimension never coarsens at all** (384×128×256 → 5.0 pressure iterations/step, ×255 →
   16.2), and under MPI only if *every rank's block* is even on it. **Telescoping is the default**
@@ -714,6 +732,55 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - Host performance: advance ÷ projection ≈ 1.05 at OMP 4 after D-WO9-3, and 1.4–1.6 before it (the
     smoother is 38 % of the advance). The GPU sits at 0.96–0.98 under contention.
   - Q5 (spelling), Q7 (default), and the NAMING rows in `doc/scalar_ibm_naming_rows.md`.
+
+## Steady marches (`march_to_steady`)
+
+`peclet.flow.march_to_steady(solver, monitor, rtol=1e-4, max_steps=5000, accelerate=True, window=5,
+check_every=5, num_passes=3, slow_rate=0.997, roundoff=1e-11, callback=None)` marches a solver to its
+steady state and returns a frozen `MarchResult` (`converged`, `steps`, `accelerated_steps`, `reason`
+∈ {"certified", "max_steps", "diverged"}, `num_restarts`, `monitor`). Design and every measured
+number: [`doc/steady_acceleration.md`](doc/steady_acceleration.md) (rev 2) and its log.
+`converged=True` certifies that the state passed the stop test on consecutive plain steps at this dt
+(stationarity); it does not certify that a plain march from the initial state would reach it.
+
+```python
+s = peclet.flow.Solver((N, N, N), extent=(L, L, L)); ...; s.set_solid(sdf, cutcell_pressure=True)
+res = peclet.flow.march_to_steady(s, lambda: float(s.get_u().mean()))   # <u_x> along the force
+```
+
+- **The stop instrument is the study's** (geometric-remainder bound on the block change of
+  `monitor()`); `accelerate=False` is that march step for step (ctest `march_to_steady`, G0(b)).
+  Under MPI `monitor()` must return the same value on every rank (a global reduction).
+- **Acceleration is type-II Anderson on the march state** (u, v, w + P; collocated with projected-face
+  advection + uf/vf/wf), velocity-only metric. Phase A mixes until the relative velocity residual is
+  `(1 - slow_rate) * rtol`; phase B certifies on consecutive PLAIN steps with the unchanged
+  instrument (budget `2 * (num_passes + 3)` blocks, early "slow" exit, ×0.1 and resume), so the
+  reported state is a plain-march state. There is no instability guard (rev 2: a Ritz radius of
+  this non-normal map is no stability test); an unstable plain map shows only on plain steps
+  (growth exit, R ≥ 1 never passes, stagnation fallback). Phase A "stagnates" when its residual
+  has not fallen by `slow_rate**(10 window)` (the plain march's assumed rate) in `10 window` calls
+  (review R1; a halving rule lost the dense bed at ν dt/h² = 60). A core restart restores the last
+  kept map output (review R2). `Solver.step()` is untouched. Data
+  path: core's `AndersonCore` + `src/anderson_accelerator.hpp`; control path:
+  `packaging/flow_steady.py` (installed as `peclet/flow/steady.py`).
+- **Scope.** Staggered `Solver`; `SolverColocated` with the `'ghost'` scheme only. Refused with a
+  named error (`Solver::marchState()`, re-checked every step): the other collocated schemes, VoF,
+  phase change, scalars, porous continuity, variable rho/mu, `drag_beta`, cell forces, moving scenes,
+  `set_superficial_velocity`, the pressure warm start, the balanced-force projection. Pass
+  `accelerate=False` for those.
+- **Memory:** `(2 window + 3) * n_fields * 8 * n_padded` bytes per rank (`n_fields` 4, or 7 collocated
+  with face advection): 416 B per inner cell at window 5, ~7.5 M cells max on a 16 GB card beside the
+  solver. `acc.memory_bytes` reports it; an allocation that does not fit raises with the byte count.
+- **Checkpoint with `get_field`/`set_field` of u, v, w, p** — not `set_state` (velocity only, loses P).
+  The Anderson history is not checkpointed; a restart rebuilds it in a few steps.
+- Developer tier: `s.diagnostics.anderson_accelerator(window=5, mixing=1.0)` → `acc.step(accelerate)`,
+  `acc.residual`, `acc.status` ("active" | "disabled"), `acc.reason`, `acc.num_restarts`,
+  `acc.num_resets`, `acc.num_columns`, `acc.memory_bytes`, `acc.seconds`, `acc.reset()`,
+  `acc.disable()`. A redistribute
+  reallocates the state buffers, and collocated `set_advection` changes the field count (a
+  configuration change, history reset); the accelerator then refuses to step (construct a new one).
+  A change of dt, rho, mu, the body force or the advection settings (on / scheme / implicit) between
+  calls resets the history (`num_resets`).
 
 ## Open items
 

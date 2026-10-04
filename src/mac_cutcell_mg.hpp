@@ -28,6 +28,7 @@
 #include "ghost_projection.hpp"  // GpOverlay + gpApplyDelta (ghost-projection BiCGStab matvec)
 #include "mac_bc.hpp"
 #include "mac_pressure.hpp"
+#include "mg_bottom_direct.hpp"              // §13: the direct preconditioner of the device bottom
 #include "peclet/core/solver/graph_amg.hpp"  // decomposition-agnostic algebraic bottom solve
 #include "star_elimination.hpp"  // StarOverlay + starApplyDelta (mode-B fluid-only PCG matvec)
 
@@ -461,6 +462,353 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, i
       });
 }
 
+// --- The device bottom solve (doc/vof_step_performance_design.md §5.7, §5.14, §13) -------------
+// On a device build an ELIGIBLE agglomerated bottom (single rank, singular operator, <= 8192 inner
+// cells, 1-64 fluid components (BottomLabelKernel), an axis whose planes hold <= 192 cells;
+// CutcellMG::directBottomIneligible) is solved in ONE launch instead of the host GraphAMG round
+// trip: a single team runs flexible CG (Polak-Ribiere) in FP64 on the bottom level's own operator,
+// preconditioned by the block-tridiagonal FP32 direct factor of mg_bottom_direct.hpp (§13; factored
+// by its own launch once per operator change), to a relative infinity-norm residual of tau = 1e-5
+// (E3), capped at 100 iterations. The constants are fixed, not setters. Ghost width 1 (single
+// rank). B1's V-cycle preconditioner over a geometric sub-hierarchy (§5.7) was retired by §13 D-4;
+// its code is in the history (the WO-6 / WO-11 commits).
+inline constexpr long kBottomMaxCells = 8192;
+// tau: 1e-5 since E3 (§7 WO-6, Q2): 1e-8, 1e-6 and 1e-5 give the SAME outer iteration count on
+// every one of the 50 bubble-column steps (653 total).
+inline constexpr double kBottomTau = 1e-5;
+inline constexpr int kBottomMaxComponents = 64;  // B1b (§5.14): more -> GraphAMG
+inline constexpr int kBottomCap = 100;
+
+struct BottomLevel {
+  C3 ext{0, 0, 0}, inner{0, 0, 0};
+  FPC AC, AFX, AFY, AFZ;
+};
+
+// B1b (§5.14): the fluid components of the bottom level. Deterministic min-label propagation over
+// the faces whose coefficient is > 0 (the face form stores the band sign: AF < 0) between two fluid
+// cells (AC > 1e-30, removeMean's predicate), iterated to its fixed point inside one team kernel:
+// every fluid cell ends with the smallest flat index of its component, whatever the update order
+// (Jacobi sweeps between two buffers here). Then, in flat (label) order, one thread numbers the
+// components 0, 1, ... and counts their cells. Solid cells get -1. Out: comp (ids), cnt (cells per
+// component, the first kBottomMaxComponents), nc(0) = the number of components. Geometry time only.
+struct BottomLabelKernel {
+  using Member = Kokkos::TeamPolicy<CCExec>::member_type;
+  C3 ext{0, 0, 0}, inner{0, 0, 0};
+  FPC AC, AFX, AFY, AFZ;
+  Kokkos::View<int*, CCMem> comp, tmp;
+  Kokkos::View<long*, CCMem> cnt;
+  Kokkos::View<int*, CCMem> nc;
+  // §13.4.2: with a slow axis (slow >= 0), each component's last plane kc(c) (the largest
+  // coordinate along `slow` among its cells) and aug(c) = 1/m_c, m_c = its cells in that plane.
+  int slow = -1;
+  Kokkos::View<int*, CCMem> kc;
+  Kokkos::View<double*, CCMem> aug;
+  KOKKOS_INLINE_FUNCTION long cell(int q, int& lx, int& ly, int& lz) const {
+    const int t = q / inner.x;
+    lx = 1 + (q - t * inner.x);
+    lz = t / inner.y;
+    ly = 1 + (t - lz * inner.y);
+    lz += 1;
+    return (long)lx + (long)ly * ext.x + (long)lz * (long)ext.x * ext.y;
+  }
+  // one Jacobi sweep src -> dst; returns the number of labels that moved
+  KOKKOS_INLINE_FUNCTION int sweep(const Member& t, const Kokkos::View<int*, CCMem>& src,
+                                   const Kokkos::View<int*, CCMem>& dst) const {
+    const int ninner = inner.x * inner.y * inner.z;
+    const long sy = ext.x, sz = (long)ext.x * ext.y;
+    int moved = 0;
+    Kokkos::parallel_reduce(
+        Kokkos::TeamThreadRange(t, ninner),
+        [&](int q, int& acc) {
+          int lx, ly, lz;
+          const long i = cell(q, lx, ly, lz);
+          int m = src(i);
+          if (m >= 0) {
+            const CcNbrs w = ccWrapNbrs(lx, ly, lz, inner, 1, i, sy, sz);
+            const long nb[6] = {w.xp, w.xm, w.yp, w.ym, w.zp, w.zm};
+            const double cf[6] = {(double)AFX(i + 1), (double)AFX(i),      (double)AFY(i + sy),
+                                  (double)AFY(i),     (double)AFZ(i + sz), (double)AFZ(i)};
+            for (int f = 0; f < 6; ++f) {
+              const int lj = src(nb[f]);
+              if (cf[f] < 0.0 && lj >= 0 && lj < m)
+                m = lj;
+            }
+            if (m < src(i))
+              acc += 1;
+          }
+          dst(i) = m;
+        },
+        moved);  // a sum (the identity of Max<int> is INT_MIN, not 0)
+    return moved;
+  }
+  KOKKOS_INLINE_FUNCTION void operator()(const Member& t) const {
+    const int ninner = inner.x * inner.y * inner.z;
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, ninner), [&](int q) {
+      int lx, ly, lz;
+      const long i = cell(q, lx, ly, lz);
+      comp(i) = (AC(i) > 1e-30f) ? (int)i : -1;
+    });
+    t.team_barrier();
+    for (;;) {  // two sweeps per round, so the labels end in `comp`
+      sweep(t, comp, tmp);
+      t.team_barrier();
+      const int moved = sweep(t, tmp, comp);
+      t.team_barrier();
+      if (!moved)
+        break;
+    }
+    Kokkos::single(Kokkos::PerTeam(t), [&]() {
+      int n = 0;
+      for (int q = 0; q < ninner; ++q) {  // number the roots in label (flat-index) order
+        int lx, ly, lz;
+        const long i = cell(q, lx, ly, lz);
+        if (comp(i) == (int)i)
+          tmp(i) = n++;
+      }
+      for (int c = 0; c < kBottomMaxComponents; ++c)
+        cnt(c) = 0;
+      for (int q = 0; q < ninner; ++q) {
+        int lx, ly, lz;
+        const long i = cell(q, lx, ly, lz);
+        if (comp(i) >= 0) {
+          const int id = tmp(comp(i));
+          comp(i) = id;
+          if (id < kBottomMaxComponents)
+            cnt(id) += 1;
+        }
+      }
+      nc(0) = n;
+      if (slow >= 0) {
+        long m[kBottomMaxComponents];
+        for (int c = 0; c < kBottomMaxComponents; ++c) {
+          kc(c) = -1;
+          m[c] = 0;
+        }
+        for (int pass = 0; pass < 2; ++pass)
+          for (int q = 0; q < ninner; ++q) {
+            int lx, ly, lz;
+            const long i = cell(q, lx, ly, lz);
+            const int c = comp(i);
+            if (c < 0 || c >= kBottomMaxComponents)
+              continue;
+            const int k = (slow == 0 ? lx : (slow == 1 ? ly : lz)) - 1;
+            if (pass == 0 && k > kc(c))
+              kc(c) = k;
+            else if (pass == 1 && k == kc(c))
+              m[c] += 1;
+          }
+        for (int c = 0; c < kBottomMaxComponents; ++c)
+          aug(c) = m[c] > 0 ? 1.0 / (double)m[c] : 0.0;
+      }
+    });
+  }
+};
+
+// The bottom solve kernel: one TeamPolicy(1, T) launch per bottom solve. FCG in FP64 on the stored
+// operator (A0 cell bodies); M = the direct factor `dir` (FacReal = float in production), whose
+// dir.stat(0) = 0 (a factor that failed even with the largest shift) takes the failure path.
+template <class FacReal = float>
+struct BottomKernel {
+  using Member = Kokkos::TeamPolicy<CCExec>::member_type;
+  BottomDirect<FacReal> dir;
+  BottomLevel lv;
+  CCField x, b, r, p, z, zp, ap;  // the bottom's solution and rhs (its x, rhs), FCG vectors
+  int precondOnly = 0;            // test hook: z = M(b) and nothing else
+  int noMeanForTest = 0;          // test hook: M without the component means' removal
+  // B1b (§5.14): the bottom's fluid components -- comp(i) in [0, nc) on fluid cells, -1 on cells
+  // with AC <= 1e-30 (which keep x = 0) -- their cell counts, and a scratch for their means.
+  int nc = 1;
+  Kokkos::View<const int*, CCMem> comp;
+  Kokkos::View<const long*, CCMem> ccnt;
+  Kokkos::View<double*, CCMem> cmean;
+  Kokkos::View<double*, CCMem> ks;  // the Krylov slots; ks(flagSlot) = 1 on a non-finite scalar
+  int flagSlot = 0;
+  Kokkos::View<int*, CCMem> info;  // info(0) = inner iterations of the last solve
+
+  // Every phase is one TeamThreadRange pass over the level followed by a barrier; the matvec reads
+  // periodic neighbours through wrapped indices (the A3 rule, §4.3), with 32-bit index arithmetic.
+  KOKKOS_INLINE_FUNCTION static int nInner(const BottomLevel& l) {
+    return l.inner.x * l.inner.y * l.inner.z;
+  }
+  KOKKOS_INLINE_FUNCTION static int nExt(const BottomLevel& l) {
+    return l.ext.x * l.ext.y * l.ext.z;
+  }
+  // inner cell q (x fastest) -> local coordinates (ghost width 1) and the flat index
+  KOKKOS_INLINE_FUNCTION static long cell(const BottomLevel& l, int q, int& lx, int& ly, int& lz) {
+    const int nx = l.inner.x, ny = l.inner.y;
+    const int t = q / nx;
+    lx = 1 + (q - t * nx);
+    lz = t / ny;
+    ly = 1 + (t - lz * ny);
+    lz += 1;
+    return (long)lx + (long)ly * l.ext.x + (long)lz * (long)l.ext.x * l.ext.y;
+  }
+  KOKKOS_INLINE_FUNCTION double dot(const Member& t, const BottomLevel& l, const CCField& a,
+                                    const CCField& c) const {
+    double s = 0.0;
+    Kokkos::parallel_reduce(
+        Kokkos::TeamThreadRange(t, nInner(l)),
+        [&](int q, double& acc) {
+          int lx, ly, lz;
+          const long i = cell(l, q, lx, ly, lz);
+          if (l.AC(i) > 1e-30f)
+            acc += a(i) * c(i);
+        },
+        s);
+    return s;
+  }
+  // The bottom's mean removal, per fluid component (§5.14): one team reduction per label, in label
+  // order, then one subtraction pass.
+  KOKKOS_INLINE_FUNCTION void removeMeanBottom(const Member& t, const CCField& f) const {
+    const BottomLevel& l = lv;
+    for (int c = 0; c < nc; ++c) {
+      double s = 0.0;
+      Kokkos::parallel_reduce(
+          Kokkos::TeamThreadRange(t, nInner(l)),
+          [&](int q, double& acc) {
+            int lx, ly, lz;
+            const long i = cell(l, q, lx, ly, lz);
+            if (comp(i) == c)
+              acc += f(i);
+          },
+          s);
+      Kokkos::single(Kokkos::PerTeam(t), [&]() { cmean(c) = s / (double)ccnt(c); });
+    }
+    t.team_barrier();
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(l)), [&](int q) {
+      int lx, ly, lz;
+      const long i = cell(l, q, lx, ly, lz);
+      const int c = comp(i);
+      if (c >= 0)
+        f(i) -= cmean(c);
+    });
+    t.team_barrier();
+  }
+  // z = M r (§13.4.4): the direct factor's M, then the component means' removal (step 5). With
+  // `keep`, z's previous values go there first.
+  KOKKOS_INLINE_FUNCTION void applyM(const Member& t, const CCField& R, const CCField& Z,
+                                     const CCField* keep) const {
+    dir.apply(t, R, Z, comp, keep);
+    if (!noMeanForTest)
+      removeMeanBottom(t, Z);
+  }
+  KOKKOS_INLINE_FUNCTION void operator()(const Member& t) const {
+    const BottomLevel& B0 = lv;
+    if (precondOnly) {
+      applyM(t, b, z, nullptr);
+      return;
+    }
+    const long sy = B0.ext.x, sz = (long)B0.ext.x * B0.ext.y;
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nExt(B0)), [&](int i) { x(i) = 0.0; });
+    // r = b on the fluid cells and 0 on the solid ones (GraphAMG's identity rows with a zero rhs)
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(B0)), [&](int q) {
+      int lx, ly, lz;
+      const long i = cell(B0, q, lx, ly, lz);
+      r(i) = (comp(i) >= 0) ? b(i) : 0.0;
+    });
+    t.team_barrier();
+    removeMeanBottom(t, r);  // b -= mean_fluid(b), per component
+    double r0 = 0.0;
+    Kokkos::parallel_reduce(
+        Kokkos::TeamThreadRange(t, nInner(B0)),
+        [&](int q, double& acc) {
+          int lx, ly, lz;
+          const long i = cell(B0, q, lx, ly, lz);
+          if (B0.AC(i) > 1e-30f) {
+            const double v = Kokkos::fabs(r(i));
+            if (v > acc)
+              acc = v;
+          }
+        },
+        Kokkos::Max<double>(r0));
+    int it = 0;
+    // a direct factor that failed even with the largest shift (non-finite input): the failure path
+    bool fail = dir.stat(0) == 0;
+    if (r0 != 0.0 && !fail) {
+      applyM(t, r, z, nullptr);
+      Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nExt(B0)), [&](int i) { p(i) = z(i); });
+      t.team_barrier();
+      double rz = dot(t, B0, r, z);
+      while (it < kBottomCap) {
+        ++it;
+        // Ap = A_b p: the band apply reading p's periodic neighbours through the wrap
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(B0)), [&](int q) {
+          int lx, ly, lz;
+          const long i = cell(B0, q, lx, ly, lz);
+          const CcNbrs w = ccWrapNbrs(lx, ly, lz, B0.inner, 1, i, sy, sz);
+          ap(i) = cutcellApplyFaceCell(p, B0.AC, B0.AFX, B0.AFY, B0.AFZ, i, 1L, sy, sz, w.xp, w.xm,
+                                       w.yp, w.ym, w.zp, w.zm);
+        });
+        t.team_barrier();
+        const double pAp = dot(t, B0, p, ap);
+        if (!(Kokkos::isfinite(pAp) && pAp > 1e-300)) {
+          fail = !Kokkos::isfinite(pAp);  // a tiny pAp is a converged direction, not a failure
+          break;
+        }
+        const double a = rz / pAp;
+        // x += a p; r -= a Ap on the fluid cells (a cell with AC <= 1e-30 keeps x = 0), then
+        // r -= its component mean, then max|r|
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(B0)), [&](int q) {
+          int lx, ly, lz;
+          const long i = cell(B0, q, lx, ly, lz);
+          if (comp(i) >= 0) {
+            x(i) += a * p(i);
+            r(i) -= a * ap(i);
+          }
+        });
+        t.team_barrier();
+        removeMeanBottom(t, r);
+        double rn = 0.0;
+        Kokkos::parallel_reduce(
+            Kokkos::TeamThreadRange(t, nInner(B0)),
+            [&](int q, double& acc) {
+              int lx, ly, lz;
+              const long i = cell(B0, q, lx, ly, lz);
+              if (B0.AC(i) > 1e-30f) {
+                const double v = Kokkos::fabs(r(i));
+                if (v > acc)
+                  acc = v;
+              }
+            },
+            Kokkos::Max<double>(rn));
+        if (rn <= kBottomTau * r0)
+          break;
+        applyM(t, r, z, &zp);  // zp = z (the previous one), z = M r
+        double rzc = 0.0;      // <r, z - zp>: Polak-Ribiere (robust to M's rounding)
+        Kokkos::parallel_reduce(
+            Kokkos::TeamThreadRange(t, nInner(B0)),
+            [&](int q, double& acc) {
+              int lx, ly, lz;
+              const long i = cell(B0, q, lx, ly, lz);
+              if (B0.AC(i) > 1e-30f)
+                acc += r(i) * (z(i) - zp(i));
+            },
+            rzc);
+        const double beta = rzc / rz;
+        rz = dot(t, B0, r, z);
+        if (!(Kokkos::isfinite(rz) && Kokkos::isfinite(beta))) {
+          fail = true;
+          break;
+        }
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nInner(B0)), [&](int q) {
+          int lx, ly, lz;
+          const long i = cell(B0, q, lx, ly, lz);
+          p(i) = z(i) + beta * p(i);
+        });
+        t.team_barrier();
+      }
+    }
+    if (fail) {  // x = 0 on the bottom and the device flag; the host turns it into solveFailed_
+      Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nExt(B0)), [&](int i) { x(i) = 0.0; });
+      Kokkos::single(Kokkos::PerTeam(t), [&]() { ks(flagSlot) = 1.0; });
+      t.team_barrier();
+    } else {
+      removeMeanBottom(t, x);  // x -= mean_fluid(x), per component
+    }
+    Kokkos::single(Kokkos::PerTeam(t), [&]() { info(0) = it; });
+  }
+};
+
 // Env-gated MG diagnostics (host printf only, off unless PECLET_FLOW_MG_DEBUG is set):
 //   1 = level table (per-level global/local dims + coarsening ratio) at build time
 //   2 = + PCG/V-cycle residual history for the first PECLET_FLOW_MG_DEBUG_SOLVES (default 3) solves
@@ -643,6 +991,7 @@ class CutcellMG {
   void init(int nx, int ny, int nz, int nLevels) {
     lv_.clear();
     amg_.reset();
+    eigWarm_ = false;  // D3: the kept power-iteration vectors belong to the old hierarchy
     gnxF_ = nx;
     gnyF_ = ny;
     gnzF_ = nz;
@@ -685,6 +1034,7 @@ class CutcellMG {
       inner = next;
       cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
     }
+    buildBottomStore();  // the device bottom's storage (device backends; else none)
     if (mgDebugLevel()) {
       printf("[mg] init %dx%dx%d single-rank -> %d levels (requested %d)\n", nx, ny, nz,
              (int)lv_.size(), nLevels);
@@ -865,7 +1215,9 @@ class CutcellMG {
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     lv_.clear();
     amg_.reset();
+    eigWarm_ = false;  // D3: the kept power-iteration vectors belong to the old hierarchy
     distributed_ = true;
+    buildBottomStore();  // single-rank only: none (the distributed path keeps GraphAMG)
     comm_ = comm;
     gnxF_ = gnx;
     gnyF_ = gny;
@@ -1330,6 +1682,11 @@ class CutcellMG {
     // bottom level is tiny, so the per-step rebuild is negligible next to the V-cycles.
     amg_.reset();
     amgGlobalN_ = 0;
+    // §13: the direct factor is rebuilt at the next device bottom solve; the components
+    // (condition 6) are labelled once per hierarchy, here at its first operator build.
+    facStale_ = true;
+    if (!bottomConnKnown_ && bottomStore_)
+      evalBottomComponents();
   }
 
   // CG preconditioned by one symmetric V-cycle (solve_pcg port). rhs on level 0; solution left in
@@ -1461,23 +1818,25 @@ class CutcellMG {
     kPAp = 0,
     kRn = 1,
     kStop = 2,
-    kRz = 3,
-    kRzNew = 4,
-    kBeta = 5,
-    kAlpha = 6,
-    kMsum = 7
+    kBottomFlag = 3,  // the device bottom met a non-finite scalar (read with the packet)
+    kRz = 4,
+    kRzNew = 5,
+    kBeta = 6,
+    kAlpha = 7,
+    kMsum = 8
   };
-  static constexpr int kNSlots = 8;
+  static constexpr int kNSlots = 9;
+  static constexpr int kPacket = 4;  // the per-iteration host packet {pAp, rn, stop, bottomFlag}
   static constexpr double kBrkPAp = 1.0, kBrkRz = 2.0;  // the stop codes (slot kStop)
   Kokkos::View<double*, CCMem> ks_;                     // the scalar slots
   Kokkos::View<long, CCMem> kcnt_;                      // removeMean's fluid-cell count
-  Kokkos::View<double*, Kokkos::HostSpace> kpk_;        // the host packet {pAp, rn, stop}
+  Kokkos::View<double*, Kokkos::HostSpace> kpk_;  // the host packet {pAp, rn, stop, bottomFlag}
   void ensureScalars() {
     if (ks_.extent(0) == (std::size_t)kNSlots)
       return;
     ks_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_krylov_scalars", kNSlots);
     kcnt_ = Kokkos::View<long, CCMem>("peclet::flow::mg_mean_count");
-    kpk_ = Kokkos::View<double*, Kokkos::HostSpace>("peclet::flow::mg_krylov_packet", 3);
+    kpk_ = Kokkos::View<double*, Kokkos::HostSpace>("peclet::flow::mg_krylov_packet", kPacket);
   }
   Kokkos::View<double, CCMem> slot(int k) const {
     return Kokkos::View<double, CCMem>(ks_.data() + k);
@@ -1609,11 +1968,12 @@ class CutcellMG {
             });
         removeMean(l0, r, /*stopGuard=*/true);
         maxabsTo(l0, r, kRn);
-        Kokkos::deep_copy(kpk_, Kokkos::subview(ks_, std::make_pair(0, 3)));  // THE read
+        Kokkos::deep_copy(kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));  // THE read
         const double pAp = kpk_(0), rn = kpk_(1), stop = kpk_(2);
-        if (stop == kBrkRz) {   // r^T z of the previous iteration was non-finite
-          solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
-          --it;                 // report the iteration that computed it
+        noteBottomFlag(kpk_(3));  // a non-finite scalar in a device bottom solve
+        if (stop == kBrkRz) {     // r^T z of the previous iteration was non-finite
+          solveFailed_ = true;    // ISSUES sweep item 6: a breakdown, not a convergence
+          --it;                   // report the iteration that computed it
           exited = true;
           break;
         }
@@ -2182,10 +2542,18 @@ class CutcellMG {
       isBottom = false;
 #endif
     if (isBottom) {
-      if (agglomerateBottom())
-        graphAmgSolveBottom(
-            lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
-      else
+      if (bottomSolver_ == kBottomDirect) {
+        if (const char* why = directBottomIneligible())
+          throw std::runtime_error(
+              std::string("set_pressure_bottom_solver('direct'): not eligible here: ") + why);
+      }
+      if (agglomerateBottom()) {
+        if (bottomSolver_ != kBottomAlgebraic && directBottomIneligible() == nullptr)
+          directBottomSolve();  // §13: FCG + the FP32 direct factor (device, one launch)
+        else
+          graphAmgSolveBottom(
+              lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
+      } else
         smooth(lv, bottom_, false);
       if (meanRemovalAll_)
         removeMean(lv, lv.x);
@@ -2413,6 +2781,224 @@ class CutcellMG {
       gz /= lv_[L].ratio.z;
     }
     return gx > thresh || gy > thresh || gz > thresh;
+  }
+
+  // --- The device bottom solve (doc/vof_step_performance_design.md §5.7, §5.14, §13) -----------
+  static constexpr bool kHostMemory =
+      std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>;
+  // Eligibility (§13.4.6: §5.7 conditions 1-6 -- 6 = B1b's 1-64 fluid components -- and an axis
+  // whose planes hold at most kBottomMaxPlane cells): nullptr when the device bottom may run, else
+  // the first failed condition. Host-cheap: the components are labelled once per hierarchy
+  // (evalBottomComponents, at the first setOpenness after init) and cached -- the rho / eps / drag
+  // rescaling of the per-step setOpenness never closes a face, so it cannot change the answer.
+  const char* directBottomIneligible() const {
+    if (kHostMemory)
+      return "the backend's memory space is a host space (host backends keep GraphAMG)";
+    if (distributed_)
+      return "the solve is distributed (multi-rank)";
+    if (!removeMean_ || hasOutflow_)
+      return "the operator is not the singular one (an outflow face is present)";
+    if (!agglomerateBottom())
+      return "the bottom is not agglomerated (set_pressure_bottom / set_pressure_bottom_extent)";
+    if (lv_.empty() ||
+        (long)lv_.back().inner.x * lv_.back().inner.y * lv_.back().inner.z > kBottomMaxCells)
+      return "the bottom level has more than 8192 inner cells";
+    if (!bottomConnKnown_)
+      return "the pressure operator has not been built (no setOpenness since the hierarchy)";
+    if (!bottomConnected_)
+      return "the bottom level has no fluid cell or more than 64 fluid components (B1b)";
+    if (!dirPlanes_.valid())
+      return "no axis gives planes of at most 192 cells (the direct factor's cap)";
+    return nullptr;
+  }
+  // The bottom's storage (§13.4.7): single rank, device backends (or a test hook), a bottom of at
+  // most kBottomMaxCells cells with ghost width 1; otherwise none and the engine is ineligible.
+  // The FCG vectors, the component labels and their scratch, the plane ordering and the factor.
+  void buildBottomStore(bool forceHost = false) {
+    facStale_ = true;
+    bottomConnKnown_ = false;
+    bottomConnected_ = false;
+    bottomStore_ = false;
+    dirPlanes_ = BottomPlanes{};
+    if ((kHostMemory && !forceHost) || distributed_ || lv_.empty())
+      return;
+    const Level& bt = lv_.back();
+    if (bt.g != 1 || (long)bt.inner.x * bt.inner.y * bt.inner.z > kBottomMaxCells)
+      return;
+    bottomStore_ = true;
+    for (CCField* f : {&bottomR_, &bottomP_, &bottomZ_, &bottomZp_, &bottomAp_})
+      *f = CCField("mg_bottom_fcg", bt.n);
+    bottomInfo_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_info", 1);
+    bottomComp_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_comp", bt.n);
+    bottomLabTmp_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_labtmp", bt.n);
+    bottomCompCnt_ =
+        Kokkos::View<long*, CCMem>("peclet::flow::mg_bottom_compcnt", kBottomMaxComponents);
+    bottomCompMean_ = CCField("peclet::flow::mg_bottom_compmean", kBottomMaxComponents);
+    dirKc_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_kc", kBottomMaxComponents);
+    dirAug_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_bottom_aug", kBottomMaxComponents);
+    dirPlanes_ = bottomChoosePlanes(bt.inner, bc_);
+    dir_ = BottomDirect<float>::allocate(dirPlanes_, bt.ext);
+    dirTeam_ = 0;
+    dirFacTeam_ = 0;
+  }
+  // Condition 6, as B1b replaced it (§5.14): the bottom level's fluid components, labelled on the
+  // device by BottomLabelKernel -- eligible with 1..64 of them (the register's per-component
+  // projector for the agglomerated bottom; more go to GraphAMG) -- and, along the slow axis, each
+  // component's last plane and 1/m_c (§13.4.2). One team launch and one scalar read, at the first
+  // operator build of a hierarchy (geometry time; the rho / eps / drag rescaling of the per-step
+  // setOpenness never closes or opens a face, so the labels stay valid).
+  void evalBottomComponents() {
+    bottomConnKnown_ = true;
+    bottomConnected_ = false;
+    bottomNComp_ = 0;
+    if (!bottomStore_)
+      return;
+    const Level& bt = lv_.back();
+    BottomLabelKernel k;
+    k.ext = bt.ext;
+    k.inner = bt.inner;
+    k.AC = bt.AC;
+    k.AFX = bt.AFX;
+    k.AFY = bt.AFY;
+    k.AFZ = bt.AFZ;
+    k.comp = bottomComp_;
+    k.tmp = bottomLabTmp_;
+    k.cnt = bottomCompCnt_;
+    k.nc = bottomInfo_;  // info(0) doubles as the component-count landing slot here
+    k.slow = dirPlanes_.s;
+    k.kc = dirKc_;
+    k.aug = dirAug_;
+    Kokkos::TeamPolicy<CCExec> probe(CCExec(), 1, 1);
+    const int T = std::min(1024, probe.team_size_max(k, Kokkos::ParallelForTag()));
+    Kokkos::parallel_for("peclet::flow::mg_bottom_label",
+                         Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
+    Kokkos::deep_copy(bottomNComp_, Kokkos::subview(bottomInfo_, 0));
+    bottomConnected_ = bottomNComp_ >= 1 && bottomNComp_ <= kBottomMaxComponents;
+    if (mgDebugLevel())
+      printf("[mg] device bottom: %d fluid component(s) on the %dx%dx%d bottom%s\n", bottomNComp_,
+             bt.inner.x, bt.inner.y, bt.inner.z,
+             bottomConnected_ ? "" : " -> GraphAMG (more than 64, or none)");
+  }
+  template <class FR = float>
+  BottomKernel<FR> makeBottomKernel(bool precondOnly) {
+    ensureScalars();
+    Level& bt = lv_.back();
+    BottomKernel<FR> k;
+    k.lv.ext = bt.ext;
+    k.lv.inner = bt.inner;
+    k.lv.AC = bt.AC;
+    k.lv.AFX = bt.AFX;
+    k.lv.AFY = bt.AFY;
+    k.lv.AFZ = bt.AFZ;
+    k.x = bt.x;
+    k.b = bt.rhs;
+    k.r = bottomR_;
+    k.p = bottomP_;
+    k.z = bottomZ_;
+    k.zp = bottomZp_;
+    k.ap = bottomAp_;
+    k.precondOnly = precondOnly ? 1 : 0;
+    k.ks = ks_;
+    k.flagSlot = kBottomFlag;
+    k.info = bottomInfo_;
+    k.nc = bottomNComp_;
+    k.comp = bottomComp_;
+    k.ccnt = bottomCompCnt_;
+    k.cmean = bottomCompMean_;
+    return k;
+  }
+  // A non-finite scalar in a device bottom solve (the kernel's device flag) fails the solve. `v`
+  // is the flag as read by the PCG packet or by lastSolveFailed(); a set flag is cleared on the
+  // device so it is reported once.
+  void noteBottomFlag(double v) {
+    bottomFlagPending_ = false;
+    if (v != 0.0) {
+      solveFailed_ = true;
+      setSlot(kBottomFlag, 0.0);
+    }
+  }
+  // A launch's team size: min(1024, team_size_max) when team <= 0, else `team` clamped to it; with
+  // `probe` false a positive `team` (a size this kernel already ran with) is used as is.
+  // `scratch` = the team scratch (level 0) the kernel requests, in bytes.
+  template <class K>
+  static int directTeam(const K& k, int team, bool probe, std::size_t scratch = 0) {
+    if (team > 0 && !probe)
+      return team;
+    Kokkos::TeamPolicy<CCExec> pol(CCExec(), 1, 1);
+    if (scratch)
+      pol.set_scratch_size(0, Kokkos::PerTeam(scratch));
+    const int tmax = std::min(1024, pol.team_size_max(k, Kokkos::ParallelForTag()));
+    return (team > 0) ? std::min(team, tmax) : tmax;
+  }
+  // The factor launch: one team, T = directTeam(team) (the U3 hook passes T; the factor is bitwise
+  // independent of it). Returns the team size used.
+  template <class FR>
+  int launchDirectFactor(const BottomDirect<FR>& D, int team, double tauPiv0, bool probe = true) {
+    const Level& bt = lv_.back();
+    BottomFactorKernel<FR, FPC> k;
+    k.D = D;
+    k.AFX = bt.AFX;
+    k.AFY = bt.AFY;
+    k.AFZ = bt.AFZ;
+    k.comp = bottomComp_;
+    k.kc = dirKc_;
+    k.aug = dirAug_;
+    k.tauPiv0 = tauPiv0;
+    const std::size_t scratch = BottomFactorKernel<FR, FPC>::scratchBytes(D.pl.b);
+    const int T = directTeam(k, team, probe, scratch);
+    Kokkos::parallel_for(
+        "peclet::flow::mg_bottom_factor",
+        Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T).set_scratch_size(0, Kokkos::PerTeam(scratch)),
+        k);
+    return T;
+  }
+  // The FCG kernel with M = the direct factor `D`: the production solve (precondOnly = false) or,
+  // for the tests, z = M(lv.rhs) alone. Returns the team size used.
+  template <class FR>
+  int launchDirectKernel(const BottomDirect<FR>& D, bool precondOnly, int team, bool noMean,
+                         CCField zOut = CCField(), CCField rIn = CCField(), bool probe = true) {
+    BottomKernel<FR> k = makeBottomKernel<FR>(precondOnly);
+    k.dir = D;
+    k.noMeanForTest = noMean ? 1 : 0;
+    if (precondOnly) {
+      k.z = zOut;
+      k.b = rIn;
+    }
+    const int T = directTeam(k, team, probe);
+    Kokkos::parallel_for("peclet::flow::mg_bottom_direct",
+                         Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
+    return T;
+  }
+  // The production direct bottom solve: lv.x = A_b^{-1} lv.rhs (component-mean-free) by the FCG
+  // preconditioned by the FP32 factor, refactored first if setOpenness changed the operator (a
+  // host flag, not a device read).
+  void directBottomSolve() {
+    const bool first = dirTeam_ == 0;
+    if (facStale_) {
+      dirFacTeam_ = launchDirectFactor(dir_, dirFacTeam_, dirPivotTol_, /*probe=*/false);
+      facStale_ = false;
+      if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
+        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dir_.stat);
+        printf("[mg]     direct bottom factor: ok %d, restarts %d (team %d)\n", h(0), h(1),
+               dirFacTeam_);
+      }
+    }
+    dirTeam_ =
+        launchDirectKernel(dir_, false, dirTeam_, false, CCField(), CCField(), /*probe=*/false);
+    if (first && mgDebugLevel()) {
+      printf(
+          "[mg] direct bottom: %dx%dx%d, slow axis %d, P = %d, b = %d, border %d; team sizes "
+          "factor %d, solve %d\n",
+          lv_.back().inner.x, lv_.back().inner.y, lv_.back().inner.z, dirPlanes_.s, dirPlanes_.P,
+          dirPlanes_.b, dirPlanes_.border, dirFacTeam_, dirTeam_);
+      fflush(stdout);
+    }
+    bottomFlagPending_ = true;
+    if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
+      int it = 0;
+      Kokkos::deep_copy(it, Kokkos::subview(bottomInfo_, 0));
+      printf("[mg]     direct bottom: %d inner iterations (team %d)\n", it, dirTeam_);
+    }
   }
 
   // --- Agglomerated GraphAMG bottom solve --------------------------------------------------------
@@ -3109,12 +3695,34 @@ class CutcellMG {
     return v;
   }
 
+  // How estimateEigenvalues starts its two power iterations (D3, doc/vof_step_performance_design.md
+  // §5.13). `Cold`: both from `seed` (the right-hand side), nothing kept -- the pre-D3 estimate,
+  // and still the balanced-force pre-projection's. `ColdKeep`: the same arithmetic, and the last
+  // v_max / v_min iterates are kept. `Warm`: each iteration starts from its kept iterate (masked,
+  // mean-removed and normalised exactly as the rhs seed is) and the kept iterates are replaced by
+  // the new last ones; `seed` is not read. Warm requires eigenWarmReady().
+  enum class EigenStart { Cold, ColdKeep, Warm };
+  // True when a ColdKeep or Warm estimate has run on the current hierarchy (init/initMpi drop it).
+  bool eigenWarmReady() const {
+    return eigWarm_ && !lv_.empty() && eigVmax_.extent(0) == lv_[0].n &&
+           eigVmin_.extent(0) == lv_[0].n;
+  }
+  // The kept iterates are cross-step state: the Solver's `redistribute` carries them across a
+  // repartition (inner cells migrated like a registry field) and hands them back here.
+  CCField eigenWarmMax() const { return eigVmax_; }
+  CCField eigenWarmMin() const { return eigVmin_; }
+  void setEigenWarm(CCField vmax, CCField vmin) {
+    eigVmax_ = vmax;
+    eigVmin_ = vmin;
+    eigWarm_ = true;
+  }
+
   // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power
-  // iteration (direct for the max + a shifted iteration for the min), seeded by `seed`.
-  // Communication-heavy, so the CUDA driver runs it once on step 1 and reuses the bounds. Port of
-  // estimate_eigenvalues.
+  // iteration (direct for the max + a shifted iteration for the min), seeded by `seed` (or, with
+  // EigenStart::Warm, by the iterates a previous estimate kept). Communication-heavy, so the CUDA
+  // driver runs it once on step 1 and reuses the bounds. Port of estimate_eigenvalues.
   void estimateEigenvalues(CCConst seed, double& lmin, double& lmax, int iters, int pre, int post,
-                           int bottom) {
+                           int bottom, EigenStart start = EigenStart::Cold) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     pre_ = pre;
     post_ = post;
@@ -3123,7 +3731,9 @@ class CutcellMG {
     const std::size_t n = l0.n;
     CCField v = workVector(0, n, "ev_v"), w = workVector(1, n, "ev_w"),
             z = workVector(2, n, "ev_z"), srhs = workVector(3, n, "ev_srhs");
-    Kokkos::deep_copy(CCExec(), srhs, seed);
+    const bool warm = start == EigenStart::Warm, keep = start != EigenStart::Cold;
+    if (!warm)
+      Kokkos::deep_copy(CCExec(), srhs, seed);
     auto matvec = [&](CCField y, CCField x) { matvecOverlap(l0, y, x); };
     auto applyT = [&](CCField out,
                       CCField in) {  // out = M^{-1} A in, projected onto the fluid range
@@ -3136,14 +3746,20 @@ class CutcellMG {
       double nr = std::sqrt(dot(l0, x, x));
       if (nr > 0)
         scale(x, 1.0 / nr);
+      return nr;
     };
-    auto seedf = [&](CCField x) {
-      Kokkos::deep_copy(CCExec(), x, srhs);
+    auto seedf = [&](CCField x, CCField src) {
+      Kokkos::deep_copy(CCExec(), x, src);
       removeMean(l0, x);
       maskSolid(l0, x);
-      normalize(x);
+      return normalize(x);
     };
-    seedf(v);
+    auto keepf = [&](CCField& dst, CCField x, const char* label) {
+      if (dst.extent(0) != n)
+        dst = CCField(label, n);
+      Kokkos::deep_copy(CCExec(), dst, x);
+    };
+    const double nrMax = seedf(v, warm ? eigVmax_ : srhs);
     lmax = 1.0;
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
@@ -3151,7 +3767,9 @@ class CutcellMG {
       Kokkos::deep_copy(CCExec(), v, z);
       normalize(v);
     }
-    seedf(v);
+    if (keep)
+      keepf(eigVmax_, v, "ev_vmax");
+    const double nrMin = seedf(v, warm ? eigVmin_ : srhs);
     double mu = 0.0;
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
@@ -3159,6 +3777,14 @@ class CutcellMG {
       mu = dot(l0, v, z);
       Kokkos::deep_copy(CCExec(), v, z);
       normalize(v);
+    }
+    if (keep) {
+      keepf(eigVmin_, v, "ev_vmin");
+      // Only a non-degenerate estimate may seed a warm one: a zero seed (a zero right-hand side,
+      // e.g. a fluid at rest) leaves zero iterates and lmax = 0, from which a warm estimate would
+      // return zero bounds -- and a Chebyshev solve on them NaN, which maxabs cannot see.
+      eigWarm_ =
+          nrMax > 0.0 && nrMin > 0.0 && std::isfinite(lmax) && lmax > 0.0 && std::isfinite(mu);
     }
     double e_hi = lmax, e_lo = lmax - mu;  // direct (max) + shifted (min) Rayleigh estimates
     lmin = e_lo < e_hi ? e_lo : e_hi;
@@ -3171,9 +3797,13 @@ class CutcellMG {
   // the step coefficients come from the spectral bounds [a,b], so NO per-iteration global
   // dot-products (communication- light at scale). rhs on level-0 supplied as `b`; solution left in
   // `x`. Returns the V-cycle count. Port of solve_chebyshev.
+  // `guard3` (D3, §5.13, for a solve on warm-started bounds): if the residual after 3 iterations
+  // is not <= r0 the solve stops there and chebyshevGuardTripped() reports it, so the caller can
+  // re-estimate cold and redo the solve. Off, the loop is the pre-D3 loop.
   int solveChebyshev(CCField b, CCField x, int maxit, double rtol, int pre, int post, int bottom,
-                     double a, double bnd) {
+                     double a, double bnd, bool guard3 = false) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    chebGuardTripped_ = false;
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -3211,8 +3841,13 @@ class CutcellMG {
         matvec(w, d);
         axpy(r, -1.0, w);
         removeMean(l0, r);  // r -= A d
-        if (maxabs(l0, r) < rtol * rref)
+        const double rn = maxabs(l0, r);
+        if (rn < rtol * rref)
           break;
+        if (guard3 && i == 3 && !(rn <= r0)) {  // growing after 3 iterations: bounds gone stale
+          chebGuardTripped_ = true;
+          break;
+        }
         precond(z, r);
         ++nvc;
         const double rho_new = 1.0 / (2.0 * sigma1 - rho);
@@ -3228,6 +3863,8 @@ class CutcellMG {
   // projection, flow doc/collocated_varrho_forces.md §4.6 / WO-P5). ref <= 0 restores the
   // default (stop relative to the initial residual). Callers set it around ONE solve only.
   void setStopReference(double ref) { stopRef_ = ref; }
+  // Did the last solveChebyshev(..., guard3 = true) stop on its 3-iteration growth guard?
+  bool chebyshevGuardTripped() const { return chebGuardTripped_; }
   // max|b| over the fluid cells after the null-space (mean) projection -- the drivers' norm.
   double rhsNorm(CCField b, CCField scratch) {
     Level& l0 = lv_[0];
@@ -3302,18 +3939,19 @@ class CutcellMG {
     const int g = lv.g;
     CCField ff = f;
     FPV ac = lv.AC;
+    // the {sum, count} body; ccReduce3 runs it in B2's pencil order on a host backend (§5.8) and
+    // as the MDRange reduction it always was on a device
+    auto body = KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
+      const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+      if (ac(i) > 1e-30f) {
+        s += ff(i);
+        k += 1;
+      }
+    };
     if (!distributed_) {
       ensureScalars();
-      Kokkos::parallel_reduce(
-          "mgmeanr", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-          KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
-            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-            if (ac(i) > 1e-30f) {
-              s += ff(i);
-              k += 1;
-            }
-          },
-          Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
+      ccReduce3("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body,
+                Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
       auto ks = ks_;
       auto kc = kcnt_;
       const bool guard = stopGuard;
@@ -3331,16 +3969,7 @@ class CutcellMG {
     }
     double sum = 0;
     long cnt = 0;
-    Kokkos::parallel_reduce(
-        "mgmeanr", MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          if (ac(i) > 1e-30f) {
-            s += ff(i);
-            k += 1;
-          }
-        },
-        sum, cnt);
+    ccReduce3("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body, sum, cnt);
     double dcnt = (double)cnt;
     allreduceSum2(sum, dcnt
 #ifdef PECLET_FLOW_MPI
@@ -3376,7 +4005,16 @@ class CutcellMG {
   // ISSUES sweep item 6: did the LAST solve driver give up on a non-finite recurrence scalar?
   // A failing solve returns the ITERATION CAP (so a rule-3b "no capped solve" check sees it) and
   // sets this; it used to print to stdout, zero the correction and report 0 iterations.
-  bool lastSolveFailed() const { return solveFailed_; }
+  // The device bottom flags a non-finite scalar on the device; a driver whose host reads do not
+  // carry it (all but the single-rank PCG packet) has it folded in here, by one scalar read.
+  bool lastSolveFailed() {
+    if (bottomFlagPending_) {
+      double v = 0.0;
+      Kokkos::deep_copy(v, slot(kBottomFlag));
+      noteBottomFlag(v);
+    }
+    return solveFailed_;
+  }
   void resetAllreduceCounters() {
     allreduceTime_ = 0.0;
     allreduceCount_ = 0;
@@ -3429,6 +4067,11 @@ class CutcellMG {
 
   std::vector<Level> lv_;
   CCField work_[8];  // workVector's slots (0-3 the eigenvalue estimate, 4-7 the Chebyshev driver)
+  // D3 (§5.13): the last v_max / v_min power iterates of a ColdKeep/Warm estimate, persistent
+  // across solves (never zeroed), valid while eigWarm_ (dropped by init/initMpi).
+  CCField eigVmax_, eigVmin_;
+  bool eigWarm_ = false;
+  bool chebGuardTripped_ = false;  // see chebyshevGuardTripped()
   // The physical metric (setMetric), doc/anisotropic_metric.md §5: h_a' = h_a/hRef and the flag
   // that engages the aspect-ratio coarsening rule.  (1,1,1)/false is the isotropic lattice, on
   // which mgChooseRatio reproduces today's level table exactly.
@@ -3455,6 +4098,30 @@ class CutcellMG {
   // scalar (a preconditioner or operator that produced NaN/Inf)? Reset at the head of
   // every solve. See `lastSolveFailed()`.
   bool solveFailed_ = false;
+  // The device bottom (§5.7, §5.14, §13): the FCG vectors, the kernel's info slot, the component
+  // labels (condition 6, cached per hierarchy), and whether a device solve ran since its flag was
+  // last read.
+  CCField bottomR_, bottomP_, bottomZ_, bottomZp_, bottomAp_;
+  Kokkos::View<int*, CCMem> bottomInfo_;  // [0] = inner iterations of the last device solve
+  bool bottomConnKnown_ = false, bottomConnected_ = false;  // condition 6 (B1b), per hierarchy
+  int bottomNComp_ = 0;                                     // the bottom's fluid components
+  Kokkos::View<int*, CCMem> bottomComp_, bottomLabTmp_;  // component ids (-1 solid), label scratch
+  Kokkos::View<long*, CCMem> bottomCompCnt_;             // cells per component
+  CCField bottomCompMean_;                               // the kernel's per-component means
+  bool bottomFlagPending_ = false;  // a device solve ran since the device flag was last read
+  int bottomSolver_ = 0;            // kBottomAuto / kBottomDirect / kBottomAlgebraic
+  // §13, the direct preconditioner: the bottom storage exists (single rank, <= 8192 cells, device
+  // or forced by a hook), the plane ordering, the FP32 factor, the per-component augmentation, the
+  // factor's staleness (set by setOpenness), the two kernels' team sizes, the first attempt's
+  // pivot floor (kBottomPivotTol; the U5 hook raises it).
+  bool bottomStore_ = false;
+  BottomPlanes dirPlanes_;
+  BottomDirect<float> dir_;
+  Kokkos::View<int*, CCMem> dirKc_;
+  Kokkos::View<double*, CCMem> dirAug_;
+  bool facStale_ = true;
+  int dirTeam_ = 0, dirFacTeam_ = 0;
+  double dirPivotTol_ = kBottomPivotTol;
   double stopRef_ = -1.0;       // see setStopReference
   std::vector<double> lvTime_;  // per-level V-cycle wall time (mgDebugLevel() >= 3)
   int lvCycles_ = 0;
@@ -3735,6 +4402,60 @@ class CutcellMG {
     agglomMode_ = on ? 1 : 0;
     amg_.reset();
   }
+  // Engine selection for an agglomerated bottom (§13 D-5): kBottomAuto = the device bottom
+  // preconditioned by the direct factor wherever directBottomIneligible() is null (device backends
+  // only), GraphAMG otherwise; kBottomDirect = that engine or a raise naming the failed condition;
+  // kBottomAlgebraic = GraphAMG always (the A/B instrument).
+  enum : int { kBottomAuto = 0, kBottomDirect = 1, kBottomAlgebraic = 2 };
+  void setBottomSolver(int m) { bottomSolver_ = m; }
+  int bottomSolver() const { return bottomSolver_; }
+  // Test hooks (tests/kokkos/test_bottom_direct.cpp). Host backends never build the device
+  // bottom's storage; `bottomForceForTest` builds it (and labels the components) so the kernels can
+  // be exercised there.
+  bool bottomConnected() const { return bottomConnected_; }
+  int bottomComponents() const { return bottomNComp_; }
+  void bottomForceForTest() {
+    if (!bottomStore_ && kHostMemory) {
+      buildBottomStore(/*forceHost=*/true);
+      evalBottomComponents();
+    }
+  }
+  // §13 hooks (host backends after bottomForceForTest).
+  // `directFactorForTest<FR>`: a fresh factor of the bottom in FR arithmetic (team T, 0 = the
+  // default), `*Tused` = the team size it ran with. `directApplyForTest`: z = M(r) by that factor
+  // through the FCG kernel's precondition-only path (`noMean`: without the component means'
+  // removal); returns the team size. `directSolveForTest`: the production solve (FP32 factor,
+  // lazily refactored) on the bottom's rhs; returns the inner iterations.
+  const BottomPlanes& directPlanes() const { return dirPlanes_; }
+  template <class FR>
+  BottomDirect<FR> directFactorForTest(int team, double tauPiv0 = kBottomPivotTol,
+                                       int* Tused = nullptr) {
+    BottomDirect<FR> D = BottomDirect<FR>::allocate(dirPlanes_, lv_.back().ext);
+    const int T = launchDirectFactor(D, team, tauPiv0);
+    Kokkos::fence();
+    if (Tused)
+      *Tused = T;
+    return D;
+  }
+  template <class FR>
+  int directApplyForTest(const BottomDirect<FR>& D, CCField z, CCField r, int team,
+                         bool noMean = false) {
+    const int T = launchDirectKernel(D, true, team, noMean, z, r);
+    Kokkos::fence();
+    return T;
+  }
+  int directSolveForTest() {
+    directBottomSolve();
+    int it = 0;
+    Kokkos::deep_copy(it, Kokkos::subview(bottomInfo_, 0));
+    return it;
+  }
+  int directRestarts() const {
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dir_.stat);
+    return h(1);
+  }
+  void directPivotTolForTest(double t) { dirPivotTol_ = t; }
+  void directMarkStaleForTest() { facStale_ = true; }
 
  private:
 };

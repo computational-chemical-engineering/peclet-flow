@@ -112,6 +112,33 @@ void Solver<Grid>::redistribute(const peclet::core::decomp::BlockDecomposer<3>& 
     op[k] = oldHost[k].data();
     np[k] = newHost[k].data();
   }
+  // 2b. The Chebyshev driver's kept power iterates (D3, doc/vof_step_performance_design.md §5.13)
+  //    are cross-step state of the pressure MG, held on its g = 1 level-0 block: carried along
+  //    in the same exchange (inner cells re-padded to G), handed back after the MG rebuild (5b).
+  //    Dropping them would make the next re-estimate cold, and an np = 1 rebalance would stop
+  //    being bit-exact. Collective decision: every rank carries them or none does.
+  int warmLocal = mg_.eigenWarmReady() ? 1 : 0, warmAll = 0;
+  MPI_Allreduce(&warmLocal, &warmAll, 1, MPI_INT, MPI_MIN, comm_);
+  std::vector<double> eigOld[2], eigNew[2];
+  if (warmAll) {
+    const CCField src[2] = {mg_.eigenWarmMax(), mg_.eigenWarmMin()};
+    const int o1x = (int)ob.size[0] + 2, o1y = (int)ob.size[1] + 2;
+    for (int v = 0; v < 2; ++v) {
+      auto h = Kokkos::create_mirror_view(src[v]);
+      Kokkos::deep_copy(h, src[v]);
+      eigOld[v].assign((std::size_t)oex * oey * oez, 0.0);
+      eigNew[v].assign((std::size_t)nex * ney * nez, 0.0);
+      for (int z = 0; z < (int)ob.size[2]; ++z)
+        for (int y = 0; y < (int)ob.size[1]; ++y)
+          for (int x = 0; x < (int)ob.size[0]; ++x)
+            eigOld[v][(std::size_t)(x + G) + (std::size_t)(y + G) * oex +
+                      (std::size_t)(z + G) * oex * oey] =
+                h((std::size_t)(x + 1) + (std::size_t)(y + 1) * o1x +
+                  (std::size_t)(z + 1) * o1x * o1y);
+      op.push_back(eigOld[v].data());
+      np.push_back(eigNew[v].data());
+    }
+  }
   peclet::core::decomp::redistributeGridFields<double>(*dec_, newDec, rank, G, op, np, comm_);
 
   // 3. reallocate every buffer to the new block; re-init the halo + MG on the new partition.
@@ -146,6 +173,26 @@ void Solver<Grid>::redistribute(const peclet::core::decomp::BlockDecomposer<3>& 
   for (std::size_t k = 0; k < names.size(); ++k)
     if (names[k] != "sdf")
       scatterPadded(names[k], newHost[k]);
+  // 5b. hand the migrated Chebyshev power iterates back to the rebuilt MG (see 2b): inner cells
+  //    into a fresh g = 1 level-0 vector (ghosts zero; no consumer reads them before a refill).
+  if (warmAll) {
+    const int n1x = (int)nb.size[0] + 2, n1y = (int)nb.size[1] + 2, n1z = (int)nb.size[2] + 2;
+    CCField dst[2];
+    for (int v = 0; v < 2; ++v) {
+      dst[v] = CCField(v == 0 ? "ev_vmax" : "ev_vmin", (std::size_t)n1x * n1y * n1z);
+      auto h = Kokkos::create_mirror_view(dst[v]);
+      Kokkos::deep_copy(h, 0.0);
+      for (int z = 0; z < (int)nb.size[2]; ++z)
+        for (int y = 0; y < (int)nb.size[1]; ++y)
+          for (int x = 0; x < (int)nb.size[0]; ++x)
+            h((std::size_t)(x + 1) + (std::size_t)(y + 1) * n1x +
+              (std::size_t)(z + 1) * n1x * n1y) =
+                eigNew[v][(std::size_t)(x + G) + (std::size_t)(y + G) * nex +
+                          (std::size_t)(z + G) * nex * ney];
+      Kokkos::deep_copy(dst[v], h);
+    }
+    mg_.setEigenWarm(dst[0], dst[1]);
+  }
   // 6. REFILL THE GHOSTS. `redistributeGridFields` moves the INNER cells only and says so
   //    ("the caller refills ghosts with a halo exchange afterwards"); the padded destination
   //    buffers were zero-initialised in step 1, so without this every migrated field enters the

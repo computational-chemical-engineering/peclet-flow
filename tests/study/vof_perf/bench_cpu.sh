@@ -19,7 +19,7 @@ TREE_B=${TREE_B-$SUITE/flow-vof-mg/build_omp}
 LABEL_B=${LABEL_B-"vof-mg build_omp"}
 TREE_C=${TREE_C-}
 LABEL_C=${LABEL_C-"C"}
-CKPT=${CKPT-$HOME/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/data/ckpt_t43.npz}
+CKPT=${CKPT-$HOME/Codes/bubble_column_perf/ckpt_t43.npz}
 source "$SUITE/.venv/bin/activate"
 cd "$P"
 echo "load: $(cat /proc/loadavg)"

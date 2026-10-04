@@ -13,14 +13,22 @@ Usage:
             [--warm W] [--flux device|python|none] [--levels L] [--bottom MODE] [--fixdt DT]
             [--ckpt PATH] [--case-dir DIR] [--dummy N]
 
-    --ckpt      checkpoint (default ~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/
-                data/ckpt_t43.npz)
-    --case-dir  directory holding run_peclet.py + case.py (default: that repo's scripts/)
+    --ckpt      checkpoint (default ~/Codes/bubble_column_perf/ckpt_t43.npz)
+    --case-dir  directory holding run_peclet.py + case.py (default:
+                ~/Codes/peclet-examples/benchmarks/bubble-column/scripts)
     --pcg       MG-PCG pressure with cap 800 and relative tolerance --rtol (default 1e-10)
+    --cheb      Chebyshev pressure (cap --cheb-maxit, default 120) at --rtol; prints the
+                solver's num_pressure_chebyshev_restarts when the build has it (D3, §5.13)
     --dump      save u, v, w, p, C, the timed steps' dt and pressure iterations (iters) and every
                 VoF block's colour array (col<id>) -- compare two dumps with cmp.py (G-BIT item 2)
     --timing    per-stage breakdown from diagnostics.vof_timing()
     --levels L  pressure multigrid depth; --bottom MODE = set_pressure_bottom(MODE) (E1)
+    --bottom-solver ENGINE  diagnostics.set_pressure_bottom_solver(ENGINE): auto | direct |
+                algebraic (§13: the A/B of the two bottom engines on one build)
+    --div       with --dump: also store each timed step's max_open_divergence_projected() (div),
+                read after the step (G-NUM item 3)
+    --stats     with --dump: also store every timed step's measured block statistics (st_volume,
+                st_area, st_centroid, st_velocity, st_moments; WO-9's gate, C2 §5.10)
 """
 import os
 import sys
@@ -36,9 +44,9 @@ def arg(name, default, cast=str):
 
 
 CASE_DIR = arg("--case-dir", os.path.expanduser(
-    "~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/scripts"))
+    "~/Codes/peclet-examples/benchmarks/bubble-column/scripts"))
 CKPT = arg("--ckpt", os.path.expanduser(
-    "~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/data/ckpt_t43.npz"))
+    "~/Codes/bubble_column_perf/ckpt_t43.npz"))
 sys.path.insert(0, CASE_DIR)
 import run_peclet as rp  # noqa: E402
 
@@ -80,8 +88,16 @@ for _name in ("set_superficial_velocity", "set_bulk_velocity"):
         break
 if "--pcg" in A:
     s.set_pressure_pcg(True, 800, RTOL)
+if "--cheb" in A:  # the variable-density default driver, solver default cap 120, at --rtol
+    s.set_pressure_chebyshev(True, arg("--cheb-maxit", 120, int), RTOL)
 if "--bottom" in A:
     s.set_pressure_bottom(arg("--bottom", "auto"))
+if "--bottom-solver" in A:
+    s.diagnostics.set_pressure_bottom_solver(arg("--bottom-solver", "auto"))
+DIV = "--div" in A
+divs = []
+STATS = "--stats" in A
+stats = {k: [] for k in ("volume", "area", "centroid", "velocity", "moments")}
 print(f"build {time.time()-t_b:.2f} s", flush=True)
 
 S = rp.S
@@ -111,6 +127,12 @@ def one(timed):
         T["step"] += t2 - t1
         T["flux"] += t3 - t2
         iters.append(s.diagnostics.last_pressure_iterations())
+        if DIV:
+            divs.append(s.max_open_divergence_projected())
+        if STATS:
+            st = s.diagnostics.vof_block_stats()
+            for k in stats:
+                stats[k].append([b[k] for b in st])
     t += dt
     return dt
 
@@ -125,6 +147,8 @@ wall = time.perf_counter() - w0
 print(f"steps {N}  wall {wall:.3f} s  {1000*wall/N:.2f} ms/step  dt mean {np.mean(dts):.3e}")
 print("per-step ms: " + "  ".join(f"{k} {1000*v/N:.2f}" for k, v in T.items()))
 print(f"pressure iters mean {np.mean(iters):.2f} min {min(iters)} max {max(iters)}")
+if "--cheb" in A and hasattr(s.diagnostics, "num_pressure_chebyshev_restarts"):
+    print(f"chebyshev restarts {s.diagnostics.num_pressure_chebyshev_restarts}")
 if TIMING:
     v = s.diagnostics.vof_timing()
     n = v["steps"]
@@ -138,5 +162,7 @@ if DUMP:
     cols = {f"col{b['id']}": np.asarray(s.vof_block_color(b["id"]))
             for b in s.diagnostics.vof_block_stats()}
     np.savez(DUMP, u=s.get_u(), v=s.get_v(), w=s.get_w(), p=s.get_field("p"), C=s.get_field("C"),
-             dts=np.array(dts), iters=np.array(iters, dtype=np.int64), **cols)
+             dts=np.array(dts), iters=np.array(iters, dtype=np.int64), **cols,
+             **({"div": np.array(divs)} if DIV else {}),
+             **({f"st_{k}": np.array(v) for k, v in stats.items()} if STATS else {}))
     print("dumped", DUMP, f"({len(cols)} block colours)")

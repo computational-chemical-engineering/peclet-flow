@@ -43,9 +43,9 @@ CASES = arg("--cases", "static,hysing,column").split(",")
 RTOLS = [float(r) for r in arg("--rtols", "1e-10,1e-9,1e-8,1e-7,1e-6").split(",")]
 NCOL = arg("--column-steps", 2000, int)
 CASE_DIR = arg("--case-dir", os.path.expanduser(
-    "~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/scripts"))
+    "~/Codes/peclet-examples/benchmarks/bubble-column/scripts"))
 CKPT = arg("--ckpt", os.path.expanduser(
-    "~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/data/ckpt_t43.npz"))
+    "~/Codes/bubble_column_perf/ckpt_t43.npz"))
 
 # the two study scripts read sys.argv at import: hand them none of ours
 sys.argv = [sys.argv[0]]

@@ -43,6 +43,7 @@
 #include "peclet/core/decomp/block_decomposer.hpp"
 #endif
 
+#include "anderson_accelerator.hpp"
 #include "flow_ibm.hpp"
 #include "peclet/core/python/kokkos_teardown.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
@@ -179,6 +180,59 @@ struct BoundSolver final : peclet::flow::Solver<Grid>, peclet::core::python::Rel
   using peclet::flow::Solver<Grid>::Solver;
   void release() noexcept override { peclet::core::python::destruct_bound_instance(this); }
 };
+
+// The bound Anderson accelerator (doc/steady_acceleration.md §5.2): it owns Kokkos Views (the
+// history), so it is a Releasable like the solver and is destroyed by the module's atexit hook
+// before Kokkos::finalize if it is still alive then.
+template <class Grid>
+struct BoundAccelerator final : peclet::flow::AndersonAccelerator<Grid>,
+                                peclet::core::python::Releasable {
+  using peclet::flow::AndersonAccelerator<Grid>::AndersonAccelerator;
+  void release() noexcept override { peclet::core::python::destruct_bound_instance(this); }
+};
+
+// The developer-tier Anderson accelerator of a steady march, bound as a PRIVATE class
+// (`_AndersonAccelerator` / `_AndersonAcceleratorColocated`) and created only through
+// `s.diagnostics.anderson_accelerator(...)`. The public entry is peclet.flow.march_to_steady.
+template <class Grid>
+static void bind_accelerator(nb::module_& m, const char* name) {
+  using A = BoundAccelerator<Grid>;
+  nb::class_<A>(
+      m, name,
+      "Anderson accelerator of a steady march (doc/steady_acceleration.md): type-II Anderson on "
+      "the march state (velocity + P, plus the collocated face field under projected-face "
+      "advection), velocity-only metric. Created by s.diagnostics.anderson_accelerator(); the "
+      "public driver is peclet.flow.march_to_steady. step(accelerate) is ONE call of the solver's "
+      "step() (preceded by the lazy mix when accelerate and a mix is pending); between calls the "
+      "solver always holds a genuine step output.")
+      .def("step", &A::step, nb::arg("accelerate") = true,
+           "One map evaluation: when accelerate and a mix is pending, the solver's state is "
+           "replaced by the Anderson mix first; then one solver.step(). accelerate=False is a "
+           "plain step that still records history. Raises if the configuration became "
+           "unsupported (the same refusals as the constructor).")
+      .def_prop_ro("residual", &A::residual,
+                   "Relative velocity residual ||g_u - x_u|| / ||g_u|| of the last evaluation "
+                   "(inf before the first).")
+      .def_prop_ro(
+          "status", [](const A& a) { return std::string(a.statusName()); },
+          "'active' or 'disabled' (acceleration stopped; steps are plain).")
+      .def_prop_ro("reason", &A::reason, "Why the status is not 'active' ('' while active).")
+      .def_prop_ro("num_restarts", &A::numRestarts, "History restarts so far.")
+      .def_prop_ro("num_resets", &A::numResets,
+                   "History resets because the state or the parameters (dt, rho, mu, body force, "
+                   "advection on / scheme / implicit) "
+                   "were changed from outside.")
+      .def_prop_ro("num_columns", &A::numColumns, "Window columns in use.")
+      .def_prop_ro("window", &A::window, "The window m.")
+      .def_prop_ro("mixing", &A::mixing, "The mixing beta.")
+      .def_prop_ro("memory_bytes", &A::memoryBytes,
+                   "Bytes of the history: (2m+3) * n_fields * 8 * n_padded (this rank).")
+      .def_prop_ro("seconds", &A::seconds,
+                   "Cumulative wall time spent in the accelerator, solver.step() excluded "
+                   "(device-fenced), seconds, this rank.")
+      .def("reset", &A::reset, "Clear the history (the next call starts a new window).")
+      .def("disable", &A::disable, "Stop accelerating for good; step() is then a plain step.");
+}
 
 /// The reconstructed-traction loads as the (4, n_instances, 3) array that both of its Python names
 /// return: `diagnostics.hydro_force_torque_traction()` (canonical) and the deprecated
@@ -653,6 +707,30 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "winner of the multi-GPU ablation) or 'all' (legacy — every V-cycle level + after every "
           "matvec). Iteration counts are identical (A preserves mean-freeness); results equal "
           "within solver tolerance, not bit-identical.")
+      .def(
+          "set_pressure_bottom_solver",
+          [](D& diag, const std::string& engine) {
+            if (engine == "auto")
+              diag.s->setPressureBottomSolver(0);
+            else if (engine == "direct")
+              diag.s->setPressureBottomSolver(1);
+            else if (engine == "algebraic")
+              diag.s->setPressureBottomSolver(2);
+            else
+              throw std::runtime_error("set_pressure_bottom_solver: 'auto' | 'direct' | 'algebraic'");
+          },
+          nb::arg("engine"),
+          "Engine of the AGGLOMERATED pressure bottom (set_pressure_bottom 'auto' / "
+          "'agglomerated'). 'auto' (DEFAULT): on a GPU backend, single rank, the singular "
+          "(periodic / wall) operator, a bottom of at most 8192 cells with at most 64 fluid "
+          "components (solids allowed) and an axis whose planes hold at most 192 cells, 'direct': "
+          "one device launch runs flexible CG in FP64 (inner tolerance 1e-5, cap 100) "
+          "preconditioned by a block-tridiagonal FP32 direct factor of the bottom (planes along "
+          "one axis, explicit Schur-complement inverses), refactored once per operator change -- "
+          "no host transfer; everywhere else the host GraphAMG solve. 'direct' forces the device "
+          "engine and raises at the bottom solve, naming the failed condition, where it is not "
+          "eligible; 'algebraic' forces GraphAMG (the A/B instrument). Host backends always run "
+          "GraphAMG under 'auto'. doc/vof_step_performance_design.md §13.")
       .def("set_pressure_graph_amg", [](D& diag, bool on) { return diag.s->setPressureGraphAmg(on); }, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "
@@ -713,11 +791,34 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def("balanced_force_failures", [](D& diag) { return diag.s->balancedForceFailures(); },
            "How many balanced-force solves have failed over the solver's lifetime (see "
            "last_balanced_force_failed).")
+      .def(
+          "anderson_accelerator",
+          [](D& diag, int window, double mixing) {
+            return new BoundAccelerator<Grid>(*diag.s, window, mixing);
+          },
+          nb::arg("window") = 5, nb::arg("mixing") = 1.0, nb::rv_policy::take_ownership,
+          nb::keep_alive<0, 1>(),
+          "A new Anderson accelerator of this solver's steady march "
+          "(doc/steady_acceleration.md; the public driver is peclet.flow.march_to_steady). "
+          "window in [1, 8] (default 5), mixing in (0, 1] (default 1.0). Raises on an "
+          "unsupported configuration (a collocated scheme other than 'ghost', VoF, phase change, "
+          "scalars, porous, variable properties, drag, cell forces, moving scenes, superficial "
+          "velocity, pressure warm start, the balanced-force projection) and when the history, "
+          "(2m+3) * n_fields * 8 * n_padded bytes, does not fit. Collective under MPI.")
       .def("last_pressure_iterations", [](D& diag) { return diag.s->lastPressureIterations(); },
            "Return the pressure-solver iteration count from the last step().\n\n"
            "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "
            "CAP, so the usual rule-3b 'a capped pressure solve invalidates the run' check sees "
            "it; pressure_solve_failed() distinguishes the two.")
+      .def_prop_ro("num_pressure_chebyshev_restarts",
+                   [](D& diag) { return diag.s->numPressureChebyshevRestarts(); },
+                   "How many Chebyshev pressure solves were redone on cold spectral bounds since "
+                   "construction. Under variable density the bounds are re-estimated every step "
+                   "from the previous estimate's power iterates (5 + 5 iterations instead of "
+                   "15 + 15 from the right-hand side); a solve on such bounds that reaches the "
+                   "cap, or whose residual after 3 iterations exceeds the initial one, is redone "
+                   "on a cold estimate and counted here; the abandoned attempt's V-cycles count in "
+                   "last_pressure_iterations().")
       .def("pressure_solve_failed", [](D& diag) { return diag.s->pressureSolveFailed(); },
            "Did the last pressure solve break down on a non-finite recurrence scalar (a "
            "preconditioner or operator that produced NaN/Inf)?\n\n"
@@ -2069,7 +2170,11 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "The physical cell-center coordinates of THIS rank's inner block as three 1-D float64 "
           "arrays (x, y, z), i.e. origin + (i + 1/2) * spacing per axis. "
           "np.meshgrid(*s.cell_centers(), indexing='ij') is the grid an SDF for set_solid is "
-          "sampled on. Under MPI these are the LOCAL block's centers in GLOBAL coordinates.")
+          "sampled on. Under MPI these are the LOCAL block's centers in GLOBAL coordinates. "
+          "CELL-UNIT TRAP: without an extent this is i + 1/2, while set_scene puts cell i's centre "
+          "at i -- the same body given as a scene and as an SDF sampled here lands half a cell "
+          "apart. With an extent both use origin + (i + 1/2) * spacing. Unifying the cell-unit "
+          "convention changes results; deferred to 2.0.0.")
       .def("set_rho", &S::setRho, nb::arg("rho"),
            "Set the fluid density rho (the caller's units). Under a physical domain the FIRST call "
            "pins the reference density the internal scales are built on; a later change rebuilds "
@@ -2365,7 +2470,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "records are accepted, reading an all-zero centre as 'follows the body'). Coordinates are "
           "the caller's own PHYSICAL ones when the solver was given an extent -- so ONE scene "
           "serves flow, dem and voro unchanged -- and CELL UNITS on the global inner grid "
-          "otherwise (cell (i,j,k)'s centre at (i,j,k)). The scene is replicated on every rank, so scene-derived geometry needs no "
+          "otherwise (cell (i,j,k)'s centre at (i,j,k) -- half a cell from cell_centers(), which "
+          "returns i + 1/2 in cell units). The scene is replicated on every rank, so scene-derived geometry needs no "
           "communication and -- unlike diagnostics.set_exact_crossings -- is NOT single-rank only. "
           "periodic=True treats the scene as min-image periodic over the global grid (one "
           "instance per body, no images); periodic=False leaves images to the caller.")
@@ -3621,6 +3727,8 @@ NB_MODULE(_flow, m) {
   // Staggered MAC grid (THE flow solver) + the collocated/cell-centered variant. Same Python API.
   bind_solver<peclet::flow::Staggered>(m, "Solver", "SolverDiagnostics");
   bind_solver<peclet::flow::Colocated>(m, "SolverColocated", "SolverColocatedDiagnostics");
+  bind_accelerator<peclet::flow::Staggered>(m, "_AndersonAccelerator");
+  bind_accelerator<peclet::flow::Colocated>(m, "_AndersonAcceleratorColocated");
 
 #ifdef PECLET_FLOW_MPI
   // Module-level: this rank's ORB block of the global (gnx,gny,gnz) grid, matching the

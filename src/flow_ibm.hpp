@@ -45,6 +45,7 @@
 #include "mac_stencils.hpp"
 #include "mac_velocity_mg.hpp"
 #include "peclet/core/field/field_set.hpp"
+#include "peclet/core/solver/anderson.hpp"  // AndersonRole of the march state (MarchState)
 #include "property_closures.hpp"
 #include "scalar_cutcell_geometry.hpp"  // cut-cell scalars: the geometry record (WO-2)
 #include "scalar_cutcell_operator.hpp"  // cut-cell scalars: operator + per-scalar state (WO-3)
@@ -506,6 +507,12 @@ class Solver {
   // Coarse-level (bottom) solve policy: 0 smoothed bottom (default), -1 auto (agglomerate exactly
   // when the geometric hierarchy cannot reach a small enough coarsest grid), 1 always. See CutcellMG.
   void setPressureBottomMode(int mode);
+  // Engine of an agglomerated bottom (doc/vof_step_performance_design.md §13): 0 "auto" (the
+  // single-team device bottom -- FP64 FCG preconditioned by the FP32 block-tridiagonal direct
+  // factor -- where eligible on a device backend, GraphAMG otherwise), 1 "direct" (raises at the
+  // bottom solve, naming the failed condition, where ineligible), 2 "algebraic" (GraphAMG always).
+  // Live; independent of the geometry.
+  void setPressureBottomSolver(int engine);
 
   // Coarse-level telescoping of the pressure multigrid (mac_cutcell_mg.hpp Telescope): when a
   // per-rank block turns odd, merge ORB siblings onto fewer ranks and keep coarsening instead of
@@ -1321,6 +1328,12 @@ class Solver {
   long lastPressureIterations() const;
 
 
+  // D3 (doc/vof_step_performance_design.md §5.13): how many pressure solves on warm-started
+  // Chebyshev bounds tripped the guard (the cap, or a residual above r0 after 3 iterations) and
+  // were redone on cold bounds, since construction.
+  long numPressureChebyshevRestarts() const { return chebColdRestarts_; }
+
+
   // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
   // (doc/anisotropic_metric.md §5).  On an isotropic domain this is today's table; on a stretched
   // one the aspect rule defers an axis while it is at least the aspect threshold (2) times
@@ -1332,6 +1345,37 @@ class Solver {
   // preconditioner output / recurrence scalar)? A failing solve also reports the
   // iteration cap through `lastPressureIterations()`.
   bool pressureSolveFailed() const;
+
+
+  // The state of the steady march (doc/steady_acceleration.md §3.1, §5.1, rev 1): exactly what
+  // step() reads across steps, as the full padded G = 2 buffers, with their roles for the Anderson
+  // accelerator's metric. Velocity = the three velocity components (measured); Carried = the
+  // accumulated pressure P and, on the collocated grid with projected-face advection, the face
+  // field uf/vf/wf (mixed and differenced, never measured). `signature` is (dt, rho, mu, Fx, Fy,
+  // Fz, advection on, advection scheme, implicit advection), all internal: a change of any of them
+  // changes the map (the last three: review R5).
+  struct MarchState {
+    std::vector<CCField> fields;
+    std::vector<peclet::core::solver::AndersonRole> roles;
+    C3 e{0, 0, 0};
+    int G = 2;
+    std::array<double, 9> signature{};
+#ifdef PECLET_FLOW_MPI
+    MPI_Comm comm = MPI_COMM_NULL;
+    bool distributed = false;
+#endif
+  };
+
+
+  // The march state of this solver (above), for the Anderson accelerator
+  // (src/anderson_accelerator.hpp). Public C++, not bound. Throws std::runtime_error naming the
+  // FIRST configuration the steady acceleration refuses (doc/steady_acceleration.md §5.3, D10): a
+  // collocated scheme other than the fluid-only 'ghost' projection; phase change; VoF; transported
+  // scalars; porous continuity; variable density or viscosity; a drag_beta field; cell force
+  // fields; moving scene instances; a superficial-velocity target; the pressure warm start; the
+  // balanced-force projection. A re-evaluation of host flags only, so the accelerator repeats it
+  // at every step.
+  MarchState marchState();
 
 
   // Per-phase wall times of the last step() in seconds, THIS RANK (device-fenced at each phase
@@ -4793,6 +4837,11 @@ class Solver {
   CCField zp1_;                 // FCG's extra scratch: allocated lazily at the first FCG solve
   int chebMaxit_ = 120;
   double chebRtol_ = 1e-9, chebA_ = 0.0, chebB_ = 0.0;
+  // D3 (§5.13): may the next main-bound re-estimate start warm? Set by a coefficient rebuild that
+  // drops VALID bounds, cleared by every structural invalidation (driver, density, porous setters).
+  bool chebWarmOk_ = false;
+  long chebColdRestarts_ = 0;  // guard firings (numPressureChebyshevRestarts)
+  CCField chebX0_;             // the solve's starting iterate under the pressure warm start
   int nLevels_ = 4;             // multigrid depth (CUDA default; set_pressure_multigrid)
   bool pressGraphAmg_ = false;
   // Coarse-solve policy: -1 auto (DEFAULT — agglomerate when the coarsest grid exceeds

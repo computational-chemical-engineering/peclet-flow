@@ -517,6 +517,11 @@ void Solver<Grid>::setPressureBottomMode(int mode) {
 }
 
 template <class Grid>
+void Solver<Grid>::setPressureBottomSolver(int engine) {
+  mg_.setBottomSolver(engine);
+}
+
+template <class Grid>
 void Solver<Grid>::setPressureTelescope(bool on) {
   mg_.setTelescope(on);
 }
@@ -567,6 +572,7 @@ void Solver<Grid>::setPressureChebyshev(bool on, int maxit, double rtol) {
   chebMaxit_ = maxit;
   chebRtol_ = rtol;
   chebBoundsSet_ = false;
+  chebWarmOk_ = false;
   bfpChebSet_ = false;
 }
 
@@ -580,6 +586,7 @@ void Solver<Grid>::setPressurePcg(bool on, int maxit, double rtol) {
   useChebyshev_ = false;  // genuine selection: the three drivers are mutually exclusive
   useFcg_ = false;
   chebBoundsSet_ = false;
+  chebWarmOk_ = false;
   bfpChebSet_ = false;
   pcgMaxit_ = maxit;
   pcgRtol_ = rtol;

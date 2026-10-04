@@ -7,6 +7,8 @@ reports which one this build has.
 
 * :class:`peclet.flow.Solver` — the staggered MAC solver.
 * :class:`peclet.flow.SolverColocated` — the collocated/cell-centered variant.
+* :func:`peclet.flow.march_to_steady` — march a solver to its certified steady state, optionally
+  Anderson-accelerated (returns a :class:`peclet.flow.MarchResult`).
 
 Pore-network extraction lives in the companion :mod:`peclet.pnm` package (peclet-pnm; it was
 ``peclet.flow.pnm`` before 2026-07).
@@ -16,6 +18,7 @@ top-level ``__init__.py``.
 """
 
 from ._flow import *  # noqa: F401,F403  (Solver, SolverColocated, execution_space, ...)
+from .steady import MarchResult, march_to_steady  # noqa: F401  (steady marches)
 
 # The installed distribution's metadata (pyproject.toml) is the single source of truth for the version;
 # a build-tree import (PYTHONPATH=<build>) has no metadata and reports "0+unknown". This replaces a

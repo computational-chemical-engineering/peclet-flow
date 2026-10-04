@@ -385,6 +385,24 @@ target_include_directories(test_pcg_breakdown PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test_pcg_breakdown PRIVATE Kokkos::kokkos)
 add_test(NAME pcg_breakdown COMMAND test_pcg_breakdown)
 
+# The state descriptor of the steady march (doc/steady_acceleration.md WO-2): field list and roles
+# of the three rows of §3.1, the inner tolerance of §4.1 and the twelve refusals of §5.3.
+add_executable(test_march_state test_march_state.cpp)
+target_include_directories(test_march_state PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_march_state PRIVATE Kokkos::kokkos)
+add_test(NAME march_state COMMAND test_march_state)
+
+# §13 (doc/vof_step_performance_design.md, WO-D1): the device bottom's block-tridiagonal direct
+# preconditioner -- FP64 exactness, FP32 accuracy, team-size independence (bitwise), the FCG to
+# tau, the shift and non-finite paths, and a host dense FP64 reference (gate A, U1-U7).
+add_executable(test_bottom_direct test_bottom_direct.cpp)
+target_include_directories(test_bottom_direct PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_bottom_direct PRIVATE Kokkos::kokkos)
+add_test(NAME bottom_direct COMMAND test_bottom_direct)
+set_tests_properties(bottom_direct PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
+
 # PHYSICAL DOMAINS (suite/docs/PHYSICAL_UNITS_PLAN.md Phase 1). Two gates off one binary:
 #  units_identity        — the physical constructor at extent == cells reproduces the cell-unit
 #                          solver (accessors, and BITWISE fields at rho = dt = 1);

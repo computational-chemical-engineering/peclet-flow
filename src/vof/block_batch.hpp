@@ -761,6 +761,48 @@ inline void vofCurvHfReset(const VofCurvTable& T) {
       });
 }
 
+/// Tier 3 of the batched cascade on a DEVICE (C3, `doc/vof_step_performance_design.md` §4.7,
+/// §5.11; launch shape: coordinator decision 2026-10-02, option C). The interfacial counts stay on
+/// the device (§4.6), so the league cannot be the number of entries; instead a FIXED league of
+/// persistent warp-teams strides over the concatenated device-counted entries
+/// `g = league_rank, league_rank + league_size, ...`, each entry handled by `curvFallbackTeam` (the
+/// same body as `VofCurvature::fallbackBatch`'s team path: canonical-order accumulation, bit for
+/// bit the one-thread `curvFallbackCell`). No host read, no empty teams.
+///
+/// League size: one team per hardware warp slot, `concurrency() / kVofWarp` (on CUDA = SMs x
+/// resident threads per SM / 32), capped by `kVofTier3MaxTeams`. Teams beyond the resident
+/// number simply start later; the stride covers every entry whatever the league.
+inline constexpr int kVofTier3MaxTeams = 1 << 16;
+inline void vofCurvFallbackTeams(const VofCurvTable& T, LField list, LField start, LField end) {
+  using Policy = Kokkos::TeamPolicy<SExec>;
+  using Terms = Kokkos::View<PvTerm*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+  constexpr int side = 2 * kPvHalf + 1, nk = side * side * side;
+  const int league =
+      std::max(1, std::min(kVofTier3MaxTeams, static_cast<int>(SExec().concurrency() / kVofWarp)));
+  Policy pol(SExec(), league, kVofWarp);
+  pol.set_scratch_size(0, Kokkos::PerTeam(Terms::shmem_size(nk)));
+  Kokkos::parallel_for(
+      "vof::block::batch_curv_pv_team", pol, KOKKOS_LAMBDA(const typename Policy::member_type& tm) {
+        Terms terms(tm.team_scratch(0), nk);
+        long cum[kVofBlockBatch + 1];  // device prefix of the jobs' entry counts
+        cum[0] = 0;
+        for (int k = 0; k < T.nj; ++k)
+          cum[k + 1] = cum[k] + (end(T.base + k) - start(T.base + k));
+        for (long g = tm.league_rank(); g < cum[T.nj]; g += tm.league_size()) {
+          int k = 0;
+          while (g >= cum[k + 1])
+            ++k;
+          const VofCurvJob& J = T.job[k];
+          const long i = list(start(T.base + k) + (g - cum[k]));
+          const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+          curvFallbackTeam(tm, terms, i, VofRawField{J.c}, VofRawField{J.mx}, VofRawField{J.my},
+                           VofRawField{J.mz}, VofRawField{J.al}, VofRawField{J.kap},
+                           VofRawField{J.br}, sy, sz, kPvHalf, J.dW, J.cmin, J.ieps, J.gm);
+          tm.team_barrier();  // the single lane is done with `terms` before the next entry's map
+        }
+      });
+}
+
 /// The per-list-cell passes of the cascade over the inner interfacial list (upper bound: the inner
 /// region): `pass` 0 = tiers 1-2 (`curvHeightCell`), 1 = tier 3 (`curvFallbackCell`), 2 = the
 /// admissibility clip (its count into `cnt(8 (base + k) + 7)`), 3 = the branch census (its seven
@@ -768,6 +810,12 @@ inline void vofCurvHfReset(const VofCurvTable& T) {
 /// integer atomics: exact whatever the order.
 inline void vofCurvListPass(const VofCurvTable& T, int pass, LField list, LField start, LField end,
                             LField cnt) {
+  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, SField::memory_space>::accessible) {
+    if (pass == 1) {  // tier 3 on a device: persistent warp-teams (C3); the host keeps the loop
+      vofCurvFallbackTeams(T, list, start, end);
+      return;
+    }
+  }
   Kokkos::parallel_for(
       "vof::block::batch_curv_list", Kokkos::RangePolicy<SExec>(SExec(), 0, T.off[T.nj]),
       KOKKOS_LAMBDA(const long t) {
@@ -844,6 +892,138 @@ inline void vofCsfForceBatch(const VofCurvTable& T, double sig, double w0, doubl
           }
           J.f[cc][i] = f;
         }
+      });
+}
+
+// ---- C2: the block statistics (§5.10) ----------------------------------------------------------
+
+/// N double sums in one team reduction (`Kokkos::Sum<VofSumN<N>>`).
+template <int N>
+struct VofSumN {
+  double v[N];
+  KOKKOS_INLINE_FUNCTION VofSumN() {
+    for (int i = 0; i < N; ++i)
+      v[i] = 0.0;
+  }
+  KOKKOS_INLINE_FUNCTION VofSumN& operator+=(const VofSumN& o) {
+    for (int i = 0; i < N; ++i)
+      v[i] += o.v[i];
+    return *this;
+  }
+};
+
+}  // namespace peclet::flow::vof
+
+namespace Kokkos {
+template <int N>
+struct reduction_identity<peclet::flow::vof::VofSumN<N>> {
+  KOKKOS_FORCEINLINE_FUNCTION static peclet::flow::vof::VofSumN<N> sum() {
+    return peclet::flow::vof::VofSumN<N>();
+  }
+};
+}  // namespace Kokkos
+
+namespace peclet::flow::vof {
+
+/// What `measure()` reads besides the colour: each job's previous centroid and whether it is valid
+/// (the host's `prevCentroid_` / `hasPrev_`, current when the launch is issued).
+struct VofStatsPrev {
+  double c[kVofBlockBatch][3];
+  unsigned char valid[kVofBlockBatch];
+};
+
+/// Doubles per job in the statistics packet: volume, centroid[3], velocity[3], area, moment[6].
+inline constexpr int kVofStats = 14;
+
+/// `VofBlockSet::measure` for every job in one launch, one team per job: the first moments, then
+/// the central second moments and the PLIC interface area (`VofBlockSet::interfaceArea`'s body)
+/// together, each as ONE team reduction over the inner box, with the per-cell expressions of the
+/// per-block reductions verbatim. The summation ORDER is the team reduction's, not the per-block
+/// MDRange's: a recorded change (C2) of these diagnostics, which feed no state. Job k's values land
+/// at `out(off + kVofStats * (T.base + k) + ...)`; the host applies them later (deferred read).
+inline void vofBatchStats(const VofBlockTable& T, const VofStatsPrev& P, double hh, double aeps,
+                          double dt, SField out, long off) {
+  using Team = Kokkos::TeamPolicy<SExec>;
+  Kokkos::parallel_for(
+      "vof::block::batch_stats", Team(SExec(), T.nj, Kokkos::AUTO),
+      KOKKOS_LAMBDA(const typename Team::member_type& tm) {
+        const int k = tm.league_rank();
+        const VofBlockJob& J = T.job[k];
+        const I3 e = J.e, n = J.n, o = J.o;
+        const int g = J.g;
+        const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
+        const long region = static_cast<long>(n.x) * n.y * n.z;
+        const VofRawField c{J.c};
+        double* q0 = out.data() + off + static_cast<long>(kVofStats) * (T.base + k);
+        VofSumN<4> m1;
+        Kokkos::parallel_reduce(
+            Kokkos::TeamThreadRange(tm, region),
+            [&](const long r, VofSumN<4>& a) {
+              const int x = static_cast<int>(r % n.x) + g;
+              const int y = static_cast<int>((r / n.x) % n.y) + g;
+              const int z = static_cast<int>(r / (static_cast<long>(n.x) * n.y)) + g;
+              const double q = c(L3(x, y, z, e));
+              a.v[0] += q;
+              a.v[1] += q * (x - g + o.x + 0.5) * hh;
+              a.v[2] += q * (y - g + o.y + 0.5) * hh;
+              a.v[3] += q * (z - g + o.z + 0.5) * hh;
+            },
+            Kokkos::Sum<VofSumN<4>>(m1));
+        const double v = m1.v[0];
+        if (v <= 0.0) {  // measure()'s empty-marker branch: everything but the volume is zero
+          Kokkos::single(Kokkos::PerTeam(tm), [&]() {
+            q0[0] = v;
+            for (int d = 1; d < kVofStats; ++d)
+              q0[d] = 0.0;
+          });
+          return;
+        }
+        const double cx = m1.v[1] / v, cy = m1.v[2] / v, cz = m1.v[3] / v;
+        VofSumN<7> m2;
+        Kokkos::parallel_reduce(
+            Kokkos::TeamThreadRange(tm, region),
+            [&](const long r, VofSumN<7>& a) {
+              const int x = static_cast<int>(r % n.x) + g;
+              const int y = static_cast<int>((r / n.x) % n.y) + g;
+              const int z = static_cast<int>(r / (static_cast<long>(n.x) * n.y)) + g;
+              const long i = L3(x, y, z, e);
+              const double q = c(i);
+              const double px = (x - g + o.x + 0.5) * hh - cx, py = (y - g + o.y + 0.5) * hh - cy,
+                           pz = (z - g + o.z + 0.5) * hh - cz;
+              a.v[0] += q * px * px;
+              a.v[1] += q * py * py;
+              a.v[2] += q * pz * pz;
+              a.v[3] += q * px * py;
+              a.v[4] += q * px * pz;
+              a.v[5] += q * py * pz;
+              if (!(q > aeps) || !(q < 1.0 - aeps))  // interfaceArea: mixed cells only
+                return;
+              double st[27];
+              for (int dz = -1; dz <= 1; ++dz)
+                for (int dy = -1; dy <= 1; ++dy)
+                  for (int dx = -1; dx <= 1; ++dx)
+                    st[vof::plicSt(dx + 1, dy + 1, dz + 1)] = c(i + dx + dy * sy + dz * sz);
+              double m[3];
+              vof::mycNormal(st, m);
+              const double al = vof::plicAlpha(m[0], m[1], m[2], q);
+              double pv[8][3], ctr[3], ar = 0.0;
+              const int nv = vof::plicPolygon(m[0], m[1], m[2], al, pv);
+              vof::polygonAreaCentroid(pv, nv, ctr, ar);
+              a.v[6] += ar;
+            },
+            Kokkos::Sum<VofSumN<7>>(m2));
+        Kokkos::single(Kokkos::PerTeam(tm), [&]() {
+          const double nc[3] = {cx, cy, cz};
+          q0[0] = v;
+          for (int d = 0; d < 3; ++d) {
+            q0[1 + d] = nc[d];
+            q0[4 + d] = (P.valid[k] && dt > 0.0) ? (nc[d] - P.c[k][d]) / dt : 0.0;
+          }
+          q0[7] = m2.v[6];
+          const double iv = 1.0 / v;
+          for (int d = 0; d < 6; ++d)
+            q0[8 + d] = m2.v[d] * iv;
+        });
       });
 }
 

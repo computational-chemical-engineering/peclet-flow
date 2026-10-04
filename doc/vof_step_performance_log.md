@@ -397,3 +397,420 @@ per-V-cycle rhs/solution round trip, which WO-6 (B1) removes; the transfer gate 
 
 D1 (started in WO-0) finished: `~/Codes/bubble_column_perf/d1/d1.log` ends "D1 DONE" — not analysed
 here (WO-13).
+
+---
+
+## 2026-10-02 — WO-7: C3 PV fallback, team per target (P5)
+
+**WO-7a (core, branch `pvfit`, worktree `suite/core-pvfit`, commit `cb4c7ba`; NOT tagged or pushed
+— the release session tags core).** `pvFitAdd` = `pvFitTerm` (→ `PvTerm {w, B, s[6], ok}`) +
+`pvFitAccum` (the `+=` loops verbatim). ctest `vof_pvfit`: 10⁵ random cases (800 stencils × 5³;
+random planes, frames, origins, isotropic + anisotropic metrics, cosMin, dW incl. 0; planted zero
+normals and missing planes) — a frozen copy of the pre-split `pvFitAdd` vs the new `pvFitAdd` vs
+term-to-memory + ordered fold, each in its own kernel, on the default and host spaces. Cuda and
+OpenMP: 35574 accepted / 64426 rejected, 776/800 stencils with npoly ≥ 6, **0 accumulator and 0
+flag mismatches**. A mutation (`w*(s*B)`) is caught (795 / 776 mismatching stencils).
+
+**WO-7b (flow, branch `vof-pvfit`).** `curvFallbackTeam` (one warp per target, terms in team
+scratch in the canonical k order, one lane folds + solves) behind `if constexpr` on the memory
+space in `VofCurvature::fallbackBatch` (§5.11's launch site); the host keeps the one-thread loop.
+`curvFallbackCell` now shares `curvFallbackFrame` / `curvFallbackStore` with it (expressions
+verbatim). Built with `-DPECLET_SIBLING_PECLET_CORE=…/core-pvfit`: **flow main cannot build this
+until core carries `pvFitTerm`** (tag + `PECLET_CORE_TAG` bump, or the shared `../core` at it).
+
+| gate | result |
+|---|---|
+| G-BIT 1, state_hash 12 cases + mpi np2, CUDA | identical to main (and to the WO-0 table) |
+| G-BIT 1, same, host-openmp (OMP 8) | identical to main |
+| G-BIT 2, 50-step column dump, CUDA / host 1×8 / host 1×24 (passive) | `bitwise=True`, 24/24 arrays each; iters 13.06 mean, identical |
+| team vs one-thread, CUDA (`test_vof_blocks` C1 gate: per-block path = team, batched = one-thread) | CSF force, colours, stats 0 differences; pv cells 2876 (periodic) / 2824 (y walls) |
+
+The column G-BIT does **not** exercise the team kernel: the bubble column runs the C1 batched
+container (`csfBatchEligible()`), whose tier 3 is `vofCurvListPass(T, 1, …)` in
+`vof/block_batch.hpp` (one thread per list entry, device-side counts) — WO-8 moved the production
+launch site after §5.11 was written. `fallbackBatch` now serves only the per-block container path
+(cut blocks, MPI all-reduce hook, timing, debug). **Open (for the note's author):** whether and how
+the team kernel goes into the batched pass. §5.11's league = Σ list lengths is host-known in
+`fallbackBatch` but device-resident in the batched path (§4.6: counts stay on the device; WO-8's
+≤ 3 host reads per container step). Options: (A) league = the region upper bound, teams past the
+device count exit (≈ 2·10⁵ mostly-empty 32-lane teams per call on the column, each reserving 9 kB
+scratch → occupancy-limited); (B) one more host read of the counts (breaks ≤ 3 reads); (C) a fixed
+league of persistent teams striding over the device-counted entries (no read, no empty teams; a
+new kernel shape). Recommended default: (C), else (A).
+
+G-PERF (indicative; GPU idle at sampling, load 6–10): nsys over `test_vof_blocks`, tier-3 kernel of
+the per-block path, same workload both builds, 240 launches: main `fallbackBatch` (RangePolicy)
+**5.37 ms/launch** → team **1.61 ms/launch** (−70 %, ×3.3) for ≈ 2.9·10³ fallback cells per
+launch. Scaled to the column's ≈ 7·10³ targets that is ≈ 3–4 ms against the ≤ 1.5 ms target — a
+miss to report, and only realised on the column once the batched pass takes the team kernel.
+
+---
+
+## 2026-10-02 — WO-13: the D1 tolerance study, analysed (P5)
+
+Raw data `~/Codes/bubble_column_perf/d1/{static,hysing,column}_rtol<R>.json` (driver
+`tests/study/vof_perf/d1_tolerance.py`, run 2026-09-25 on the frozen CUDA module of flow
+**ed05b6f**, shared GPU, load 63–132). Reference rtol 1e-10; the momentum rtol follows the
+pressure rtol (its default). Relative differences are against the reference.
+
+| rtol | static max\|u\| (4 rungs, worst) | Hysing v_max | t(v_max) | y_c final | column total vol. drift | per-bubble drift | rise, last 1000 steps | p iters/step column (min–max) | max div_proj column | momentum ms/step (median) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1e-10 | ref | ref | ref | ref | 2.8e-14 | 2.0e-13 | ref (1.002478) | 13.85 (12–16) | 1.6e-10 | 10.4 |
+| 1e-9 | 2.7e-9 | −1.6e-9 | 0 | −5.3e-10 | 2.7e-13 | 2.7e-12 | 7.2e-14 | 12.16 (11–15) | 1.7e-9 | 11.6 |
+| 1e-8 | 1.3e-8 | −1.6e-9 | 0 | −5.7e-10 | 5.6e-12 | 2.2e-11 | 7.7e-9 | 10.52 (9–12) | 1.7e-8 | 5.1 |
+| 1e-7 | 1.8e-8 | −1.4e-9 | 0 | −5.7e-10 | 1.2e-10 | 3.6e-10 | 7.7e-9 | 9.15 (8–10) | 1.7e-7 | 5.2 |
+| 1e-6 | 3.6e-8 | −1.8e-5 | 0 | −1.2e-5 | 1.6e-9 | 4.4e-9 | 7.8e-9 | 7.43 (7–9) | 1.6e-6 | 5.3 |
+
+Pressure iterations, max per run: static 9–10 → 6 (1e-6), Hysing 18 → 10. No run capped.
+
+**§5.12 acceptance:** (1) static max|u| ≤ 1.05× ref — every rtol (worst 1 + 3.6e-8); (2) Hysing
+within 0.2 % — every rtol (worst 1.8e-5); (3) total drift ≤ max(1e-8, 2× ref) = 1e-8 and rise
+within 1 % — every rtol (1.6e-9; 7.8e-9). **The loosest passing rtol is 1e-6**, the loosest
+tested. Per Q8 (USER default) the solver default stays 1e-10 and only a case script may change.
+DECISION (session, 2026-10-02): the published bubble-column case KEEPS 1e-10 (peclet-examples
+ac35a14 reverts the 1e-6 change): 1e-6 adds a systematic ~5e-8 volume drift over the production
+window where the markers conserve to 1e-12, the study predates b273031, and TBFsolver solves its
+pressure exactly; revisit after the D1 rerun on main. The saving 1e-6 would give on the column:
+pressure iterations −46 % (13.85 → 7.43), the momentum solve about halved (its residual stop
+follows the pressure rtol: median residual 4.7e-16 → 1.9e-9 from 1e-8 on). Step times in the JSONs
+(146 → 84 ms median) were taken on a shared GPU at load 63–132 and are not to be quoted.
+
+**Caveats (read before relying on 1e-6 for a long production run):**
+1. **Physics provenance.** ed05b6f predates b273031 (variable μ on the MAC control volume's own
+   faces), which changed the column's physics; the production column now runs on later flow. The
+   study measures rtol *sensitivity* on one build, which that fix should not move, but it is not
+   re-measured. Confirmation rerun (resumable, ~1.5–2.5 h GPU; freezes main's module first):
+   `nohup ~/Codes/bubble_column_perf/d1_main/run_d1_main.sh > ~/Codes/bubble_column_perf/d1_main/d1.log 2>&1 &`
+   — expect the same pattern: every criterion passing at 1e-6, pressure iterations ≈ 14 → ≈ 7.5.
+2. **The column window does not decorrelate.** 2000 steps from t = 43 are 3.2 time units; the
+   trajectories stay together (max|Δu_x|/max|u_x| at 1e-6: 1.0e-9 at step 100, 3.8e-9 at step 1000,
+   2.9e-6 at step 2000). Criterion (3)'s rise velocity is therefore a trajectory comparison, not a
+   statistical one: it rules out an immediate departure, not a slow statistical bias.
+3. **The volume drift at 1e-6 is systematic**, not a random walk: monotone, no sign change, about
+   −8e-10 per 1000 steps. Extrapolated to a t 50–150 production window (≈ 6.3·10⁴ steps) it is
+   ≈ 5e-8 relative (1e-8: ≈ 2e-10) — far below any physical effect, but larger than the 2000-step
+   criterion suggests.
+
+### WO-7c (2026-10-02): the batched container's tier 3 — persistent warp-teams (coordinator decision: option C)
+
+`vofCurvFallbackTeams` (`src/vof/block_batch.hpp`) replaces pass 1 of `vofCurvListPass` on a
+device: a fixed league of `min(concurrency()/32, 65536)` warp-teams (`kVofTier3MaxTeams`) strides
+over the concatenated device-counted interfacial entries (prefix of `end − start` per job computed
+in-kernel), each entry handled by `curvFallbackTeam`, with a team barrier between entries; no host
+read (WO-8's ≤ 3 per container step stands), no empty teams. Host: unchanged loop.
+
+| gate | result |
+|---|---|
+| 50-step column dump vs main, CUDA / host 1×8 / host 1×24 | `bitwise=True` 24/24 each (the column now runs the team kernel: 24 launches in 23 steps) |
+| `ctest -R vof_blocks` (incl. `vof_blocks_mpi` np 1/2/4/8), CUDA and host | 12/12 each |
+
+Tier 3 on the column (nsys, 20 + 3 steps, GPU at 99 % shared with P4, load ≈ 22 — indicative):
+main one-thread pass 1 **14.76 ms/call** → persistent teams **7.40 ms/call** (×2.0). Still above
+the ≤ 1.5 ms target; to be re-measured on a quiet GPU.
+
+## 2026-10-02 — WO-6: B1, the geometric-Krylov bottom on GPU backends (package P3)
+
+**Builds under test** (worktree `flow-vof-b1`, branch `vof-b1` from origin/main `7f74620`): the
+frozen modules `~/Codes/bubble_column_perf/p3/frozen_base/{cuda,omp}` (origin/main, `src/`
+unmodified) against `frozen_c4/cuda` (this commit) and the host tree of this commit. RTX 5080
+(sm_120), `PECLET_FLOW_MPI=ON`, double operator storage. Raw output: `~/Codes/bubble_column_perf/p3/g/`,
+`.../p3/phys/`, `.../p3/xfer/`. Gate driver `p3/run_gate.sh`. The GPU was shared with two other
+packages' batteries throughout (90-99 % utilisation by others): **every timing below is indicative
+only**; the bitwise and G-NUM results are unaffected.
+
+**What landed.** `CutcellMG::geoBottomSolve` (`src/mac_cutcell_mg.hpp`, `GeoBottomKernel`): one
+`TeamPolicy(1, T)` launch per bottom solve, FCG (Polak-Ribiere) on the bottom level's own operator,
+preconditioned by one symmetric V-cycle over `sub_` (the geometric levels below the bottom, built by
+init()'s `can()` + `mgChooseRatio` rule and held outside `lv_`), tau 1e-8 (relative, infinity norm,
+fluid mean removed), cap 100, pre/post/bottom 2/2/12. Eligibility = §5.7 conditions 1-7
+(`geoBottomIneligible()`), condition 6 evaluated once per hierarchy at its first setOpenness and
+cached. Selection: `diagnostics.set_pressure_bottom_solver('auto' | 'geometric' | 'algebraic')`.
+A non-finite inner scalar zeroes the bottom's x and sets a device flag that rides the A6 PCG packet
+(now 4 doubles: {pAp, rn, stop, geoFlag}) or, for the other drivers, is folded in by
+`lastSolveFailed()` (one scalar read, only when a geometric solve ran since the last read).
+T = min(1024, team_size_max) = **640** in the module build (768 in an earlier draft; it is a
+property of the compiled kernel's register use, logged under `PECLET_FLOW_MG_DEBUG`). Case:
+bottom 16x12x8, sub-levels 8x6x4, 4x3x2, 2x3x2.
+
+**Implementation choices the note did not spell out (each bitwise-neutral against the per-kernel
+V-cycle, proved by the unit gate's part (a)):** the team kernel reads periodic neighbours through
+the A3 wrapped indices where `smooth()` / `vcycleImpl` do (residual and matvec always, colour
+passes on all-even levels) instead of a fill phase; 32-bit index arithmetic; the sub-levels'
+operators are coarsened lazily, at the first geometric bottom solve after a setOpenness (same
+kernels, same inputs, so a configuration that never takes the path never pays for it); the FCG's
+own scalars (not part of M) fuse the x/r update with the sum of the new r. Tried and dropped:
+running the smallest levels on one thread (4x slower — a single thread's dependent global-memory
+round trips cost more than the barriers they save).
+
+### Gates
+
+| gate | result |
+|---|---|
+| host G-BIT: `state_hash.py` 12 cases + np2, 8 threads | **identical** to frozen_base (both files) |
+| host G-BIT: 50-step bubble column 1x8 and 1x24 | **bitwise=True**, all 24 arrays, both |
+| CUDA, `'algebraic'` (GraphAMG on this build), 50-step dump | **bitwise=True** vs frozen_base |
+| CUDA `state_hash.py` (12 cases + np2) | **all identical** to frozen_base: no hash case reaches the geometric bottom (agglomeration needs a bottom > 4 cells on an axis; np2 is distributed) — nothing to re-baseline |
+| G-NUM 1, N50 (u v w p C, 50 steps from ckpt_t43) | **max rel 1.998e-14** (v; p 9.9e-15) ≤ N50_rtol = 1.499e-11 (WO-0) — and ≤ 2.522e-09, N50 re-measured on origin/main 7f74620 (rtol 1e-9 vs 1e-10: p rel 2.522e-09, u 2.09e-10; the case now amplifies a tolerance change 170x more than at WO-0) |
+| G-NUM 2 / WO-6: per-step outer iterations vs `'algebraic'` (= base) | **identical on all 50 steps** (653 = 653, 13 x 49 + 14 x 1) |
+| G-NUM 3: per-step `max_open_divergence_projected()` | max ratio to the reference **1.000112** (≤ 2) |
+| G-NUM 4: physics (`d1_tolerance.py --cases static,hysing --rtols 1e-10`, CUDA) | static drop max\|u\| 2.552041443788365e-03 both (identical; within 5 %); Hysing case 1 (block path): v_rise max 0.28429521057944 vs ...246 (rel 2.0e-16), its time 1.0484717840861797 both, final y_c rel -1.8e-16 (all within 0.2 %); volume drift 1.71e-14 → 1.69e-14 |
+| unit gate (`geo_bottom`, CUDA and host) | (a) M with the mean removals off on both sides: **bitwise** to the per-kernel V-cycle over the same levels, periodic and walls-y (ratio-50 coefficient). (b) full M: **NOT bitwise** — 344 / 638 of 1536 cells differ by at most 4.4e-16 (2.8e-17 of max\|z\|): the exit fluid mean is a TEAM reduction (§5.7: "team reductions produce ... fluid means") and the per-kernel removeMean a Kokkos range reduction, so the summation orders differ. The note's gate as written ("M(r) equals, bitwise, the per-kernel vcycle") cannot hold; the ctest asserts (a) and a 4-eps bound on (b) and prints the strict result. **OPEN for the note's owner.** Inner FCG to tau: 13 (periodic) / 15 (walls-y) iterations, true residual 8.9e-9 / 2.1e-9 r0, no flag |
+| transfer gate (nsys, 20-step difference, `--flux device --fixdt`) | **bottom transfers gone**: H→D ≥ 1 KiB 13.05 → **0**, D→H ≥ 1 KiB 19.05 → **2.00** per step. The two left are WO-8's batched-container packets inside step() (1024 B after `vofCsfForceBatch`, 2688 B after `vofBatchBox`: 16 blocks x 8 / 21 doubles), above the gate's literal 1 KiB line; not bottom transfers |
+| run-to-run | two 50-step CUDA dumps of the same module bitwise identical |
+
+### G-PERF (indicative: GPU 90-99 % busy with other packages)
+
+`GeoBottomKernel` (nsys): **2.8-2.9 ms per bottom solve, 37-40 ms per step** at 17 inner
+iterations (the bubble column's bottoms; 13-15 on the unit problem) — against the model's
+0.2 ms / 2.5 ms (§4.1) and the target ≤ 3.5 ms per step: **missed by ~11x**. Wall: 74 ms/step
+geometric vs 50 ms/step `'algebraic'` on the same build, back to back. **Risk R3 holds and is
+larger than modelled.** The cost is per-thread FP64 throughput on the one SM, not barriers: the
+unit problem's solve time rises as T falls (default T: 150 us per FCG iteration; 512: 165; 256: 170; 128: 229;
+64: 432; 32: 732) — about 7 000 smoothing updates per V-cycle, each with an FP64 division, at the
+5080's 1/64-rate FP64 on one SM. §4.1's premise (≈ 140 kFLOP per inner iteration, ≈ 0.2 ms per
+bottom) underestimates it ~10x on this card; on H100 / MI250X (FP64 1:2) the same kernel is
+expected 20-30x cheaper (§3.3), which this session could not measure.
+
+## 2026-10-02 — WO-6 / E3 (Q2): the geometric bottom's inner tolerance
+
+`kGeoTau` built at 1e-8, 1e-6 and 1e-5 (one CUDA module each; 1e-6 on an earlier draft of the
+kernel, 1e-8 and 1e-5 on the committed source, T = 640), 50 bubble-column steps from ckpt_t43
+(`prof.py 50 --pcg --dump --div`) against origin/main:
+
+| tau | outer iterations, 50 steps | per-step diff vs reference | max rel u v w p C | max div ratio | inner iterations per bottom |
+|---|---|---|---|---|---|
+| reference (GraphAMG, 1e-8 2-norm) | 653 | — | — | — | — |
+| 1e-8 | 653 | 0 on every step | 1.998e-14 | 1.000112 | 15-17 |
+| 1e-6 | 653 | 0 on every step | 5.156e-14 | 1.000121 | — |
+| 1e-5 | 653 | 0 on every step | 6.682e-14 | 1.000254 | 10-12 |
+
+Physics at 1e-5 (`d1_tolerance.py --cases static,hysing --rtols 1e-10`): static max|u|
+2.552041443788365e-03 identical; Hysing case 1 v_rise max rel 2.0e-16, its time and the final y_c
+identical, volume drift identical; p_iters_max 18 = 18. **Adopted: tau = 1e-5** (the loosest of
+the three with per-step outer iterations within +1 — here within 0). `GeoBottomKernel` per step
+(nsys, GPU 98 % busy with other work, indicative): 43.5 ms at 1e-8 against 18.9 ms at 1e-5 in
+back-to-back runs; the inner-iteration ratio (17 → 11) predicts ~1.5x.
+
+## 2026-10-02 — WO-11: B1b, the geometric bottom with solids (package P3)
+
+**What landed** (§5.14). Condition 6 became component labels: `GeoLabelKernel` (one team launch at
+the first operator build of a hierarchy, one scalar read) runs Jacobi min-label propagation between
+two buffers over the faces with coefficient > 0 joining two fluid cells (AC > 1e-30) to its fixed
+point — every fluid cell ends with the smallest flat index of its component, whatever the order —
+then numbers the components in label order and counts their cells. Eligible with 1..64
+components; more (or none) go to GraphAMG. The kernel's bottom mean removals (of b, of r every
+iteration, at M's exit, of the final x) loop over the components, one team reduction per label in
+label order, then one subtraction pass; sub-level means (the "all" scope only) stay per level.
+Cells with AC <= 1e-30 keep x = 0 (the x/r update is masked) and enter r as 0 (GraphAMG's identity
+rows with a zero rhs: a solid cell's rhs would otherwise reach the coarse levels through the
+residual and make M affine). With one component the arithmetic is WO-6's exactly.
+
+### Gates (CUDA unless stated; raw output `~/Codes/bubble_column_perf/p3/{g,sol,xfer}/`)
+
+| gate | result |
+|---|---|
+| bubble column, 50 steps (1 component) | **bitwise** to WO-6 + E3 (`frozen_e3`), all 24 arrays — the per-component path reduces exactly; T unchanged (640) |
+| CUDA `state_hash.py` 12 cases | identical to origin/main: the IBM / porous hash cases are labelled (1 component) but never reach the geometric bottom (their bottoms are not agglomerated) |
+| host `state_hash.py` + np2, bubble column 1x8 | identical / **bitwise** to origin/main (host untouched) |
+| unit gate `geo_bottom` | + two B1b cases (solid sheet + 3 components, periodic and walls-y): device labels = host union-find (3); M with the means off bitwise to the per-kernel V-cycle; FCG 9 / 10 iterations to tau, true residual 5.5e-6 / 4.0e-6 r0, x = 0 exactly in solid cells, per-component mean of x <= 4e-16 |
+| G-NUM on bottoms WITH solids (`p3/solids.py`: N = 64, levels 4, bottom 8^3, PCG rtol 1e-8, 20 steps, periodic + body force; probe geometries plus two solid slabs) | `slab1` (solid coarse layers, 1 component) and `slab2` (2 components), const and variable rho: B1b engaged; outer iterations **identical on every step** (109, 436, 111, 3678); u v w max rel diff vs GraphAMG <= 6.6e-13 against the rtol-x10 floor 2.3e-12 .. 1.6e-6; divergence ratio 1.000. WO-6 + E3 on the same cases falls back to GraphAMG: bitwise to origin/main |
+| same, 1-component cut-cell beds (`cyl`, `rings`, `pack` (packing_ring.vti), const / rho slab) | iterations identical every step; velocities <= 7.8e-11 rel (floor 4e-10 .. 7e-10 on pack); fluid-cell pressure identical to 1e-15 on cyl / rings; on pack 47 cells differ by up to 1.8e-8 rel — all in 1-2-cell pockets or slivers the operator decouples, whose pressure is a free constant (velocities unaffected) |
+| `'algebraic'` on these cases | bitwise to origin/main |
+| transfer gate, packing_ring (`pack:slab`, nsys 20-step difference) | ≥ 1 KiB per step: H→D 13.20 → **0**, D→H 17.20 → **0** (small D→H 14.2 = 14.2) |
+
+## 2026-10-02 — P3 HANDOFF (WO-6, E3, WO-11): state for the next implementer
+
+**Branch `vof-b1`** (worktree `suite/flow-vof-b1`), rebased onto origin/main `4b819fb`, NOT pushed:
+`7db4a75` WO-6 (B1), `1d58d56` E3 (tau = 1e-5), `ba8f769` WO-11 (B1b), + this handoff. Gate numbers
+are in the three entries above; raw artifacts in `~/Codes/bubble_column_perf/p3/` (frozen modules
+`frozen_{base,c4,e3,w11}`, gate driver `run_gate.sh`, transfer census `xfer/xfer.sh`, solids
+driver `solids.py`, physics `phys/`).
+
+**Batteries on the rebased tree:** host-openmp `build_omp` (`OMP_NUM_THREADS=8`, `-LE bench -j6`):
+**189/189 passed** (incl. the new `geo_bottom`). CUDA `build_cuda` (`OMP_NUM_THREADS=4`, `-LE bench
+-j4`): **was still running at handoff** (44/189 passed, 0 failed so far; the GPU was 98 % busy with
+two other packages' batteries) — log `~/Codes/bubble_column_perf/p3/ctest_cuda.log`, ends `EXIT n`.
+clang-format 18.1.8 clean on the changed C++ files (`flow_bindings.cpp` / `flow_ibm.hpp` are on the
+CI exclude list).
+
+**Open for the note's owner (not decided here):**
+1. §5.7's unit gate "M(r) equals, bitwise, the per-kernel vcycle" cannot hold: §5.7 also prescribes
+   team reductions for the fluid means, whose summation order differs from the per-kernel Kokkos
+   range reduction (full M differs by <= 4.4e-16 = 2.8e-17 max|z|; with the mean removals off on
+   both sides it IS bitwise). `geo_bottom` asserts the bitwise part and a 4-eps bound on the rest.
+2. G-PERF MISSED: the bottom costs 2.8-2.9 ms per solve at tau 1e-8 (37-43 ms/step), ~19 ms/step at
+   tau 1e-5, against the target <= 3.5 ms/step (shared GPU, indicative). Cost scales with 1/T
+   (FP64 throughput on one SM of the 5080, risk R3), not with barriers. Needs a quiet-GPU and an
+   H100 measurement before any redesign; wall time is currently WORSE than GraphAMG on the 5080
+   (74 vs 50 ms/step at tau 1e-8). The coordinator should decide whether `auto` may select it on
+   FP64-weak cards.
+3. NAMING (Q15): `diagnostics.set_pressure_bottom_solver('auto'|'geometric'|'algebraic')` follows
+   `diagnostics.set_velocity_solver`; an additive row for `suite/docs/NAMING.md`'s history list is
+   not written (umbrella file).
+4. Register entries (text in the WO-6 / WO-11 commit messages) to be added by the caller.
+
+**Next commands:**
+```bash
+tail -n 3 ~/Codes/bubble_column_perf/p3/ctest_cuda.log        # CUDA battery verdict
+# if it did not finish / was killed, rerun:
+cd ~/Codes/suite/flow-vof-b1 && source ../.venv/bin/activate && export PATH=/usr/local/cuda-13.2/bin:$PATH
+OMP_NUM_THREADS=4 OMP_PROC_BIND=false ctest --test-dir build_cuda -LE bench -j4 --output-on-failure \
+  > ~/Codes/bubble_column_perf/p3/ctest_cuda.log 2>&1; tail -n 3 ~/Codes/bubble_column_perf/p3/ctest_cuda.log
+# quiet-GPU timing of the bottom (kernel ms/step), WO-11 module:
+~/Codes/bubble_column_perf/p3/xfer/xfer.sh quiet ~/Codes/bubble_column_perf/p3/frozen_w11/cuda --flux device --fixdt 1.5e-3
+```
+Untracked in the worktree (not for commit): `data/packing_ring.vti` (symlink to `../flow/data`,
+used by `p3/solids.py`'s `pack` geometry).
+
+## 2026-10-03 — §13 WO-D0 … WO-D4: the direct bottom (block-tridiagonal FP32 factor + FP64 FCG)
+
+Branch `vof-b1`, NOT pushed. Commits: WO-D1 factor + M (not wired), WO-D2 `'direct'` (recorded
+numerics change; its message carries gates B-E), WO-D3 B1's V-cycle retired + `Geo*` -> `Bottom*`,
+WO-D2 G-PERF part 1 (bitwise-neutral), this entry. Raw artifacts: `~/Codes/bubble_column_perf/d/`
+(`g*/` gate outputs, `xfer/` nsys censuses, `perf/` 300-step timings, `frozen_*` modules,
+`bench_bottom_direct.cpp` + `mg_bottom_direct.profiled.hpp` = the clock64 phase profiler, not in
+the tree).
+
+**WO-D0 (quiet RTX 5080, no other GPU process; `xfer.sh … --flux device --fixdt 1.5e-3`).**
+B1's `GeoBottomKernel` = **G = 19.06 ms/step** (13.05 launches, 1.46 ms per solve; 19.02 with one
+co-tenant: a one-SM kernel is indeed barely slowed). Hence N = 29.1 − G = **10.0 ms**, A = 23.85 − N
+= **13.8 ms**. BCs of the column: x periodic (16), **y walls (12)**, z periodic (8) -> slow axis y,
+P = 12, b = 128, no border; team sizes factor 1024, solve 896. G-PERF targets from these:
+factor + solve <= 2.5 ms/step, factor <= 0.6 ms, projection <= 12.5 ms, step <= 31.7 ms.
+
+**Gates.**
+
+| gate | result |
+|---|---|
+| A, `bottom_direct` (U1-U7; periodic+border P=16 b=96, periodic P=2, walls-y, B1b sheet periodic + walls-y, two-cell pocket with m_c = 1), CUDA + host | PASS. U1 FP64 residual 4e-15 .. 7e-15 (<= 1e-12), component means <= 3.5e-17 max\|x\|; U2 FP32 2e-7 .. 5e-6 (<= 1e-3); U3 bitwise over T = 32 64 128 256 896 (CUDA) and 1 2 4 (OpenMP); U4 1 FCG iteration everywhere, means <= 3.5e-17 (<= 4e-16); U5 restarts 1, 2-3 iterations; U6 flag + x = 0; U7 FP32 M vs dense FP64 A'^-1 <= 1.2e-6 |
+| B, column 50 steps vs `'algebraic'` | 2.67e-14 (<= 1.499e-11); iterations identical (653); div ratio 1.0000; two runs bitwise; `'auto'` = `'direct'` bitwise |
+| B, 300 steps | inner FCG 1 (3968x) / 2 (94x): max 2, mean 1.02; restarts 0 in 305 factors; no flag |
+| C, solids (10 cases) | iterations identical every step; u v w within the rtol x10 floor; `'algebraic'` bitwise to pre-§13 |
+| D | host state_hash + np2 + host column bitwise; CUDA state_hash unchanged; transfers: column 0 / 2 bulk, pack:slab 0 / 0, small reads = WO-11 |
+| WO-D3 | CUDA column dump bitwise to WO-D2's (all arrays); host G-BIT holds |
+| G-PERF part 1 | factor storage + M bitwise to WO-D1's kernel (bench dump); CUDA column dump bitwise to WO-D3's |
+| E, G-PERF | **MISSED** (below) |
+
+**Performance (quiet 5080, 300 steps, `prof.py --pcg --timing`, OMP 8).**
+
+| | `'algebraic'` | `'direct'` (after part 1) | target |
+|---|---|---|---|
+| step (`s.step()`) ms | 42.6 / 42.6 | 36.1 / 37.4 | <= 31.7 |
+| projection ms | 23.7 / 23.7 | 17.2 / 17.8 | <= 12.5 |
+| factor kernel ms (1 per step) | — | 6.55 -> **3.08** | <= 0.6 |
+| solve kernels ms/step (13.05) | — | 3.13 -> 3.10 (0.24 ms per solve) | factor + solve <= 2.5 |
+
+N (projection minus the two bottom kernels) = 17.2 − 6.2 = 11.0 ms, consistent with WO-D0.
+
+**Why G-PERF misses (profiled with clock64 per phase, `bench_bottom_direct`).** The §13.5 model's
+1 µs per dependent phase holds only for phases whose work is short; every long dependent chain
+here is L2-latency-bound (~50-100 cycles per step of a dot, with only b = 128 active threads).
+Factor after part 1 (9.2 M cycles ~ 3.2 ms): W 31 %, diagonal tiles 26 % (now barrier-bound, 17
+barriers per tile x 96 tiles), Q = W^T W 17 %, panel 10 %, trailing 9 %, assembly 8 %. M: forward
+57 % / backward 40 %, ~4 µs per plane phase (128-term dots streaming Q_k from L2), ~80 µs per M
+against 28-45 [model]; the FCG skeleton's ~8 team reductions add ~100 µs per solve. Dead ends
+measured: a diagonal-major layout for L and W (coalesced in theory) was SLOWER (W 3.8 -> 6.1 M
+cycles, Q 1.4 -> 2.1 M) and was reverted; `#pragma unroll 16` alone moved M by 20 % and the factor
+by nothing. Kokkos caps team scratch at sharedMemPerBlock minus 8 KB (~40 KB on the 5080), so
+staging a whole Q_k (64 KB at b = 128) — R-D1 lever 1 — is not available through Kokkos.
+
+**Open for the note's owner (not decided here).**
+1. G-PERF is missed by ~2.5x on the bottom (6.2 vs 2.5 ms/step) though the engine already saves
+   6.5 ms/step of projection against GraphAMG and 13 against B1. Remaining bitwise-neutral levers
+   (estimated): Q on the row-major W with idle threads prefetching; the M bracket (u − e g) and
+   (e x) formed once by their owner thread into scratch; idle threads prefetching Q_{k+1} into L1
+   during plane k. Numerics-changing levers the note lists: R-D1 lever 2 (a fixed 2-4-way split of
+   each dot: more threads in flight in M and W). Whether to take lever 2, or relax the target, is
+   the owner's call.
+2. Readings taken where §13 was not explicit (each documented in the code): "the remaining axes"
+   of the slow-axis fallback = the two axes other than the first choice, longest first, tie to the
+   higher index; non-periodic boundary-crossing faces are excluded from the re-summed diagonal and
+   the couplings exactly as GraphAMG excludes them; the assembled entry is 1 (diagonal) + faces in
+   order + 1/m_c + delta, then cast; U1 measures the residual against the operator M factors (the
+   re-summed diagonal); U3 compares M before the FCG's component-mean removal (a team reduction,
+   §13.2); the test's "1-cell pocket" is a two-cell pocket whose last plane holds one cell (a
+   one-cell component cannot exist: all faces closed => AC = 0 => solid).
+3. NAMING row (umbrella `docs/NAMING.md` history, for the caller): "2026-10-03 — flow
+   `diagnostics.set_pressure_bottom_solver('auto' | 'direct' | 'algebraic')`: `'direct'` replaces
+   the never-released `'geometric'` (B1, branch-only); additive on the release line, no alias owed."
+4. Register entries: §13.10 text, items 1-4 as written there; item 5's spelling `'direct'` checked
+   against NAMING.md (no conflict).
+
+## 2026-10-03 — WO-12 (D3), WO-9 (C2), WO-10 (B2): gates (package vof-perf3)
+
+Branch `vof-perf3` (worktree `suite/flow-vof-perf3`), on origin/main 6719f01 (no code change
+since d02d3b0, the baseline build `flow-main-base`). Raw output:
+`~/Codes/bubble_column_perf/perf3/{wo12,wo9,wo10,hash,timing,kp}/`. Conditions throughout: the
+RTX 5080 shared with the D1-on-main study (88-99 % busy), host load 23-95 on 48 cores, so every
+timing is indicative; the bitwise and G-NUM gates are unaffected.
+
+**WO-12 (D3, §5.13), recorded.** Warm power iterations (k_w = 5 from the kept v_max / v_min)
+after a coefficient rebuild; guard = cap or r(3) > r0 -> cold re-estimate + redo, counted in
+`diagnostics.num_pressure_chebyshev_restarts`.
+
+| gate | result |
+|---|---|
+| V-cycles / step, bubble column, Chebyshev rtol 1e-10 | 44.15 -> 24.05 (solve 14.15 -> 14.05, estimate 30 -> 10) |
+| projection ms / step (20 steps, min of 3 interleaved rounds) | 172.0 -> 96.8 (MG-PCG 53.8) |
+| 2000 Chebyshev steps from ckpt_t43 | 0 guard firings; solve V-cycles 16.30 mean (14..20) |
+| G-NUM 1 (50 steps, vs main) | max rel 2.186e-12 (p) <= N50(Chebyshev, 1e-10 vs 1e-9) 2.523e-09 |
+| G-NUM 2 | per step within +-1; total 704 -> 723 = **+2.7 % (> +-2 %: literal miss)** |
+| G-NUM 3 | <= 2x main at 44/50 steps; 6 steps up to 5.97x where main stopped one V-cycle later; max over the run 1.154e-10 vs main 1.193e-10 |
+| G-NUM 4 (Chebyshev runs, CUDA) | static drop max|u| equal to 12 digits; Hysing vmax 0.28429521077005615 vs 0.2842952107700561, t(vmax) equal, yc equal to 2e-16; max V-cycles / solve 23 -> 16 |
+| vardensity suite | hydrostatic ratios 3 / 1000 and walls-z / jump-z np 1, 2, 4 pass (np 1 bit-exact) |
+| state_hash | only vof_droplet (variable-density Chebyshev) changes, CUDA and host; MG-PCG column dump bitwise |
+
+**WO-9 (C2, §5.10), recorded.** One TeamPolicy launch (team per master block) for measure();
+values deferred to read #1 / flushStats().
+
+| gate | result |
+|---|---|
+| state, 50 steps (u v w p C, dts, iterations, 16 colours) | bitwise vs main on CUDA, host 1x8 and 1x24 (also with stats read every step) |
+| stats vs main's per-block reductions, 50 steps x 16 blocks | CUDA rel volume 4.2e-16, area 2.7e-16, centroid 5.6e-16, moments 8.4e-16; host <= 9.2e-15. Velocity rel 1.7e-11 (CUDA) / 2.3e-10 (host) = a centroid error of 3.5e-16 / 4.7e-15: the difference quotient amplifies by \|c\|/\|Δc\| ~ 5e4 |
+| state_hash | identical to WO-12's (CUDA, host) |
+| VoF block ctests (23, MPI np 1-8) | pass, CUDA and host; the C1 gate now holds the measured stats to 1e-12 (velocity as a centroid error) |
+| launches | moments1 + moments2 + area 48 / step -> batch_stats 1 (2.43 ms fenced, 16 teams) |
+| G-PERF (shared GPU) | block_advect 31.1 -> 8.7-9.1 ms / step: the 48 fenced syncs were expensive under time-slicing; a quiet-GPU figure is owed (model -0.5 to -1.5) |
+
+**WO-10 (B2, §5.8), recorded.** Host ccReduce3 and mgmeanr = pencil reduction.
+
+| gate | result |
+|---|---|
+| CUDA | state_hash and the 50-step dump identical to WO-9 |
+| host 50 steps vs WO-9 | max rel 2.543e-14 (1x8), 2.626e-14 (1x24) <= N50 host 2.522e-09; iterations identical; div ratio <= 1.000 |
+| host physics | static drop and Hysing equal to WO-9 to 10 / 16 digits |
+| host state_hash | 11 of 12 cases + np 2 re-baselined (porous unchanged); table in the commit |
+| G-PERF | not resolvable at this host load; Snellius |
+
+**Two WO-12 defects the batteries found, fixed in follow-up commits.**
+1. The kept iterates are cross-step state; a repartition dropped them (MG rebuild), so an np = 1
+   rebalance was no longer bit-exact (porous_redistribute_mpi_np1 rel 1.78e-13 vs tol 0;
+   balanced_force_mpi_np1 colo-vof-rebalance V-cycles 71 vs 69). `redistribute` now carries them
+   in the registry exchange (step 2b) and hands them back after the MG rebuild (5b), per the
+   register rule "redistribute must carry every piece of cross-step state".
+2. A first estimate on a zero right-hand side (a drop at rest) kept zero iterates; the warm
+   estimate then returned bounds [0, 0] and the solve NaN, invisible to the 3-iteration guard
+   because `maxabs` skips NaN (vof_collocated_mpi np 1/2/4 on CUDA: P, C NaN after step 1). Kept
+   iterates are now usable only from a non-degenerate estimate (non-zero seeds, finite lmax > 0);
+   a degenerate warm estimate is replaced at once by the cold one.
+Neither touches a non-degenerate, non-redistributed path: state hashes (CUDA, host) and the
+50-step Chebyshev column dump are unchanged by them.
+
+**Batteries** (`ctest -LE bench`, OMP 2 per rank, load up to 147): host 192/194 and CUDA 189/194
+on the tree before the follow-ups, every failure one of the two defects above; after them the
+affected tests pass: host 29/29 (redistribute_mpi, porous_redistribute_mpi, balanced_force(_mpi),
+vof_redistribute_mpi, vof_phase_change(_mpi), predict_weighted_mpi, telescope_mpi, vof_collocated
+(_mpi), vardensity*), CUDA 32/32 (the same families); state hashes and the Chebyshev column dump
+unchanged by the follow-ups on both backends.
+
+**Readings taken where the note was not explicit (each isolated, reversible):**
+1. D3 warm start only after a coefficient rebuild that drops VALID bounds; any setter
+   invalidation or hierarchy rebuild -> cold. The guard's 3-iteration test aborts the solve at
+   iteration 3 (the redo replaces it anyway); the abandoned V-cycles count in
+   last_pressure_iterations. Under `set_pressure_warmstart` the redo restarts from the saved
+   previous phi. Counter name `diagnostics.num_pressure_chebyshev_restarts` (NAMING §1.3).
+2. C2's previous centroid travels by value in the launch from the host copy (current after read
+   #1), not as a separate device array: same values, no extra sync path for migration.
+3. B2 keeps the registered rule that reductions are never cut over to serial below 8192 cells.
+4. §14 Q-H4 (fold "4 fixed x-lanes per row" into B2): arrived after WO-10 was committed
+   (locally, unpushed); per the coordinator's instruction WO-10 is left as is, H-5 follows.

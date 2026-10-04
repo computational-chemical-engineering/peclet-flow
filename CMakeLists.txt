@@ -193,6 +193,8 @@ set_target_properties(peclet_flow PROPERTIES OUTPUT_NAME _flow   # -> peclet.flo
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/flow")
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/__init__.py COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_steady.py
+               ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/steady.py COPYONLY)   # march_to_steady
 target_include_directories(peclet_flow PRIVATE src "${PECLET_CORE_INCLUDE}")
 target_link_libraries(peclet_flow PRIVATE Kokkos::kokkos)
 # G.8: the solver instantiation. STATIC, so its objects land INSIDE _flow.so -- nothing extra to
@@ -342,6 +344,15 @@ if(PECLET_FLOW_BUILD_TESTS)
     set_tests_properties(scalar_cutcell_${g} PROPERTIES ENVIRONMENT "${_flow_py_env}"
                          LABELS verify SKIP_RETURN_CODE 77 TIMEOUT 7200)
   endforeach()
+  # Steady marches (doc/steady_acceleration.md WO-4): march_to_steady(accelerate=False) is the
+  # study's march bit for bit (G0(b)), the accelerated and plain fixed points agree to 1e-8 (a small
+  # G1), a march-unstable case is not certified by either driver (G7a), and the driver's
+  # certification on scripted monitor sequences ("pass" / "slow" / "budget").
+  add_test(NAME march_to_steady
+           COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_march_to_steady.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(march_to_steady PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77 TIMEOUT 3600)
   # QUALITY_PLAN D3: `src/` carries no environment variable that can change a result (package E).
   add_test(NAME no_env_knobs
            COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_no_env_knobs.py
@@ -367,4 +378,6 @@ if(DEFINED SKBUILD)
   install(TARGETS peclet_flow LIBRARY DESTINATION peclet/flow COMPONENT python)
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
           DESTINATION peclet/flow RENAME __init__.py COMPONENT python)
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_steady.py
+          DESTINATION peclet/flow RENAME steady.py COMPONENT python)
 endif()

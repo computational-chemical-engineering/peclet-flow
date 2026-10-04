@@ -24,9 +24,9 @@ def arg(name, default):
 
 
 CASE_DIR = arg("--case-dir", os.path.expanduser(
-    "~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/scripts"))
+    "~/Codes/peclet-examples/benchmarks/bubble-column/scripts"))
 CKPT = arg("--ckpt", os.path.expanduser(
-    "~/Codes/peclet-examples-bubble-column/benchmarks/bubble-column/data/ckpt_t43.npz"))
+    "~/Codes/bubble_column_perf/ckpt_t43.npz"))
 sys.path.insert(0, CASE_DIR)
 import case  # noqa: E402
 import peclet.flow as pf  # noqa: E402
