@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstdint>
 #include <Kokkos_Core.hpp>
 #include <map>
@@ -66,6 +67,30 @@ struct VofPiece {
   int loc[3]{0, 0, 0};  ///< block-local index (0-based within the block's box) of `g.lo`
   long cells() const { return g.cells(); }
 };
+
+/// One (piece, component) copy of `VofBlockExchange::movePiece` -- patch cells
+/// `[s, s + n)` to block cells `[q, q + n)` -- for the host's one-launch move (H-4e).
+struct VofMoveJob {
+  const double* src;
+  double* dst;
+  I3 e, be;  ///< the patch's and the block array's extents
+  I3 s, q;   ///< the piece's first cell in the patch and in the block array
+  I3 n;      ///< the piece's extent
+};
+
+/// The job table of one move launch, by value.
+struct VofMoveTable {
+  VofMoveJob job[kVofBlockBatch];
+  int nj;
+};
+
+/// Debug check of H-4(e)'s premise: two jobs writing the same block array overlap.
+inline bool vofMoveOverlap(const VofMoveJob& a, const VofMoveJob& b) {
+  if (a.dst != b.dst)
+    return false;
+  return a.q.x < b.q.x + b.n.x && b.q.x < a.q.x + a.n.x && a.q.y < b.q.y + b.n.y &&
+         b.q.y < a.q.y + a.n.y && a.q.z < b.q.z + b.n.z && b.q.z < a.q.z + a.n.z;
+}
 
 /// Build the pieces of one block box against every rank's owned box, in canonical order.
 ///
@@ -214,6 +239,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
     std::vector<Recv> recvs;
     std::vector<SField> sendD(blocks.size());
     std::vector<HostView> sendH(blocks.size());
+    std::vector<VofMoveJob> moves;  // H-4(e), host only: the master's own pieces, every block
 #ifdef PECLET_FLOW_MPI
     std::vector<MPI_Request> reqs;
 #endif
@@ -244,8 +270,12 @@ class VofBlockExchange : public VofBlockExchangeBase {
         continue;
       if (master) {  // device-to-device, no host traffic at all
         for (const auto& p : pieces_)
-          if (p.rank == rank_)
-            movePiece(p, nc, loc, blockView, b, blockBase, /*toBlock=*/true);
+          if (p.rank == rank_) {
+            if (kVofHostExec<SExec>)  // H-4(e): collected, moved in one launch after the loop
+              appendMoveJobs(p, nc, loc, blockView, b, blockBase, moves);
+            else
+              movePiece(p, nc, loc, blockView, b, blockBase, /*toBlock=*/true);
+          }
       } else {
         sendD[bi] = buffer(nc * counts[rank_]);
         long off = 0;
@@ -257,6 +287,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
         Kokkos::deep_copy(sendH[bi], sendD[bi]);
       }
     }
+    moveLocalPieces(moves);  // after every block's zero fill; the pieces are disjoint
     Kokkos::fence();
 #ifdef PECLET_FLOW_MPI
     if (size_ > 1) {
@@ -628,6 +659,58 @@ class VofBlockExchange : public VofBlockExchangeBase {
             dst(L3(q0 + x, q1 + y, q2 + z, be)) =
                 src(L3(lo0 + x - o.x + g, lo1 + y - o.y + g, lo2 + z - o.z + g, e));
           });
+    }
+  }
+
+  /// H-4(e): the (piece, component) copies of `movePiece` for one piece, appended to `out`.
+  void appendMoveJobs(const VofPiece& p, int nc, const SField* loc,
+                      SField (*blockView)(VofBlock&, int), VofBlock& b, int blockBase,
+                      std::vector<VofMoveJob>& out) {
+    const I3 o = patch_.o;
+    const int g = patch_.g;
+    for (int c = 0; c < nc; ++c) {
+      VofMoveJob J;
+      J.src = loc[c].data();
+      J.dst = blockView(b, c).data();
+      J.e = patch_.e;
+      J.be = b.advector().extent();
+      J.s = I3{p.g.lo[0] - o.x + g, p.g.lo[1] - o.y + g, p.g.lo[2] - o.z + g};
+      J.q = I3{p.loc[0] + blockBase, p.loc[1] + blockBase, p.loc[2] + blockBase};
+      J.n = I3{p.g.n(0), p.g.n(1), p.g.n(2)};
+      out.push_back(J);
+    }
+  }
+
+  /// H-4(e), host: every collected `movePiece` copy in one launch per chunk of `kVofBlockBatch`
+  /// (piece, component) pairs, rows inside, through a by-value job table -- instead of one MDRange3
+  /// per piece per component. Pure copies; the pieces partition each block box, so no two jobs
+  /// write the same cell (asserted in debug builds) and the result is the per-piece launches'.
+  template <class Exec = SExec>
+  void moveLocalPieces(const std::vector<VofMoveJob>& mv) {
+    if constexpr (kVofHostExec<Exec>) {
+      for (std::size_t j0 = 0; j0 < mv.size(); j0 += kVofBlockBatch) {
+        VofMoveTable T;
+        T.nj = static_cast<int>(std::min<std::size_t>(kVofBlockBatch, mv.size() - j0));
+        for (int k = 0; k < T.nj; ++k)
+          T.job[k] = mv[j0 + k];
+#ifndef NDEBUG
+        for (int k = 0; k < T.nj; ++k)
+          for (int l = 0; l < k; ++l)
+            assert(!vofMoveOverlap(T.job[k], T.job[l]) && "vof::block: movePiece pieces overlap");
+#endif
+        vofHostRowFor<Exec>(
+            "vof::block::move_local", T.nj,
+            [&](const int k) { return static_cast<long>(T.job[k].n.y) * T.job[k].n.z; },
+            [=](const int k, const long r) {
+              const VofMoveJob& J = T.job[k];
+              const int y = static_cast<int>(r % J.n.y), z = static_cast<int>(r / J.n.y);
+              const double* src = J.src + L3(J.s.x, J.s.y + y, J.s.z + z, J.e);
+              double* dst = J.dst + L3(J.q.x, J.q.y + y, J.q.z + z, J.be);
+              PECLET_FLOW_OMP_SIMD
+              for (int x = 0; x < J.n.x; ++x)
+                dst[x] = src[x];
+            });
+      }
     }
   }
 
