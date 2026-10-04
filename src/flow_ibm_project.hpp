@@ -254,8 +254,7 @@ void Solver<Grid>::step() {
       project();  // cut-cell projection -> incompressible
     tProjection_ += phaseTick() - tp2;
     if (hasBc_)
-      for (int c = 0; c < 3; ++c)
-        applyVelocityBcComp(c, 0, false);  // re-impose domain BCs (keep outflow)
+      applyVelocityBcAll(0, false);  // re-impose domain BCs (keep outflow), components 0, 1, 2
     if (outerTol_ > 0) {  // outer convergence: max velocity change over this Picard iteration
       double corr = 0.0;
       for (int c = 0; c < 3; ++c)

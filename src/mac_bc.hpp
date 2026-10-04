@@ -33,6 +33,36 @@ KOKKOS_INLINE_FUNCTION void axisDims(B3 ext, int (&dims)[3], long (&strides)[3])
   strides[1] = ext.x;
   strides[2] = static_cast<long>(ext.x) * ext.y;
 }
+// One column of bcVelocityComp: the ghosts of component `comp` on face (axis a, side s) along the
+// column `at(ia)` (ia = the index along a, na = the extent along a), wall velocity `wc`.
+template <class At>
+KOKKOS_INLINE_FUNCTION void velFaceColumn(const At& at, int na, int g, int a, int s, int comp,
+                                          double wc, int fold) {
+  const int bf = (s == 0) ? g : (na - g);
+  if (comp == a) {  // normal: Dirichlet face + odd reflection
+    at(bf) = wc;
+    if (s == 0)
+      for (int ia = 0; ia < g; ++ia)
+        at(ia) = 2.0 * wc - at(2 * bf - ia);
+    else
+      for (int ia = na - g + 1; ia < na; ++ia)
+        at(ia) = 2.0 * wc - at(2 * bf - ia);
+  } else if (fold) {  // tangential implicit: drop wall face
+    if (s == 0)
+      for (int ia = 0; ia < g; ++ia)
+        at(ia) = 0.0;
+    else
+      for (int ia = na - g; ia < na; ++ia)
+        at(ia) = 0.0;
+  } else {  // tangential explicit: cell-centred reflection about bf-0.5
+    if (s == 0)
+      for (int ia = 0; ia < g; ++ia)
+        at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
+    else
+      for (int ia = na - g; ia < na; ++ia)
+        at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
+  }
+}
 }  // namespace bcdetail
 
 // Fill component comp (0=u,1=v,2=w) ghosts for one domain face (axis a, side s=0 low/1 high) with a
@@ -46,7 +76,6 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
   const int b = (a + 1) % 3, c = (a + 2) % 3;
   const long sa = strides[a], sb = strides[b], sc = strides[c];
   const int na = dims[a];
-  const int bf = (s == 0) ? g : (na - g);
   const bool hasProf =
       prof.extent(0) > 0;  // per-position inlet profile (resampled to the face grid)
   using MD = MDRange2<BExec>;
@@ -55,28 +84,44 @@ inline void bcVelocityComp(BField f, B3 ext, int g, int a, int s, int comp, doub
         const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
         const double wc = hasProf ? prof((static_cast<long>(p0) * prof_nc + p1) * 3 + comp) : wall;
         auto at = [&](int ia) -> double& { return f(base + static_cast<long>(ia) * sa); };
-        if (comp == a) {  // normal: Dirichlet face + odd reflection
-          at(bf) = wc;
-          if (s == 0)
-            for (int ia = 0; ia < g; ++ia)
-              at(ia) = 2.0 * wc - at(2 * bf - ia);
-          else
-            for (int ia = na - g + 1; ia < na; ++ia)
-              at(ia) = 2.0 * wc - at(2 * bf - ia);
-        } else if (fold) {  // tangential implicit: drop wall face
-          if (s == 0)
-            for (int ia = 0; ia < g; ++ia)
-              at(ia) = 0.0;
-          else
-            for (int ia = na - g; ia < na; ++ia)
-              at(ia) = 0.0;
-        } else {  // tangential explicit: cell-centred reflection about bf-0.5
-          if (s == 0)
-            for (int ia = 0; ia < g; ++ia)
-              at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
-          else
-            for (int ia = na - g; ia < na; ++ia)
-              at(ia) = 2.0 * wc - at(2 * bf - 1 - ia);
+        bcdetail::velFaceColumn(at, na, g, a, s, comp, wc, fold);
+      });
+}
+
+// §14 H-3(e): up to six bcVelocityComp applications on ONE axis a -- (field, component, side, wall
+// velocity or inlet profile) -- in one launch over the face's perpendicular plane. Each column runs
+// the applications in table order, so for every field the faces keep their sequential order
+// (s = 0 before s = 1) and different fields are independent: bit-identical to the separate launches
+// in that order. The caller merges only faces whose ghost planes are disjoint (ext_a > 2g).
+struct BcVelFace {
+  BField f, prof;  // the field; the resampled inlet profile (empty: the scalar `wall`)
+  double wall = 0.0;
+  int comp = 0, s = 0, profNc = 0;
+};
+struct BcVelFaces {
+  static constexpr int kMax = 6;
+  BcVelFace j[kMax];
+  int n = 0;
+};
+inline void bcVelocityFaces(const BcVelFaces& J, B3 ext, int g, int a, int fold) {
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int na = dims[a];
+  using MD = MDRange2<BExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_vel", MD(space, {0, 0}, {dims[b], dims[c]}), KOKKOS_LAMBDA(int p0, int p1) {
+        const long base = static_cast<long>(p0) * sb + static_cast<long>(p1) * sc;
+        for (int k = 0; k < J.n; ++k) {
+          const BcVelFace& q = J.j[k];
+          const double wc = (q.prof.extent(0) > 0)
+                                ? q.prof((static_cast<long>(p0) * q.profNc + p1) * 3 + q.comp)
+                                : q.wall;
+          auto at = [&](int ia) -> double& { return q.f(base + static_cast<long>(ia) * sa); };
+          bcdetail::velFaceColumn(at, na, g, a, q.s, q.comp, wc, fold);
         }
       });
 }
