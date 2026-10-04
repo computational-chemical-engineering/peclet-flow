@@ -1790,3 +1790,57 @@ this measurement, and design §5.2 has Amendment A3 with the table.
 **Gates.**
 - G12: **12/12** at OMP_NUM_THREADS=1.
 - Battery (build_dev, `-LE bench`, OMP_NUM_THREADS=2, -j4, OMP_WAIT_POLICY=passive, load 70–88): **225/225 pass** in 4639 s. The six G6 ctests took 1488–2207 s each.
+
+## 2026-10-04 — ruling D-WO9-3: G-iter's cold first step relaxed to ≤ 12; the level-rule switch moves to κ_A = 25
+
+**Ruling (orchestrator).** G-iter's bound on the COLD FIRST STEP of the transient row becomes
+≤ 12; warm steps stay ≤ 10. `ScalarMG::kFullTableKappa` moves to the largest κ_A at which every
+gate holds and level 0 alone is measurably cheaper per advance (D-WO9-2's table: up to κ_A 25–49).
+
+**Change.**
+- `src/scalar_mg.hpp`: `kFullTableKappa` 13 → **25**, with its comment and the header's level-rule
+  line. The comparison is unchanged: κ_A < 25 runs level 0 alone, κ_A ≥ 25 the full table. Why 25:
+  D-WO9-2 measured level 0 cheaper at κ_A 25 (1.35–1.55 against 1.86–2.04 s per advance) and tied
+  at 49 (15 against 10 iterations). 25 is the largest measured point that is measurably cheaper; no
+  point between 25 and 49 was measured.
+- `tests/python/test_scalar_cutcell_gates.py` `gate_giter`: the cold first step is checked at ≤ 12
+  and the warm steps at ≤ 10, as two clauses.
+- `tests/kokkos/test_scalar_mg.cpp` `testLevelRule`: the two probe Δt values are now derived from
+  the constant (dt D/h² = 0.95 and 1.05 × (κ − 1)/12, i.e. 1.900 and 2.100).
+- Design §5.2: the level-rule line and a D-WO9-3 paragraph under Amendment A3; §11 G-iter's
+  transient line restated.
+
+**G-iter** (ctest `scalar_cutcell_giter`, OMP 4, level 0 now runs at κ_A = 13). Iterations per step
+over the 3 offsets × 6 steps:
+
+| R/h | offset 1 | offset 2 | offset 3 | levels | cold / warm max |
+|---|---|---|---|---|---|
+| 8 | 9 9 9 9 8 9 | 10 9 9 10 8 9 | 10 9 9 9 8 8 | 1 | 10 / 10 |
+| 16 | 9 ×6 | 9 ×6 | 11 9 9 9 9 9 | 1 | 11 / 9 |
+| 32 | 10 9 9 9 9 9 | 9 ×6 | 10 9 9 9 9 9 | 1 | 10 / 9 |
+
+PASS (≤ 12 cold, ≤ 10 warm). The singular steady rows are unchanged: 5 / 5 / 6. `scalar_mg` PASS
+(level rule: 1.900 → 1 level, 2.100 → 5, steady → 5; C1–C4 rows unchanged to every printed digit).
+
+**Inert outside the moved band** (G1-like sphere, R/h 8, box 32³, Dirichlet, 4 transient steps, OMP 4;
+the build before the change, saved in the scratchpad, against the build after it). Fields, iteration
+counts and MG level counts compared with `np.array_equal`:
+- dt D/h² 0.5 / 2.0 / 3.0 / 8.0 (κ_A 7 / 25 / 37 / 97): **bitwise equal**.
+- dt D/h² 1.0 and 1.9 (κ_A 13 and 23.8, inside the band): levels 5 → 1 as intended. Iterations go
+  10 9 9 8 → 9 9 10 9 and 9 8 8 8 → 10 10 9 9; max|Δc| = 1.0e-8 and 1.3e-9 on c ≤ 1, which is the
+  stopping tolerance.
+
+**G12:** 12/12 hashes = `doc/scalar_ibm_baseline_hashes.txt` at OMP_NUM_THREADS=1.
+
+**Host advance ÷ projection** (G-perf's 128³ bed, dt D/h² = 1, koren, Dirichlet spheres; OMP 4,
+host load 37–45; the new and old builds run back to back in the same session):
+
+| build | `gperf.py advance`, 5 steps: advance ÷ projection | median | `advance_profile.py` (NS = 4) |
+|---|---|---|---|
+| κ switch 25 (new) | 1.29, 1.05, 1.12, 1.05, 0.96 (projection 491–540 ms) | **1.05** | 587 ms per advance, 9 it |
+| κ switch 13 (old) | 1.51, 1.45, 1.52, 1.50, 1.34 (projection 501–609 ms) | 1.50 | 698 ms per advance, 9 it |
+
+The host target (≤ 1) is now nearly met at this load: the advance is about the projection's time.
+
+**Battery** (build_dev, `-LE bench`, OMP 4, -j4, OMP_WAIT_POLICY=passive, load 43–80): **225/225
+pass** in 5275 s; the six G6 ctests took 1344–2403 s each.

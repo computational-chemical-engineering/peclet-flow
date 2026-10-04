@@ -45,8 +45,9 @@ conversions of §1.2 are on the path.
        -J_x/(D G_x) from scalar_mean_flux, self-convergence order >= 1.7, k* below the
        Hashin-Shtrikman bound; G-iter on multigrid-friendly boxes; the no-solid identity k* = 1
        to 1e-12 (at rest, and under a uniform flow: the moving frame).
-  giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 10 per step,
-       the cold first step included — ruling of WO-4, restating the provisional 8) and the singular
+  giter  §11 G-iter, the rows not carried by g1/g2/g3a: transient at dt D/h^2 = 1 (<= 10 per warm
+       step, ruling D-WO4-3 restating the provisional 8; <= 12 on the cold first step, ruling
+       D-WO9-3, which moved the level-rule switch so that this row runs level 0 alone) and the singular
        steady problem on G5b's geometry (periodic simple-cubic array, c = 0.3, insulating + flux +
        source; <= 30, growth <= 5 per rung) on multigrid-friendly n.
 
@@ -611,10 +612,12 @@ def gate_giter():
     print("G-iter transient: G1's sphere at dt D/h^2 = 1, 6 steps from c = 0, R/h in {8, 16, 32}")
     for Rh in (8, 16, 32):
         rows = [giter_transient_case(Rh, off) for off in OFFSETS]
-        mx = max(max(its) for its, _ in rows)
         print(f"  R/h={Rh:3d}  iterations/step {[its for its, _ in rows]}  mg levels {rows[0][1][0]}")
-        # ruling (WO-4): the provisional <= 8 restated as <= 10, the cold first step included
-        check(mx <= 10, f"R/h={Rh}: <= 10 iterations per step, cold first step included ({mx})")
+        # rulings D-WO4-3 (the provisional <= 8 restated as <= 10) and D-WO9-3 (cold first step <= 12)
+        cold = max(its[0] for its, _ in rows)
+        warm = max(max(its[1:]) for its, _ in rows)
+        check(cold <= 12, f"R/h={Rh}: <= 12 iterations on the cold first step ({cold})")
+        check(warm <= 10, f"R/h={Rh}: <= 10 iterations per warm step ({warm})")
     print("G-iter singular steady: G5b's geometry (periodic SC array, c = 0.3), n in {32, 48, 80}"
           " (n = 20/40/80 rounded up to multiples of 16, ruling Q-C)")
     mx = []

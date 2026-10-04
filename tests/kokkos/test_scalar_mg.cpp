@@ -173,16 +173,18 @@ void testLevelRule() {
   const int n = 32;
   IbmSolver s(n, n, n);
   g1Setup(s, n, 8.0, 0.37);
-  s.setDt(0.9 / 0.7);  // dt D / h^2 = 0.9 -> kappa_A = 11.8 < 13
+  // dt D / h^2 = F -> kappa_A = 1 + 12 F; F just below / above the switch (D-WO9-3: 25 -> F = 2)
+  const double Fsw = (ScalarMG::kFullTableKappa - 1.0) / 12.0;
+  s.setDt(0.95 * Fsw / 0.7);  // kappa_A = 23.8 < 25
   s.advanceScalars();
   const int small = s.scalarField("c").cut->mgLevels;
-  s.setDt(1.05 / 0.7);  // 1.05 -> kappa_A = 13.6
+  s.setDt(1.05 * Fsw / 0.7);  // kappa_A = 26.2
   s.advanceScalars();
   const int at = s.scalarField("c").cut->mgLevels;
   s.solveScalarSteady("c");
   const int steady = s.scalarField("c").cut->mgLevels;
-  std::printf("level rule: dt D/h^2 = 0.9 -> %d level(s), 1.05 -> %d, steady -> %d\n", small, at,
-              steady);
+  std::printf("level rule: dt D/h^2 = %.3f -> %d level(s), %.3f -> %d, steady -> %d\n", 0.95 * Fsw,
+              small, 1.05 * Fsw, at, steady);
   CHECK(small == 1 && at == 5 && steady == 5);
 }
 

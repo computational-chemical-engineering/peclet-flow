@@ -681,8 +681,9 @@ cut-cell scalar.
 - The cycle is a fixed linear operator, so plain BiCGStab is correct (no FGMRES).
 
 **Level rule.** It is the physics rule, as for momentum:
-- Transient: let κ_A = 1 + 4 Δt' max(D', D_s') Σ_a w_a, where Λ_s/(C_s K) = D_s. If κ_A < 13, use
-  level 0 only, i.e. 2 + 2 RB-GS sweeps as the preconditioner. Otherwise use the full table.
+- Transient: let κ_A = 1 + 4 Δt' max(D', D_s') Σ_a w_a, where Λ_s/(C_s K) = D_s. If κ_A < 13
+  (25 since D-WO9-3, below), use level 0 only, i.e. 2 + 2 RB-GS sweeps as the preconditioner.
+  Otherwise use the full table.
 - Steady: always the full table.
 
 *Amendment A3 (D-WO9-2, 2026-10-04) — the switch stays at κ_A = 13, now measured.* The value is
@@ -702,6 +703,19 @@ On cost alone the switch would sit near κ_A ≈ 49. It cannot: at κ_A = 13, le
 R/h 16 takes 11 iterations on one of nine cold first steps, against the ≤ 10 bound, at 1, 2 and 4
 threads. G-iter and G-perf both sit at κ_A = 13 exactly, so 13 is the largest switch that keeps
 every gate. Below 13, level 0 is already the cheaper choice.
+
+*D-WO9-3 (2026-10-04) — the switch moves to κ_A = 25.* The orchestrator relaxed G-iter's bound on
+the **cold first step** to ≤ 12; warm steps stay ≤ 10.
+- Level 0 then passes G-iter at κ_A = 13: cold first step 10 / 11 / 10 and warm steps ≤ 10 / 9 / 9
+  at R/h 8 / 16 / 32 (max over three offsets).
+- κ_A = 25 is the largest measured value at which level 0 is measurably cheaper (table above); at
+  49 the two tie. So `kFullTableKappa = 25`: κ_A < 25 runs level 0 alone, κ_A ≥ 25 the full table.
+- Outside 13 ≤ κ_A < 25 the change is bitwise inert: at κ_A 7, 25, 37 and 97 the fields, iteration
+  counts and level counts are `np.array_equal` to the κ_A = 13 build. Inside the band the solution
+  moves within the solver tolerance (≤ 1e-8 on c ≈ 1 at rtol 1e-10).
+- Host advance ÷ projection at G-perf's condition (128³ bed, κ_A = 13), OMP 4, load 37–45, the two
+  builds in the same session: **1.05** (median of 5; 0.96–1.29) against 1.50 with the switch at 13.
+  `advance_profile.py`: 587 against 698 ms per advance, 9 iterations each.
 
 #### Amendment A1 (WO-4, 2026-10-03) — the coarse wall term uses the fine probe distance
 
@@ -1823,7 +1837,8 @@ Rules:
 - Steady G1, G2 and G3a (Da = 1): ≤ 20 BiCGStab iterations at every resolution, growth ≤ 3 per
   doubling.
 - Singular steady (G5b, G8): ≤ 30, growth ≤ 5.
-- Transient at Δt·D/h² = 1: ≤ 8 per step (warm start).
+- Transient at Δt·D/h² = 1: ≤ 8 per step (warm start). *Restated:* ≤ 10 per step (D-WO4-3);
+  then ≤ 10 per warm step and ≤ 12 on the cold first step (D-WO9-3).
 - Conjugate G4/G6: ≤ 30.
 - V-cycle contraction on the surrogate: *restated by Amendment A1* as C1 (< 1 everywhere), C2
   (≤ 0.35 on box, Neumann and no-solid geometries) and C3 (≤ 0.75 on periodic isolated-sink
