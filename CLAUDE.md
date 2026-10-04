@@ -647,12 +647,23 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - **a moving fluid without the cut-cell projection.** Remedy: `set_solid(..., cutcell_pressure=True)`
     or `set_pressure_geometry`. A fluid at rest needs neither. Relatedly, an open face before the first
     `step()` is refused;
+  - **collocated, a moving fluid before the face field exists.** `set_solid` zeroes `uf_` and a raw
+    `set_field('u', …)` does not seed it, so the scalar would silently not advect (D-WOR-1, as
+    `advect_vof`). Remedy: `set_state`/`set_velocity`, or `step()`;
   - porous continuity; moving scene instances; the per-cell Dirichlet mask; `set_phase_change_thermal`
     or `_energy` naming a cut-cell scalar (ValueError); a mean gradient along a non-periodic axis; a
     face periodic for one of scalar and flow but not the other.
 - **Traps.**
   - **Koren is bounded only at bulk Courant ≤ ½.** Forward Euler with the legacy limiter is TVD only
     to ½; with no solid at all it reaches min −21 at C = 0.9 (D-WO5-1). FOU stays positive at any C.
+    Koren above ½ warns once per scalar (D-WOR-7).
+  - **Steady backflow through an `'outflow'` face** enters at the zero-gradient value c_i: counted
+    (census `num_backflow_faces`) and warned once per scalar; A2's coarse mass stays clamped there
+    (D-WOR-2a). An open face carrying flux is never the uniform-mean singular case (D-WOR-2b). With
+    open faces but no inflow face the operator is still singular, with a NON-uniform left null
+    vector: it converges for a compatible right-hand side (no source, insulating walls) and reports
+    non-convergence otherwise — there is no steady state then. Give the fluid an `'inflow'` face.
+  - The census residual of a singular solve is measured after the gauge shift (D-WOR-5).
   - **The unknown sets follow the snapped apertures, not κ.**
     - A fluid cell with κ > 0 and every aperture 0 is *sealed*: it is not an unknown and is held at 0.
     - A solid cell is an unknown iff κ_s > 0 and it has an open solid face or a conjugate facet
@@ -691,6 +702,11 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - The conjugate contact model (§13 Q4, triggered; G13's conjugate row self-converges at −2.84 and is
     INFO, marked OPEN) → Frank.
   - Collocated open faces.
+  - `advanceScalars`' plain velocity ghost fill still wraps the high-side open plane of the live flow
+    state, also for a run with only cut-cell scalars (review note 7; `uf-outlet-diag` owns the fix).
+    It cannot simply be skipped: the cut-cell advance reads the block's high-face velocity ghost,
+    which `projectCorrect` (inner faces only) leaves at u* — skipped, a constant drifts 4.1e-2 in 6
+    staggered steps (D-WOR-7, measured).
   - **Agglomerated exact bottom for ScalarMG (as CutcellMG `'auto'`)** — follow-up WO (review
     finding 4, D-WOR-4). Today the coarsest level gets 16 RB-GS sweeps wherever the table stops, so
     steady closure/dispersion solves at scale (grids sized by the physics, ORB blocks at np ≫ 1)

@@ -1886,3 +1886,97 @@ pattern:
 **Gates.** No source docstring was touched, so the quality ctests are only part of the battery
 below. The battery and G12 are the D-WO9-3 entry's: 225/225 and 12/12 on the tree with step 0
 (b9c8ca0). The WO-10 commit changes documentation only.
+
+## 2026-10-04 — WO-R: the post-review fixes (rulings D-WOR-1..9 on `doc/scalar_ibm_code_review.md`)
+
+Commits bcfe215 (1), 129fa67 (2), 063b886 (3), 741957e (4), 1347592 (5), 8231e2c (6), 889ae79 (7),
+b4ed3fa (8, Q20), then this entry with CLAUDE.md.
+
+**D-WOR-1 (finding 1).** Collocated: an advance or steady solve with `!faceFieldValid_` and a
+moving cell velocity (one more entry in the existing MAX reduction) raises, naming
+`set_state`/`set_velocity`/`step()`, as `advect_vof`. Gate `api`: the reviewer's probe
+(`set_field('u', 0.5)`, no step) raises for `solve_scalar_steady` and `advance_scalars`; seeded by
+`set_velocity` the same 12³ case advects (Pe_h 0.0417, 1672 flux faces).
+
+**D-WOR-2 (finding 2).**
+- (a) `openFaceCountsLocal` counts outflow-face rows with F_out < 0: census `num_backflow_faces`;
+  a steady solve with any warns once per scalar, naming the zero-gradient inflow and the kept
+  omega_open clamp.
+- (b) `singular` is false whenever an open face carries flux. **DECISION: "any open face" read as
+  "any open face while the fluid advects".** Alternative: literally any open face. Reversible by:
+  dropping `&& st.advecting` in `anyOpenFlux`. Reason: with the fluid at rest the open-face rows
+  are not assembled, the face is a plain Neumann scalar face, and the problem IS the uniform-mean
+  singular one; the literal reading would drop a correct projection there.
+- **Premise caveat (reported).** The ruling's "an open face makes the steady system non-singular"
+  holds with an inflow face (which needs a scalar Dirichlet value, so that case was never flagged).
+  With open faces but NO inflow face the rows still sum to zero (A 1 = div ≈ 0): the operator stays
+  singular, its left null vector non-uniform. Measured on the (c) case below with a uniform source
+  0.1, which has no steady state: the dd7cd8e build reported `converged` after 8 iterations with
+  `steady_incompatibility` 1.0 — it silently solved the uniform-projected problem; this tree reports
+  non-convergence (38 iterations, residual 0.12) beside the backflow warning.
+- (c) gate `g9c`, `backflow_steady_row`: 24×12×12 channel, both x ends `outflow` under a body force,
+  y/z walls, a Neumann sphere, 10 steps; insulating scalar, no source, a non-uniform start. 144
+  backflow rows (the whole −x face), converged in 8 iterations (residual 2.2e-11) to a constant
+  (spread 3.8e-12), warned once. (The dd7cd8e build also converges on this compatible case: 8 it,
+  3.3e-11.)
+
+**D-WOR-3 (finding 3).** `scalar_mg` (u3) checks columns: 0 positive bands, column sums −2.8e-16 …
+−1.7e-16 max AC on levels 0–4 and +3.7e-2 at the bottom (Pe_h 10), at the DEFAULT pressure
+tolerance — the 1e-14 tightening is gone. C4 unchanged to every printed digit: 0.566 / 0.680 / 0.764
+(11 / 16 / 24 it).
+
+**D-WOR-4 (finding 4).** A full-table build whose coarsest level exceeds
+`pressureBottomExtent()` (4) on any axis warns once per scalar. Gate `api`: 15³ warns once, 16³ not.
+CLAUDE.md open item: agglomerated exact bottom for ScalarMG, a follow-up WO.
+
+**D-WOR-5 (finding 5).** After the gauge shift the residual is re-measured with the Krylov's own
+definition (projected rhs, mean removed, same reference, 10 rtol), both branches. At the default
+pressure tolerance: g5b 7.784403e-11 → 7.784365e-11, g8 5.857601e-11 → 5.857606e-11, G-adv (b)
+8.279e-12 → 8.281e-12. Fields unchanged.
+
+**D-WOR-6 (finding 6).** `smallCells` covers the inner cells; one `fillGhosts(st.small)` per
+transient advance, then `zeroNonUnknown` over the block. Inert, MPI included (below).
+
+**D-WOR-7 (finding 7).**
+- Koren with bulk Courant > ½ warns once per scalar (gate `api`: C 0.75 warns, fou does not).
+- The resolution-warning latch is the geometry version (gate `api`: a 0.4 h plate's thin-solid
+  warning once, then again after a second `set_solid`).
+- `WallTable`, `MaterialTable` and the per-Dirichlet-face value views are persistent.
+- Snapped probe normal: HELD.
+- **Not applied (reported): skipping `advanceScalars`' velocity ghost fill when every scalar is
+  cut-cell.** The review's premise ("the cut-cell path is immune") is false for the interior: the
+  advance reads the block's high-face velocity at the first ghost index, and `projectCorrect` updates
+  inner faces only (`mac_pressure.hpp:512`, range g..e−g−1), so that ghost still holds u* until this
+  fill. Measured with the fill skipped (probe build, reverted): G9b's constant drifts 4.1e-2 in 6
+  staggered steps (n = 16); collocated stays 0 (`projectCorrectVelocities` fills `uf_` itself).
+  Doing it right means a fill that keeps the high-side open plane — `uf-outlet-diag`'s
+  `fillFaceGhostsKeepBoundary`, pending Frank. Left as is; CLAUDE.md open item.
+
+**D-WOR-8 (Q20).** Measured on this tree, identical to the WO-5c table: (a) 8/13/23 and 10/17/33;
+(b) 5/8/12 and 6/10/17; (b′) 12/10/15 and 12/13/18; (c) 8/9. **DECISION: bound = min(provisional,
+2× measured)** — tightened, never loosened. Alternative: 2× measured outright, which loosens (a)'s
+Pe_h 10 rows (40 → 46, 55 → 66) and all of (b′). Reversible by: the bound tables in `gate_gadv`.
+Old → new: (a) 20/25/40 → 16/25/40, 25/35/55 → 20/34/55; (b) 15/20/30 → 10/16/24 (n 32),
+12/20/30 (n 64); (b′) 15/20/30 unchanged; (c) 40 → 16/18.
+
+**D-WOR-9: inertness.**
+- Single rank (`build_dev`, host-openmp, OMP 4): a 16-case harness over the gate cases (g1, g3b,
+  giter, g9 koren/fou, g9c koren and Dirichlet-outlet fou, g9b staggered and gauge-exact, G-adv
+  (a)/(b)/(b′)/(c), g4, g5b, g8; every field, census and budget value, and u/v/w) against the
+  dd7cd8e module: 603/606 arrays `np.array_equal`; the 3 that move are D-WOR-5's singular
+  residuals; 18 new census keys (`num_backflow_faces`).
+- MPI (mpi4py, np = 2 and 4, OMP 2 per rank): a periodic SC array with fou at bulk Courant 1.47
+  and G9c's channel (koren; fou with 27 small cells), every rank's field, per-step census and u/v/w:
+  372/372 arrays equal on every rank.
+- G12: 12/12 hashes = `doc/scalar_ibm_baseline_hashes.txt` (OMP_NUM_THREADS=1).
+
+**G11** (`build_cuda` rebuilt at 889ae79 — every later commit is tests/docs; RTX 5080 shared with
+another job at 97 % utilization; host dump OMP 4): `scalar_cutcell_backends.py compare` **PASS**,
+19/19 rows: geometry ≤ 4.3e-14, rungs identical, solutions ≤ 1.0e-13 (non-koren) and ≤ 6.8e-9 (koren
+R_o/h 32, inside D-WO9-1's 1e-7), iterations within ±1 (max |Δ| 1 on g9_koren_32_c09, 0 elsewhere).
+
+**Battery** (`build_dev` at b4ed3fa, `-LE bench`, `--bind-to none`; load 37–60): **225/225 pass**, in
+three runs because the first was stopped by a 30-min harness limit after 58 passes (OMP 4, -j4): the
+remaining 161 (OMP 2, -j6, 210 s) and the six G6 ctests (OMP 3, -j6, 2237–2555 s each).
+`scalar_cutcell_gadv` 359 s with the new bounds, `scalar_cutcell_g9c` 68 s with the backflow row,
+`scalar_mg` at the default pressure tolerance.
