@@ -73,8 +73,9 @@ own gates.
 | WO-7 conjugate | DONE 401de1e + bb039d1 + G5a tol: G4 order 1.84–1.94, G6 1.91–2.00 (total mass), K exact, MPI bitwise; D-WO7-1..5 |
 | WO-8 contacts | DONE except conjugate contact (1c56587; D-WO8-1/2): Dirichlet contacts order 1.9; conjugate contact OPEN → Frank (§13 Q4) |
 | WO-9a GPU correctness | DONE 21593aa: CUDA builds, G11 parity ≤ 6.5e-13 except Koren R_o/h 32 (Q-N, ruling D-WO9-1: investigate the stencil reading non-unknowns) |
-| WO-9b performance (Q9 triggered: GPU sync-bound, advance/projection 33.7 CUDA, 1.58 OMP) | IN PROGRESS, opus-engineer, with Q-N first |
-| WO-10 docs/register | |
+| WO-9b performance | DONE (ec620e2…1e611de, bdc957c, 2ae5ff9): GPU syncs 40,769→922, advance/projection GPU 0.97, host 1.05 after D-WO9-3 (b9c8ca0, κ switch 25); Q-N = reduction-order seed, no defect |
+| WO-10 docs/register | DONE 82abfc4 (CLAUDE.md section, errata, 18 proposed register entries, naming rows pending Frank) |
+| REVIEW | IN PROGRESS: reviewer, brief doc/scalar_ibm_review_brief.md (untracked) → doc/scalar_ibm_review.md |
 
 **Side study running:** `tests/study/scalar_ibm/packing2d.py`, near-contact conjugate (square
 cylinder array, gap 0.2→0.01, k_s = 100 and 0.01): P2F vs Peters' hybrid ladder. It feeds WO-8 /
