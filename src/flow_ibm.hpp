@@ -2096,6 +2096,10 @@ class Solver {
 
 
   void fillAxis(CCField f, int axis);
+  // §14 H-3(d): the single-rank periodic fill of the axes in `axes` (bit a = axis a) in ONE launch
+  // over their ghost slabs -- bit-identical to fillAxis on those axes in ascending order (see the
+  // definition). Falls back to the sequential passes when a periodic axis is shorter than G.
+  void fillPeriodicAxes(CCField f, int axes);
 
 
   // Cell divergence of the current velocity iterate, on the inner cells + one ghost ring (the RHS
