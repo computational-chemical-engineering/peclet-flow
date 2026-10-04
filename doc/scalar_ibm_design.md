@@ -685,6 +685,24 @@ cut-cell scalar.
   level 0 only, i.e. 2 + 2 RB-GS sweeps as the preconditioner. Otherwise use the full table.
 - Steady: always the full table.
 
+*Amendment A3 (D-WO9-2, 2026-10-04) — the switch stays at κ_A = 13, now measured.* The value is
+the named constant `ScalarMG::kFullTableKappa`. Level 0 alone against the full table on G-perf's
+128³ bed (koren, Dirichlet spheres, host OpenMP at 2 threads, interleaved A/B, load 69–105), per
+advance, with the BiCGStab iterations per step:
+
+| κ_A (dt D/h²) | level 0 | full table |
+|---|---|---|
+| 7 (0.5) | 1.05–1.24 s, 9–10 it | 1.93 s, 9–11 it |
+| 13 (1) | 1.23–1.27 s, 9–10 it | 1.67–1.70 s, 9 it |
+| 25 (2) | 1.35–1.55 s, 10–12 it | 1.86–2.04 s, 9–10 it |
+| 49 (4) | 1.51–1.93 s, 14–15 it | 1.84–1.98 s, 10–11 it |
+| 97 (8) | 2.52–2.60 s, 19–21 it | 2.05–2.08 s, 10–12 it |
+
+On cost alone the switch would sit near κ_A ≈ 49. It cannot: at κ_A = 13, level 0 fails G-iter.
+R/h 16 takes 11 iterations on one of nine cold first steps, against the ≤ 10 bound, at 1, 2 and 4
+threads. G-iter and G-perf both sit at κ_A = 13 exactly, so 13 is the largest switch that keeps
+every gate. Below 13, level 0 is already the cheaper choice.
+
 #### Amendment A1 (WO-4, 2026-10-03) — the coarse wall term uses the fine probe distance
 
 **Decision (Q-A).**

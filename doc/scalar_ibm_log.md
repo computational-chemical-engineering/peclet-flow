@@ -1730,3 +1730,63 @@ Options, for the orchestrator:
 **Battery** (build_dev, final tree, `-LE bench`, OMP_NUM_THREADS=2, -j4, OMP_WAIT_POLICY=passive,
 host load 30): **225/225 pass** in 3917 s. The count is 224 plus the new `scalar_krylov`. The six G6
 ctests ran 1072–1886 s each under the load.
+
+## 2026-10-04 — WO-9b, ruling D-WO9-2: the level-rule measurement — the switch stays at κ_A = 13 (Amendment A3); host advance ÷ projection 1.55 recorded, WO-9 closed
+
+**Measurement.** Two temporary builds of the host module, one forcing level 0 alone in transient
+mode and one forcing the full table. The switch was changed as a compile-time constant; no env
+var was used. Both ran on G-perf's 128³ bed (koren, Dirichlet spheres), with D swept over
+dt D/h² ∈ {0.5, 1, 2, 4, 8}, that is κ_A ∈ {7, 13, 25, 49, 97}.
+- Each point is a fresh process: 3 flow steps, 1 step + 1 advance warm-up, then the median of 4
+  timed advances.
+- The variants were interleaved L0/FULL/L0/FULL at OMP_NUM_THREADS=2, host load 69–105.
+- The script is `sweep_one.py` in the session scratchpad. It is advance_profile.py with D = F h²/dt.
+
+| κ_A | level 0, ms per advance (it/step) | full table, ms per advance (it/step) | projection ms |
+|---|---|---|---|
+| 7 | 1052 / 1237 (10, 9, 9, 9, 9) | 1947 / 1927 (10, 9, 10, 11, 9) | 1114–1130 |
+| 13 | 1274 / 1226 (10, 10, 9, 9, 9) | 1673 / 1698 (9 ×5) | 1061–1145 |
+| 25 | 1549 / 1348 (12, 11, 10, 10, 10) | 1857 / 2043 (10, 9, 9, 9, 9) | 1046–1161 |
+| 49 | 1511 / 1929 (15, 15, 14, 14, 14) | 1985 / 1839 (10, 10, 10, 11, 10) | 1059–1403 |
+| 97 | 2515 / 2597 (21, 21, 20, 20, 19) | 2084 / 2047 (12, 11, 11, 10, 10) | 996–1348 |
+
+- On cost alone, level 0 wins up to κ_A ≈ 49, where the two tie, and loses at 97.
+- At κ_A = 13 level 0 saves 26 % per advance, which would put the host ratio at about 1.1.
+
+**G-iter with level 0 forced** (`test_scalar_cutcell_gates.py giter`, κ_A = 13):
+- R/h 8: 10 / 9 / 10 on the cold first step.
+- R/h 16: offset 3 takes **11** on the cold first step, which is **FAIL ≤ 10**. The warm steps are all 9.
+- R/h 32: 10 / 9 / 10.
+- The 11 is the same at OMP_NUM_THREADS 1, 2 and 4.
+- The full-table counts from the WO-9b battery are ≤ 10 everywhere.
+
+**Choice.** G-iter and G-perf both sit at κ_A = 13 exactly, and on an isotropic grid
+1 + 12 · 1 = 13 for both. Any switch above 13 therefore fails G-iter. Any switch below 13 makes the
+cheaper level-0 band narrower. The cost-minimizing switch that keeps every gate is 13, the current
+value.
+
+**Change.** `bdc957c`: the literal becomes `ScalarMG::kFullTableKappa = 13.0`. The comment cites
+this measurement, and design §5.2 has Amendment A3 with the table.
+- Inert: the host module built from `bdc957c` is byte-identical to the one built from `ec4b916`
+  (md5 f5cf878c…).
+- G11 was not rerun, since nothing changed numerically. build_cuda was not rebuilt.
+
+**Host advance ÷ projection, final.**
+- 1.55–1.58 at OMP_NUM_THREADS=2 and load 72–76: full table 1673–1698 ms against projection
+  1061–1094 ms, measured in the same processes.
+- 1.39 / 1.40 at OMP 4 and load 30 (WO-9b).
+- The cost breakdown is unchanged from WO-9b, since the numerics are identical:
+  - smoother 664 ms (38 %), prolongation 277, matvec 189, Krylov ≈ 200, assembly ≈ 150,
+    residual 74, restriction 68;
+  - all of these are ms per advance at 1 thread.
+- **Not met on host.** The GPU meets the target (0.96 / 0.98 busy, WO-9b). Per D-WO9-2, WO-9 is
+  closed with this ratio. The optional fused two-colour sweep was not attempted.
+
+**Open for the orchestrator.**
+- If G-iter's cold-first-step bound were ≤ 11, with warm steps ≤ 10, the measured optimum would
+  move the switch to about κ_A 25–49.
+- Even then the host ratio stays above 1: about 1.1 at κ_A 13.
+
+**Gates.**
+- G12: **12/12** at OMP_NUM_THREADS=1.
+- Battery (build_dev, `-LE bench`, OMP_NUM_THREADS=2, -j4, OMP_WAIT_POLICY=passive, load 70–88): **225/225 pass** in 4639 s. The six G6 ctests took 1488–2207 s each.
