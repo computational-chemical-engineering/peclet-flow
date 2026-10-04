@@ -91,7 +91,7 @@ struct ScalarCutState {
   Kokkos::View<double*, Kokkos::HostSpace> pk;  ///< and its host packet
   CCField kb, kq;  ///< singular case: the projected rhs, and the preconditioner's rhs copy
   int iterations = 0;
-  double residual = 0.0;  ///< final TRUE residual max|b - A c| / ref
+  double residual = 0.0;  ///< final TRUE residual max|b - A c| / ref, after any gauge shift
   bool converged = true;
   bool warnedNoConv = false;
   bool warnedGeometry = false;  ///< the §9 resolution warnings were issued (WO-8; once per scalar)

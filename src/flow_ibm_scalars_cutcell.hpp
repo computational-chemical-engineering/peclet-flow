@@ -1384,6 +1384,17 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
       sco::kappaMomentsLocal(CCConst(sc.c), kap, unk, e_, G, m[0], m[1]);
       allSum(m, 2);
       sco::addOnUnknown(sc.c, unk, (kc0 - m[0]) / k0, e_, G);
+      // Review finding 5 (ruling D-WOR-5): the gauge shift delta adds delta A 1 = delta div to the
+      // residual, so the reported residual and flag are re-measured after it -- the Krylov's own
+      // true-residual definition (the projected rhs, mean removed), its reference and its 10 rtol.
+      if (kr.ref > 0.0) {
+        const ScalarVec t = vec(st.kt);
+        ops.matvec(t, vec(sc.c));
+        skr::residualFrom(t, vec(bK), e_, G);
+        ops.removeMean(t);
+        kr.trueRes = ops.maxabs(t);
+        kr.converged = kr.trueRes <= 10.0 * (st.rtol * kr.ref);
+      }
     }
 
   } else {
@@ -1518,6 +1529,14 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
       const double d = (kc0 - m[0]) / k0;
       sco::addOnUnknown(sc.c, unk, d, e_, G);
       sco::addOnUnknown(st.solid, sunk, d, e_, G);
+      if (kr.ref > 0.0) {  // review finding 5: the residual after the gauge shift, as above
+        const ScalarVec t = vec2(st.kt, st.ktS);
+        ops.matvec(t, vec2(sc.c, st.solid));
+        skr::residualFrom(t, vec2(bKf, bKs), e_, G);
+        ops.removeMean(t);
+        kr.trueRes = ops.maxabs(t);
+        kr.converged = kr.trueRes <= 10.0 * (st.rtol * kr.ref);
+      }
     }
     fillGhosts(st.solid);
   }
