@@ -1980,3 +1980,17 @@ three runs because the first was stopped by a 30-min harness limit after 58 pass
 remaining 161 (OMP 2, -j6, 210 s) and the six G6 ctests (OMP 3, -j6, 2237–2555 s each).
 `scalar_cutcell_gadv` 359 s with the new bounds, `scalar_cutcell_g9c` 68 s with the backflow row,
 `scalar_mg` at the default pressure tolerance.
+
+## 2026-10-04 — WO-R closed: orchestrator acceptance
+
+- **D-WOR-10.** Accepted: 2b applies only while the fluid moves (at rest the steady problem is
+  genuinely singular, with a uniform null vector).
+- **D-WOR-11.** Accepted: Q20 bound = min(old provisional, 2× measured).
+- **Open faces without inflow under a uniform source:** no steady state exists. The new build
+  reports non-convergence plus the backflow warning. The old build reported "converged" on a
+  projected, wrong problem. Correct as is.
+- **7d not done, correctly:** the cut-cell advance reads the high-face velocity ghost. The proper fix
+  is the outflow-plane-preserving fill on branch `uf-outlet-diag` (awaiting Frank). It is recorded as
+  a CLAUDE.md open item.
+
+**CAMPAIGN CODE COMPLETE** at 43ccd78. What remains is user decisions and follow-ups (see STATE).

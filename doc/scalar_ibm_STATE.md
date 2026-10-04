@@ -56,30 +56,24 @@ and a divergence-free MAC face flux. Then a plan, and a step-by-step implementat
 
 ## Next action
 
-The design note `doc/scalar_ibm_design.md` (95e4a55) is the contract. Execute its work orders WO-1 …
-WO-10 in order through the opus-implementer agent. Each WO must pass G12 (the state hashes) and its
-own gates.
+**CODE COMPLETE (43ccd78). Waiting for Frank on:**
+1. **Landing.** scalar-ibm (flow) + scalar-ibm (core: a031c6f, b1fcb6a). Core goes first and is
+   tagged before the flow pointer. Push / main is Frank's call.
+2. **Conjugate contact model** (§13 Q4; G13 conjugate row OPEN). Recommendation: a body-aware geometry
+   record plus a contact conductance, designed by the architect with Frank's input.
+3. **Naming:** set_scalar_tolerance → set_scalar_residual_tolerance; maxit → max_iter; the
+   `cutcell=` spelling (Q5); when cut-cell becomes the default (Q7). See doc/scalar_ibm_naming_rows.md.
+4. **Register entries:** doc/scalar_ibm_register_entries.md + doc/scalar_units_register_entry.md, to
+   be placed in the umbrella at landing.
+5. **Battery cadence:** per work order, or only at milestones.
 
-| WO | status |
-|---|---|
-| WO-1 core kernels (core worktree `suite/core-scalar-ibm`, branch `scalar-ibm`) | DONE: core a031c6f + b1fcb6a |
-| WO-2 flow geometry record | DONE: 9a445cb, 88f0214 (gate restated D-WO2-1/2) |
-| WO-3 operator + Krylov | DONE f0fc80a: G1 1.93, G2 1.89, G3a 1.93–2.00, G3b 1.76–2.34, G7 1.97–2.02; budget 2.8e-14; 205/205 |
-| WO-4 ScalarMG | DONE 35e183d (+Amendment A1 03435df: coarse wall term averaged at the fine probe distance; RAP removed): G1 10/10/11 it, contraction ≤ 0.27, MPI parity 1e-13; 207/207 |
-| WO-5 advection/small cells | DONE a12106a (rulings D-WO5-1..4; collocated 'ghost' refused) |
-| WO-5b open faces, Koren gate, refusal messages | DONE 0794b15 (collocated open faces refused: possible `uf_` outlet issue, see log D-WO5b-1) |
-| WO-5c advective surrogate (Amendment A2, a61f88e) | DONE e1127ed + 7a3e5fb: steady adv Pe_h 0.1–10 in 5–33 it, growth ≤ 1.43×/doubling; D-WO5c-1/2 |
-| WO-6 closures | DONE b5cb6a5 + 3eb151c: Taylor–Aris 3.3e-4 at R/h 32 (order 2.02); SC k* → 0.60566 < HS; D-WO6-1..4 |
-| WO-7 conjugate | DONE 401de1e + bb039d1 + G5a tol: G4 order 1.84–1.94, G6 1.91–2.00 (total mass), K exact, MPI bitwise; D-WO7-1..5 |
-| WO-8 contacts | DONE except conjugate contact (1c56587; D-WO8-1/2): Dirichlet contacts order 1.9; conjugate contact OPEN → Frank (§13 Q4) |
-| WO-9a GPU correctness | DONE 21593aa: CUDA builds, G11 parity ≤ 6.5e-13 except Koren R_o/h 32 (Q-N, ruling D-WO9-1: investigate the stencil reading non-unknowns) |
-| WO-9b performance | DONE (ec620e2…1e611de, bdc957c, 2ae5ff9): GPU syncs 40,769→922, advance/projection GPU 0.97, host 1.05 after D-WO9-3 (b9c8ca0, κ switch 25); Q-N = reduction-order seed, no defect |
-| WO-10 docs/register | DONE 82abfc4 (CLAUDE.md section, errata, 18 proposed register entries, naming rows pending Frank) |
-| REVIEW | IN PROGRESS: reviewer, brief doc/scalar_ibm_review_brief.md (untracked) → doc/scalar_ibm_review.md |
-
-**Side study running:** `tests/study/scalar_ibm/packing2d.py`, near-contact conjugate (square
-cylinder array, gap 0.2→0.01, k_s = 100 and 0.01): P2F vs Peters' hybrid ladder. It feeds WO-8 /
-Q4. Results go in `pack_ks*.out` → the log.
+**Follow-up work orders (not started):**
+- an agglomerated exact bottom for ScalarMG (review finding 4);
+- the outflow-plane-preserving velocity fill in the cut-cell advance (depends on uf-outlet-diag);
+- the held snapped-normal probe option;
+- WO-11 (steady deferred-correction Koren);
+- collocated open faces;
+- the tracer route (A4).
 
 ## Side thread awaiting Frank
 
