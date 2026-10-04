@@ -34,7 +34,7 @@ conversions of §1.2 are on the path.
        (b) the closure on G9b's SC array (Neumann spheres, singular, the mean-gradient mode of
        WO-6 with G = e_x) and (b')
        the same with Dirichlet spheres, 32^3 and 64^3; (c) G9c's channel (open faces), Pe_h 1 and
-       10 (set through D). (i) converged, (ii) iteration bounds (prov.), (iii) growth per
+       10 (set through D). (i) converged, (ii) iteration bounds (Q20: min(prov., 2x measured)), (iii) growth per
        doubling <= 1.7x, (v) the steady budget identity <= 1e-11 of the gross budget (D-WO5c-1). (iv) C4 is in the
        `scalar_mg` ctest, (vi) a one-time logged check.
   g8   Taylor-Aris (WO-6): G7's pipe, frozen face-averaged Poiseuille fluxes (D-WO6-1), insulating walls, the
@@ -1494,7 +1494,7 @@ def gadv_row(tag, s, name, pe, bound, rate=None):
     check(abs(c["max_cell_peclet"] / pe - 1.0) <= 1e-9, f"{tag}: census Pe_h {c['max_cell_peclet']:.6g} = {pe}")
     check(c["krylov_converged"] and c["krylov_residual"] <= 1e-10,
           f"{tag} Pe_h {pe}: (i) converged to rtol 1e-10 within 200 ({its} iterations)")
-    check(its <= bound, f"{tag} Pe_h {pe}: (ii) {its} <= {bound} iterations (prov.)")
+    check(its <= bound, f"{tag} Pe_h {pe}: (ii) {its} <= {bound} iterations (Q20, D-WOR-8)")
     check(ident <= 1e-11, f"{tag} Pe_h {pe}: (v) steady budget identity {ident:.1e} <= 1e-11 of the gross budget")
     return its
 
@@ -1509,7 +1509,10 @@ def gate_gadv():
     print("G-adv: steady advection on the advective surrogate (design Amendment A2), "
           "Pe_h = census max_cell_peclet")
     t0 = time.time()
-    bounds = {16: (20, 25, 40), 32: (25, 35, 55)}
+    # (ii), ruling Q20 / D-WOR-8: min(the provisional bound, 2x the count measured on the WO-R tree,
+    # doc/scalar_ibm_log.md 2026-10-04 WO-R) -- tightened, never loosened. Provisional: (a) 20/25/40
+    # and 25/35/55, (b) and (b') 15/20/30 at both sizes, (c) 40.
+    bounds = {16: (16, 25, 40), 32: (20, 34, 55)}
     its = {}
     for Rh in (16, 32):
         its[Rh] = {}
@@ -1519,13 +1522,15 @@ def gate_gadv():
             its[Rh][pe] = gadv_row(f"(a) R/h={Rh} ({4 * Rh}^3)", s, "c", pe, bd)
     gadv_growth("(a)", its[16], its[32])
     print(f"  [(a): {time.time() - t0:.0f} s]")
+    bounds_b = {"neumann": {32: (10, 16, 24), 64: (12, 20, 30)},
+                "dirichlet": {32: (15, 20, 30), 64: (15, 20, 30)}}
     for wall, nm in (("neumann", "(b) closure, Neumann spheres, mean gradient e_x"),
                      ("dirichlet", "(b') Dirichlet spheres")):
         t0 = time.time()
         its = {}
         for n in (32, 64):
             its[n] = {}
-            for pe, bd in zip(GADV_PE, (15, 20, 30)):
+            for pe, bd in zip(GADV_PE, bounds_b[wall][n]):
                 s = gadv_b_case(n, pe, wall)
                 if wall == "neumann":
                     check(s.diagnostics.scalar_census("c")["steady_incompatibility"] >= 0.0 and
@@ -1534,9 +1539,9 @@ def gate_gadv():
         gadv_growth(nm, its[32], its[64])
         print(f"  [{nm}: {time.time() - t0:.0f} s]")
     t0 = time.time()
-    for pe in (1.0, 10.0):
+    for pe, bd in ((1.0, 16), (10.0, 18)):
         s = gadv_c_case(pe)
-        gadv_row("(c) G9c channel, open faces", s, "d", pe, 40, rate=1.0)
+        gadv_row("(c) G9c channel, open faces", s, "d", pe, bd, rate=1.0)
     print(f"  [(c): {time.time() - t0:.0f} s]")
 
 
