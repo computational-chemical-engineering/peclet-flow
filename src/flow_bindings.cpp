@@ -572,16 +572,18 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           },
           nb::arg("engine"),
           "Engine of the AGGLOMERATED pressure bottom (set_pressure_bottom 'auto' / "
-          "'agglomerated'). 'auto' (DEFAULT): on a GPU backend, single rank, the singular "
-          "(periodic / wall) operator, a bottom of at most 8192 cells with at most 64 fluid "
-          "components (solids allowed) and an axis whose planes hold at most 192 cells, 'direct': "
-          "one device launch runs flexible CG in FP64 (inner tolerance 1e-5, cap 100) "
-          "preconditioned by a block-tridiagonal FP32 direct factor of the bottom (planes along "
-          "one axis, explicit Schur-complement inverses), refactored once per operator change -- "
-          "no host transfer; everywhere else the host GraphAMG solve. 'direct' forces the device "
-          "engine and raises at the bottom solve, naming the failed condition, where it is not "
-          "eligible; 'algebraic' forces GraphAMG (the A/B instrument). Host backends always run "
-          "GraphAMG under 'auto'. doc/vof_step_performance_design.md §13.")
+          "'agglomerated'). 'auto' (DEFAULT): single rank, the singular (periodic / wall) "
+          "operator, a bottom of at most 8192 cells with at most 64 fluid components (solids "
+          "allowed) and an axis whose planes hold at most 192 cells, 'direct': one team launch "
+          "runs flexible CG in FP64 (inner tolerance 1e-5, cap 100) preconditioned by a "
+          "block-tridiagonal FP32 direct factor of the bottom (planes along one axis, explicit "
+          "Schur-complement inverses), refactored once per operator change -- no host transfer "
+          "on a GPU; on a host backend the team has min(8, team_size_max) threads and the FCG's "
+          "reductions run on one lane, so the result does not depend on the thread count. "
+          "Everywhere else the GraphAMG solve. 'direct' forces that engine and raises at the "
+          "bottom solve, naming the failed condition, where it is not eligible; 'algebraic' "
+          "forces GraphAMG (the A/B instrument). doc/vof_step_performance_design.md §13, §14 "
+          "H-1.")
       .def("set_pressure_graph_amg", [](D& diag, bool on) { return diag.s->setPressureGraphAmg(on); }, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "

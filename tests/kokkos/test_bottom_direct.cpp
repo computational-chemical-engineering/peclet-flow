@@ -20,8 +20,10 @@
 ///       §13.4.1), and per-component means of x <= 1e-15 max|x|;
 ///   U2  the FP32 (production) instantiation: the same residual <= 1e-3;
 ///   U3  the factor storage (Q, Y, e, s) and M(r) before the FCG's mean removal (a team
-///       reduction, §13.2: "the FCG's dots stay team reductions") are BITWISE identical over the
-///       team sizes {32, 64, 128, 256, T_max} (device) or {1, 2, 4} (OpenMP);
+///       reduction on a device, §13.2: "the FCG's dots stay team reductions") are BITWISE
+///       identical over the team sizes {32, 64, 128, 256, T_max} (device) or {1, 2, 4, 8}
+///       (OpenMP); on OpenMP also the WHOLE production FCG solve (§14 H-1: the host FCG's
+///       reductions are single-lane, so its bits are independent of T);
 ///   U4  the production FCG reaches tau in <= 3 iterations, raises no flag, its true residual
 ///       (stored operator) is <= 10 tau r0, x = 0 exactly on solids, per-component means of x
 ///       <= 4e-16 max|x|;
@@ -421,7 +423,8 @@ int runCase(const Case& cs) {
     fails += !ok;
   }
   {  // U3: team-size independence (factor storage; M before the mean removal)
-    std::vector<int> Ts = kHost ? std::vector<int>{1, 2, 4} : std::vector<int>{32, 64, 128, 256, 0};
+    std::vector<int> Ts =
+        kHost ? std::vector<int>{1, 2, 4, 8} : std::vector<int>{32, 64, 128, 256, 0};
     BottomDirect<float> ref;
     CCField zref("zref", bt.n);
     int Tref = -1;
@@ -456,6 +459,45 @@ int runCase(const Case& cs) {
       printf(" %d", T);
     printf(": factor + M %s -> %s\n", ok ? "bitwise identical" : "DIFFER (or < 2 sizes)",
            ok ? "ok" : "FAIL");
+    fails += !ok;
+  }
+  if (kHost) {  // U3, host: the whole FCG solve is bitwise across T (single-lane reductions)
+    std::vector<double> hb(bt.n, 0.0);
+    std::mt19937 rng(5);
+    std::uniform_real_distribution<double> U(-1.0, 1.0);
+    H.forCells([&](const int*, long i) { hb[i] = U(rng); });
+    CCField b = toDevice(hb, "b");
+    CCField xref("xref", bt.n);
+    int itRef = -1, Tref = -1;
+    bool ok = true;
+    std::vector<int> used;
+    for (int T : {1, 2, 4, 8}) {
+      Kokkos::deep_copy(bt.rhs, b);
+      int Tu = 0;
+      const int it = mg.directSolveTeamForTest(T, &Tu);
+      if (Tu != T) {
+        printf("[%s] U3 FCG team size %d not available (ran %d): skipped\n", cs.name, T, Tu);
+        continue;
+      }
+      used.push_back(T);
+      if (Tref < 0) {
+        Kokkos::deep_copy(xref, bt.x);
+        itRef = it;
+        Tref = T;
+        continue;
+      }
+      const bool same = it == itRef && sameBits(bt.x, xref);
+      if (!same)
+        printf("[%s] U3 FCG team size %d differs from %d (iterations %d vs %d)\n", cs.name, T, Tref,
+               it, itRef);
+      ok = ok && same;
+    }
+    ok = ok && used.size() >= 2 && !mg.lastSolveFailed();
+    printf("[%s] U3 FCG team sizes", cs.name);
+    for (int T : used)
+      printf(" %d", T);
+    printf(": the whole solve (%d iterations) %s -> %s\n", itRef,
+           ok ? "bitwise identical" : "DIFFERS (or < 2 sizes)", ok ? "ok" : "FAIL");
     fails += !ok;
   }
   auto fcg = [&](const char* tag, int itMax, int restartsWant) {
