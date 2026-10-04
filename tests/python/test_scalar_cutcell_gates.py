@@ -2072,6 +2072,34 @@ def gate_api():
         check(got == want and "ScalarMG" not in err2,
               f"{m}^3 steady: the shallow-bottom warning is {'printed once' if want else 'absent'} "
               f"(D-WOR-4; {err.strip()[:90]!r})")
+    # review finding 7 (ruling D-WOR-7): koren above bulk Courant 1/2 warns once (fou never); a
+    # rebuilt geometry re-issues the §9 resolution warnings (a 0.4 h plate: thin solid)
+    for scheme in ("koren", "fou"):
+        s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+        s.set_dt(0.05)
+        s.set_solid(np.asfortranarray(np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2) - 0.2),
+                    cutcell_pressure=True)
+        s.add_scalar("c", 0.01, scheme=scheme, cutcell=True)
+        s.set_field("u", np.asfortranarray(np.full((n, n, n), 0.75)))
+        _, err = capture_stderr(s.advance_scalars)
+        _, err2 = capture_stderr(s.advance_scalars)
+        cb = s.diagnostics.scalar_census("c")["bulk_courant"]
+        want = scheme == "koren"
+        check(cb > 0.5 and ("'koren' at bulk Courant" in err) == want and "Courant" not in err2,
+              f"{scheme} at bulk Courant {cb:.3f}: the koren warning is "
+              f"{'printed once' if want else 'absent'} (D-WOR-7)")
+    h = 1.0 / n
+    plate = np.asfortranarray(np.abs(X - (n // 2 + 0.55) * h) - 0.2 * h)
+    s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_solid(plate)
+    s.add_scalar("c", 1.0, cutcell=True)
+    errs = [capture_stderr(lambda: s.solve_scalar_steady("c"))[1]]
+    errs.append(capture_stderr(lambda: s.solve_scalar_steady("c"))[1])
+    s.set_solid(plate)
+    errs.append(capture_stderr(lambda: s.solve_scalar_steady("c"))[1])
+    check(["thin-solid" in e for e in errs] == [True, False, True],
+          f"the thin-solid warning: once per geometry, again after set_solid (D-WOR-7; "
+          f"{['thin-solid' in e for e in errs]})")
     # WO-7 (§8.1): set_scalar_solid's validation, the registered solid field, get_scalar_solid
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
     s.set_rho(1.0)

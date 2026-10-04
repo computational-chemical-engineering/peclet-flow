@@ -261,13 +261,20 @@ sco::MaterialTable Solver<Grid>::scalarMaterialTable(ScalarField& sc, std::vecto
     st.mtRc[(std::size_t)b] = w.solidRc * rI;
     st.maxSolidD = std::fmax(st.maxSolidD, w.solidD * dI);
   }
+  if (st.mtConjV.extent(0) != (std::size_t)nb) {  // persistent, refilled below (finding 7)
+    st.mtConjV = Kokkos::View<int*, CCMem>("peclet::flow::sco_mt_conj", nb);
+    st.mtLamV = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_lam", nb);
+    st.mtCKV = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_ck", nb);
+    st.mtKV = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_k", nb);
+    st.mtRcV = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_rc", nb);
+  }
   sco::MaterialTable mt;
   mt.nb = nb;
-  mt.conj = Kokkos::View<int*, CCMem>("peclet::flow::sco_mt_conj", nb);
-  mt.lam = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_lam", nb);
-  mt.ck = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_ck", nb);
-  mt.kp = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_k", nb);
-  mt.rc = Kokkos::View<double*, CCMem>("peclet::flow::sco_mt_rc", nb);
+  mt.conj = st.mtConjV;
+  mt.lam = st.mtLamV;
+  mt.ck = st.mtCKV;
+  mt.kp = st.mtKV;
+  mt.rc = st.mtRcV;
   auto hc = Kokkos::create_mirror_view(mt.conj);
   auto hl = Kokkos::create_mirror_view(mt.lam);
   auto hk = Kokkos::create_mirror_view(mt.ck);
@@ -823,6 +830,18 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
     }
 #endif
     st.bulkCourant = cb;
+    // Review finding 7 (D-WO5-1): koren with forward Euler is TVD only to bulk Courant 1/2 (min
+    // -21 at C = 0.9 with no solid); legacy-identical, so said once rather than refused.
+    if (sc.scheme == 1 && cb > 0.5 && !st.warnedKoren) {
+      st.warnedKoren = true;
+      if (scalarRootRank())
+        std::fprintf(stderr,
+                     "peclet.flow: cut-cell scalar '%s': scheme 'koren' at bulk Courant %.3f > 1/2 "
+                     "-- the explicit limiter is bounded only to 1/2 and overshoots above it; "
+                     "reduce dt or use scheme='fou' (diagnostics.scalar_census 'bulk_courant', "
+                     "printed once)\n",
+                     sc.name.c_str(), cb);
+    }
     sco::smallCells(st.small, px, py, pz, kap, unk, dt_, std::fmax(0.5, cb), e_, G);
     // Review finding 6 (ruling D-WOR-6): the ghost flags are the OWNER's, by one exchange per
     // advance, so a face's implicit/explicit split agrees across ranks whatever the ghost fluxes
@@ -955,12 +974,18 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     st.wtQ[b] = st.wtType[b] == 0 ? st.wtQ[b] * sp : 0.0;
     st.wtG[b] = st.wtType[b] == 0 ? 0.0 : st.wtG[b];
   }
+  if (st.wtTypeV.extent(0) != (std::size_t)nb) {  // persistent, refilled below (finding 7)
+    st.wtTypeV = Kokkos::View<int*, CCMem>("peclet::flow::sco_wt_type", nb);
+    st.wtKV = Kokkos::View<double*, CCMem>("peclet::flow::sco_wt_k", nb);
+    st.wtGV = Kokkos::View<double*, CCMem>("peclet::flow::sco_wt_g", nb);
+    st.wtQV = Kokkos::View<double*, CCMem>("peclet::flow::sco_wt_q", nb);
+  }
   sco::WallTable wt;
   wt.nb = nb;
-  wt.type = Kokkos::View<int*, CCMem>("peclet::flow::sco_wt_type", nb);
-  wt.k = Kokkos::View<double*, CCMem>("peclet::flow::sco_wt_k", nb);
-  wt.gval = Kokkos::View<double*, CCMem>("peclet::flow::sco_wt_g", nb);
-  wt.q = Kokkos::View<double*, CCMem>("peclet::flow::sco_wt_q", nb);
+  wt.type = st.wtTypeV;
+  wt.k = st.wtKV;
+  wt.gval = st.wtGV;
+  wt.q = st.wtQV;
   {
     auto ht = Kokkos::create_mirror_view(wt.type);
     auto hk = Kokkos::create_mirror_view(wt.k);
@@ -1014,7 +1039,9 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     sco::faceTangents(a, t1, t2);
     const int n[3] = {nx_, ny_, nz_};
     const long nf = (long)n[t1] * n[t2];
-    Kokkos::View<double*, CCMem> gv(sc.name + "_cc_gface", nf);
+    if (st.gFace[f].extent(0) != (std::size_t)nf)  // persistent, refilled below (finding 7)
+      st.gFace[f] = Kokkos::View<double*, CCMem>(sc.name + "_cc_gface", nf);
+    Kokkos::View<double*, CCMem> gv = st.gFace[f];
     if (st.hasProfile[f] && (st.profileN[f][0] != n[t1] || st.profileN[f][1] != n[t2]))
       throw std::runtime_error("cut-cell scalar '" + sc.name +
                                "': the domain-face profile no longer matches this rank's block");
@@ -1041,7 +1068,6 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     } else {
       Kokkos::deep_copy(gv, sc.bcVal[f]);
     }
-    st.gFace[f] = gv;
     st.dirFace[f] = true;
     anyDir = true;
     sco::dirichletFaceFold(sc.AC, sc.b, unk, CCConst(saAx[a]), gv, lam * u_.w[a], a, side, e_, G);
@@ -1584,9 +1610,9 @@ bool Solver<Grid>::scalarRootRank() const {
 template <class Grid>
 void Solver<Grid>::scalarCutWarnings(ScalarField& sc) {
   ScalarCutState& st = *sc.cut;
-  if (st.warnedGeometry)
+  if (st.warnedGeometryVersion == scg_.version)
     return;
-  st.warnedGeometry = true;
+  st.warnedGeometryVersion = scg_.version;
   bool root = true;
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {

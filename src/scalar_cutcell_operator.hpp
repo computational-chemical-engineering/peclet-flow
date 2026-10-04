@@ -94,7 +94,14 @@ struct ScalarCutState {
   double residual = 0.0;  ///< final TRUE residual max|b - A c| / ref, after any gauge shift
   bool converged = true;
   bool warnedNoConv = false;
-  bool warnedGeometry = false;  ///< the §9 resolution warnings were issued (WO-8; once per scalar)
+  /// The geometry version whose §9 resolution warnings were issued (WO-8: once per scalar and
+  /// geometry; a rebuilt geometry warns again, review finding 7). -1: none yet.
+  long warnedGeometryVersion = -1;
+  bool warnedKoren = false;  ///< the koren-above-bulk-Courant-1/2 warning was issued (once)
+  // persistent device tables, refilled every advance (review finding 7: no per-advance allocation):
+  // the wall table (sco::WallTable) and the conjugate material table (sco::MaterialTable)
+  Kokkos::View<int*, CCMem> wtTypeV, mtConjV;
+  Kokkos::View<double*, CCMem> wtKV, wtGV, wtQV, mtLamV, mtCKV, mtKV, mtRcV;
   double incompatibility = 0.0;  ///< steady singular case: |sum b| / sum |b| before projection
   // ---- ScalarMG (§5.2): level table per geometry version / block, coefficients per build ----
   std::shared_ptr<ScalarMG> mg;
