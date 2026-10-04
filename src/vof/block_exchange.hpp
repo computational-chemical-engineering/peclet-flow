@@ -41,15 +41,18 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <Kokkos_Core.hpp>
 #include <map>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #ifdef PECLET_FLOW_MPI
 #include <mpi.h>
 #endif
 
+#include "mac_cutcell.hpp"  // ccFor3 (rule H)
 #include "vof/block_container.hpp"
 #include "policy.hpp"
 
@@ -457,6 +460,61 @@ class VofBlockExchange : public VofBlockExchangeBase {
     const I3 e = patch_.e, n = patch_.n, o = patch_.o;
     const int g = patch_.g;
     SField d0 = loc[0], d1 = T.nc > 1 ? loc[1] : loc[0], d2 = T.nc > 2 ? loc[2] : loc[0];
+    if constexpr (std::is_same_v<typename SField::memory_space, Kokkos::HostSpace>) {
+      // §14 H-3(b), host: rule H (ccFor3: rows, x inside) and per-axis job masks. m_d[x_d] holds
+      // bit k iff job k's box contains patch coordinate x_d on axis d under the periodic predicate
+      // below, so a cell visits exactly the jobs in mx[x] & my[y] & mz[z], in ascending k, with
+      // l[d] computed as there: the same jobs, order and additions -- bitwise -- without the 16
+      // jobs x 3 axes of ((v % L) + L) % L per cell. The device keeps the launch below.
+      static_assert(kVofBlockBatch <= 32, "the job masks are 32-bit");
+      const int nn[3] = {n.x, n.y, n.z}, oo[3] = {o.x, o.y, o.z};
+      std::vector<std::uint32_t> mk((std::size_t)n.x + n.y + n.z, 0u);
+      std::uint32_t* md[3] = {mk.data(), mk.data() + n.x, mk.data() + n.x + n.y};
+      for (int d = 0; d < 3; ++d)
+        for (int xd = 0; xd < nn[d]; ++xd)
+          for (int k = 0; k < T.nj; ++k) {
+            int v = xd + oo[d] - T.lo[k][d];
+            if (T.per[d])
+              v = ((v % T.L[d]) + T.L[d]) % T.L[d];
+            if (v >= 0 && v < T.n[k][d])
+              md[d][xd] |= (1u << k);
+          }
+      const std::uint32_t *mx = md[0], *my = md[1], *mz = md[2];
+      ccFor3(
+          "vof::block::gather_local_sum", C3{0, 0, 0}, C3{n.x, n.y, n.z},
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            const int gp[3] = {x + o.x, y + o.y, z + o.z};
+            const long i = L3(x + g, y + g, z + g, e);
+            double acc[3] = {0.0, 0.0, 0.0};
+            if (!T.first) {
+              acc[0] = d0(i);
+              acc[1] = T.nc > 1 ? d1(i) : 0.0;
+              acc[2] = T.nc > 2 ? d2(i) : 0.0;
+            }
+            const std::uint32_t m = mx[x] & my[y] & mz[z];
+            for (int k = 0; k < T.nj; ++k) {
+              if (!((m >> k) & 1u))
+                continue;
+              int l[3];
+              for (int d = 0; d < 3; ++d) {
+                int v = gp[d] - T.lo[k][d];
+                if (T.per[d])
+                  v = ((v % T.L[d]) + T.L[d]) % T.L[d];
+                l[d] = v;
+              }
+              const long q = L3(l[0] + T.gh, l[1] + T.gh, l[2] + T.gh, T.be[k]);
+              for (int c = 0; c < T.nc; ++c)
+                acc[c] += T.f[k][c][q];
+            }
+            d0(i) = acc[0];
+            if (T.nc > 1)
+              d1(i) = acc[1];
+            if (T.nc > 2)
+              d2(i) = acc[2];
+          });
+      Kokkos::fence();  // the masks live on this stack frame
+      return;
+    }
     Kokkos::parallel_for(
         "vof::block::gather_local_sum", MDRange3<SExec>(SExec(), {0, 0, 0}, {n.x, n.y, n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
