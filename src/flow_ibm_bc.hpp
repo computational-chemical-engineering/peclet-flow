@@ -221,9 +221,7 @@ void Solver<Grid>::fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow
     return;
   }
 #endif
-  for (int a = 0; a < 3; ++a)
-    if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)
-      fillAxis(f, a);
+  fillDomainPeriodic(f);  // the periodic axes (§14 H-3(d): one launch when there are two or three)
   applyVelocityBcCompTo(f, comp, fold, doOutflow);
 }
 

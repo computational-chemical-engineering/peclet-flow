@@ -1196,6 +1196,21 @@ void Solver<Grid>::fillPeriodicAxes(CCField f, int axes) {
 }
 
 template <class Grid>
+void Solver<Grid>::fillDomainPeriodic(CCField f) {
+  int axes = 0, n = 0, last = -1;
+  for (int a = 0; a < 3; ++a)
+    if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0) {
+      axes |= 1 << a;
+      ++n;
+      last = a;
+    }
+  if (n >= 2)
+    fillPeriodicAxes(f, axes);
+  else if (n == 1)
+    fillAxis(f, last);  // a single-axis fill keeps its own launch
+}
+
+template <class Grid>
 bool Solver<Grid>::advWallInputs() const {
   return advWallVel_ && !Grid::collocated && hasScene_ && hasMotion_ && advect_ &&
          uBc_[0].extent(0) == n_ && C[0].mask.extent(0) == n_;

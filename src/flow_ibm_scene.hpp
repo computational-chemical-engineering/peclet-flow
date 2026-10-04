@@ -678,9 +678,7 @@ void Solver<Grid>::exchangeExtRaw(CCField f) {
     return;
   }
 #endif
-  for (int a = 0; a < 3; ++a)
-    if (bc_[2 * a] == 0 && bc_[2 * a + 1] == 0)
-      fillAxis(f, a);
+  fillDomainPeriodic(f);  // the periodic axes (§14 H-3(d): one launch when there are two or three)
 }
 
 template <class Grid>
