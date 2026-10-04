@@ -58,6 +58,17 @@ if not committed). Then S-1 Snellius (needs user OK: budget low), WO-H5..H8, S-2
 Production column at case rtol 1e-8 running (peclet-examples worktree peclet-examples-rtol, branch
 rtol-1e8; frozen module scratchpad/flow_prod6 = a0afc9b) -> page update.
 
+**2026-10-04 later.** LANDED: WO-12/9/10 (flow 935ffaf; Chebyshev 44 -> 24 V-cycles/step); full
+battery on main with a CORRECT MPI launcher 194/194 (fresh trees otherwise pick ParaView mpiexec =
+singleton MPI tests). Page updated with the rtol 1e-8 production run (peclet-examples dee1a32; drift
+0.965 +- 0.042, volume 1.3e-10). CPU §14: WO-H0..H3 (branch cpu14) + WO-H4 (cpu14-h4) DONE, all
+bitwise except H-1 (host 'direct' bottom: G-NUM-H passes, G-PERF open — serially 1.35x GraphAMG,
+team barriers under load); H4 container kernels 132.9 -> 23.8 ms/step at 8 threads. Branches
+COMBINED as cpu14-h4 (16 commits on origin/main 935ffaf); gate running (gate_cpu14.sh). HELD until
+S-1 (Snellius, needs USER OK, budget low) measures host 'direct' vs 'algebraic' and the protocol fix
+(patch /home/frankp/Codes/bubble_column_perf/patches/bench_peclet_H0.patch; CCD-respecting layouts).
+Builds use /home/frankp/Codes/suite/core-v140 (detached v1.4.0) via PECLET_SIBLING_PECLET_CORE.
+
 **Next.** Snellius same-node rerun (bubble_cpu.slurm) + update the page's cost table; host MG launch
 structure (CPU still ~4x TBF); WO-9/10/12; E2(a) per the user's answer.
 
