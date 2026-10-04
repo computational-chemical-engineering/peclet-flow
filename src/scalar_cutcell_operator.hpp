@@ -121,6 +121,7 @@ struct ScalarCutState {
   long numGuardedFaces = 0;   ///< faces whose projection flux the guard zeroed (a no-op reading)
   long numBackflowFaces = 0;  ///< census `num_backflow_faces`: outflow-face rows with F_out < 0
   bool warnedBackflow = false;  ///< the steady backflow warning was issued (once per scalar)
+  bool warnedBottom = false;    ///< the ScalarMG shallow-bottom warning was issued (once)
   double bulkCourant = 0.0;   ///< census `bulk_courant`: C_bulk of §6.3 (0 steady)
   // ---- conjugate (WO-7, §1.1, §1.3, §2.7, §3.4, §4): the solid field psi_s = c_s / K ----------
   // Allocated by the first set_scalar_solid; the two-field path runs only while some body is

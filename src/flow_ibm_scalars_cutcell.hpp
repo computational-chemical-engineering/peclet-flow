@@ -1246,6 +1246,27 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     }
     st.mg->build(in);
     st.mgLevels = st.mg->levelsUsed();
+    // Review finding 4 (ruling D-WOR-4): the full table's bottom is a fixed number of smoothing
+    // sweeps on whatever level the table stops at -- there is no agglomerated exact coarse solve
+    // (CutcellMG's 'auto' bottom). An axis that cannot halve (odd, 2-poor, or an odd MPI block or
+    // origin) stops the table on a large grid, and the iterations then grow with it. Warned once
+    // per scalar, against the pressure's own bottom extent (set_pressure_bottom_extent).
+    if (in.fullTable && !st.warnedBottom) {
+      const auto& lc = st.mg->level(st.mg->levelsUsed() - 1);
+      const int be = pressureBottomExtent();
+      if (lc.gdim.x > be || lc.gdim.y > be || lc.gdim.z > be) {
+        st.warnedBottom = true;
+        if (scalarRootRank())
+          std::fprintf(stderr,
+                       "peclet.flow: cut-cell scalar '%s': the ScalarMG level table stops at %d x "
+                       "%d x %d cells (%d levels), larger than the pressure's bottom extent %d on "
+                       "some axis -- an axis that cannot halve (odd or 2-poor size, or an odd MPI "
+                       "block). Its bottom is smoothing only, not an exact solve, so the iteration "
+                       "count grows with the grid (78 iterations at n = 77 against 6 at n = 80). "
+                       "Size the grid and the blocks with factors of two (printed once)\n",
+                       sc.name.c_str(), lc.gdim.x, lc.gdim.y, lc.gdim.z, st.mg->levelsUsed(), be);
+      }
+    }
   }
 
   // ---- reductions (+ MPI) ----

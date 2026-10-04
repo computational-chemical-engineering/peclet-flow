@@ -2058,6 +2058,20 @@ def gate_api():
             check(cen["max_cell_peclet"] > 0.0 and cen["num_flux_faces"] > 0,
                   f"collocated, seeded by set_velocity: the steady solve advects (Pe_h "
                   f"{cen['max_cell_peclet']:.3g}, {cen['num_flux_faces']} flux faces)")
+    # review finding 4 (ruling D-WOR-4): a level table that stops above the pressure's bottom extent
+    # (an odd box cannot halve: level 0 alone, 15^3) warns once per scalar; a factor-of-two box not
+    for m, want in ((15, True), (16, False)):
+        s = pf.Solver((m, m, m), extent=(1.0, 1.0, 1.0))
+        Xm, Ym, Zm = grid(s)
+        s.set_solid(np.asfortranarray(np.sqrt((Xm - 0.5) ** 2 + (Ym - 0.5) ** 2 + (Zm - 0.5) ** 2) - 0.2))
+        s.add_scalar("c", 1.0, cutcell=True)
+        s.set_scalar_wall("c", "dirichlet", 1.0)
+        _, err = capture_stderr(lambda: s.solve_scalar_steady("c"))
+        _, err2 = capture_stderr(lambda: s.solve_scalar_steady("c"))
+        got = "ScalarMG level table stops" in err
+        check(got == want and "ScalarMG" not in err2,
+              f"{m}^3 steady: the shallow-bottom warning is {'printed once' if want else 'absent'} "
+              f"(D-WOR-4; {err.strip()[:90]!r})")
     # WO-7 (§8.1): set_scalar_solid's validation, the registered solid field, get_scalar_solid
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
     s.set_rho(1.0)

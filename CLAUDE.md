@@ -663,7 +663,9 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - **The iteration count measures the MG level table.** An axis coarsens only while it stays even,
     so an odd or 2-poor box gives a shallow table: G5b at n = 77 takes 78 iterations, at n = 80 six.
     Gate and benchmark on boxes with factors of two (D-WO4-1;
-    `../docs/DECOMPOSITION_AND_MULTIGRID.md` §3.1).
+    `../docs/DECOMPOSITION_AND_MULTIGRID.md` §3.1). The bottom is smoothing only, so a full-table
+    solve (steady, or κ_A ≥ 25) whose table stops above `set_pressure_bottom_extent` (4) on any axis
+    warns once per scalar (D-WOR-4).
   - **rtol and MPI parity.**
     - np = 1 is bitwise.
     - np > 1 agrees to the Krylov reduction-order floor, i.e. inside the stopping tolerance, so MPI
@@ -689,6 +691,10 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - The conjugate contact model (§13 Q4, triggered; G13's conjugate row self-converges at −2.84 and is
     INFO, marked OPEN) → Frank.
   - Collocated open faces.
+  - **Agglomerated exact bottom for ScalarMG (as CutcellMG `'auto'`)** — follow-up WO (review
+    finding 4, D-WOR-4). Today the coarsest level gets 16 RB-GS sweeps wherever the table stops, so
+    steady closure/dispersion solves at scale (grids sized by the physics, ORB blocks at np ≫ 1)
+    lose the grid-independent iteration count; only the warning exists.
   - Host performance: advance ÷ projection ≈ 1.05 at OMP 4 after D-WO9-3, and 1.4–1.6 before it (the
     smoother is 38 % of the advance). The GPU sits at 0.96–0.98 under contention.
   - Q5 (spelling), Q7 (default), and the NAMING rows in `doc/scalar_ibm_naming_rows.md`.
