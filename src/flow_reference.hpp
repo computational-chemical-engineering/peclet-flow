@@ -12,6 +12,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "mac_cutcell.hpp"  // ccFor3 (rule H)
 #include "mac_mg.hpp"
 #include "mac_reductions.hpp"
 #include "mac_stencils.hpp"
@@ -128,13 +129,11 @@ class FlowReference {
   double idiag() const { return 1.0 / dt_; }
 
   // Copy the N^3 inner cells between two extended blocks of different ghost width.
+  // rule H (§4.5; §14 H-3a): ccFor3 -- host pencil, device MDRange, no per-cell div/mod.
   void copyInner(F dst, I3 de, int dg, SConst src, I3 se, int sg) {
-    SExec space;
     const int N = N_;
-    Kokkos::parallel_for(
-        "peclet::flow::copyInner", Kokkos::RangePolicy<SExec>(space, 0, (long)N * N * N),
-        KOKKOS_LAMBDA(long c) {
-          const int ix = (int)(c % N), iy = (int)((c / N) % N), iz = (int)(c / ((long)N * N));
+    ccFor3(
+        "peclet::flow::copyInner", C3{0, 0, 0}, C3{N, N, N}, KOKKOS_LAMBDA(int ix, int iy, int iz) {
           const long di =
               (long)(ix + dg) + (long)(iy + dg) * de.x + (long)(iz + dg) * (long)de.x * de.y;
           const long si =
