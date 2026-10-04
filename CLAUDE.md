@@ -58,7 +58,7 @@ four independent np = 1 jobs.
 `src/flow_solver_staggered.cpp` and `src/flow_solver_colocated.cpp` hold the explicit instantiations;
 `cmake/PecletFlowSolver.cmake` builds them into a static library that the module and all 45 tests
 link, and `flow_ibm.hpp` ends with the matching `extern template` declarations. It also includes the
-twelve domain headers **only in those two TUs** (`PECLET_FLOW_INSTANTIATING`), so everything else
+thirteen domain headers **only in those two TUs** (`PECLET_FLOW_INSTANTIATING`), so everything else
 sees declarations alone and an edit to one domain header rebuilds four objects, not forty-nine. The
 one rule that follows: a member *template* of `Solver` that a test or the bindings calls must be
 defined in `flow_ibm.hpp` itself — an explicit instantiation of the class does not cover member
@@ -83,19 +83,20 @@ rejects the combination at configure time with that explanation, so do not re-at
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 193 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 228 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-193 registered / **191 with `-LE bench`** (counted 2026-10-02): 52 from `tests/kokkos` — of
-which `bench_rbgs` and `vof_timing` carry the `bench` label and are instruments, not gates — 127
-from `tests/kokkos_mpi` (42 cases at np = 1, 2, 4 plus one np = 8 rung), and 14 Python ctests on
-the module built in that tree (`regression_staggered`, `verify_poiseuille_flow`,
-`verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`, `colocated_open_boundary`,
-`cell_force_placement`, `collocated_stability_guard`, `balanced_force_restart`, `mirror_symmetry`,
-`velocity_solver_variable_mu`, `hydro_force_units`, `no_env_knobs`, `no_float_operator_casts`,
-`iteration_order`).
+228 registered / **225 with `-LE bench`** (counted 2026-10-04, branch `scalar-ibm`): 57 from
+`tests/kokkos` — of which `bench_rbgs`, `vof_timing` and `bench_scalar_cutcell` carry the `bench`
+label and are instruments, not gates — 133 from `tests/kokkos_mpi` (44 cases at np = 1, 2, 4 plus one
+np = 8 rung), and 38 Python ctests on the module built in that tree: `regression_staggered`,
+`verify_poiseuille_flow`, `verify_lid_cavity_sdflow`, `verify_colocated_taylor_green`,
+`colocated_open_boundary`, `cell_force_placement`, `collocated_stability_guard`,
+`balanced_force_restart`, `mirror_symmetry`, `velocity_solver_variable_mu`, `hydro_force_units`,
+`no_env_knobs`, `no_float_operator_casts`, `iteration_order`, and the 24 `scalar_cutcell_*` gates of
+the cut-cell scalar (below). The six `scalar_cutcell_g6_*` take 20–35 min each on a loaded host.
 Always bound the OpenMP pool — an unbounded one on a many-core host is an hour-long trap.
 
 More verification lives in `scripts/verify_*_sdflow.py` and `validate_zick_homsy_sdflow.py` (the
@@ -118,7 +119,7 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
 - `src/flow_ibm.hpp` — `template <class Grid> class Solver` (`IbmSolver` = `Solver<Staggered>`):
   includes, the nested structs, every member DECLARATION (with its docstring) and the whole state
   block (QUALITY_PLAN G.1: split 2026-09-11, 11886 -> 4046 lines). The out-of-line member
-  DEFINITIONS live in twelve domain headers included at the bottom — since G.8, only in the two
+  DEFINITIONS live in thirteen domain headers included at the bottom — since G.8, only in the two
   instantiation TUs (each reopens
   `namespace peclet::flow`; declarations + state never move):
   `flow_ibm_core.hpp` (allocation, rho/mu/dt + driver setters, stencils/ghosts/advection inputs,
@@ -132,6 +133,8 @@ All header-only Kokkos C++20 in `namespace peclet::flow`.
   (interface area, mass flux, energy transport, budgets, the `pc*` machinery),
   `flow_ibm_closures.hpp` (property closures/modes, porous continuity, drag, prop/eps ghosts),
   `flow_ibm_scalars.hpp` (`addScalar`/`setScalarBc`/`advanceScalars` + BC application),
+  `flow_ibm_scalars_cutcell.hpp` (the cut-cell scalar path: geometry build, setters, assembly + solve,
+  diagnostics),
   `flow_ibm_bc.hpp` (domain BCs/profiles, `pressureBcGhost`, `fillVelGhosts*`,
   `setupBcDiffusion`), `flow_ibm_mpi.hpp` (`initMpi`, `redistribute`, `rebalanceByWeights`, the
   post-repartition field-resize passes; `#ifdef PECLET_FLOW_MPI`-guarded), `flow_ibm_diagnostics.hpp`
@@ -594,6 +597,101 @@ the ablation knobs (`set_csf_mode`, `set_vof_kappa_*`, the `set_phase_change_*` 
 
 The rung-by-rung record — every work order, gate number and refuted hypothesis — is
 `doc/history/vof_workorders{,_v2,_v34,_v5,_v6}.md`.
+
+## Cut-cell scalar transport (`add_scalar(..., cutcell=True)`)
+
+An opt-in per scalar, branch `scalar-ibm`. The contract is
+[`doc/scalar_ibm_design.md`](doc/scalar_ibm_design.md), with Amendments A1–A3 and the open
+questions in §13; every measured number and every ruling (D-WO*) is in
+[`doc/scalar_ibm_log.md`](doc/scalar_ibm_log.md). Legacy scalars are untouched: the dispatch is the
+first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
+
+- **Status.** The `cutcell=` spelling is DEFAULT-PENDING Frank (§13 Q5). The path stays opt-in until
+  G1–G13 pass and one release has shipped it (Q7).
+- **Method.**
+  - Cut-cell FV with κ (fluid fraction) in storage and sources.
+  - Plain aperture two-point faces, on the scalar's own apertures (ungated, snapped at both ends).
+    `ox_` is never touched.
+  - Geometry from one fan-tetrahedron PL model of the SDF (core `scheme/cut_cell_geometry.hpp`).
+  - Walls: one facet per cut cell, with a **probe-flux** closure. The probe sits on the normal at
+    s = 1.1·½Σ|n_a|h_a, interpolated trilinearly, with a fallback ladder R0/R1a/R1b/R2 (core
+    `scheme/probe_flux.hpp`). The BC is eliminated per facet.
+  - Conjugate solids: two fields on one grid, in ψ = c/K.
+  - Solver: BiCGStab on the true operator, preconditioned by one `ScalarMG` V-cycle on the SPD
+    lumped-probe surrogate (the advective surrogate for steady advection, A2). The stop is a max-norm
+    relative residual, default 1e-10.
+  - Accuracy: second order for every BC, every Robin number and every conjugate contrast (gates
+    G1–G8: orders 1.84–2.02).
+- **Files.** `src/scalar_cutcell_geometry.hpp`, `src/scalar_cutcell_operator.hpp`,
+  `src/scalar_krylov.hpp`, `src/scalar_mg.hpp`, the domain header `src/flow_ibm_scalars_cutcell.hpp`;
+  gates in `tests/python/test_scalar_cutcell_gates.py`; 2-D oracles in `tests/study/scalar_ibm/`.
+- **Supported** (all physical units):
+  - wall `set_scalar_wall(name, type, value, coefficient, instance=None)`: `'neumann'` (value = flux
+    into the fluid; the default is 0), `'dirichlet'`, `'robin'` (coefficient = k, value = g);
+  - conjugate solids `set_scalar_solid(name, diffusivity, capacity, partition, contact_resistance,
+    instance=None)`, i.e. D_s, C_s, K and R_c; `get_scalar_solid` returns c_s;
+  - the mean-gradient closure mode `set_scalar_mean_gradient` (θ periodic, c = G·x + θ) with
+    `scalar_mean_flux` (k*, dispersion), and `solve_scalar_steady`;
+  - `set_scalar_source`, `set_scalar_tolerance`, `scalar_wall_flux` (per body); `set_scalar_bc` takes
+    a per-face profile;
+  - domain faces: periodic, `'dirichlet'`, `'neumann'`, and flow inflow/outflow faces **on the
+    staggered grid**. Their flux is the one the projection constrained, captured by `step()`, and an
+    inflow face needs a scalar `'dirichlet'` value.
+- **Refusals** (RuntimeError at the first advance or solve; the message names the remedy):
+  - **the collocated `'ghost'` scheme**, the AUTO default of `SolverColocated` (and the staggered
+    `diagnostics.set_ghost_projection`). Its face field is divergence-free under no openness, and a
+    constant drifts 0.80 in 50 steps (G9b). Remedy: `set_collocated_scheme('gauge-exact' | 'plain' |
+    'embed')` before `set_solid`, or the staggered `Solver`;
+  - **collocated inflow/outflow faces.** The projected `uf_` does not keep the high-side boundary
+    flux (D-WO5b-1). Remedy: the staggered `Solver`;
+  - **a moving fluid without the cut-cell projection.** Remedy: `set_solid(..., cutcell_pressure=True)`
+    or `set_pressure_geometry`. A fluid at rest needs neither. Relatedly, an open face before the first
+    `step()` is refused;
+  - porous continuity; moving scene instances; the per-cell Dirichlet mask; `set_phase_change_thermal`
+    or `_energy` naming a cut-cell scalar (ValueError); a mean gradient along a non-periodic axis; a
+    face periodic for one of scalar and flow but not the other.
+- **Traps.**
+  - **Koren is bounded only at bulk Courant ≤ ½.** Forward Euler with the legacy limiter is TVD only
+    to ½; with no solid at all it reaches min −21 at C = 0.9 (D-WO5-1). FOU stays positive at any C.
+  - **The unknown sets follow the snapped apertures, not κ.**
+    - A fluid cell with κ > 0 and every aperture 0 is *sealed*: it is not an unknown and is held at 0.
+    - A solid cell is an unknown iff κ_s > 0 and it has an open solid face or a conjugate facet
+      (D-WO7-1).
+    - Both sealed volumes are in the census (`sealed_volume`, `sealed_solid_volume`). A fluid one
+      above 1e-6 of the fluid volume prints a warning.
+    - Non-unknowns read exactly 0 (NaN in `get_scalar_solid`) and are re-zeroed every advance.
+  - **The iteration count measures the MG level table.** An axis coarsens only while it stays even,
+    so an odd or 2-poor box gives a shallow table: G5b at n = 77 takes 78 iterations, at n = 80 six.
+    Gate and benchmark on boxes with factors of two (D-WO4-1;
+    `../docs/DECOMPOSITION_AND_MULTIGRID.md` §3.1).
+  - **rtol and MPI parity.**
+    - np = 1 is bitwise.
+    - np > 1 agrees to the Krylov reduction-order floor, i.e. inside the stopping tolerance, so MPI
+      parity is gated at rtol 1e-13 (≤ 1e-10 relative, iterations ±1; D-WO4-2).
+    - The thread count and the backend move Koren results by ~1e-9 over hundreds of steps: the limiter
+      carries reduction-order noise that FOU damps (D-WO9-1). Gate koren at 1e-7, or on integrals.
+  - Steady advection is first-order FOU in v1 (WO-11 optional), gated to Pe_h ≤ 10 (census
+    `max_cell_peclet`).
+  - The transient level rule: κ_A = 1 + 4 dt'D'Σw_a < 25 runs level 0 alone, otherwise the full table
+    (`ScalarMG::kFullTableKappa`, D-WO9-3).
+  - **Conjugate contacts and sub-cell gaps are not resolved.** The point-sampled SDF closes fluid
+    wedges thinner than ~h, so a contact neck comes out √(a² + Rh) instead of a, and conducting
+    sub-cell gaps fuse.
+- **Do not reverse** (proposed register entries in `doc/scalar_ibm_register_entries.md`):
+  - a short or κ-dependent probe (AMReX; erratic order 0.4–1.2);
+  - unit storage (first order; it loses 2–12 % of the mass);
+  - the series-resistance / GFM wall flux (first order);
+  - coarse wall terms at the level's own probe distance (divergent, contraction 3.1) or Galerkin RAP;
+  - a symmetric surrogate for steady advection (no convergence at Pe_h 1);
+  - a post-solve mass fix-up;
+  - Peters' directional one-field conjugate scheme (L∞ first order, 2–50× worse).
+- **Open.**
+  - The conjugate contact model (§13 Q4, triggered; G13's conjugate row self-converges at −2.84 and is
+    INFO, marked OPEN) → Frank.
+  - Collocated open faces.
+  - Host performance: advance ÷ projection ≈ 1.05 at OMP 4 after D-WO9-3, and 1.4–1.6 before it (the
+    smoother is 38 % of the advance). The GPU sits at 0.96–0.98 under contention.
+  - Q5 (spelling), Q7 (default), and the NAMING rows in `doc/scalar_ibm_naming_rows.md`.
 
 ## Open items
 

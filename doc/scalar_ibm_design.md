@@ -112,6 +112,14 @@ Conversions:
 
 The three new members `diffToInt`, `speedToInt` and `resistToInt` are appended to `UnitScales`.
 
+*Amended (WO-10; Q6 decided by Frank 2026-10-02, "fix it").* The legacy scalar/energy API became
+physical under an armed extent on branch `scalar-units` (merged into `scalar-ibm` as 184ae9f; cell
+units bit-identical, 12/12 state hashes). It already carries `diffToInt()` (D), `divToInt()` (S) and
+the physical output factors (`volToPhys()·divToPhys()` for the body flux, `areaToPhys()`), and the
+cut-cell path reuses them (WO-3 ruling). Only `speedToInt()` (Robin k, wall flux q; WO-3) and
+`resistToInt()` (R_c; WO-7) are appended. The "pre-existing gap" of the next bullet is closed: a
+legacy `add_scalar` diffusivity is physical too.
+
 - With `extent=None`, every factor is 1, so the new path is in cell units, exactly like the legacy
   path.
 - With an extent armed, the new path is physical. The legacy `add_scalar` diffusivity stays in
@@ -223,7 +231,11 @@ a point x, it uses θ + G·x, and the G·x part goes to the RHS.** Concretely:
   - x_j − x_i is always the true displacement ±h'_a e_a, never a wrapped index difference.
 - **Dirichlet/Robin probes:** RHS += α G_φ (g_φ − Σ_k w_k G·x_k), where x_k are the global centres
   of the stencil cells, unwrapped relative to cell i.
-- **Conjugate:** RHS ∓= α G_c (Σ_s w G·x − Σ_f w G·x) in the fluid/solid rows.
+- **Conjugate:** RHS ±= α G_c (Σ_s w G·x − Σ_f w G·x) in the fluid/solid rows, i.e.
+  b_f += α G_c (Σ_s w_k G·x_k − Σ_f w_k G·x_k) and b_s −= the same.
+  - *Erratum (D-WO7-3, corrected in WO-10):* this line first read "RHS ∓=", the opposite sign. The
+    rule above (the G·x part of the fluid row's + α G_c (u_pf − u_ps) moves to the RHS) gives ±=;
+    that is what is implemented, gated by k* = 1 to 3.5e-14 at Λ_s = Λ_f (log WO-7).
 - **Neumann:** nothing extra; the face term already produces n·∇θ = −n·G.
 - **advection:** θ is advected; the linear part enters exactly through the source −(1/V) G·(U_i − κ_i V Ū).
   - U_i = Σ_{f∈i} F_f^out (x_f − x_i) is the volume-integrated cell velocity.
@@ -1946,23 +1958,23 @@ Rules:
 | Q1 | 3-D absolute accuracy bounds | **fact** | the *(prov.)* bounds of §11 | first passing run; tighten to 2× measured |
 | Q2 | Is the rediscretized ScalarMG good enough? | **fact** — **answered by A1 (2026-10-03)** | rediscretized faces + wall terms averaged at the fine probe distance | Q2′: if dilute suspensions (many bodies smaller than the coarse cells) show iterations growing with the number of bodies, design operator-dependent (BoxMG-type) prolongation; RAP is not the remedy (A1) |
 | Q3 | Depth at scale without telescoping | **fact** | in-place depth only | if steady singular at np ≥ 8 needs > 1.5× the np = 1 iterations, add core stage telescoping (`chooseStageTarget`/`RedistributeTopology`, as CutcellMG) |
-| Q4 | Contact-region accuracy for packed-bed Nu | **fact** | ladder of §3.3, one solid DOF per cell | G13 self-convergence < 1 or R2 > 1 % → design a contact model (Claassen 2024 line) |
+| Q4 | Contact-region accuracy for packed-bed Nu | **fact** — **TRIGGERED by WO-8 (D-WO8-2); OPEN → Frank** | ladder of §3.3, one solid DOF per cell | G13 self-convergence < 1 or R2 > 1 % → design a contact model (Claassen 2024 line). *Status (WO-10):* G13's conjugate contact row (Λ_s/Λ_f = 100) self-converges at order −2.84 while the Dirichlet rows reach 1.91–1.92 and Λ_s = Λ_f is exact to 1e-6, so the probes are exonerated. Cause: the point-sampled SDF closes every fluid wedge thinner than ~h, so the neck comes out √(a² + Rh) instead of a, and conducting sub-cell gaps fuse. The row is INFO, marked OPEN. Options for Frank: an architect-designed contact model (body-aware record, per-body SDF at the face samples, plus a lubrication-type contact conductance; Claassen 2024 / Peters' very-close faces), a pre-asymptotic restatement, or a resolution requirement only. |
 | Q5 | API spelling of the opt-in | **user preference** | `add_scalar(..., cutcell=True)` — **DEFAULT-PENDING-USER** | rename before the first release that ships it (no alias needed while unreleased) |
-| Q6 | The legacy `add_scalar` diffusivity is in internal units under an armed extent | **user preference** (scope) | leave legacy untouched; document — **DEFAULT-PENDING-USER** | fix at the next breaking release, or make cutcell the default (Q7) |
+| Q6 | The legacy `add_scalar` diffusivity is in internal units under an armed extent | **user preference** (scope) — **DECIDED by Frank 2026-10-02: fix it; done on `scalar-units`, merged 184ae9f (§1.2 amendment)** | leave legacy untouched; document — **DEFAULT-PENDING-USER** | fix at the next breaking release, or make cutcell the default (Q7). *Status:* decided and done (§1.2 amendment); the register entry text is `doc/scalar_units_register_entry.md`. |
 | Q7 | Should cut-cell become the default scalar discretization? | **user preference** | opt-in until G1–G13 pass and one release has shipped — **DEFAULT-PENDING-USER** | a recorded decision after that release |
-| Q8 | First-order FOU at small-cell faces on slip walls / interfaces | **fact** | the dynamic split (§6.3) | if the G9 L1 error at the finest grid is dominated by the cut band (> 50 % of the total), or at VoF species time: implement WSRD with a G = 3 scalar block |
-| Q9 | Memory and time per scalar | **fact** | separate level-0 surrogate storage, host Krylov scalars | G-perf red flag → derive the level-0 surrogate from the bands on the fly; device-resident Krylov scalars; fused two-field exchange |
+| Q8 | First-order FOU at small-cell faces on slip walls / interfaces | **fact** — **not triggered (WO-5)** | the dynamic split (§6.3) | if the G9 L1 error at the finest grid is dominated by the cut band (> 50 % of the total), or at VoF species time: implement WSRD with a G = 3 scalar block. *Status:* the cut band carries 1.4 % (cut cells) / 4.5 % (± one cell) of FOU's L1 error at R_o/h 64, and 0.0 % / 0.3 % of Koren's: far from 50 %. WSRD stays the recorded alternative for VoF species and slip walls. |
+| Q9 | Memory and time per scalar | **fact** — **triggered by WO-9a, addressed by WO-9b + D-WO9-3** | separate level-0 surrogate storage, host Krylov scalars | G-perf red flag → derive the level-0 surrogate from the bands on the fly; device-resident Krylov scalars; fused two-field exchange. *Status:* the CUDA path was synchronization-bound (advance ÷ projection 33.7; 40 769 stream syncs in 3 steps); WO-9b's bitwise changes (one-launch coarse fills, device-resident Krylov scalars, reused coarse wall gather) cut the syncs to 922 and the GPU ratio to 0.96–0.98 under contention. Memory 237 B/cell (≤ 300). Host ratio 1.39–1.58 with the level-rule switch at κ_A 13; D-WO9-3 moved it to 25, giving 1.05 (OMP 4, load 37–45; A3). Not done: a fused two-colour sweep, a vectorized trilinear prolongation (flow-wide), surrogate-only float storage. |
 | Q10 | Local wall gradients are first order in L∞ | **user preference** (scope) | integrated fluxes only are guaranteed 2nd order | if local Nu maps become a deliverable: the quadratic-normal post-processor (§9) |
 | Q11 | Steady advection is first order (FOU) in v1 | **user preference** (scope) | v1 FOU; WO-11 optional | first porous-media dispersion study |
 | Q12 | Default rtol 1e-10 | **user preference** | 1e-10, max-norm relative | — |
-| Q13 | Which openness each collocated scheme constrains | **fact** | the projection's divergence-kernel openness via one predicate | G9b decides per scheme; a scheme that fails is refused for cut-cell scalars |
+| Q13 | Which openness each collocated scheme constrains | **fact** — **decided by G9b (WO-5, D-WO5-4)** | the projection's divergence-kernel openness via one predicate | G9b decides per scheme; a scheme that fails is refused for cut-cell scalars. *Status:* staggered, 'gauge-exact', 'plain' and 'embed' preserve a constant exactly; 'ghost' (and the staggered `set_ghost_projection`) drifts 0.80 in 50 steps and is refused. |
 | Q14 | Two different conjugate materials sharing one solid DOF | **fact** | the larger-area facet's material | G13 conjugate pair |
 | Q15 | Thin solids (< ~2h) leak through one fluid DOF | **fact** (resolution) | census + warning | — (a user resolution requirement) |
 | Q16 | Moving geometry (DEM) and VoF species | **user preference** (scope) | hooks only (§6.6, §7.4) | their own packages |
 | Q17 | Solid volumetric sources (reaction heat in particles) | **user preference** (scope) | fluid sources only in v1 | add `set_scalar_source(..., phase='solid')` when asked |
-| Q18 | Is the V-cycle enough for steady advection in 3-D, at depth and at scale? (A2) | **fact** | the V-cycle of A2 | Any of: a G-adv bound exceeded; growth > 1.7× per doubling; a production closure at Pe_h ≤ 10 needing > 60 iterations. Then switch the steady advective path to the **F-cycle**: F(L) = pre-smooth, restrict, F(L+1) from 0, then one V(L+1) on the coarse defect, prolong, post-smooth; the bottom as now; mean removal on both coarse right-hand sides when singular. In 2-D at n = 256, Pe_h 10, it halves the count (26 → 13, 26 → 14). Level L is visited L + 1 times. This is a recorded decision, not a setter. |
+| Q18 | Is the V-cycle enough for steady advection in 3-D, at depth and at scale? (A2) | **fact** — **V-cycle kept (WO-5c, WO-6, WO-7)** | the V-cycle of A2 | Any of: a G-adv bound exceeded; growth > 1.7× per doubling; a production closure at Pe_h ≤ 10 needing > 60 iterations. Then switch the steady advective path to the **F-cycle**: F(L) = pre-smooth, restrict, F(L+1) from 0, then one V(L+1) on the coarse defect, prolong, post-smooth; the bottom as now; mean removal on both coarse right-hand sides when singular. In 2-D at n = 256, Pe_h 10, it halves the count (26 → 13, 26 → 14). Level L is visited L + 1 times. This is a recorded decision, not a setter. *Status:* not triggered. Every G-adv bound holds, (a) 8/13/23 and 10/17/33 iterations, growth ≤ 1.43× per doubling, C4 ≤ 0.764; G8 6/6/9 and G-adv(b) conjugate within 1.5× of insulating. One observation stays with this row (D-WO6-4): on boxes with nz = 4, a one-cell periodic coarse axis lags the axial coarse advection (8/15/30 against 6/6/9 at nz = 16). |
 | Q19 | Steady advection at Pe_h ≫ 10 | **user preference** (scope) | ungated and graceful (2-D: Pe_h 100 → ≤ 35 iterations at n = 128); the accuracy of FOU there is Q11's question | A study that needs Pe_h ≥ 30 routinely: first measure G-adv at 30 and 100. If the counts exceed 2× the Pe_h 10 row, a nonsymmetric AMG (AIR-type) is a new design. |
-| Q20 | 3-D iteration and contraction bounds of G-adv (A2) | **fact** | the *(prov.)* numbers of §11 | first passing run; tighten to 2× measured |
+| Q20 | 3-D iteration and contraction bounds of G-adv (A2) | **fact** — **measured (WO-5c); tightening deferred (D-WO5c-2), not yet applied** | the *(prov.)* numbers of §11 | first passing run; tighten to 2× measured. *Status:* measured (log WO-5c: (a) 8/13/23 and 10/17/33, (b) 5/8/12 and 7/10/17, (b′) 12/10/15 and 12/13/18, (c) 8/9; C4 0.566/0.680/0.764). 2× would give (a) 16/26/46 and 20/34/66. D-WO5c-2 deferred the tightening to WO-9, which did not apply it; the orchestrator's call. |
 | Q21 | Should transient mode use the advective surrogate too? (A2) | **fact** | No. Its FOU is local (small-cell faces only), and measured at 5–6 per step it equals the count at rest. | a transient row whose iterations grow with Pe_h (e.g. many small cells with a large implicit outflow) |
 
 **What would make me revisit the design itself:**

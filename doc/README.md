@@ -26,5 +26,12 @@ The short working reference is [`../CLAUDE.md`](../CLAUDE.md); suite-wide contra
 | [anisotropic_metric.md](anisotropic_metric.md) | 2026-09 | The metric in every discrete operator on stretched cells (physical-units Phase 2) — the reference for anisotropic domains. |
 | [anisotropic_vof.md](anisotropic_vof.md) | 2026-09 | The same for the geometric two-phase stack (Phase 3). |
 | [units_escalation.md](units_escalation.md) | 2026-09 | The escalation channel for the physical-domains work (`../../docs/PHYSICAL_UNITS_PLAN.md` §9.6); kept live while Phase 4 is open. |
+| [scalar_ibm_design.md](scalar_ibm_design.md) | 2026-10-02 … 10-04 | **Cut-cell scalar transport** (`add_scalar(..., cutcell=True)`): the contract. It covers the probe-flux walls (Dirichlet / Neumann / Robin), conjugate solids, closures, ScalarMG, advection with small cells, the gates and the open questions (§13), with Amendments A1–A3. |
+| [scalar_ibm_STATE.md](scalar_ibm_STATE.md) | 2026-10 | The campaign's one-screen state: where it is, the next action, the open decisions. |
+| [scalar_ibm_log.md](scalar_ibm_log.md) | 2026-10 | Append-only log: the 2-D prototype rounds, every work order's numbers, and every ruling (D-WO*). Grep it; do not read it whole. |
+| [scalar_ibm_brief.md](scalar_ibm_brief.md), [scalar_ibm_brief_A2.md](scalar_ibm_brief_A2.md) | 2026-10 | The architect briefs behind the design and behind Amendment A2 (steady advection). |
+| [scalar_ibm_literature/](scalar_ibm_literature) | 2026-10 | Literature digests: L1 cut-cell/EB, L2 interfaces and conjugate transport, L3 particle-resolved benchmarks, R building blocks. |
+| [scalar_ibm_register_entries.md](scalar_ibm_register_entries.md), [scalar_ibm_naming_rows.md](scalar_ibm_naming_rows.md), [scalar_units_register_entry.md](scalar_units_register_entry.md) | 2026-10-04 | PROPOSED text for `../../docs/decisions/flow.md`, `DECISIONS.md` and `NAMING.md`, to be placed when the branch lands; delete them once placed. |
+| [scalar_ibm_baseline_hashes.txt](scalar_ibm_baseline_hashes.txt) | 2026-10-02 | The 12 legacy state hashes (gate G12) the cut-cell work must keep. |
 
 [`data/`](data) holds the raw logs and probe scripts the collocated campaign produced.

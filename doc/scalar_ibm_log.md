@@ -1844,3 +1844,45 @@ The host target (≤ 1) is now nearly met at this load: the advance is about the
 
 **Battery** (build_dev, `-LE bench`, OMP 4, -j4, OMP_WAIT_POLICY=passive, load 43–80): **225/225
 pass** in 5275 s; the six G6 ctests took 1344–2403 s each.
+
+## 2026-10-04 — WO-10: documentation and register (design §10 WO-10) — done; nothing stopped
+
+**Written.**
+- `CLAUDE.md`:
+  - a new section "Cut-cell scalar transport", covering the opt-in (Q5 pending), the method, the
+    files, the supported BCs, the refusals with their remedies, the traps, the do-not-reverse list,
+    and the open items;
+  - the test counts (228 registered / 225 non-bench: 57 kokkos incl. 3 bench, 133 kokkos_mpi =
+    44 cases × np 1, 2, 4 + one np 8, 38 Python incl. 24 `scalar_cutcell_*`);
+  - thirteen domain headers (`flow_ibm_scalars_cutcell.hpp`).
+- Design note:
+  - the §1.5 conjugate-row sign erratum corrected (D-WO7-3: ∓= → ±=, i.e. b_f += α G_c (Σ_s w G·x −
+    Σ_f w G·x) and b_s −= the same, as implemented);
+  - the §1.2 amendment for Q6: Frank, "fix it"; branch `scalar-units`, merged 184ae9f; only
+    `speedToInt` and `resistToInt` appended;
+  - status lines on the §13 rows Q4 (triggered, OPEN → Frank), Q6 (decided, done), Q8 (not
+    triggered), Q9 (addressed: WO-9b + D-WO9-3), Q13 (decided by G9b), Q18 (V-cycle kept, not
+    triggered) and Q20 (measured; tightening deferred, not applied).
+- `doc/scalar_ibm_register_entries.md`: PROPOSED text for `../docs/decisions/flow.md` (18 entries),
+  `decisions/core.md` (1) and the `DECISIONS.md` one-liners. It covers §12's thirteen entries plus
+  the unknown sets, the sealed rules, the probe distance, the series-resistance / GFM rejection, the
+  ghost / collocated-open-face refusal and A3 / D-WO9-3. The scalar-units entry is included by
+  reference. The umbrella was not edited.
+- `doc/scalar_ibm_naming_rows.md`: rows for every new public and diagnostics name and the census,
+  budget, facet and geometry keys. Three PENDING Frank, no code renamed:
+  - `set_scalar_tolerance` → `set_scalar_residual_tolerance`, the same criterion as the velocity
+    setter;
+  - `set_scalar_max_iterations(maxit)` → `max_iter`, the pressure drivers' Krylov cap;
+  - the census key `mg_levels` → `num_mg_levels`, minor because keys are exempt.
+- `doc/README.md`: the scalar docs are indexed.
+
+**Check carried from the uf-outlet side thread (read only).** The cut-cell path has neither legacy
+pattern:
+- `cOld` is copied from c, and then `fillGhosts(sc.cOld)` runs before the explicit fluxes read it
+  (`flow_ibm_scalars_cutcell.hpp`), so there are no stale ghosts.
+- An inflow face adds F_in·g with the scalar's own Dirichlet value (`openFaceAdvection`), with no
+  2v − c ghost.
+
+**Gates.** No source docstring was touched, so the quality ctests are only part of the battery
+below. The battery and G12 are the D-WO9-3 entry's: 225/225 and 12/12 on the tree with step 0
+(b9c8ca0). The WO-10 commit changes documentation only.
