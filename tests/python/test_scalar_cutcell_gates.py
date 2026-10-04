@@ -1967,6 +1967,34 @@ def gate_api():
                   ("'gauge-exact'", "'plain'", "'embed'", "staggered Solver"),
                   "the 'ghost' scheme is refused, listing gauge-exact, plain, embed and the staggered "
                   "Solver (D-WO5-4)")
+    # review finding 1 (ruling D-WOR-1): collocated, a raw set_field('u') never builds the projected
+    # face field, so a moving fluid before the first step() is refused, naming the remedy (the
+    # reviewer's probe: it silently returned the pure-diffusion solution); seeded through
+    # set_velocity, the same case advects
+    for seed in ("set_field", "set_velocity"):
+        s = pf.SolverColocated((n, n, n), extent=(1.0, 1.0, 1.0))
+        s.set_rho(1.0)
+        s.set_mu(1.0)
+        s.set_dt(0.1)
+        s.set_collocated_scheme("gauge-exact")
+        s.set_solid(np.asfortranarray(np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2) - 0.2),
+                    cutcell_pressure=True)
+        s.add_scalar("c", 1.0, cutcell=True)
+        s.set_scalar_wall("c", "dirichlet", 1.0)
+        if seed == "set_field":
+            s.set_field("u", np.asfortranarray(np.full((n, n, n), 0.5)))
+            for fn, nm in ((lambda: s.solve_scalar_steady("c"), "solve_scalar_steady"),
+                           (s.advance_scalars, "advance_scalars")):
+                raises_naming(RuntimeError, fn, ("FACE field", "set_velocity", "step()"),
+                              f"collocated {nm} with an unbuilt face field and a moving fluid is "
+                              "refused, naming the remedy (D-WOR-1)")
+        else:
+            s.set_velocity(0, np.asfortranarray(np.full((n, n, n), 0.5)))
+            s.solve_scalar_steady("c")
+            cen = s.diagnostics.scalar_census("c")
+            check(cen["max_cell_peclet"] > 0.0 and cen["num_flux_faces"] > 0,
+                  f"collocated, seeded by set_velocity: the steady solve advects (Pe_h "
+                  f"{cen['max_cell_peclet']:.3g}, {cen['num_flux_faces']} flux faces)")
     # WO-7 (§8.1): set_scalar_solid's validation, the registered solid field, get_scalar_solid
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
     s.set_rho(1.0)

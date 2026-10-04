@@ -736,21 +736,39 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
     nFlux += n1;
     nGuard += n2;
   }
-  // (the third entry: A2's census max_cell_peclet, max |phi_a| / (Lam' w_a) over interior faces)
-  double mx[3] = {
+  // (the third entry: A2's census max_cell_peclet, max |phi_a| / (Lam' w_a) over interior faces;
+  // the fourth, collocated only: the CELL velocity, which moves while the face field may not exist)
+  double vcell = 0.0;
+  if constexpr (Grid::collocated)
+    for (int a = 0; a < 3; ++a)
+      vcell = std::fmax(vcell, sco::maxabsLocal(CCConst(C[a].u), e_, G));
+  double mx[4] = {
       sco::maxAbsFluxLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]), e_, G), vmax,
       sco::maxCellPecletLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]), unk,
-                              st.lam, u_.w, e_, G)};
+                              st.lam, u_.w, e_, G),
+      vcell};
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
-    double o[3] = {0.0, 0.0, 0.0};
-    MPI_Allreduce(mx, o, 3, MPI_DOUBLE, MPI_MAX, comm_);
-    mx[0] = o[0];
-    mx[1] = o[1];
-    mx[2] = o[2];
+    double o[4] = {0.0, 0.0, 0.0, 0.0};
+    MPI_Allreduce(mx, o, 4, MPI_DOUBLE, MPI_MAX, comm_);
+    for (int k = 0; k < 4; ++k)
+      mx[k] = o[k];
   }
 #endif
   st.maxCellPeclet = mx[2];
+  // Review finding 1 (ruling D-WOR-1): on the collocated grid the advecting field is the projected
+  // MAC face field uf_/vf_/wf_. set_solid zeroes it and a raw set_field('u', ...) does not seed it,
+  // so before the first projection a moving fluid would read max|uf| = 0 and be silently left
+  // unadvected (the trap advect_vof closed for VoF, ISSUES sweep item 5). Refused, as there.
+  if constexpr (Grid::collocated)
+    if (!faceFieldValid_ && mx[3] > 0.0)
+      throw std::runtime_error(
+          "cut-cell scalar '" + sc.name +
+          "': SolverColocated advects with the projected MAC FACE field uf_/vf_/wf_ (the only "
+          "discretely divergence-free field on this grid), and it has never been built since the "
+          "geometry was set -- it is all zeros, so the moving fluid would be silently ignored. "
+          "Call set_state()/set_velocity() (which seed the face field through the same "
+          "centerToFace map project() uses) or step() first (doc/scalar_ibm_design.md §6.1)");
   // WO-5 (open, reported): without the cut-cell pressure operator no projection runs and no
   // openness exists (set_solid(..., cutcell_pressure=False)), so there is no discretely
   // divergence-free face flux to advect with (§6.1); a moving fluid is refused rather than left
