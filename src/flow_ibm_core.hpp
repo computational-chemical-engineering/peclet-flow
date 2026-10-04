@@ -983,12 +983,12 @@ void Solver<Grid>::rebuildStencils() {
 
 template <class Grid>
 void Solver<Grid>::copyInner(CCField dst, C3 de, int dg, CCConst src, C3 se, int sg) {
-  CCExec space;
-  const int NX = nx_, NY = ny_;
-  Kokkos::parallel_for(
-      "peclet::flow::copyInner", Kokkos::RangePolicy<CCExec>(space, 0, (long)nx_ * ny_ * nz_),
-      KOKKOS_LAMBDA(long c) {
-        const int ix = (int)(c % NX), iy = (int)((c / NX) % NY), iz = (int)(c / ((long)NX * NY));
+  // rule H (§4.5; §14 H-3a): host pencil, device MDRange -- no per-cell 64-bit div/mod. dst and
+  // src are different fields (two blocks of different ghost width), so ccFor3's simd contract
+  // holds.
+  ccFor3(
+      "peclet::flow::copyInner", C3{0, 0, 0}, C3{nx_, ny_, nz_},
+      KOKKOS_LAMBDA(int ix, int iy, int iz) {
         const long di =
             (long)(ix + dg) + (long)(iy + dg) * de.x + (long)(iz + dg) * (long)de.x * de.y;
         const long si =
