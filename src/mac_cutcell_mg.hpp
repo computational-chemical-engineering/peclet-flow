@@ -405,14 +405,20 @@ KOKKOS_INLINE_FUNCTION void restrictAvgCell(const CV& coarse, const FV& fine, C3
 template <class FV, class CV>
 KOKKOS_INLINE_FUNCTION void prolongAddCell(const FV& fine, const CV& coarse, C3 fext, C3 cext,
                                            int gf, int gc, C3 ratio, int ifx, int ify, int ifz) {
-  // coarse sample coord: coarsened axis (ratio 2) -> 0.5*ifine - 0.25 + gc; kept axis (ratio
-  // 1) -> ifine+gc
-  const double cx = (ratio.x == 2) ? 0.5 * ifx - 0.25 + gc : ifx + gc;
-  const double cy = (ratio.y == 2) ? 0.5 * ify - 0.25 + gc : ify + gc;
-  const double cz = (ratio.z == 2) ? 0.5 * ifz - 0.25 + gc : ifz + gc;
-  const double fxw = Kokkos::floor(cx), fyw = Kokkos::floor(cy), fzw = Kokkos::floor(cz);
-  const double wx = cx - fxw, wy = cy - fyw, wz = cz - fzw;
-  const int x0 = (int)fxw, y0 = (int)fyw, z0 = (int)fzw;
+  // The coarse sample coordinate is 0.5*ifine - 0.25 + gc on a coarsened axis (ratio 2) and
+  // ifine + gc on a kept one (ratio 1); its floor is the lower coarse index and its fraction the
+  // weight. §14 H-2: both in integer arithmetic. The coordinate is exact in double, so its floor
+  // and fraction are exactly
+  //   ratio 2: x0 = (i >> 1) + gc - 1 + (i & 1),  w = 0.25 (i odd) or 0.75 (i even);
+  //   ratio 1: x0 = i + gc,                        w = 0,
+  // and the interpolation below (textually unchanged) sees the same operands -- bit-identical,
+  // without three floors and six FP <-> int conversions per fine cell.
+  const int x0 = (ratio.x == 2) ? (ifx >> 1) + gc - 1 + (ifx & 1) : ifx + gc;
+  const int y0 = (ratio.y == 2) ? (ify >> 1) + gc - 1 + (ify & 1) : ify + gc;
+  const int z0 = (ratio.z == 2) ? (ifz >> 1) + gc - 1 + (ifz & 1) : ifz + gc;
+  const double wx = (ratio.x == 2) ? ((ifx & 1) ? 0.25 : 0.75) : 0.0;
+  const double wy = (ratio.y == 2) ? ((ify & 1) ? 0.25 : 0.75) : 0.0;
+  const double wz = (ratio.z == 2) ? ((ifz & 1) ? 0.25 : 0.75) : 0.0;
   const long sy = cext.x, sz = (long)cext.x * cext.y;
   auto C = [&](int xx, int yy, int zz) { return coarse((long)xx + (long)yy * sy + (long)zz * sz); };
   const double c00 = C(x0, y0, z0) * (1 - wx) + C(x0 + 1, y0, z0) * wx;
