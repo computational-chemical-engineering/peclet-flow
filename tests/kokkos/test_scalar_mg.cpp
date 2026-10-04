@@ -481,15 +481,14 @@ void testAdvDivergenceFree() {
 }
 
 // The C3 problem (periodic box 4R, a Dirichlet sphere R = n/4 with a source) with the projected
-// Stokes field of that geometry (20 steps under a body force: WO-5's harness), cell units. The
-// pressure PCG runs to 1e-14 so that the field is discretely divergence-free to round-off: the
-// advective rows of A2 are an M-matrix only up to the field's divergence, and (u3)'s 1e-13 AC is a
-// round-off bound (at the default 1e-10 the margin is -5.8e-13 AC at Pe_h 10).
+// Stokes field of that geometry (20 steps under a body force: WO-5's harness), cell units, the
+// pressure at its default tolerance. (u3) checks the COLUMN sums, which are zero by construction
+// whatever the field's divergence (review finding 3); the field's divergence moves only the row
+// sums, which is why the former row check needed the pressure PCG at 1e-14.
 void c3Stokes(IbmSolver& s, int n) {
   s.setRho(1.0);
   s.setMu(1.0);
   s.setDt(1.0);
-  s.setPressurePcg(true, 500, 1e-14);
   s.setSolid(sphereSdf(n, 0.5 * n + 0.37, 0.5 * n - 0.22, 0.5 * n + 0.11, 0.25 * n), true);
   s.setBodyForce(1e-3, 4e-4, 2e-4);
   for (int k = 0; k < 20; ++k)
@@ -534,32 +533,48 @@ double vcycleSeconds(IbmSolver& s, int reps) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / reps;
 }
 
-// (u3) M-matrix on every level: bands <= 0, AC >= sum |bands| - 1e-13 AC on every inner row
-// (identity rows trivially). Returns the defect count; prints the smallest relative margin.
+// (u3) A2's M-matrix property on every level, by COLUMNS (review finding 3, ruling D-WOR-3): every
+// off-diagonal band <= 0, and every column sum AC(j) + sum_k band_k(j's neighbour toward j) >=
+// -1e-13 max AC. The advective couplings enter as one number per face (Q on the upwind diagonal,
+// -Q as the downwind off-diagonal), so the advection and diffusion parts have zero column sums up to
+// round-off INDEPENDENTLY of the field's divergence; the mass, wall, Dirichlet and omega_open terms
+// only add to the diagonal. A column-diagonally dominant Z-matrix is an M-matrix (by columns), and
+// the left null vector of a singular closure problem is exactly 1 on every level. The C3 box is
+// periodic on every axis: the neighbours wrap over the inner cells. Returns the defect count.
 long mMatrixDefects(const ScalarMG& mg, const char* tag) {
   long bad = 0;
   for (int L = 0; L < mg.levels(); ++L) {
     const auto& lv = mg.level(L);
-    const HV AC = host(lv.AC),
-             B[6] = {host(lv.AW), host(lv.AE), host(lv.AS), host(lv.AN), host(lv.AB), host(lv.AT)};
-    double margin = 1e300;
-    long rows = 0;
+    const HV AC = host(lv.AC), AW = host(lv.AW), AE = host(lv.AE), AS = host(lv.AS),
+             AN = host(lv.AN), AB = host(lv.AB), AT = host(lv.AT);
+    double maxAC = 0.0;
+    for (int z = 0; z < lv.inner.z; ++z)
+      for (int y = 0; y < lv.inner.y; ++y)
+        for (int x = 0; x < lv.inner.x; ++x)
+          maxAC = std::fmax(maxAC, std::fabs(AC(inner(lv, x, y, z))));
+    double minCol = 1e300;
+    long rows = 0, positive = 0, negative = 0;
     for (int z = 0; z < lv.inner.z; ++z)
       for (int y = 0; y < lv.inner.y; ++y)
         for (int x = 0; x < lv.inner.x; ++x) {
           const long i = inner(lv, x, y, z);
-          double sum = 0.0;
-          bool pos = false;
-          for (const HV& b : B) {
-            sum += std::fabs(b(i));
-            pos = pos || b(i) > 0.0;
-          }
-          margin = std::fmin(margin, (AC(i) - sum) / AC(i));
-          if (pos || !(AC(i) >= sum - 1e-13 * AC(i)))
-            ++bad;
+          auto I = [&](int dx, int dy, int dz) {
+            return inner(lv, (x + dx + lv.inner.x) % lv.inner.x, (y + dy + lv.inner.y) % lv.inner.y,
+                         (z + dz + lv.inner.z) % lv.inner.z);
+          };
+          for (const HV* b : {&AW, &AE, &AS, &AN, &AB, &AT})
+            positive += (*b)(i) > 0.0 ? 1 : 0;
+          const double cs = AC(i) + AW(I(1, 0, 0)) + AE(I(-1, 0, 0)) + AS(I(0, 1, 0)) +
+                            AN(I(0, -1, 0)) + AB(I(0, 0, 1)) + AT(I(0, 0, -1));
+          minCol = std::fmin(minCol, cs / maxAC);
+          negative += cs < -1e-13 * maxAC ? 1 : 0;
           ++rows;
         }
-    std::printf("(u3) %s level %d: %ld rows, min (AC - sum|b|)/AC = %.3e\n", tag, L, rows, margin);
+    std::printf(
+        "(u3) %s level %d: %ld columns, min column sum = %.3e max AC, %ld below -1e-13, %ld positive "
+        "off-diagonals\n",
+        tag, L, rows, minCol, negative, positive);
+    bad += positive + negative;
   }
   return bad;
 }
