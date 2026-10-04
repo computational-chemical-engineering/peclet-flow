@@ -22,6 +22,7 @@
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
 
+#include "mac_cutcell.hpp"  // ccFor3 (rule H)
 #include "policy.hpp"
 
 namespace peclet::flow {
@@ -360,10 +361,10 @@ template <class FaceProps, class MV>
 inline void ibmBuildDiffusionVar(MV AC, MV AW, MV AE, MV AS, MV AN, MV AB, MV AT, int ex, int ey,
                                  int ez, int g, FaceProps fp, double wx = 1.0, double wy = 1.0,
                                  double wz = 1.0) {
-  Kokkos::DefaultExecutionSpace space;
-  using MD = MDRange3<Kokkos::DefaultExecutionSpace>;
-  Kokkos::parallel_for(
-      "peclet::flow::ibm_build_diff_var", MD(space, {g, g, g}, {ex - g, ey - g, ez - g}),
+  // rule H (§4.5; §14 H-3c): host pencil, device MDRange, on the same (default) execution space;
+  // the body is verbatim. A cell writes only its own seven coefficients (ccFor3's simd contract).
+  ccFor3(
+      "peclet::flow::ibm_build_diff_var", C3{g, g, g}, C3{ex - g, ey - g, ez - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = ex, sz = (long)ex * ey;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;

@@ -956,7 +956,6 @@ void Solver<Grid>::buildRhsForced(int c) {
 
 template <class Grid>
 void Solver<Grid>::buildRhsVar(int c) {
-  CCExec space;
   const double idt = 1.0 / dt_, fc = f_[c], wc = u_.w[c];
   C3 e = e_;
   CCField bb = C[c].b, rs = C[c].rscale, P = P_, brhs = bcBrhs_[c], inh = C[c].inhom;
@@ -983,10 +982,10 @@ void Solver<Grid>::buildRhsVar(int c) {
   // momentum given the enforced continuity (the u*[d(eps)/dt + div(eps u)] bracket vanishes).
   const bool pc = porous_ && advect_;
   CCConst dv = CCConst(divAdv_);
-  using MD = MDRange3<CCExec>;
-  Kokkos::parallel_for(
-      "rhs_var", MD(space, {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-      KOKKOS_LAMBDA(int x, int y, int z) {
+  // rule H (§4.5; §14 H-3c): host pencil, device MDRange; the body is verbatim. Each cell writes
+  // only bb(i), which nothing in the body reads (ccFor3's simd contract).
+  ccFor3(
+      "rhs_var", C3{G, G, G}, C3{e.x - G, e.y - G, e.z - G}, KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
         const double rhoF = 0.5 * (rf(i) + rf(i - strd));  // face density of the velocity unknown
         double aK = 0.0, aF = 0.0;
