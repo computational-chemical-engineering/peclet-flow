@@ -105,7 +105,7 @@ struct ScalarCutState {
   CCField
       phi[3];  ///< F/V through the LOW a-face of cell i (internal 1/T), guarded (sco::faceFluxes)
   CCField Phi[3];   ///< explicit face fluxes phi c*(c^n), 0 on implicit faces (§6.2)
-  CCField small;    ///< 1 on a small cell (§6.3), inner cells + ghost layer 1
+  CCField small;    ///< 1 on a small cell (§6.3), inner cells + exchanged ghosts
   CCField outflow;  ///< lumped implicit outflow per cell (inside SAC; ScalarMG coarse mass, §5.2)
   /// A2 (§6.7, D-WO5-3): the implicit outflow the open-face rows add to AC, summed over the cell's
   /// open faces and clamped at 0 (implicit backflow), 0 elsewhere — the advective path's coarse
@@ -751,15 +751,16 @@ inline double bulkCourantLocal(CCConst phx, CCConst phy, CCConst phz, CCConst ka
   return m;
 }
 
-/// The small-cell flags of §6.3 over the inner cells and ghost layer 1 (from the face fluxes and
-/// kappa, which carry ghosts: no exchange, deterministic): small(i) = 1 iff i is an unknown,
-/// kappa_i < 1 and dt Out_i > thr kappa_i, thr = max(1/2, C_bulk). 0 elsewhere on the block.
+/// The small-cell flags of §6.3 over the inner cells: small(i) = 1 iff i is an unknown, kappa_i < 1
+/// and dt Out_i > thr kappa_i, thr = max(1/2, C_bulk); 0 elsewhere on the block. The ghost layers
+/// are the caller's one exchange (review finding 6: the owner's flag, however its ghost fluxes
+/// were formed), followed by zeroNonUnknown over the whole block.
 inline void smallCells(CCField small, CCConst phx, CCConst phy, CCConst phz, CCConst kappa,
                        CCConst unk, double dt, double thr, C3 e, int g) {
   Kokkos::deep_copy(CCExec(), small, 0.0);
   ccFor3(
-      "peclet::flow::sco_small_cells", C3{g - 1, g - 1, g - 1},
-      C3{e.x - g + 1, e.y - g + 1, e.z - g + 1}, KOKKOS_LAMBDA(int x, int y, int z) {
+      "peclet::flow::sco_small_cells", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int x, int y, int z) {
         const long sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)x + (long)y * sy + (long)z * sz;
         const double k = kappa(i);

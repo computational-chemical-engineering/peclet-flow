@@ -659,8 +659,8 @@ void Solver<Grid>::scalarCaptureOpenFaceFlux() {
   // WO-5b (§6.5, ruling D-WO5-3). Called right after the projection: the high-side boundary face
   // is the first GHOST index, which the next plain ghost fill (advanceScalars' own, the VoF
   // bridge's) wraps from the opposite face, so the flux the projection constrained there is read
-  // now. The plane spans the full transverse extent: the transverse ghost rows are what the small
-  // flags of ghost layer 1 read (§6.3), with the values the neighbour holds for its own rows.
+  // now. The plane spans the full transverse extent (its transverse ghost rows fed the locally
+  // computed ghost-layer small flags until D-WOR-6 exchanged them; kept, a plane copy).
   if (!hasBc_)
     return;
   // Captured whether or not a cut-cell scalar exists yet (one plane copy per open face), so a
@@ -812,8 +812,7 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
   if (steady) {  // §6.7: implicit FOU on every face; no classification
     Kokkos::deep_copy(CCExec(), st.small, 0.0);
   } else {
-    // §6.3: C_bulk = the global MAX over full cells of dt Out / V, then the per-cell flags over the
-    // inner cells and ghost layer 1 (no exchange)
+    // §6.3: C_bulk = the global MAX over full cells of dt Out / V, then the per-cell flags
     double cb = sco::bulkCourantLocal(px, py, pz, kap, unk, CCConst(gm.sax), CCConst(gm.say),
                                       CCConst(gm.saz), dt_, e_, G);
 #ifdef PECLET_FLOW_MPI
@@ -825,6 +824,13 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
 #endif
     st.bulkCourant = cb;
     sco::smallCells(st.small, px, py, pz, kap, unk, dt_, std::fmax(0.5, cb), e_, G);
+    // Review finding 6 (ruling D-WOR-6): the ghost flags are the OWNER's, by one exchange per
+    // advance, so a face's implicit/explicit split agrees across ranks whatever the ghost fluxes
+    // (formerly ghost layer 1 was recomputed locally, which agreed only through flow's
+    // outflow-correction and ghost-fill ranges). The periodic wrap beyond a non-periodic face is
+    // then cleared with the unknown flags, as the local computation had it.
+    fillGhosts(st.small);
+    sco::zeroNonUnknown(st.small, unk, e_, 0);
   }
   long cnt[5] = {sco::countSmallLocal(CCConst(st.small), e_, G), 0, nFlux, nGuard, 0};
   for (int a = 0; a < 3; ++a)
