@@ -119,6 +119,8 @@ struct ScalarCutState {
   long numImplicitFaces = 0;  ///< census `num_implicit_faces` (faces carrying flux, implicit)
   long numFluxFaces = 0;      ///< faces carrying flux (the implicit fraction's denominator)
   long numGuardedFaces = 0;   ///< faces whose projection flux the guard zeroed (a no-op reading)
+  long numBackflowFaces = 0;  ///< census `num_backflow_faces`: outflow-face rows with F_out < 0
+  bool warnedBackflow = false;  ///< the steady backflow warning was issued (once per scalar)
   double bulkCourant = 0.0;   ///< census `bulk_courant`: C_bulk of §6.3 (0 steady)
   // ---- conjugate (WO-7, §1.1, §1.3, §2.7, §3.4, §4): the solid field psi_s = c_s / K ----------
   // Allocated by the first set_scalar_solid; the two-field path runs only while some body is
@@ -1051,9 +1053,12 @@ inline double openFaceInflux(CCConst c, CCConst cOld, CCConst phi, CCConst small
 
 /// The census counts of one open face over this rank's inner boundary cells: (faces carrying flux
 /// on the HIGH side — faceFluxCountsLocal already counts the low side's —, the implicit ones of
-/// either side: outflow with steady or a small inner cell).
+/// either side: outflow with steady or a small inner cell, the BACKFLOW rows of an outflow face:
+/// F_out < 0, flow entering through it, whose inflow takes the zero-gradient value c_i; review
+/// finding 2, census `num_backflow_faces`).
 inline void openFaceCountsLocal(CCConst phi, CCConst small, CCConst unk, bool inflow, int a,
-                                int side, bool steady, C3 e, int g, long& nFlux, long& nImpl) {
+                                int side, bool steady, C3 e, int g, long& nFlux, long& nImpl,
+                                long& nBack) {
   int t1, t2;
   faceTangents(a, t1, t2);
   const int ext[3] = {e.x, e.y, e.z};
@@ -1062,10 +1067,10 @@ inline void openFaceCountsLocal(CCConst phi, CCConst small, CCConst unk, bool in
   const long sa = st[a], s1 = st[t1], s2 = st[t2];
   const int aInner = side == 0 ? g : ext[a] - g - 1;
   CCExec space;
-  long p = 0, q = 0;
+  long p = 0, q = 0, r = 0;
   Kokkos::parallel_reduce(
       "peclet::flow::sco_open_face_counts", MDRange2<CCExec>(space, {0, 0}, {n1, n2}),
-      KOKKOS_LAMBDA(int j1, int j2, long& c1, long& c2) {
+      KOKKOS_LAMBDA(int j1, int j2, long& c1, long& c2, long& c3) {
         const long i = (long)aInner * sa + (long)(j1 + g) * s1 + (long)(j2 + g) * s2;
         const double v = side == 0 ? phi(i) : phi(i + sa);
         if (!(unk(i) > 0.5) || v == 0.0)
@@ -1074,10 +1079,13 @@ inline void openFaceCountsLocal(CCConst phi, CCConst small, CCConst unk, bool in
           ++c1;
         if (!inflow && (steady || small(i) > 0.5))
           ++c2;
+        if (!inflow && (side == 0 ? v > 0.0 : v < 0.0))  // F_out < 0
+          ++c3;
       },
-      p, q);
+      p, q, r);
   nFlux = p;
   nImpl = q;
+  nBack = r;
 }
 
 /// max over facets of cw (0 when there is no Dirichlet/Robin facet: the steady singular test).

@@ -791,6 +791,7 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
   st.bulkCourant = 0.0;
   st.numFluxFaces = 0;
   st.numGuardedFaces = 0;
+  st.numBackflowFaces = 0;
   if (!st.advecting) {
     long cnt[1] = {nGuard};
 #ifdef PECLET_FLOW_MPI
@@ -825,24 +826,25 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
     st.bulkCourant = cb;
     sco::smallCells(st.small, px, py, pz, kap, unk, dt_, std::fmax(0.5, cb), e_, G);
   }
-  long cnt[4] = {sco::countSmallLocal(CCConst(st.small), e_, G), 0, nFlux, nGuard};
+  long cnt[5] = {sco::countSmallLocal(CCConst(st.small), e_, G), 0, nFlux, nGuard, 0};
   for (int a = 0; a < 3; ++a)
     cnt[1] += sco::countImplicitLocal(CCConst(st.phi[a]), CCConst(st.small), unk, a, steady, e_, G);
   for (int f = 0; f < 6; ++f) {
     st.openFace[f] = openHere[f];
     if (!openHere[f])
       continue;
-    long n1 = 0, n2 = 0;
+    long n1 = 0, n2 = 0, n3 = 0;
     sco::openFaceCountsLocal(CCConst(st.phi[f / 2]), CCConst(st.small), unk, st.openInflow[f],
-                             f / 2, f % 2, steady, e_, G, n1, n2);
+                             f / 2, f % 2, steady, e_, G, n1, n2, n3);
     cnt[2] += n1;
     cnt[1] += n2;
+    cnt[4] += n3;
   }
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
-    long o[4];
-    MPI_Allreduce(cnt, o, 4, MPI_LONG, MPI_SUM, comm_);
-    for (int k = 0; k < 4; ++k)
+    long o[5];
+    MPI_Allreduce(cnt, o, 5, MPI_LONG, MPI_SUM, comm_);
+    for (int k = 0; k < 5; ++k)
       cnt[k] = o[k];
   }
 #endif
@@ -850,6 +852,23 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
   st.numImplicitFaces = cnt[1];
   st.numFluxFaces = cnt[2];
   st.numGuardedFaces = cnt[3];
+  st.numBackflowFaces = cnt[4];
+  // Review finding 2a (ruling D-WOR-2a): A2 requires an implicit backflow row to be reported. Such
+  // a row is AC += F_out < 0 (inflow at the zero-gradient value c_i); it costs the column its
+  // dominance (no M-matrix there), and A2's coarse mass omega_open is clamped at 0 on it.
+  if (steady && st.numBackflowFaces > 0 && !st.warnedBackflow) {
+    st.warnedBackflow = true;
+    if (scalarRootRank())
+      std::fprintf(stderr,
+                   "peclet.flow: cut-cell scalar '%s': %ld outflow-face row(s) carry BACKFLOW in "
+                   "the steady solve (flow entering through an 'outflow' face). Their inflow "
+                   "takes the zero-gradient value c_i, which is not a well-posed inflow condition "
+                   "(doc/scalar_ibm_design.md §6.5): the matrix loses column dominance there, and "
+                   "the advective preconditioner's coarse mass omega_open is clamped at 0 on those "
+                   "rows (A2). Prefer an 'inflow' face where fluid enters "
+                   "(diagnostics.scalar_census 'num_backflow_faces', printed once)\n",
+                   sc.name.c_str(), st.numBackflowFaces);
+  }
 }
 
 template <class Grid>
@@ -1140,7 +1159,21 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
     sing[1] = gs[1];
   }
 #endif
-  st.singular = steady && !(sing[0] > 0.0) && !(sing[1] > 0.0);
+  // Review finding 2b (ruling D-WOR-2b): an open domain face carrying flux takes the problem out
+  // of the uniform-mean case. An outflow face's column sums to its F_out, not 0, so 1 is not a
+  // left null vector and the uniform-mean projection and gauge below are not the compatibility
+  // conditions; they are never applied there. (An inflow face needs a scalar Dirichlet value, so
+  // that case was never singular.) With open faces but no inflow face, continuity forces backflow
+  // and the operator stays singular (A 1 = 0 up to the projection's divergence) with a NON-uniform
+  // left null vector: the solve converges for a compatible right-hand side (no source, insulating
+  // walls) and otherwise reports non-convergence; the backflow warning above names the cause.
+  // `bc_` is global and `st.advecting` a global MAX, so every rank agrees. Without flux an open
+  // face is a plain Neumann/Dirichlet scalar face, and the diffusion-only rule stands.
+  bool anyOpenFlux = false;
+  for (int f = 0; f < 6; ++f)
+    anyOpenFlux = anyOpenFlux || bc_[f] == 2 || bc_[f] == 3;
+  anyOpenFlux = anyOpenFlux && st.advecting;
+  st.singular = steady && !(sing[0] > 0.0) && !(sing[1] > 0.0) && !anyOpenFlux;
   st.built = true;
   // ScalarMG (§5.2): the level table once per geometry version and block (VelocityMG's rule), the
   // surrogate on every level rebuilt with the operator (ruling D-WO3-3)
@@ -1488,6 +1521,18 @@ void Solver<Grid>::scalarCutAssembleSolve(ScalarField& sc, bool steady) {
                    "kept -- see diagnostics.scalar_census (printed once)\n",
                    sc.name.c_str(), kr.iterations, st.residual, st.rtol);
   }
+}
+
+template <class Grid>
+bool Solver<Grid>::scalarRootRank() const {
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    int r = 0;
+    MPI_Comm_rank(comm_, &r);
+    return r == 0;
+  }
+#endif
+  return true;
 }
 
 template <class Grid>

@@ -1013,6 +1013,69 @@ def gate_g9c():
     s, unk, _k, _dt, _V = channel_case(n=12)
     s.set_field("u", np.asfortranarray(np.full(unk.shape, 1.0)))
     raises(RuntimeError, s.advance_scalars, "open faces, a moving fluid and no projection yet: refused")
+    backflow_steady_row()
+
+
+def capture_stderr(fn):
+    """Run fn() with the C-level stderr captured; returns (fn's result, the text)."""
+    import os
+    import tempfile
+    with tempfile.TemporaryFile(mode="w+b") as tmp:
+        sys.stderr.flush()
+        fd = os.dup(2)
+        os.dup2(tmp.fileno(), 2)
+        try:
+            r = fn()
+        finally:
+            os.dup2(fd, 2)
+            os.close(fd)
+        tmp.seek(0)
+        return r, tmp.read().decode(errors="replace")
+
+
+def backflow_steady_row(n=12, nsteps=10):
+    """Review finding 2 (rulings D-WOR-2a/b/c): open faces but NO inflow face -- both x ends
+    'outflow', the flow driven by a body force, so the whole -x face backflows; walls on y and z, a
+    Neumann sphere. A steady scalar, insulating everywhere, no source, from a non-uniform start:
+    the problem is not the uniform-mean singular case (no compatibility projection, no gauge), the
+    solve converges -- to a constant, the null vector --, and the backflow rows are counted and
+    warned about once. Returns the census."""
+    s = pf.Solver((2 * n, n, n), extent=(2.0, 1.0, 1.0))
+    s.set_rho(1.0)
+    s.set_mu(0.05)
+    s.set_dt(0.01)
+    s.set_domain_bc("-x", "outflow")
+    s.set_domain_bc("+x", "outflow")
+    for f in FACES[2:]:
+        s.set_domain_bc(f, "wall")
+    X, Y, Z = grid(s)
+    s.set_solid(np.asfortranarray(np.sqrt((X - 0.97) ** 2 + (Y - 0.48) ** 2 + (Z - 0.53) ** 2) - 0.23),
+                cutcell_pressure=True)
+    s.set_body_force((1.0, 0.0, 0.0))
+    for _ in range(nsteps):
+        s.step()
+    s.add_scalar("b", diffusivity=0.05, cutcell=True)
+    for f in FACES:
+        s.set_scalar_bc("b", f, "neumann")
+    unk = s.diagnostics.scalar_geometry("b")["unknown"] > 0.5
+    s.set_field("b", np.asfortranarray(np.where(unk, 0.5 + 0.3 * np.sin(3.0 * X) * np.cos(2.0 * Y), 0.0)))
+    _, err = capture_stderr(lambda: s.solve_scalar_steady("b"))
+    cen = s.diagnostics.scalar_census("b")
+    c = s.get_field("b")[unk]
+    spread = float(c.max() - c.min())
+    print(f"  backflow (both x ends outflow, body force): {cen['num_backflow_faces']} backflow rows, "
+          f"{cen['krylov_iterations']} iterations, residual {cen['krylov_residual']:.1e}, "
+          f"incompatibility {cen['steady_incompatibility']:.1e}, max - min c = {spread:.1e}; "
+          f"stderr: {err.strip()!r}")
+    check(cen["num_backflow_faces"] > 0, f"backflow: census num_backflow_faces > 0 ({cen['num_backflow_faces']})")
+    check("BACKFLOW" in err and "num_backflow_faces" in err, "backflow: the steady solve warns, naming the census key")
+    check(cen["krylov_converged"], f"backflow, no inflow face: the steady solve converges "
+                                   f"({cen['krylov_iterations']} iterations, D-WOR-2b)")
+    check(cen["steady_incompatibility"] == 0.0, "backflow: not treated as the uniform-mean singular case")
+    check(spread <= 1e-6, f"backflow: the converged field is the null vector, a constant (spread {spread:.1e})")
+    _, err2 = capture_stderr(lambda: s.solve_scalar_steady("b"))
+    check("BACKFLOW" not in err2, "backflow: the warning is printed once per scalar")
+    return cen
 
 
 # ------------------------------------------------------------------------- WO-6: closures ----

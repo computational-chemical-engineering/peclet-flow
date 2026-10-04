@@ -516,6 +516,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             d["num_implicit_faces"] = st.numImplicitFaces;
             d["num_flux_faces"] = st.numFluxFaces;
             d["num_guarded_flux_faces"] = st.numGuardedFaces;
+            d["num_backflow_faces"] = st.numBackflowFaces;
             d["bulk_courant"] = st.bulkCourant;
             d["max_cell_peclet"] = st.maxCellPeclet;
             return d;
@@ -536,7 +537,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(faces carrying flux that took implicit upwind / all faces carrying flux; steady: all "
           "implicit), 'bulk_courant' (C_bulk: max over full cells of dt Out/V; 0 steady), "
           "'num_guarded_flux_faces' (faces with projection flux toward a cell that is not a fluid "
-          "unknown, whose flux the operator drops), 'max_cell_peclet' (the largest "
+          "unknown, whose flux the operator drops), 'num_backflow_faces' (rows of an 'outflow' "
+          "domain face whose flux enters the domain: their inflow takes the zero-gradient value; "
+          "a steady solve warns once), 'max_cell_peclet' (the largest "
           "aperture-weighted face Peclet number |u_a| a h_a / D over the interior faces; the "
           "steady envelope of the advective preconditioner is <= 10). The geometry "
           "part: 'num_unknowns' (fluid unknowns), 'num_cut_cells' (cells carrying a facet), "
