@@ -1022,9 +1022,7 @@ void Solver<Grid>::fillGhosts(CCField f) {
     return;
   }
 #endif
-  fillAxis(f, 0);
-  fillAxis(f, 1);
-  fillAxis(f, 2);
+  fillPeriodicAxes(f, 7);  // §14 H-3(d): x, y, z in one launch (was fillAxis 0, 1, 2)
 }
 
 template <class Grid>
@@ -1079,6 +1077,121 @@ void Solver<Grid>::fillAxis(CCField f, int axis) {
           ff(base + (long)gl * sa) = ff(base + (long)(gl + N) * sa);
           ff(base + (long)(G + N + gl) * sa) = ff(base + (long)(G + gl) * sa);
         }
+      });
+}
+
+// §14 H-3(d): every ghost cell that has a ghost coordinate on at least one axis in `axes` takes the
+// value of the cell its periodic coordinates (those in `axes`) wrap to; its other coordinates stay.
+// That is exactly what the sequential fillAxis passes over those axes in ascending order (each over
+// the full transverse extent, ghosts included) leave behind: a ghost an earlier pass wrote is
+// overwritten by a later pass with the wrapped value of a cell the earlier pass had written from
+// its own wrap, and the source of every write (inner on every axis in `axes`) is never written.
+// Pure copies, so bit-identical (CutcellMG::fillWrap's argument, §5.4, with non-periodic axes
+// kept). The shell as up to three disjoint slabs: z-ghost planes (all x, y) if z is in `axes`; then
+// y-ghost rows (all x) over the z range the z slab did not cover; then x-ghost cells over the (y,
+// z) range the first two did not cover.
+template <class Grid>
+void Solver<Grid>::fillPeriodicAxes(CCField f, int axes) {
+  const bool px = axes & 1, py = axes & 2, pz = axes & 4;
+  const int nx = nx_, ny = ny_, nz = nz_;
+  if ((px && nx < G) || (py && ny < G) || (pz && nz < G)) {
+    // a ghost band wider than the block: the sequential passes copy ghost from ghost, which the
+    // one-shot wrap does not reproduce -- keep them
+    for (int a = 0; a < 3; ++a)
+      if (axes & (1 << a))
+        fillAxis(f, a);
+    return;
+  }
+  CCExec space;
+  const C3 e = e_;
+  const long exy = (long)e.x * e.y;
+  // the z range of the y slab and the (y, z) range of the x slab: inner on a periodic axis whose
+  // slab came first, the full extent otherwise
+  const int z0 = pz ? G : 0, zn = pz ? nz : e.z;
+  const int y0 = py ? G : 0, yn = py ? ny : e.y;
+  const long nZ = pz ? 2L * G * exy : 0, nY = py ? (long)zn * 2 * G * e.x : 0,
+             nX = px ? (long)zn * yn * 2 * G : 0;
+  CCField ff = f;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    // host: the slabs ROW by row (one division per row, a contiguous copy along x), serially below
+    // the cutoff (rule H). No simd mark: a row's source and destination can share the row.
+    const long rZ = pz ? 2L * G * e.y : 0, rY = py ? (long)zn * 2 * G : 0,
+               rX = px ? (long)zn * yn : 0;
+    auto copyRow = [=](long dst, long src) {  // one full x row, wrapped along x if x is periodic
+      if (px) {
+        for (int x = 0; x < G; ++x)
+          ff(dst + x) = ff(src + x + nx);
+        for (int x = G; x < G + nx; ++x)
+          ff(dst + x) = ff(src + x);
+        for (int x = G + nx; x < e.x; ++x)
+          ff(dst + x) = ff(src + x - nx);
+      } else {
+        for (int x = 0; x < e.x; ++x)
+          ff(dst + x) = ff(src + x);
+      }
+    };
+    auto row = [=](long t) {
+      if (t < rZ) {  // z-ghost plane row (y, zg)
+        const int l = (int)(t / e.y), y = (int)(t - (long)l * e.y);
+        const int z = l < G ? l : nz + l;
+        const int sy = !py ? y : (y < G ? y + ny : (y >= G + ny ? y - ny : y));
+        const int sz = z < G ? z + nz : z - nz;
+        copyRow((long)y * e.x + (long)z * exy, (long)sy * e.x + (long)sz * exy);
+      } else if (t < rZ + rY) {  // y-ghost row (yg, z) of the y slab's z range
+        const long t2 = t - rZ;
+        const int zi = (int)(t2 / (2 * G)), l = (int)(t2 - (long)zi * 2 * G);
+        const int y = l < G ? l : ny + l, z = z0 + zi;
+        const int sy = y < G ? y + ny : y - ny;
+        copyRow((long)y * e.x + (long)z * exy, (long)sy * e.x + (long)z * exy);
+      } else {  // the x-ghost cells of row (y, z) of the x slab's range
+        const long t3 = t - rZ - rY;
+        const int zi = (int)(t3 / yn), yi = (int)(t3 - (long)zi * yn);
+        const long base = (long)(y0 + yi) * e.x + (long)(z0 + zi) * exy;
+        for (int x = 0; x < G; ++x)
+          ff(base + x) = ff(base + x + nx);
+        for (int x = G + nx; x < e.x; ++x)
+          ff(base + x) = ff(base + x - nx);
+      }
+    };
+    if (hostRunSerial(nZ + nY + nX)) {
+      for (long t = 0; t < rZ + rY + rX; ++t)
+        row(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::ibm_pfill3",
+                         Kokkos::RangePolicy<CCExec>(space, 0, rZ + rY + rX), row);
+    return;
+  }
+  Kokkos::parallel_for(
+      "peclet::flow::ibm_pfill3", Kokkos::RangePolicy<CCExec>(space, 0, nZ + nY + nX),
+      KOKKOS_LAMBDA(long t) {
+        int x, y, z;
+        if (t < nZ) {
+          const int l = (int)(t / exy);
+          const long r = t - (long)l * exy;
+          x = (int)(r % e.x);
+          y = (int)(r / e.x);
+          z = l < G ? l : nz + l;
+        } else if (t < nZ + nY) {
+          const long t2 = t - nZ, rw = 2L * G * e.x;
+          const long zi = t2 / rw, r = t2 - zi * rw;
+          const int l = (int)(r / e.x);
+          x = (int)(r % e.x);
+          y = l < G ? l : ny + l;
+          z = z0 + (int)zi;
+        } else {
+          const long t3 = t - nZ - nY, rw = (long)yn * 2 * G;
+          const long zi = t3 / rw, r = t3 - zi * rw;
+          const int l = (int)(r % (2 * G));
+          x = l < G ? l : nx + l;
+          y = y0 + (int)(r / (2 * G));
+          z = z0 + (int)zi;
+        }
+        const int sx = !px ? x : (x < G ? x + nx : (x >= G + nx ? x - nx : x));
+        const int sy = !py ? y : (y < G ? y + ny : (y >= G + ny ? y - ny : y));
+        const int sz = !pz ? z : (z < G ? z + nz : (z >= G + nz ? z - nz : z));
+        ff((long)x + (long)y * e.x + (long)z * exy) =
+            ff((long)sx + (long)sy * e.x + (long)sz * exy);
       });
 }
 
