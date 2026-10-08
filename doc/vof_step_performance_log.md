@@ -998,3 +998,53 @@ default (`'direct'`) bottom. Batteries (`ctest -LE bench`, 231 tests after scala
 231/231; CUDA 227/231 at -j6, the four failures (`scalar_cutcell_g4`, `_g6_2`, `_g6_4`, `_g6_5`)
 all `Cuda memory space failed to allocate` on a GPU shared with another session — rerun serially on the idle GPU: 4/4 pass
 (g4 6 s, g6_2/4/5 29-31 s), so 231/231.
+
+## 2026-10-08 — A(b): the host bottom factor, a bitwise host schedule (branch bottom-factor-host)
+
+USER DECISION 2026-10-08: A(b) (faster factor, bitwise) first; A(a) (factor reuse across steps,
+a numerics change) not in scope. Commits bb10f56 (host schedule + `teamAlgorithm` oracle hook +
+ctest U8 + `bench_bottom_factor`), fbe8721 (`kBottomHostFactorTeam = 2`).
+
+**Root cause (measured, `bench_bottom_factor`, walls-y 16x12x8: P 12, b 128 = the column's
+bottom; workstation 5965WX under load ~20).** The team kernel's order is T-independent as the
+header claims (factor bytes identical at T 1..24). T sweep of the old kernel, ms per factor
+(median), T = 1 / 2 / 4 / 8 / 16 / 24: 11.0 / 7.9 / 5.7 / 5.6 / 6.4 / 6.5. Two costs: every scalar
+is one serial, latency-bound dot product (T = 1: 11 ms), and every column of every 16-wide
+diagonal tile is published by a team barrier (~170 per plane), so T stops paying at 4-8. Not the
+assembly (`entry()`: 0.18 ms per factor), not memory.
+
+**The change (host only, `if constexpr` on CCMem == HostSpace; device code untouched).** Per tile
+one thread factors the diagonal tile and the panel, the team does the trailing update (~2.5
+barriers per tile); W = L^{-1} by rows over contiguous cost-balanced column shares; Q = W^T W by
+rows; the border by columns with no barrier between planes; the assembly scatters each face's term
+to its partner. Every stored scalar is the team expression with its operands in the same order;
+lanes run over independent outputs, each continuing its own accumulator in ascending order (four
+terms per pass, one at a time per lane), so `omp simd` under -ffp-contract=off reorders nothing.
+Host scratch layouts of Sg/L/W are by columns; the factor storage is unchanged.
+
+**New schedule, ms per factor (same probe, loaded):** T = 1 / 2 / 3 / 4 / 6 / 8: 1.44-1.51 / 1.05-1.09
+/ 0.93-1.79 / 0.86-1.70 / 1.43-1.69 / 1.43-1.88 (team algorithm at T 8: 5.2-6.7). Periodic (P 16,
+b 96, border): T 2 1.59, old T 8 7.6. Phase split at T 1: assemble 0.18, diagonal tile + panel 0.12,
+trailing 0.28, W 0.43, Q 0.38. Production kprof 1x24 `direct` (interleaved A/B x2, before the
+rebase): `mg_bottom_factor` 6.59 / 6.53 -> 1.52 / 1.82 ms/step; the step (151 -> 143-151 ms) is
+inside the load noise (`cc_smooth` 31-41 ms).
+
+**DECISION:** `kBottomHostFactorTeam = 2` (a constant of its own; the FCG solve keeps
+`kBottomHostTeam = 8`): the fastest size that is stable under load here. Alternative 4 (best on a
+quiet box) pending the genoa sweep in `bubble_column_perf/s1/s1_bfac.slurm` (written, NOT
+submitted: needs the user's OK). Reversible by reverting fbe8721.
+
+**Gates (rebased on main f19ac4b, then onto 41da997 (clang-format of scalar sources only: rebuilt, bottom_direct + state_hash rechecked identical); baseline worktree at f19ac4b, host rebuilt, CUDA fresh trees
+nvcc 13.4; every artifact checked newer than the rebuild start).** Factor bytes Q|Y|e|s|stat vs the
+baseline: identical (walls-y 804884 B, periodic 1161236 B), host and CUDA. ctest `bottom_direct`:
+U8 (host schedule vs team algorithm, FP32 + FP64, T 1/2/4, production floor and the 1e30 restart
+path) bitwise on all 6 problems (negative control: swapping two terms of the 4-term pass fails U8);
+U3 host and CUDA pass. Host G-BIT: state_hash 12/12 + np2 identical; 50-step column dump with
+`--bottom-solver direct`, rtol 1e-8, bitwise at OMP 1, 8, 24 (24 arrays, 10.00 iterations). (The
+baseline itself differs between OMP 1 and 24 at 3e-14-1e-13 relative: pre-existing, outside the
+bottom.) CUDA: state_hash + np2 identical, dump bitwise, U3 pass. Host battery `ctest -LE bench`:
+231/231.
+
+**Device factor (not acted on).** USER 2026-10-08 (relayed by the orchestrator): device A(b)
+wanted later — the device factor costs 7–9 ms per launch on the RTX 5080 (walls-y), out of a
+36–37 ms step; same goal: bitwise-faster schedule first.

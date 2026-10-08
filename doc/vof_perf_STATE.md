@@ -19,17 +19,25 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
   (algebraic only until H-6): 8x3 per CCD 90.72, 6x4 106.53, 3x8 107.87. Generic build 97.95
   (znver4 5 % faster). TBFsolver 8x3 same node 45.45-46.04. Old published 144 ms (old protocol).
   kprof 1x24: 937 launches/step (F4 not triggered), projection 55.3 of 93.7 ms.
+- **A(b) landed 2026-10-08** (flow bb10f56, fbe8721): the host `mg_bottom_factor` runs a bitwise
+  host schedule (same scalars, ~2.5 barriers per tile, vectorized lanes); factor bytes, U8, host
+  G-BIT (OMP 1/8/24, `direct`) and CUDA identical to main. Workstation: 5.6-6.5 -> 1.05-1.5 ms per
+  factor (kprof 1x24: 6.6 -> 1.5-1.8 ms/step). DECISION `kBottomHostFactorTeam = 2` (alternative 4)
+  pending the genoa confirmation `bubble_column_perf/s1/s1_bfac.slurm` (NOT submitted: user OK).
 - PARKED: E2(a) constant-coefficient driver; E2(b) FFT solver DROPPED 2026-10-08 (register).
 
 **Next action.**
 1. Gallery cost table on peclet-examples `benchmarks/bubble-column` from S-1 (re-render + commit the
    `_freeze`; check the publish job) — not done; Snellius numbers above, TBFsolver 45.5-46.0.
-2. WO-H5 (Krylov reduction fusion on host), H6 (distributed host 'direct'), H7, then S-2 (incl. a
+2. USER 2026-10-08: device A(b) wanted later — the device factor costs 7–9 ms per launch on the
+   RTX 5080 (walls-y), out of a 36–37 ms step; same goal: bitwise-faster schedule first.
+3. WO-H5 (Krylov reduction fusion on host), H6 (distributed host 'direct'), H7, then S-2 (incl. a
    64x3 and 24x8 profile), H8 (flow CLAUDE.md: host no longer "keeps GraphAMG").
 
-**Open.** `mg_bottom_factor` = 16.9 ms/step at 1x24 (the FP32 factor rebuilt every step; 1 launch),
-the largest single host kernel — the obvious next host target (factor reuse across steps / more
-lanes); NOT designed. Q-H3 (T_host) not measured. Spread placement 10 % faster than contiguous:
+**Open.** Genoa confirmation of A(b) (S-1 had `mg_bottom_factor` 16.9 ms/step at 1x24): job
+`s1_bfac.slurm`, needs the user's OK. A(a) (factor reuse across steps, a numerics change) not
+designed. The DEVICE factor: next action 2. Q-H3:
+factor T measured (2 chosen, above); the solve kernel's `kBottomHostTeam = 8` not re-measured. Spread placement 10 % faster than contiguous:
 publish contiguous, record spread alongside (Q-H5). The vof_momentum 1.84 acceleration seen once in
 a D/h-16 pair run (not reproduced at D/h 20); PECLET_FLOW_OPERATOR_DOUBLE=OFF fails 6 tests on main
 too (pre-existing); the 15-19 % swarm-drift difference to TBFsolver = near-contact treatment.
