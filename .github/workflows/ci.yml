@@ -1,12 +1,12 @@
 name: CI
 
 # Host (Kokkos OpenMP/Serial) CI for peclet.flow — suite/docs/QUALITY_PLAN.md §3.D ("CI that is honest"):
-#   * build-test : the single-rank module + the 43 non-bench kernel ctests (tests/kokkos) + the D3 env-knob guard
+#   * build-test : the single-rank module + the non-bench kernel ctests (tests/kokkos) + the D3 env-knob guard
 #                  + the accuracy/efficiency regression suite + the three canonical verify scripts, all
 #                  from ONE tree built with
 #                  -DPECLET_FLOW_BUILD_TESTS=ON. `ctest -LE bench` — the `bench`-labelled timing instruments
 #                  (vof_timing, bench_rbgs) are listed by `ctest -N` but not run here.
-#   * mpi        : the same tree with -DPECLET_FLOW_MPI=ON; the 106 distributed ctests at np = 1 and 2 on
+#   * mpi        : the same tree with -DPECLET_FLOW_MPI=ON; the distributed ctests at np = 1 and 2 on
 #                  the 4-core runner (np = 4 and the np = 8 rung with oversubscription only when the np = 2
 #                  pass stayed under 20 min — the step says so either way).
 #                  A last configure-only step fetches core at the DEFAULT PECLET_CORE_TAG (the release
