@@ -203,3 +203,47 @@ an AMR hierarchy needs. Keep it intact.
 slivers, and unnecessary (the true residual already gives the exact fixed point); (b) coupling the partial
 cells (dropping the exclude mask) — diverges at dt=200 even at one coarsening level, so a pore-scale cap
 cannot rescue it; (c) volume/area fractions AS COEFFICIENTS — strictly worse than the staircase. All removed.
+
+## UPDATE 2026-09-15 — which momentum solver runs is decided by the PHYSICS (supersedes "RB-GS stays the DEFAULT" above)
+
+*Moved verbatim from `CLAUDE.md` ("Velocity solve") on 2026-10-08; the short rule stays there.*
+
+Per-component backward-Euler diffusion, RB-GS or an optional V-cycle (`set_velocity_multigrid`),
+both distributed. Three operator modes: IBM-periodic (staircase), all-fluid domain-BC (folded
+constant-coefficient), and **mixed** for an immersed solid *with* domain BCs. `bcStencilPath()` and
+`implicitAdv()` must agree with the solver in use — unenforced, turning velocity MG on silently
+made advection explicit and two converged solves sat 3e-4 apart.
+
+`set_velocity_residual_tolerance(rtol)` stops a component once
+`max|b − A u| <= rtol · max(max|b|, max|A u|)`. **The default (`rtol < 0`) follows the active
+pressure driver's rtol** — the projection consumes u* and resolves its divergence to *its*
+tolerance, so "no less accurately than pressure" is the rule with no free constant; `0` restores the
+legacy update criterion. At least one sweep always runs, and there is deliberately no early return
+for a warm start that already meets the tolerance (skipping it drifts the hydrostatic acid test by
+1e-8 in dP/dz). **Which momentum solver runs is decided by the PHYSICS, not by the configuration** (2026-09-15).
+The criterion is the implicit-diffusion operator's condition number,
+`kappa = 1 + 4·dt·mu·(w_x+w_y+w_z)/rho` — that is `1 + 12·D` in the diffusion number
+`D = mu·dt/(rho·h²)` on an isotropic grid, and metric-correct on an anisotropic one. Above
+`kappa >= 13` (D ≳ 1) the 3-level **velocity V-cycle**; below it, red-black Gauss-Seidel. The rule
+names no geometry at all, so an immersed solid and a domain-BC box with the same `dt` get the same
+solver — IBM is a way of sculpting geometry, not a different momentum equation.
+
+It replaced two rules that keyed on the wrong thing: 1.0.0's (RB-GS by default, V-cycle only
+*below* 65536 cells/rank at np>1) had the block-size effect backwards — the V-cycle's margin is
+*largest* on big blocks (2.23× at 147k cells/rank, 2.19× on one H100) — and a brief intermediate
+rule made the choice depend on whether a solid was present.
+
+**The threshold is a correctness one, not a tuning one.** Measured on a domain-BC channel:
+below D≈1 RB-GS converges in tens of sweeps and the V-cycle is pure overhead (0.86× at D=0.25);
+above D≈4 RB-GS stops meeting its tolerance at all, hitting `velIters_` and returning residuals of
+6.8e-08 at D=6 and 7.7e-06 at D=12 against a 1e-10 target. Zick & Homsy is unchanged to 4 digits
+across the switch.
+
+The decision is taken at the head of the **first `step()`**, never at `set_solid` time, so a
+`set_dt()` issued after `set_solid` cannot leave it stale; `set_solid` resets the latch. A
+configuration with **no** immersed solid reaches it too — before this, enabling the velocity MG
+there built no hierarchy and segfaulted on the first solve (pre-existing bug, fixed here).
+Declines only for cause: an explicit `set_velocity_multigrid()`, an unvalidated operator mode, or
+a per-rank block shorter than 16 cells on any axis.
+`set_velocity_multigrid_auto(65536, 1 << 23)` restores the 1.0.0 rule; `(0)` disables the V-cycle.
+The V-cycle needs no depth on a pore-confined bed, so no telescoping.

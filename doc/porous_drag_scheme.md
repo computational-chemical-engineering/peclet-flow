@@ -12,6 +12,9 @@ consumer: `coupling/README.md`.
 ρ( ∂u/∂t + u·∇u ) = −∇p + μ∇²u − β(u − u_p) + f                   (gas momentum)
 ```
 
+*(Since flow `2d1564a`, default: the inertia is the ε-conservative `ερ(∂u/∂t + u·∇u)` with a matched
+projection pair — see §6.)*
+
 `ε` is the void fraction deposited from the particles, `u` the **interstitial** gas velocity,
 `β` the interphase drag coefficient per unit volume, `u_p` the particle velocity, `f` body forces.
 **Model B**: the gas feels the full `−∇p` (no `−ε∇p` split); the particles feel drag + gravity only
@@ -107,8 +110,13 @@ singular (no outflow). `diagnostics.set_pressure_graph_amg` propagates to the MG
 
 ## 6. Known limitations / roadmap
 
-- Inertia is `ρ∂u/∂t + ρu·∇u`, not `ρε(…)` — the `ρε_f` convection/time weight (consistent
-  volume-averaged inertia) is a planned accuracy upgrade; it changes `w_f` to `idt·ε_f/(idt·ε_f+β_f)`.
+- ~~Inertia is `ρ∂u/∂t + ρu·∇u`, not `ρε(…)`~~ — **LANDED** in flow `2d1564a` (2026-07-13,
+  "eps-conservative porous momentum + projection pair"): the `ρε_f` convection/time weight
+  (consistent volume-averaged inertia, `ρ_eff = ερ` through the variable-density machinery) with the
+  projection pair re-derived for it (coefficients in the commit message and the
+  `set_porous_conservative` docstring), plus the advective-form compensation `−u·(∇·u)`. Default ON;
+  `diagnostics.set_porous_conservative(False)` ablates it. Porous gas MUST use it (energy-consistent
+  CFD-DEM: without it the MFIX-Exa HCS particle variance rose ~×30).
 - Viscous stress is `μ∇²u`; the volume-averaged form `∇·[εμ(∇u+∇uᵀ)]` (ε and the transpose inside)
   is planned; the normal part slots into the existing `FaceProps` variable-coefficient band.
 - The particle side of the drag is explicit (`u_p` frozen over the DEM sub-steps). For very stiff

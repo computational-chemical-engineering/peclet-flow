@@ -6,8 +6,9 @@ note stays here only while it describes shipped behaviour or steers work that is
 campaign logs, work orders and refuted or superseded design discussion move to
 [`history/`](history/README.md), which is indexed and never deleted.
 
-The short working reference is [`../CLAUDE.md`](../CLAUDE.md); suite-wide contracts are in
-`../../docs/`.
+The short working reference is [`../CLAUDE.md`](../CLAUDE.md), with its measured numbers, rationale
+and long API notes in [`CLAUDE_reference.md`](CLAUDE_reference.md) (moved out 2026-10-08);
+suite-wide contracts are in `../../docs/`.
 
 | note | date | what it describes |
 |---|---|---|
