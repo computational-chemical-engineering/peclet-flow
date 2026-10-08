@@ -56,15 +56,13 @@ and a divergence-free MAC face flux. Then a plan, and a step-by-step implementat
 
 ## Next action
 
-**CODE COMPLETE (43ccd78). Waiting for Frank on:**
-1. **Landing.** scalar-ibm (flow) + scalar-ibm (core: a031c6f, b1fcb6a). Core goes first and is
-   tagged before the flow pointer. Push / main is Frank's call.
+**LANDED on main 2026-10-04** (core ecedb9b, flow a1a8d7d, umbrella 976a979). The register entries were placed in the umbrella on 2026-10-08 (4661441). **Still waiting for Frank on:**
+1. ~~Landing~~ DONE. Core is NOT tagged (a release step).
 2. **Conjugate contact model** (§13 Q4; G13 conjugate row OPEN). Recommendation: a body-aware geometry
    record plus a contact conductance, designed by the architect with Frank's input.
 3. **Naming:** set_scalar_tolerance → set_scalar_residual_tolerance; maxit → max_iter; the
    `cutcell=` spelling (Q5); when cut-cell becomes the default (Q7). See doc/scalar_ibm_naming_rows.md.
-4. **Register entries:** doc/scalar_ibm_register_entries.md + doc/scalar_units_register_entry.md, to
-   be placed in the umbrella at landing.
+4. ~~Register entries~~ PLACED (umbrella 4661441). The NAMING rows are still pending (doc/scalar_ibm_naming_rows.md).
 5. **Battery cadence:** per work order, or only at milestones.
 
 **Follow-up work orders (not started):**
