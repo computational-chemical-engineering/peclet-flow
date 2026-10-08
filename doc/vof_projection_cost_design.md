@@ -26,8 +26,8 @@ periodic, walls in y, ρ_g/ρ_l = 0.02, rtol 1e-8, 10.19 PCG iterations/step).
 | — | **S** (conditional) | host wrap kernels without per-cell wrap selects (peel row ends): bitwise | 0…−4 [fact] | 0 | bitwise | L | S |
 | — | **F4** | persistent host team for the coarse tail | not in this package (§10) | | | | |
 
-**Package total [model]:** host −17.5 (−12…−23), GPU −3.6. **End state (§16):** 1×24 ≈ 61 ms
-after A(b) and this package, ≈ 55 ms with G's −5.7 target, against TBFsolver's 46 (≈ 1.2×).
+**Package total [model]:** host −17.5 (−12…−23), GPU −3.6. **End state (§16):** 1×24 ≈ 59 ms
+after A(b) (measured) and this package, ≈ 53.5 ms with G's −5.5, against TBFsolver's 46 (≈ 1.15×).
 
 **Order of work:** P0 → H → F → C0 → C1–C4 → (S if P0 says go) → D0–D3 → D5 → E0 → E1; X1
 independent. Every item has its own commit(s) and gate (§12, §13).
@@ -722,12 +722,13 @@ build:
 5. G-NUM-P 3–5;
 6. a steady march (`cyl`, Stokes, 400 steps, PCG): final permeability within 1e-6 of `'zero'`.
 
-**G-PERF-P** (S-3, Snellius 1×24 contiguous, rtol 1e-8, znver4, post-A(b); a miss is reported,
-not reverted):
+**G-PERF-P** (S-3, Snellius 1×24 contiguous, rtol 1e-8, znver4, post-A(b); numbers on the S-1
+node's scale — on another node add its measured base offset, e.g. +4.5 ms for job 27783375's; a
+miss is reported, not reverted):
 
 | quantity | gate | expected |
 |---|---|---|
-| step | ≤ 66 | 61 |
+| step | ≤ 66 | 59 |
 | projection | ≤ 31 | 26 |
 | momentum | ≤ 8.5 | 7.3 |
 | launches/step | ≤ 900 | ≈ 840 |
@@ -814,16 +815,19 @@ WO except C0, whose host order change applies at every np (np-tests at their tol
 
 1×24 contiguous genoa, rtol 1e-8, ms/step:
 
-| stage | S-1 [meas-S] | after A(b) | after this package | with G (−5.7 target) |
+A(b) is measured (job 27783375, flow `b993b5d`): 1×24 step 97.6 → 81.0 ms, factor 13.2 → 1.56
+ms/step, on a node whose base is 4.5 ms above S-1's; on the S-1 scale that is 93.1 → ≈ 76.5.
+
+| stage | S-1 [meas-S] | after A(b) [meas, rescaled] | after this package | with G (≈ −5.5) |
 |---|---|---|---|---|
-| projection | 55.3 | ≈ 40.4 | ≈ 26 (22–31) | ≈ 26 |
+| projection | 55.3 | ≈ 40 | ≈ 26 (22–31) | ≈ 26 |
 | momentum | 10.6 | 10.6 | ≈ 7.3 | ≈ 7.3 |
-| curvature | 9.7 | 9.7 | 9.7 | ≈ 4 |
-| block advect, predictor, debris, CSF, outside timers | 17.5 | 17.5 | 17.5 | 17.5 |
-| **step** | **93.1** | **≈ 78** | **≈ 61 (55–66)** | **≈ 55 (49–61)** |
+| curvature | 9.7 | 9.7 | 9.7 | ≈ 4.2 |
+| block advect, predictor, debris, CSF, outside timers | 17.5 | ≈ 16 | ≈ 16 | ≈ 16 |
+| **step** | **93.1** | **≈ 76.5** | **≈ 59 (53–65)** | **≈ 53.5 (47–60)** |
 | TBFsolver, same node | 45.5–46.0 | | | |
 
-This package with A(b) and G gives ≈ 1.2× TBFsolver at 1×24 contiguous (≈ 50 ms at spread
+This package with A(b) and G gives ≈ 1.15× TBFsolver at 1×24 contiguous (≈ 48 ms at spread
 placement, the measured −10 %). It does not reach parity. What remains, largest first: block advect
 (7.6), launch overhead (≈ 5 ms; F4), `ibm_build_diff_var` (3.5), the unavoidable PCG iterations
 (≈ 8–9 × ≈ 1.9 ms). RTX 5080: ≈ 36.5 → ≈ 33 ms (D −2.5, E −0.6, F −0.3, H −0.2).
