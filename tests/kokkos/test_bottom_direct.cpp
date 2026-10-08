@@ -31,7 +31,11 @@
 ///       flag;
 ///   U6  a NaN face coefficient: the flag is raised (lastSolveFailed) and x = 0;
 ///   U7  float M against a host FP64 dense Cholesky solve of A' (the augmented matrix), on the
-///       16x12x8 problems: max |z - x_ref| / max |x_ref| <= 1e-3.
+///       16x12x8 problems: max |z - x_ref| / max |x_ref| <= 1e-3;
+///   U8  (OpenMP) the host schedule of the factor (§14 H-1, A(b)) against the team algorithm, its
+///       oracle, at team sizes {1, 2, 4}: the factor storage (Q, Y, e, s, stat) BITWISE identical,
+///       FP32 and FP64, with the production pivot floor and with a first-attempt floor of 1e30
+///       (every pivot fails: the restart path).
 /// Host sums use long double so the checks measure the device result, not the host's rounding.
 #include <cmath>
 #include <cstdio>
@@ -459,6 +463,41 @@ int runCase(const Case& cs) {
       printf(" %d", T);
     printf(": factor + M %s -> %s\n", ok ? "bitwise identical" : "DIFFER (or < 2 sizes)",
            ok ? "ok" : "FAIL");
+    fails += !ok;
+  }
+  if (kHost) {  // U8: the host schedule against the team algorithm, its bitwise oracle
+    bool ok = true;
+    std::vector<int> used;
+    auto agree = [&](const auto& A, const auto& B) {
+      return sameBits(A.Q, B.Q) && sameBits(A.e, B.e) && sameBits(A.s, B.s) &&
+             (!pl.border || sameBits(A.Y, B.Y)) && sameBits(A.stat, B.stat);
+    };
+    for (int T : {1, 2, 4}) {
+      for (double tau : {kBottomPivotTol, 1e30}) {  // 1e30: every first-attempt pivot fails
+        int Th = 0, Tt = 0, Th64 = 0, Tt64 = 0;
+        const auto Dh = mg.directFactorForTest<float>(T, tau, &Th);
+        const auto Dt = mg.directFactorForTest<float>(T, tau, &Tt, /*teamAlgorithm=*/true);
+        const auto Dh64 = mg.directFactorForTest<double>(T, tau, &Th64);
+        const auto Dt64 = mg.directFactorForTest<double>(T, tau, &Tt64, /*teamAlgorithm=*/true);
+        if (Th != T || Tt != T || Th64 != T || Tt64 != T)
+          continue;
+        if (tau == kBottomPivotTol)
+          used.push_back(T);
+        const bool same = agree(Dh, Dt) && agree(Dh64, Dt64);
+        if (!same)
+          printf("[%s] U8 team size %d, first pivot floor %.0e: host schedule differs\n", cs.name,
+                 T, tau);
+        ok = ok && same;
+      }
+    }
+    ok = ok && used.size() >= 2;
+    printf(
+        "[%s] U8 host schedule vs team algorithm (FP32 + FP64, with and without a restart), "
+        "team sizes",
+        cs.name);
+    for (int T : used)
+      printf(" %d", T);
+    printf(": %s -> %s\n", ok ? "bitwise identical" : "DIFFER (or < 2 sizes)", ok ? "ok" : "FAIL");
     fails += !ok;
   }
   if (kHost) {  // U3, host: the whole FCG solve is bitwise across T (single-lane reductions)

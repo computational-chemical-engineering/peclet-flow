@@ -402,6 +402,15 @@ target_include_directories(test_bottom_direct PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test_bottom_direct PRIVATE Kokkos::kokkos)
 add_test(NAME bottom_direct COMMAND test_bottom_direct)
 set_tests_properties(bottom_direct PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
+# The factor launch's timing probe (§14 H-1): min / median ms per team size, bitwise check across
+# them. An instrument, not a gate: LABELS bench (excluded by `ctest -LE bench`).
+add_executable(bench_bottom_factor bench_bottom_factor.cpp)
+target_include_directories(bench_bottom_factor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(bench_bottom_factor PRIVATE Kokkos::kokkos)
+add_test(NAME bench_bottom_factor COMMAND bench_bottom_factor 5)
+set_tests_properties(bench_bottom_factor PROPERTIES LABELS bench ENVIRONMENT
+                     "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
 
 # PHYSICAL DOMAINS (suite/docs/PHYSICAL_UNITS_PLAN.md Phase 1). Two gates off one binary:
 #  units_identity        — the physical constructor at extent == cells reproduces the cell-unit

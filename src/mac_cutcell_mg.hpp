@@ -2961,9 +2961,11 @@ class CutcellMG {
     return kHostMemory ? std::min(kBottomHostTeam, tmax) : tmax;
   }
   // The factor launch: one team, T = directTeam(team) (the U3 hook passes T; the factor is bitwise
-  // independent of it). Returns the team size used.
+  // independent of it). `teamAlgorithm` (a test hook, U8) runs the team algorithm on a host
+  // backend instead of the host schedule. Returns the team size used.
   template <class FR>
-  int launchDirectFactor(const BottomDirect<FR>& D, int team, double tauPiv0, bool probe = true) {
+  int launchDirectFactor(const BottomDirect<FR>& D, int team, double tauPiv0, bool probe = true,
+                         bool teamAlgorithm = false) {
     const Level& bt = lv_.back();
     BottomFactorKernel<FR, FPC> k;
     k.D = D;
@@ -2974,6 +2976,7 @@ class CutcellMG {
     k.kc = dirKc_;
     k.aug = dirAug_;
     k.tauPiv0 = tauPiv0;
+    k.teamAlgorithm = teamAlgorithm ? 1 : 0;
     const std::size_t scratch = BottomFactorKernel<FR, FPC>::scratchBytes(D.pl.b);
     const int T = directTeam(k, team, probe, scratch);
     Kokkos::parallel_for(
@@ -4452,16 +4455,17 @@ class CutcellMG {
   }
   // §13 hooks.
   // `directFactorForTest<FR>`: a fresh factor of the bottom in FR arithmetic (team T, 0 = the
-  // default), `*Tused` = the team size it ran with. `directApplyForTest`: z = M(r) by that factor
+  // default), `*Tused` = the team size it ran with; `teamAlgorithm`: by the team algorithm even on
+  // a host backend (the host schedule's oracle, U8). `directApplyForTest`: z = M(r) by that factor
   // through the FCG kernel's precondition-only path (`noMean`: without the component means'
   // removal); returns the team size. `directSolveForTest`: the production solve (FP32 factor,
   // lazily refactored) on the bottom's rhs; returns the inner iterations.
   const BottomPlanes& directPlanes() const { return dirPlanes_; }
   template <class FR>
   BottomDirect<FR> directFactorForTest(int team, double tauPiv0 = kBottomPivotTol,
-                                       int* Tused = nullptr) {
+                                       int* Tused = nullptr, bool teamAlgorithm = false) {
     BottomDirect<FR> D = BottomDirect<FR>::allocate(dirPlanes_, lv_.back().ext);
-    const int T = launchDirectFactor(D, team, tauPiv0);
+    const int T = launchDirectFactor(D, team, tauPiv0, true, teamAlgorithm);
     Kokkos::fence();
     if (Tused)
       *Tused = T;
