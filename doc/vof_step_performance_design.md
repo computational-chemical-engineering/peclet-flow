@@ -2449,6 +2449,27 @@ The statistics kernels (`area`, moments) belong to WO-9 and are not touched here
 | **step** | **143.6** | **≈ 119** | **≈ 69 (60–78)** |
 | TBFsolver, same 24 cores [brief] | 46 | | |
 
+**Measured, Snellius S-1 (2026-10-08) [meas-S]** — flow 38e80e6 = H-0…H-4 without H-5, znver4,
+1×24 contiguous cores 0–23, rtol 1e-8, `'direct'` bottom; stages from the 30-step kernel-profile
+run (step 93.7), step from the 300-step runs (log, "Snellius S-1"):
+
+| stage | model "main line" | S-1 measured |
+|---|---|---|
+| projection | 37 (32–42) | 55.3 |
+| momentum | 8.5 (7.5–10.5) | 10.6 |
+| curvature | 7.5 (6–9) | 9.7 |
+| block advect | 6 (5–8) | 7.6 |
+| predictor + debris + csf | 5.5 | 4.5 |
+| outside the stage timers | 4.5 | 6.1 |
+| **step** (best median, 300 steps) | **≈ 69 (60–78)** | **93.1** (`'algebraic'` 95.8) |
+| TBFsolver, 8×3 same node | | 45.5–46.0 |
+
+The projection carries the miss: `mg_bottom_factor` (the FP32 factor, rebuilt every step) alone is
+16.9 ms/step against the model's ≈ 3 ms for the whole bottom, and H-5 (−2) is not in. Other
+layouts: spread over 12 CCDs 83.8 (`'algebraic'` 89.4); 8×3 one rank per CCD 90.7, 6×4 106.5, 3×8
+107.9 (all `'algebraic'`: the distributed `'direct'` is H-6); generic build 98.0 (znver4 −5 %).
+F4 not triggered (937 launches/step < 1100).
+
 Projection in the main line, per V-cycle or iteration [model]:
 - smoother 1.1 ms per V-cycle;
 - residual 0.3;

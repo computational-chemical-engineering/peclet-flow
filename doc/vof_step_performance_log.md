@@ -938,3 +938,63 @@ missed: 66 of 69 calls re-impose ONE component inside the momentum sweeps). Inte
 (0.75; controls moved 0.74-1.04) -- all to be re-measured in S-1.
 Batteries (`ctest -LE bench`, final tree): host 194/194; CUDA 193/194 + collocated_stability_guard
 passed alone (110 s; it timed out at 3600 s in the battery with 32 processes on the GPU).
+
+## 2026-10-08 — Snellius S-1: host `'direct'` bottom vs `'algebraic'`; §14 lands on main
+
+Genoa node (EPYC 9654, 24 L3s of 8 cores), flow 38e80e6 (cpu14-h4 before the rebase), core v1.4.0,
+GCC 13.3 + OpenMPI 5.0.3, `-DPECLET_FLOW_HOST_ARCH=znver4` unless "generic". Protocol H-0: np 1
+without `init_mpi`, case rtol 1e-8, ckpt_t43, N = 300 steps after 5 warm-up, 2 repetitions; the
+number is the better of the two per-run step medians. Job 27770798 (main), 27770799 (kprof). Raw:
+`bubble_column_perf/s1/summary_main.txt`, `summary_kprof.txt` (scripts beside them); remote
+`/projects/0/prjs1022/peclet/bubble-cpu/s1/results/`. Rank placement audited per run (never a rank
+across two CCDs except the 1x24 rows, which are one rank by construction).
+
+| layout | bottom | ms/step | press it/step |
+|---|---|---|---|
+| 1x24, cores 0-23 (3 CCDs) | direct / algebraic | 93.10 / 95.81 | 10.19 |
+| 1x24, OMP_WAIT_POLICY=active | direct / algebraic | 94.86 / 96.22 | 10.19 |
+| 1x24, spread over 12 CCDs (every 4th core) | direct / algebraic | 83.81 / 89.38 | 10.19 |
+| 6x4, CCD-aligned | algebraic (direct ineligible multi-rank until WO-H6) | 106.53 | 10.19 |
+| 3x8, one rank per CCD | algebraic | 107.87 | 10.19 |
+| 8x3, one rank per CCD (8 CCDs) | algebraic | 90.72 | 10.19 |
+| 1x24, generic build | direct | 97.95 (znver4 is 5 % faster) | 10.19 |
+| TBFsolver 8x3, same node | — | 45.45 / 46.04 (2 runs) | — |
+
+Old published peclet number (old protocol: distributed path at np 1, rtol 1e-10): 144 ms. The
+§14.4 model said ≈ 119 after H-0 and ≈ 69 (60-78) for the main line H-0…H-5 + WO-10; measured 93.1
+without H-5 (H-5 not implemented).
+
+**Verdict (orchestrator DECISION 2026-10-08):** `'direct'` is faster than GraphAMG at every
+single-rank layout (contiguous −2.7 ms, active wait −1.4, spread −5.6), so H-1 stays as designed:
+host `'auto'` → `'direct'` where eligible (commit 3687a09 on cpu14-h4 kept, not reverted).
+
+**Kernel profile** (Kokkos simple kernel timer, 20 steps, rank 0). 1x24 direct: 937 launches/step,
+93.1 ms kernel time; stage timers (30 steps, loop 95.6 ms/step): projection 55.3, momentum 10.6,
+curvature 9.7, block_advect 7.6, predictor 3.1, csf 0.8, debris 0.6 ms. Top kernels (ms/step,
+launches): `mg_bottom_factor` 16.9 (1 — the FP32 block-tridiagonal factor is rebuilt every step and
+is the single largest kernel), `cc_smooth` 12.4 (240), `batch_curv_list` 7.2 (4), `mgmeanr` 3.9 (22),
+`vmg_resid` 3.6 (9), `mgdot` 3.5 (20), `ibm_build_diff_var` 3.5 (3), `ibm_rbgs` 2.9, `prolong` 2.7
+(30), `bc_vel` 2.3 (47), `ibm_pfill3` 2.2 (55), `mg_bottom_direct` 1.9 (10). 6x4 algebraic: 1990-2038
+launches/step/rank, 68.5-71.8 ms kernel time; projection 67.7 ms of a 107.7 ms step; halo
+pack/unpack/selfCopy 379 launches each.
+
+**Trigger answers.** Q-H7: 937 < 1100 launches/step at 1x24, so F4 is NOT triggered (the step, 93,
+is above 78, but the rule is AND). Q-H5: spread placement is 10 % faster than contiguous (memory
+bandwidth: 12 L3s vs 3); the default stays "publish contiguous", TBFsolver is not rerun at spread —
+the spread number is recorded alongside. Q-H3 (T_host): not measured by S-1. Open item (not
+designed): `mg_bottom_factor` at 16.9 ms/step is the obvious next host target (factor reuse across
+steps, or more lanes).
+
+**Merge gate (cpu14-h4 rebased on main 5795fb0; two mechanical conflicts: `step()`'s domain-BC
+re-imposition after the projection — `applyVelocityBcAll` kept, scalar-IBM's
+`scalarCaptureOpenFaceFlux` kept after it — and this log's tail).** Baselines rebuilt at 5795fb0
+(`../flow-main-base`); scripts `bubble_column_perf/gate_s1merge{,_cuda}.sh`, output
+`gate_s1merge/`. Host (host-openmp, 8 threads): state_hash 12/12 + np2 identical, 50-step column
+dump bitwise (24 arrays) with `--bottom-solver algebraic` (host `'direct'` differs by design, H-1).
+CUDA (nvidia-cuda prefix, nvcc 13.4 — the system toolkit moved 13.2 -> 13.4 on 2026-10-08, which
+broke every existing CUDA build tree's cached CUDAToolkit paths; fresh trees `build_cg134` /
+`build_cuda134`): state_hash 12/12 + np2 identical, dump bitwise with `algebraic` and with the
+default (`'direct'`) bottom. Batteries (`ctest -LE bench`, 231 tests after scalar-IBM): host
+231/231; CUDA 227/231 at -j6, the four failures (`scalar_cutcell_g4`, `_g6_2`, `_g6_4`, `_g6_5`)
+all `Cuda memory space failed to allocate` on a GPU shared with another session — rerun serially on the idle GPU: 4/4 pass
+(g4 6 s, g6_2/4/5 29-31 s), so 231/231.
