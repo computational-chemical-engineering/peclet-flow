@@ -28,6 +28,15 @@
 /// Reproducibility (§13.2): every stored or output scalar is computed by ONE thread in an order
 /// fixed by the algorithm and kBottomTile, never by the team size -- no team reductions here -- so
 /// the factor and M(r) are bitwise independent of T.
+///
+/// On a HOST backend the factor runs a second schedule of the same arithmetic (§14 H-1, A(b);
+/// BottomFactorKernel::hostAssemble / hostInvert / hostBorder): every stored scalar is the team
+/// algorithm's expression with its operands in the same order, but the work is cut into a few
+/// barrier-free phases per tile (the team version publishes every column of every diagonal tile
+/// with a barrier: ~170 per plane) and each phase computes many independent outputs in a
+/// vectorizable lane loop instead of one serial dot product per thread. Its factor storage (Q, Y,
+/// e, s, stat) is bitwise identical to the team algorithm's on the same backend (ctest
+/// `bottom_direct` U8); only the scratch layouts of Sg, L and W differ.
 #pragma once
 
 #include <Kokkos_Core.hpp>
@@ -42,6 +51,13 @@ namespace peclet::flow {
 #define PECLET_BOTTOM_UNROLL _Pragma("unroll 16")
 #else
 #define PECLET_BOTTOM_UNROLL
+#endif
+// The host factor's lane loops (one output per iteration, no reduction): `omp simd` on a host
+// compiler. With -ffp-contract=off (the host flags) vectorizing them changes no bit.
+#if defined(__CUDACC__) || defined(__HIPCC__)
+#define PECLET_BOTTOM_HOST_SIMD
+#else
+#define PECLET_BOTTOM_HOST_SIMD PECLET_FLOW_OMP_SIMD
 #endif
 
 inline constexpr int kBottomMaxPlane = 192;  // b cap (§13.9 Q-D5)
@@ -285,6 +301,10 @@ struct BottomFactorKernel {
   Kokkos::View<const int*, CCMem> comp, kc;
   Kokkos::View<const double*, CCMem> aug;
   double tauPiv0 = kBottomPivotTol;  // the first attempt's pivot floor (a test hook raises it)
+  // A host backend runs the host schedule (hostAssemble / hostInvert / hostBorder) unless this
+  // test hook asks for the team algorithm, its bitwise oracle (ctest `bottom_direct` U8).
+  static constexpr bool kHostFactor = std::is_same_v<CCMem, Kokkos::HostSpace>;
+  int teamAlgorithm = 0;
 
   // s (§13.4.1): the re-summed diagonal and the scaling, one thread per cell
   KOKKOS_INLINE_FUNCTION void scaling(const Member& t) const {
@@ -532,9 +552,313 @@ struct BottomFactorKernel {
       t.team_barrier();
     }
   }
+
+  // --- The host schedule (§14 H-1, A(b)) ------------------------------------------------------
+  // The same scalars as assemble / invert / border, each the same expression with its operands in
+  // the same order; what changes is who computes what between barriers. Scratch layouts (host
+  // only): Sg holds Sigma's lower triangle by COLUMNS, S[j b + i] = Sigma(i, j) for i >= j; L holds
+  // L by columns, Lt[m b + i] = L(i, m); W is row-major W(i, j) as on a device. A lane loop runs
+  // over independent outputs (rows i, or columns j), each lane continuing its own accumulator in
+  // ascending order, so vectorizing it reorders nothing. A thread takes a contiguous share of the
+  // outputs, balanced by their cost (hostShare), or every T-th column where columns are far apart.
+
+  // acc[i] += x[m b + i] * y[m b] for m = m0 .. m1-1 IN THAT ORDER, each lane i in [lo, hi): four
+  // m per pass over the lanes, so acc is loaded and stored once per four terms -- each lane still
+  // adds its terms one at a time in ascending m.
+  KOKKOS_INLINE_FUNCTION static void hostAccumulate(FacReal* acc, const FacReal* x,
+                                                    const FacReal* y, int b, int m0, int m1, int lo,
+                                                    int hi) {
+    int m = m0;
+    for (; m + 4 <= m1; m += 4) {
+      const FacReal *x0 = x + m * b, *x1 = x0 + b, *x2 = x1 + b, *x3 = x2 + b;
+      const FacReal y0 = y[m * b], y1 = y[(m + 1) * b], y2 = y[(m + 2) * b], y3 = y[(m + 3) * b];
+      PECLET_BOTTOM_HOST_SIMD
+      for (int i = lo; i < hi; ++i) {
+        FacReal a = acc[i];
+        a += x0[i] * y0;
+        a += x1[i] * y1;
+        a += x2[i] * y2;
+        a += x3[i] * y3;
+        acc[i] = a;
+      }
+    }
+    for (; m < m1; ++m) {
+      const FacReal* xm = x + m * b;
+      const FacReal ym = y[m * b];
+      PECLET_BOTTOM_HOST_SIMD
+      for (int i = lo; i < hi; ++i)
+        acc[i] += xm[i] * ym;
+    }
+  }
+  // [lo, hi): this thread's contiguous share of [0, n) when index i costs w(i) -- equal prefix
+  // shares of the total. Contiguous, not round-robin: neighbouring outputs share cache lines.
+  template <class Wf>
+  KOKKOS_INLINE_FUNCTION static void hostShare(const Member& t, int n, const Wf& w, int& lo,
+                                               int& hi) {
+    const int rank = t.team_rank(), T = t.team_size();
+    double tot = 0.0;
+    for (int i = 0; i < n; ++i)
+      tot += w(i);
+    lo = n;
+    hi = n;
+    double cum = 0.0;
+    for (int i = 0; i < n; ++i) {
+      if (lo == n && cum >= tot * rank / T)
+        lo = i;
+      if (cum >= tot * (rank + 1) / T) {
+        hi = i;
+        break;
+      }
+      cum += w(i);
+    }
+    if (lo > hi)
+      lo = hi;
+  }
+  // assemble: the team version's entry() per (i, j) re-scans cell i's six faces for every j; here
+  // a row's dense values start at entry()'s initial value and each face adds its term to its own
+  // partner j in face order -- per (i, j) the same additions in the same order -- then the
+  // augmentation, then delta on the diagonal, then the cast and the mode's update.
+  KOKKOS_INLINE_FUNCTION void hostAssemble(const Member& t, int k, int mode, double delta) const {
+    const int b = D.pl.b, P = D.pl.P, s = D.pl.s;
+    FacReal* S = D.Sg.data();
+    int lo, hi;
+    hostShare(t, b, [](int i) { return (double)(i + 1); }, lo, hi);
+    for (int i = lo; i < hi; ++i) {
+      double v[kBottomMaxPlane];
+      for (int j = 0; j < i; ++j)
+        v[j] = 0.0;
+      v[i] = 1.0;
+      const int fi = k * b + i;
+      int c[3], nb[3];
+      D.coords(fi, c);
+      const int ei = D.extIndex(c);
+      const double si = D.s(fi);
+      double af = 0.0;
+      for (int f6 = 0; f6 < 6; ++f6)
+        if (D.face(AFX, AFY, AFZ, c, ei, f6, nb, af) && nb[s] == k) {
+          const int fj = D.factorIndex(nb);
+          if (fj - k * b <= i)
+            v[fj - k * b] += si * af * D.s(fj);
+        }
+      const int ci = comp(ei);
+      if (ci >= 0 && ci < (int)kc.extent(0) && kc(ci) == k)
+        for (int j = 0; j <= i; ++j)
+          if (comp(D.extOf(k * b + j)) == ci)
+            v[j] += aug(ci);
+      v[i] += delta;
+      for (int j = 0; j <= i; ++j) {
+        FacReal a = (FacReal)v[j];
+        if (mode == 1)
+          a = a - D.e(k, i) * D.Q(k - 1, i, j) * D.e(k, j);
+        else if (mode == 2)
+          a = (a - D.e(0, i) * D.Y(0, j, i)) - D.e(P - 1, i) * D.Y(P - 2, j, i);
+        S[j * b + i] = a;
+      }
+    }
+    t.team_barrier();
+  }
+  // invert: per tile, ONE thread factors the diagonal tile (row by row: L(i, j) for j < i, then
+  // the pivot) and the panel below it (column by column, a lane per row), one barrier; the team
+  // applies the trailing update (a column per thread, a lane per row), one barrier. Then W = L^{-1}
+  // by rows (a lane per column; each thread a contiguous column range, rows in order) and Q = W^T W
+  // by rows (a lane per column) -- one barrier each. The lane loops are long (up to b), so the
+  // accumulators' loads and stores pipeline instead of forming a latency chain.
+  KOKKOS_INLINE_FUNCTION bool hostInvert(const Member& t, int k, double tauPiv, int flag) const {
+    const int b = D.pl.b, rank = t.team_rank(), T = t.team_size();
+    FacReal* S = D.Sg.data();
+    FacReal* Lt = D.L.data();
+    FacReal* W = D.W.data();
+    for (int j0 = 0; j0 < b; j0 += kBottomTile) {
+      const int j1 = (j0 + kBottomTile < b) ? j0 + kBottomTile : b;
+      const int nc = j1 - j0;
+      Kokkos::single(Kokkos::PerTeam(t), [&]() {
+        for (int r = 0; r < nc; ++r) {  // 1. the diagonal tile
+          const int i = j0 + r;
+          for (int c = 0; c < r; ++c) {
+            const int j = j0 + c;
+            FacReal a2 = 0;
+            for (int m = 0; m < c; ++m)
+              a2 += Lt[(j0 + m) * b + i] * Lt[(j0 + m) * b + j];
+            Lt[j * b + i] = (S[j * b + i] - a2) / Lt[j * b + j];
+          }
+          FacReal acc = 0;
+          for (int m = 0; m < r; ++m)
+            acc += Lt[(j0 + m) * b + i] * Lt[(j0 + m) * b + i];
+          const FacReal p = S[i * b + i] - acc;
+          if (!((double)p > tauPiv))
+            D.stat(flag) = 1;
+          Lt[i * b + i] = Kokkos::sqrt(p);
+        }
+        if (D.stat(flag))
+          return;
+        for (int c = 0; c < nc; ++c) {  // 2. the panel, rows j1..b-1
+          const int j = j0 + c;
+          FacReal acc[kBottomMaxPlane];
+          PECLET_BOTTOM_HOST_SIMD
+          for (int i = j1; i < b; ++i)
+            acc[i] = 0;
+          hostAccumulate(acc, Lt + j0 * b, Lt + j0 * b + j, b, 0, c, j1, b);
+          const FacReal ljj = Lt[j * b + j];
+          FacReal* Lj = Lt + j * b;
+          const FacReal* Sj = S + j * b;
+          PECLET_BOTTOM_HOST_SIMD
+          for (int i = j1; i < b; ++i)
+            Lj[i] = (Sj[i] - acc[i]) / ljj;
+        }
+      });
+      t.team_barrier();
+      if (D.stat(flag))
+        return false;
+      if (j1 < b) {
+        for (int j = j1 + rank; j < b; j += T) {  // 3. the trailing update, column j, rows j..b-1
+          FacReal acc[kBottomMaxPlane];
+          PECLET_BOTTOM_HOST_SIMD
+          for (int i = j; i < b; ++i)
+            acc[i] = 0;
+          hostAccumulate(acc, Lt + j0 * b, Lt + j0 * b + j, b, 0, nc, j, b);
+          FacReal* Sj = S + j * b;
+          PECLET_BOTTOM_HOST_SIMD
+          for (int i = j; i < b; ++i)
+            Sj[i] = Sj[i] - acc[i];
+        }
+        t.team_barrier();
+      }
+    }
+    // W(i, j) = -(sum_{m=j}^{i-1} L(i, m) W(m, j)) / L(i, i), W(i, i) = 1 / L(i, i): row i of this
+    // thread's columns [ja, jz) (equal shares of the (b - j)^2 work) sums m = ja .. i-1 in order,
+    // lane j taking the term m once m >= j -- each lane's sum is m = j .. i-1, ascending.
+    int ja, jz;
+    hostShare(t, b, [&](int j) { return (double)(b - j) * (b - j); }, ja, jz);
+    for (int i = ja; i < b; ++i) {
+      FacReal acc[kBottomMaxPlane];
+      const int jt = (i < jz) ? i : jz;  // lanes ja .. jt-1 lie left of the diagonal
+      PECLET_BOTTOM_HOST_SIMD
+      for (int j = ja; j < jt; ++j)
+        acc[j] = 0;
+      int m = ja;
+      for (; m + 4 <= i; m += 4) {  // terms m .. m+3: all four for the lanes j <= m, ...
+        hostAccumulate(acc, W, Lt + i, b, m, m + 4, ja, (m + 1 < jz) ? m + 1 : jz);
+        for (int d = 1; d < 4 && m + d < jz; ++d)  // ... m+d .. m+3 for lane m+d (its first)
+          for (int q = m + d; q < m + 4; ++q)
+            acc[m + d] += Lt[q * b + i] * W[q * b + m + d];
+      }
+      for (; m < i; ++m)
+        hostAccumulate(acc, W, Lt + i, b, m, m + 1, ja, (m + 1 < jz) ? m + 1 : jz);
+      const FacReal lii = Lt[i * b + i];
+      FacReal* Wi = W + i * b;
+      PECLET_BOTTOM_HOST_SIMD
+      for (int j = ja; j < jt; ++j)
+        Wi[j] = -acc[j] / lii;
+      if (i < jz)
+        Wi[i] = FacReal(1) / lii;
+    }
+    t.team_barrier();
+    FacReal* Qk = &D.Q(k, 0, 0);
+    int qa, qz;
+    hostShare(t, b, [&](int i) { return (double)(b - i) * (i + 1); }, qa, qz);
+    for (int i = qa; i < qz; ++i) {  // Q(i, j <= i) = sum_{m >= i} W(m, i) W(m, j)
+      FacReal acc[kBottomMaxPlane];
+      PECLET_BOTTOM_HOST_SIMD
+      for (int j = 0; j <= i; ++j)
+        acc[j] = 0;
+      hostAccumulate(acc, W, W + i, b, i, b, 0, i + 1);
+      for (int j = 0; j <= i; ++j) {
+        Qk[i * b + j] = acc[j];
+        Qk[j * b + i] = acc[j];
+      }
+    }
+    t.team_barrier();
+    return true;
+  }
+  // border: Y(., c, .) depends on its own column c only, so a thread runs one column through the
+  // whole forward and backward sweep (a lane per row i) with no barrier between the planes.
+  KOKKOS_INLINE_FUNCTION void hostBorder(const Member& t) const {
+    const int P = D.pl.P, b = D.pl.b, rank = t.team_rank(), T = t.team_size();
+    for (int c = rank; c < b; c += T) {
+      FacReal acc[kBottomMaxPlane], br[kBottomMaxPlane];
+      for (int k = 0; k <= P - 2; ++k) {  // forward
+        for (int j = 0; j < b; ++j) {
+          FacReal bj = 0;
+          if (j == c)
+            bj = (k == 0 ? D.e(0, j) : FacReal(0)) + (k == P - 2 ? D.e(P - 1, j) : FacReal(0));
+          br[j] = (k == 0) ? bj : bj - D.e(k, j) * D.Y(k - 1, c, j);
+        }
+        PECLET_BOTTOM_HOST_SIMD
+        for (int i = 0; i < b; ++i)
+          acc[i] = 0;
+        for (int j = 0; j < b; ++j) {
+          const FacReal* Qj = &D.Q(k, j, 0);
+          const FacReal bj = br[j];
+          PECLET_BOTTOM_HOST_SIMD
+          for (int i = 0; i < b; ++i)
+            acc[i] += Qj[i] * bj;
+        }
+        FacReal* Yk = &D.Y(k, c, 0);
+        PECLET_BOTTOM_HOST_SIMD
+        for (int i = 0; i < b; ++i)
+          Yk[i] = acc[i];
+      }
+      for (int k = P - 3; k >= 0; --k) {  // backward
+        PECLET_BOTTOM_HOST_SIMD
+        for (int i = 0; i < b; ++i)
+          acc[i] = 0;
+        for (int j = 0; j < b; ++j) {
+          const FacReal* Qj = &D.Q(k, j, 0);
+          const FacReal y = D.e(k + 1, j) * D.Y(k + 1, c, j);
+          PECLET_BOTTOM_HOST_SIMD
+          for (int i = 0; i < b; ++i)
+            acc[i] += Qj[i] * y;
+        }
+        FacReal* Yk = &D.Y(k, c, 0);
+        PECLET_BOTTOM_HOST_SIMD
+        for (int i = 0; i < b; ++i)
+          Yk[i] = Yk[i] - acc[i];
+      }
+    }
+    t.team_barrier();
+  }
+  // operator()'s control flow (attempts, shifts, flags) on the host schedule.
+  KOKKOS_INLINE_FUNCTION void hostFactor(const Member& t) const {
+    const int P = D.pl.P;
+    const int Pt = D.pl.border ? P - 1 : P;
+    Kokkos::single(Kokkos::PerTeam(t), [&]() {
+      for (int a = 0; a < kBottomAttempts; ++a)
+        D.stat(2 + a) = 0;
+    });
+    scaling(t);  // (its barrier also publishes the cleared flags)
+    couplings(t);
+    int attempt = 0;
+    bool ok = false;
+    for (; attempt < kBottomAttempts && !ok; ++attempt) {
+      const double delta = bottomShift(attempt);
+      const double tauPiv = (attempt == 0) ? tauPiv0 : kBottomPivotTol;
+      ok = true;
+      for (int k = 0; k < Pt && ok; ++k) {
+        hostAssemble(t, k, k == 0 ? 0 : 1, delta);
+        ok = hostInvert(t, k, tauPiv, 2 + attempt);
+      }
+      if (ok && D.pl.border) {
+        hostBorder(t);
+        hostAssemble(t, P - 1, 2, delta);
+        ok = hostInvert(t, P - 1, tauPiv, 2 + attempt);
+      }
+    }
+    const int restarts = attempt - 1;
+    Kokkos::single(Kokkos::PerTeam(t), [&]() {
+      D.stat(0) = ok ? 1 : 0;
+      D.stat(1) = restarts;
+    });
+  }
+
   KOKKOS_INLINE_FUNCTION void operator()(const Member& t) const {
     const int P = D.pl.P;
     const int Pt = D.pl.border ? P - 1 : P;
+    if constexpr (kHostFactor) {
+      if (!teamAlgorithm) {
+        hostFactor(t);
+        return;
+      }
+    }
     const SMat Ls(t.team_scratch(0), D.pl.b, kBottomTile + 1);
     const SMat St(t.team_scratch(0), kBottomTile, kBottomTile + 1);
     Kokkos::single(Kokkos::PerTeam(t), [&]() {
