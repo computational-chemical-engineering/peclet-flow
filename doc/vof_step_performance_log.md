@@ -1048,3 +1048,30 @@ bottom.) CUDA: state_hash + np2 identical, dump bitwise, U3 pass. Host battery `
 **Device factor (not acted on).** USER 2026-10-08 (relayed by the orchestrator): device A(b)
 wanted later — the device factor costs 7–9 ms per launch on the RTX 5080 (walls-y), out of a
 36–37 ms step; same goal: bitwise-faster schedule first.
+
+## 2026-10-08 — A(b) genoa confirmation (Snellius job 27783375, tcn748)
+
+Builds on the node against core ecedb9b (umbrella pin; v1.4.0 lacks `scheme/cut_cell_geometry.hpp`,
+the first submission 27783313 failed at build for that reason). base = afbc8b6 (main just before
+A(b)), new = d8cd5ca; znver4; 1x24 contiguous, `direct`, rtol 1e-8, ckpt_t43, N=100, warm 5,
+interleaved twice; press_iters_mean 10.05 both.
+
+| run | base ms/step (median) | new ms/step (median) |
+|---|---|---|
+| r1 | 97.72 (97.52) | 81.13 (80.63) |
+| r2 | 97.42 (97.11) | 80.85 (80.23) |
+
+kprof (20 steps, 937 launches both): kernel time 91.2 -> 78.8 ms/step; `mg_bottom_factor` 13.21 ->
+1.56; `cc_smooth` 13.7 / 12.6 (node noise); `mg_bottom_direct` 1.94 / 1.93.
+`bench_bottom_factor` (1 task x 24 cores, 30 reps, median ms; all bitwise identical to T=1):
+
+| T | 1 | 2 | 3 | 4 | 6 | 8 | 12 | 24 |
+|---|---|---|---|---|---|---|---|---|
+| host, walls-y (P12 b128) | 2.10 | 1.51 | 1.35 | 1.24 | **1.08** | 1.20 | 1.89 | 2.46 |
+| host, periodic (P16 b96) | 3.42 | 2.21 | 1.75 | 1.46 | 1.35 | **1.33** | 2.00 | 2.78 |
+| team, walls-y | 17.6 | 13.0 | 11.4 | 18.1 | 12.0 | 17.0 | 10.6 | 11.4 |
+
+The node's base (97.6) is 4.5 ms above S-1's 93.1 on tcn1088 (node-to-node); the A/B on one node is
+the number: -16.6 ms/step. Q-H3 for the factor: T = 6 (walls-y best; periodic within 0.02 of T = 8);
+the shipped constant 2 costs ~0.45 ms/step — change pending (bitwise).
+

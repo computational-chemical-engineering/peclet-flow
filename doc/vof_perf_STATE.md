@@ -22,8 +22,11 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
 - **A(b) landed 2026-10-08** (flow 62f91ef, 591bde4): the host `mg_bottom_factor` runs a bitwise
   host schedule (same scalars, ~2.5 barriers per tile, vectorized lanes); factor bytes, U8, host
   G-BIT (OMP 1/8/24, `direct`) and CUDA identical to main. Workstation: 5.6-6.5 -> 1.05-1.5 ms per
-  factor (kprof 1x24: 6.6 -> 1.5-1.8 ms/step). DECISION `kBottomHostFactorTeam = 2` (alternative 4)
-  pending the genoa confirmation `bubble_column_perf/s1/s1_bfac.slurm` (NOT submitted: user OK).
+  factor (kprof 1x24: 6.6 -> 1.5-1.8 ms/step). **Genoa confirmed** (job 27783375, base afbc8b6 vs
+  d8cd5ca interleaved, 1x24 `direct`, N=100 x2): step 97.4-97.7 -> 80.9-81.1 ms (-16.6, -17 %);
+  `mg_bottom_factor` 13.2 -> 1.56 ms/step. Genoa factor sweep (walls-y P12 b128): host T=6 1.08 ms
+  best (T=2 1.51, T=8 1.20; team kernel 9-18 ms) -> PENDING: set `kBottomHostFactorTeam` 2 -> 6
+  (bitwise, ~-0.45 ms/step; do it with the next code package). Peclet 1x24 now ~81 vs TBFsolver 46.
 - PARKED: E2(a) constant-coefficient driver; E2(b) FFT solver DROPPED 2026-10-08 (register).
 
 **Next action.**
@@ -34,10 +37,9 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
 3. WO-H5 (Krylov reduction fusion on host), H6 (distributed host 'direct'), H7, then S-2 (incl. a
    64x3 and 24x8 profile), H8 (flow CLAUDE.md: host no longer "keeps GraphAMG").
 
-**Open.** Genoa confirmation of A(b) (S-1 had `mg_bottom_factor` 16.9 ms/step at 1x24): job
-`s1_bfac.slurm`, needs the user's OK. A(a) (factor reuse across steps, a numerics change) not
+**Open.** A(a) (factor reuse across steps, a numerics change) not
 designed. The DEVICE factor: next action 2. Q-H3:
-factor T measured (2 chosen, above); the solve kernel's `kBottomHostTeam = 8` not re-measured. Spread placement 10 % faster than contiguous:
+factor T measured (genoa: 6 best, change pending); the solve kernel's `kBottomHostTeam = 8` not re-measured. Spread placement 10 % faster than contiguous:
 publish contiguous, record spread alongside (Q-H5). The vof_momentum 1.84 acceleration seen once in
 a D/h-16 pair run (not reproduced at D/h 20); PECLET_FLOW_OPERATOR_DOUBLE=OFF fails 6 tests on main
 too (pre-existing); the 15-19 % swarm-drift difference to TBFsolver = near-contact treatment.
