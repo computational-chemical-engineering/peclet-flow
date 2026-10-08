@@ -94,7 +94,7 @@ singular (no outflow). `diagnostics.set_pressure_graph_amg` propagates to the MG
 | GraphAMG bottom | on for porous+drag | `diagnostics.set_pressure_graph_amg` |
 | d(ε)/dt source in the projection | on | `diagnostics.set_porous_deps_dt` |
 | pressure under-relaxation | off (ω=1) | `diagnostics.set_pressure_underrelax` |
-| void-fraction floor | 0.25 (the driver default; 0.4 under-predicted dense-bed drag ~3×, 0.05 detonated beds) | `CfdDem(eps_min=…)` |
+| void-fraction floor | 0.05, a division guard, not a packing limit (the minimum voidage depends on particle shape; 0.4 under-predicted dense-bed drag ~3×; 0.25 was the default 2026-07-16 – 10-08) | `CfdDem(eps_min=…)` |
 
 ## 5. Validation
 
