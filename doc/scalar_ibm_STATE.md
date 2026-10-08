@@ -75,7 +75,7 @@ and a divergence-free MAC face flux. Then a plan, and a step-by-step implementat
 
 ## Side thread awaiting Frank
 
-Branch `uf-outlet-diag` (worktree `suite/flow-uf-outlet`) fixes the legacy scalar open-boundary bugs
+Branch `uf-outlet-diag` (PUSHED to origin 2026-10-08, not merged; worktree `suite/flow-uf-outlet`) fixes the legacy scalar open-boundary bugs
 (log 2026-10-03). Three questions are open:
 1. c002c8e: high-side inflow face plane; changes collocated momentum there.
 2. af88101: ghost = v at the Dirichlet inflow.

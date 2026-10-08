@@ -784,6 +784,19 @@ res = peclet.flow.march_to_steady(s, lambda: float(s.get_u().mean()))   # <u_x> 
 
 ## Open items
 
+**Cut-cell scalar transport: pending FRANK** (full list and evidence: `doc/scalar_ibm_STATE.md`):
+1. **The conjugate contact model** (design §13 Q4). Conducting particles in contact do not converge
+   at R/h 8–32: the point-sampled SDF closes sub-cell fluid gaps, and the G13 conjugate row is
+   INFO/OPEN. The recommendation is a body-aware geometry record plus a contact conductance.
+2. **Naming** (`doc/scalar_ibm_naming_rows.md`): set_scalar_tolerance → set_scalar_residual_tolerance,
+   maxit → max_iter, the `cutcell=` spelling (Q5), and when cut-cell becomes the default (Q7).
+3. **Branch `origin/uf-outlet-diag`** (pushed, NOT merged; evidence in its `doc/uf_outlet_fix.md`).
+   It fixes the legacy scalars at high-side open faces on both grids. Landing needs Frank's OK on
+   c002c8e (collocated momentum at a high-side inflow) and af88101 (inflow ghost = v); it changes the
+   state_hash `scalar` case. The cut-cell path's outflow-plane-preserving velocity fill depends on it.
+4. Also open: the test-battery cadence (per WO or per milestone), tagging core, and the ScalarMG
+   agglomerated bottom (a follow-up WO).
+
 Intermediate-level multigrid repartitioning at scale (the Repartition kind exists and fires for
 a weighted `dec0`; unweighted ladders are unchanged); coefficient-aware coarsening for high
 contrast; double-diagonal operator storage; `vof-w4`; **the collocated advecting face field `uf_`
