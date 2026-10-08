@@ -87,7 +87,7 @@ struct ScalarCutState {
   double ubar[3] = {0.0, 0.0, 0.0};   ///< its moving-frame velocity U'bar = sum U_i / sum kappa_i V
   // ---- Krylov scratch and statistics ----
   CCField kr, krh, kp, kv, kt, kz, kz2;
-  Kokkos::View<double*, CCMem> ks;           ///< WO-9b: the resident Krylov's scalar slots
+  Kokkos::View<double*, CCMem> ks;              ///< WO-9b: the resident Krylov's scalar slots
   Kokkos::View<double*, Kokkos::HostSpace> pk;  ///< and its host packet
   CCField kb, kq;  ///< singular case: the projected rhs, and the preconditioner's rhs copy
   int iterations = 0;
@@ -121,15 +121,15 @@ struct ScalarCutState {
   double maxCellPeclet = 0.0;  ///< census `max_cell_peclet` (A2): max |phi_a| / (Lam' w_a)
   bool openFace[6] = {false, false, false, false, false, false};  ///< open face rows built (WO-5b)
   bool openInflow[6] = {false, false, false, false, false, false};  ///< ... and it is an inflow
-  bool advecting = false;     ///< some face carried flux: else every advection kernel was skipped
-  long numSmall = 0;          ///< census `num_small_cells`
-  long numImplicitFaces = 0;  ///< census `num_implicit_faces` (faces carrying flux, implicit)
-  long numFluxFaces = 0;      ///< faces carrying flux (the implicit fraction's denominator)
-  long numGuardedFaces = 0;   ///< faces whose projection flux the guard zeroed (a no-op reading)
-  long numBackflowFaces = 0;  ///< census `num_backflow_faces`: outflow-face rows with F_out < 0
+  bool advecting = false;       ///< some face carried flux: else every advection kernel was skipped
+  long numSmall = 0;            ///< census `num_small_cells`
+  long numImplicitFaces = 0;    ///< census `num_implicit_faces` (faces carrying flux, implicit)
+  long numFluxFaces = 0;        ///< faces carrying flux (the implicit fraction's denominator)
+  long numGuardedFaces = 0;     ///< faces whose projection flux the guard zeroed (a no-op reading)
+  long numBackflowFaces = 0;    ///< census `num_backflow_faces`: outflow-face rows with F_out < 0
   bool warnedBackflow = false;  ///< the steady backflow warning was issued (once per scalar)
   bool warnedBottom = false;    ///< the ScalarMG shallow-bottom warning was issued (once)
-  double bulkCourant = 0.0;   ///< census `bulk_courant`: C_bulk of §6.3 (0 steady)
+  double bulkCourant = 0.0;     ///< census `bulk_courant`: C_bulk of §6.3 (0 steady)
   // ---- conjugate (WO-7, §1.1, §1.3, §2.7, §3.4, §4): the solid field psi_s = c_s / K ----------
   // Allocated by the first set_scalar_solid; the two-field path runs only while some body is
   // conjugate (`conj` of the last build), so a scalar without a conjugate body takes the
@@ -414,8 +414,8 @@ inline void facetCoefficients(Kokkos::View<double*, CCMem> cw, Kokkos::View<doub
 /// y(i) += sum over the facets of cut cell i of cw * (probe interpolation of x): the overlay pass
 /// of the matvec (§4.1 step 3). One thread per cut cell, facets in CSR order: deterministic, no
 /// atomics.
-/// `subtract` = true gives y(i) -= that sum instead (the budget's flux-form residual). No fence: the
-/// next kernel on the execution space is ordered after it (WO-9b).
+/// `subtract` = true gives y(i) -= that sum instead (the budget's flux-form residual). No fence:
+/// the next kernel on the execution space is ordered after it (WO-9b).
 inline void overlayApply(CCField y, CCConst x, const scg::ScalarFacetOverlay& fo,
                          Kokkos::View<const double*, CCMem> cw, bool subtract = false) {
   auto cutCell = fo.cutCell;

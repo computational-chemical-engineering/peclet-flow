@@ -142,8 +142,9 @@ Run solve(bool resident, bool two, int poisonDot, int poisonDot2, double poison,
       Kokkos::deep_copy(s, poison);
   };
   ops.dot = [&](const ScalarVec& a, const ScalarVec& bb) {
-    double s = two ? sco::dotTwoLocal(CCConst(a.f), CCConst(bb.f), CCConst(a.s), CCConst(bb.s), E, G)
-                   : sco::dotLocal(CCConst(a.f), CCConst(bb.f), E, G);
+    double s =
+        two ? sco::dotTwoLocal(CCConst(a.f), CCConst(bb.f), CCConst(a.s), CCConst(bb.s), E, G)
+            : sco::dotLocal(CCConst(a.f), CCConst(bb.f), E, G);
     poisonHost(s, nDot, poisonDot);
     return s;
   };
@@ -207,15 +208,16 @@ Run solve(bool resident, bool two, int poisonDot, int poisonDot2, double poison,
 void compare(const char* tag, bool two, int pd, int pd2, double poison, bool onTt) {
   const Run h = solve(false, two, pd, pd2, poison, onTt);
   const Run d = solve(true, two, pd, pd2, poison, onTt);
-  const bool same = h.xf.size() == d.xf.size() &&
-                    std::memcmp(h.xf.data(), d.xf.data(), h.xf.size() * sizeof(double)) == 0 &&
-                    h.xs.size() == d.xs.size() &&
-                    (h.xs.empty() ||
-                     std::memcmp(h.xs.data(), d.xs.data(), h.xs.size() * sizeof(double)) == 0);
+  const bool same =
+      h.xf.size() == d.xf.size() &&
+      std::memcmp(h.xf.data(), d.xf.data(), h.xf.size() * sizeof(double)) == 0 &&
+      h.xs.size() == d.xs.size() &&
+      (h.xs.empty() || std::memcmp(h.xs.data(), d.xs.data(), h.xs.size() * sizeof(double)) == 0);
   const bool resSame = std::memcmp(&h.trueRes, &d.trueRes, sizeof(double)) == 0;
-  std::printf("  %-34s %s: iterations host %3d resident %3d, true residual %.3e / %.3e%s, iterate %s\n",
-              tag, two ? "two fields" : "one field ", h.its, d.its, h.trueRes, d.trueRes,
-              h.restarted ? " (restarted)" : "", same ? "bitwise" : "DIFFERS");
+  std::printf(
+      "  %-34s %s: iterations host %3d resident %3d, true residual %.3e / %.3e%s, iterate %s\n",
+      tag, two ? "two fields" : "one field ", h.its, d.its, h.trueRes, d.trueRes,
+      h.restarted ? " (restarted)" : "", same ? "bitwise" : "DIFFERS");
   CHECK(same);
   CHECK(h.its == d.its);
   CHECK(resSame);
@@ -227,8 +229,8 @@ int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
     const double nan = std::numeric_limits<double>::quiet_NaN();
-    std::printf("scalarBiCGStab: the resident pass against the host-scalar pass (%d^3, g = %d)\n", N,
-                G);
+    std::printf("scalarBiCGStab: the resident pass against the host-scalar pass (%d^3, g = %d)\n",
+                N, G);
     for (const bool two : {false, true}) {
       compare("healthy", two, 0, 0, 0.0, true);
       compare("(rh, r) NaN at iteration 3", two, 5, 0, nan, true);  // dot calls: 2 per iteration

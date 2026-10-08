@@ -222,8 +222,9 @@ void testBudget() {
     // reduction-order round-off and must not depend on the thread count. Cell units: the rates
     // are internal, and a transient budget is in mass units (dt times the rates).
     const double dtB = steady ? 1.0 : s.scalarField("c").cut->dt;
-    const double scale = std::fabs(b.dMass) + dtB * ((std::fabs(b.wallIn) + std::fabs(b.boundaryIn)) +
-                                                     std::fabs(b.sourceIn));
+    const double scale =
+        std::fabs(b.dMass) +
+        dtB * ((std::fabs(b.wallIn) + std::fabs(b.boundaryIn)) + std::fabs(b.sourceIn));
     std::printf(
         "budget (%s): d_mass %.6e wall %.6e boundary %.6e source %.6e defect %.2e "
         "identity %.2e (rel %.1e)\n",

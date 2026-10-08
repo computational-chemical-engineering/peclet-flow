@@ -536,11 +536,12 @@ double vcycleSeconds(IbmSolver& s, int reps) {
 // (u3) A2's M-matrix property on every level, by COLUMNS (review finding 3, ruling D-WOR-3): every
 // off-diagonal band <= 0, and every column sum AC(j) + sum_k band_k(j's neighbour toward j) >=
 // -1e-13 max AC. The advective couplings enter as one number per face (Q on the upwind diagonal,
-// -Q as the downwind off-diagonal), so the advection and diffusion parts have zero column sums up to
-// round-off INDEPENDENTLY of the field's divergence; the mass, wall, Dirichlet and omega_open terms
-// only add to the diagonal. A column-diagonally dominant Z-matrix is an M-matrix (by columns), and
-// the left null vector of a singular closure problem is exactly 1 on every level. The C3 box is
-// periodic on every axis: the neighbours wrap over the inner cells. Returns the defect count.
+// -Q as the downwind off-diagonal), so the advection and diffusion parts have zero column sums up
+// to round-off INDEPENDENTLY of the field's divergence; the mass, wall, Dirichlet and omega_open
+// terms only add to the diagonal. A column-diagonally dominant Z-matrix is an M-matrix (by
+// columns), and the left null vector of a singular closure problem is exactly 1 on every level. The
+// C3 box is periodic on every axis: the neighbours wrap over the inner cells. Returns the defect
+// count.
 long mMatrixDefects(const ScalarMG& mg, const char* tag) {
   long bad = 0;
   for (int L = 0; L < mg.levels(); ++L) {
@@ -571,7 +572,8 @@ long mMatrixDefects(const ScalarMG& mg, const char* tag) {
           ++rows;
         }
     std::printf(
-        "(u3) %s level %d: %ld columns, min column sum = %.3e max AC, %ld below -1e-13, %ld positive "
+        "(u3) %s level %d: %ld columns, min column sum = %.3e max AC, %ld below -1e-13, %ld "
+        "positive "
         "off-diagonals\n",
         tag, L, rows, minCol, negative, positive);
     bad += positive + negative;

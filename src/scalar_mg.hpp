@@ -35,15 +35,16 @@
 // there before the trilinear prolongation reads it, and every face coefficient toward them is 0.
 //
 // Smoother: red-black Gauss-Seidel, colour = (gx + gy + gz) mod 2 from GLOBAL indices, an exchange
-// before each colour — on a single rank on a device backend (WO-9b; flow's A3) the colour passes and
-// the residual of a level with even inner dimensions read the periodic neighbour through the wrapped
-// index instead (`wrapReads`); a coarse level's fill is ONE launch (`smg::fillShell`), no fence. V-cycle: pre 2 sweeps R -> B, residual (after a fresh exchange), restrictAvg,
-// (singular: the coarse rhs mean removed), recurse, coarse ghosts filled, prolongAdd (trilinear),
-// pinned cells re-zeroed, post 2 sweeps B -> R. Bottom: 16 sweeps (8 R -> B then 8 B -> R, so the
-// cycle stays symmetric) plus the mean removal when singular. The level rule (§5.2): transient with
-// kappa_A = 1 + 4 dt' D' sum_a w_a < kFullTableKappa = 25 uses level 0 alone (2 + 2 sweeps, the
-// WO-3 preconditioner); otherwise, and always when steady, the full table. The cycle is a fixed
-// linear operator.
+// before each colour — on a single rank on a device backend (WO-9b; flow's A3) the colour passes
+// and the residual of a level with even inner dimensions read the periodic neighbour through the
+// wrapped index instead (`wrapReads`); a coarse level's fill is ONE launch (`smg::fillShell`), no
+// fence. V-cycle: pre 2 sweeps R -> B, residual (after a fresh exchange), restrictAvg, (singular:
+// the coarse rhs mean removed), recurse, coarse ghosts filled, prolongAdd (trilinear), pinned cells
+// re-zeroed, post 2 sweeps B -> R. Bottom: 16 sweeps (8 R -> B then 8 B -> R, so the cycle stays
+// symmetric) plus the mean removal when singular. The level rule (§5.2): transient with kappa_A = 1
+// + 4 dt' D' sum_a w_a < kFullTableKappa = 25 uses level 0 alone (2 + 2 sweeps, the WO-3
+// preconditioner); otherwise, and always when steady, the full table. The cycle is a fixed linear
+// operator.
 //
 // Steady mode WITH advection (design Amendment A2, §6.7; `Inputs::advective`, the same on every
 // rank): the cycle runs on the ADVECTIVE surrogate S_adv, in band form (AC, AW..AT). Level 0 is
@@ -465,8 +466,8 @@ KOKKOS_INLINE_FUNCTION void twoPhaseCell(const XV& x, const XV& rhs, const BV& A
   const double wc = W(i);
   const double af = AC(i), as = ACs(i);
   if (wc > 0.0) {
-    const double nf =
-        Band ? bandOff(x, AW, AE, AS, AN, AB, AT, i, w) : faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz, w);
+    const double nf = Band ? bandOff(x, AW, AE, AS, AN, AB, AT, i, w)
+                           : faceOff(x, AFX, AFY, AFZ, i, sx, sy, sz, w);
     const double rf = rhs(i) - nf;
     const double rs = rhss(i) - faceOff(xs, AFXs, AFYs, AFZs, i, sx, sy, sz, w);
     const double det = af * as - wc * wc;
@@ -579,12 +580,12 @@ class ScalarMG {
   static constexpr int GC = 1;  ///< coarse levels
   /// The transient level rule (design §5.2, Amendment A3 + ruling D-WO9-3): kappa_A = 1 + 4 dt' D'
   /// sum_a w_a below this uses level 0 alone (2 + 2 sweeps), at or above it the full table; steady
-  /// always the full table. Measured (D-WO9-2, 128^3 bed, koren, host OpenMP 2 threads, per advance,
-  /// level 0 vs full): kappa 7: 1.05-1.24 vs 1.93 s; 13: 1.23 vs 1.69 s (10/9 vs 9 iterations); 25:
-  /// 1.35-1.55 vs 1.86-2.04 s (10-12 vs 9-10); 49: tie (15 vs 10 iterations); 97: 2.5 vs 2.05 s
-  /// (21 vs 12). D-WO9-3 relaxed G-iter's COLD first step to <= 12 (warm steps stay <= 10; level 0
-  /// at kappa 13 takes 11 cold, 9 warm), so the switch moves to 25, the largest measured kappa at
-  /// which level 0 is measurably cheaper (at 49 the two tie). Was 13 (D-WO9-2).
+  /// always the full table. Measured (D-WO9-2, 128^3 bed, koren, host OpenMP 2 threads, per
+  /// advance, level 0 vs full): kappa 7: 1.05-1.24 vs 1.93 s; 13: 1.23 vs 1.69 s (10/9 vs 9
+  /// iterations); 25: 1.35-1.55 vs 1.86-2.04 s (10-12 vs 9-10); 49: tie (15 vs 10 iterations);
+  /// 97: 2.5 vs 2.05 s (21 vs 12). D-WO9-3 relaxed G-iter's COLD first step to <= 12 (warm steps
+  /// stay <= 10; level 0 at kappa 13 takes 11 cold, 9 warm), so the switch moves to 25, the largest
+  /// measured kappa at which level 0 is measurably cheaper (at 49 the two tie). Was 13 (D-WO9-2).
   static constexpr double kFullTableKappa = 25.0;
   using Fill = std::function<void(CCField)>;
 
@@ -1464,8 +1465,8 @@ class ScalarMG {
   /// visits only the cut descendants, in the same order: the same additions, bitwise, at O(cut
   /// cells) per level instead of O(N0) (the former loop over every descendant ran one serial
   /// thread per coarse cell: 30 ms per advance on the GPU at 128^3, most of it on the deepest
-  /// levels). Geometry only: built once per facet overlay (its cutCell view and count), on the host.
-  /// Returns whether it (re)built them.
+  /// levels). Geometry only: built once per facet overlay (its cutCell view and count), on the
+  /// host. Returns whether it (re)built them.
   bool buildCutLists(const Inputs& in) {
     const auto& fo = *in.fac;
     if (cutKey_ == fo.cutCell.data() && cutKeyN_ == fo.nCut && (int)cutStart_.size() == nUse_)
@@ -1506,14 +1507,14 @@ class ScalarMG {
         list[(std::size_t)pos[(std::size_t)coarseOf(q.first)]++] = q.second;
       Kokkos::View<int*, CCMem> ds("smg_cut_start", (std::size_t)nc + 1),
           dl("smg_cut_rows", std::max<std::size_t>(list.size(), 1));
-      Kokkos::deep_copy(ds, Kokkos::View<const int*, Kokkos::HostSpace,
-                                         Kokkos::MemoryTraits<Kokkos::Unmanaged>>(start.data(),
-                                                                                  start.size()));
+      Kokkos::deep_copy(
+          ds, Kokkos::View<const int*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                  start.data(), start.size()));
       if (!list.empty())
-        Kokkos::deep_copy(Kokkos::subview(dl, std::make_pair((std::size_t)0, list.size())),
-                          Kokkos::View<const int*, Kokkos::HostSpace,
-                                       Kokkos::MemoryTraits<Kokkos::Unmanaged>>(list.data(),
-                                                                                list.size()));
+        Kokkos::deep_copy(
+            Kokkos::subview(dl, std::make_pair((std::size_t)0, list.size())),
+            Kokkos::View<const int*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                list.data(), list.size()));
       cutStart_[(std::size_t)L] = ds;
       cutRows_[(std::size_t)L] = dl;
     }
@@ -1523,12 +1524,13 @@ class ScalarMG {
   }
 
   /// The gathered coarse wall terms W (and the conjugate W_c) of the last build are reused when
-  /// their inputs are unchanged BY CONTENT (WO-9b; the caching ruling D-WO3-3 deferred to WO-9): the
-  /// same cut lists, the same level-0 unknown flags (view), the same two-phase mode and level count,
-  /// and every per-facet cw (and cc) bitwise equal to the snapshot taken when they were gathered.
-  /// W is a pure function of those, so the reuse is bitwise; under advection only the mass changes
-  /// from step to step, and the gather — O(cut cells) per level, serial per coarse cell — then runs
-  /// only when a wall setting or dt-independent table actually changes. One reduction per build.
+  /// their inputs are unchanged BY CONTENT (WO-9b; the caching ruling D-WO3-3 deferred to WO-9):
+  /// the same cut lists, the same level-0 unknown flags (view), the same two-phase mode and level
+  /// count, and every per-facet cw (and cc) bitwise equal to the snapshot taken when they were
+  /// gathered. W is a pure function of those, so the reuse is bitwise; under advection only the
+  /// mass changes from step to step, and the gather — O(cut cells) per level, serial per coarse
+  /// cell — then runs only when a wall setting or dt-independent table actually changes. One
+  /// reduction per build.
   bool wallKeep(const Inputs& in) {
     const auto& fo = *in.fac;
     const bool two = in.twoPhase;
@@ -1537,7 +1539,8 @@ class ScalarMG {
                 (!two || ccSnap_.extent(0) == (std::size_t)fo.n);
     if (keep && fo.n > 0) {
       auto a = in.facetW, as = Kokkos::View<const double*, CCMem>(cwSnap_);
-      auto c = two ? in.facetC : in.facetW, cs = two ? Kokkos::View<const double*, CCMem>(ccSnap_) : as;
+      auto c = two ? in.facetC : in.facetW,
+           cs = two ? Kokkos::View<const double*, CCMem>(ccSnap_) : as;
       long diff = 0;
       Kokkos::parallel_reduce(
           "peclet::flow::smg_wall_same", Kokkos::RangePolicy<CCExec>(CCExec(), 0, fo.n),

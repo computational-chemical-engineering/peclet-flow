@@ -132,7 +132,9 @@ enum : int {
 };
 constexpr double kBrkRho = 1.0, kBrkRhv = 2.0, kBrkTt = 3.0, kBrkOmega = 4.0;
 using Slot = Kokkos::View<double, CCMem>;
-inline Slot slot(const Kokkos::View<double*, CCMem>& ks, int k) { return Slot(ks.data() + k); }
+inline Slot slot(const Kokkos::View<double*, CCMem>& ks, int k) {
+  return Slot(ks.data() + k);
+}
 }  // namespace skr
 
 /// The injected pieces as callables (host-side calls that launch kernels; the overhead of the
@@ -177,7 +179,6 @@ template <class F>
 inline void scalarKernel(const char* name, F f) {
   Kokkos::parallel_for(name, Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), f);
 }
-
 
 inline void residentInit(const Kokkos::View<double*, CCMem>& ks) {
   scalarKernel(
@@ -254,8 +255,8 @@ inline void residentP(const ScalarVec& p, const ScalarVec& v, const ScalarVec& r
       });
 }
 /// r <- s = r - alpha v (axpy(r, -alpha, v)); skipped on a stop.
-inline void residentS(const ScalarVec& r, const ScalarVec& v, const Kokkos::View<double*, CCMem>& ks,
-                      C3 e, int g) {
+inline void residentS(const ScalarVec& r, const ScalarVec& v,
+                      const Kokkos::View<double*, CCMem>& ks, C3 e, int g) {
   CCField rf = r.f, rs = r.s, vf = v.f, vs = v.s;
   const bool two = r.solid;
   ccFor3(
@@ -446,8 +447,8 @@ ScalarKrylovResult scalarBiCGStab(Ops& ops, const ScalarVec& b, const ScalarVec&
     // the packet {stop, max|r|} (both phases combined with std::fmax, as ops.maxabs)
     auto readPacket = [&](double& stop) {
       ops.maxabsTo(r, skr::slot(ks, skr::kRn), skr::slot(ks, skr::kRnS));
-      Kokkos::deep_copy(ops.pk, Kokkos::subview(ks, std::make_pair((int)skr::kStop,
-                                                                   (int)skr::kStop + 3)));
+      Kokkos::deep_copy(ops.pk,
+                        Kokkos::subview(ks, std::make_pair((int)skr::kStop, (int)skr::kStop + 3)));
       stop = ops.pk(0);
       return x.solid ? std::fmax(ops.pk(1), ops.pk(2)) : ops.pk(1);
     };

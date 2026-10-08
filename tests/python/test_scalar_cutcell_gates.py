@@ -195,7 +195,7 @@ def gate_g1():
         res[Rh] = rows
         idr = max(abs(r["b"]["identity_error"]) / abs(r["b"]["wall_in"]) for r in rows)
         dfr = max(abs(r["b"]["defect"]) / abs(r["b"]["wall_in"]) for r in rows)
-        print(f"  R/h={Rh:3d}  Nu/2-1 = {[f'{r['err']:+.3e}' for r in rows]}  L1 {rms([r['l1'] for r in rows]):.3e}"
+        print(f"  R/h={Rh:3d}  Nu/2-1 = {[format(r['err'], '+.3e') for r in rows]}  L1 {rms([r['l1'] for r in rows]):.3e}"
               f"  Linf {rms([r['linf'] for r in rows]):.3e}  iters {[r['it'] for r in rows]}"
               f"  identity/|wall| <= {idr:.1e}  defect/|wall| <= {dfr:.1e}")
         for r in rows:
@@ -223,7 +223,7 @@ def gate_g1():
     for Rh in (16, 32):
         rows = [g1_case(Rh, off, aniso=True) for off in OFFSETS]
         ea[Rh] = rms([r["err"] for r in rows])
-        print(f"  R/h={Rh:3d}  Nu/2-1 = {[f'{r['err']:+.3e}' for r in rows]}  iters {[r['it'] for r in rows]}"
+        print(f"  R/h={Rh:3d}  Nu/2-1 = {[format(r['err'], '+.3e') for r in rows]}  iters {[r['it'] for r in rows]}"
               f"  rungs {[r['rungs'] for r in rows]}")
         for r in rows:
             check(r["conv"], f"aniso R/h={Rh}: the solve converged ({r['it']} iterations)")
@@ -298,8 +298,8 @@ def gate_g2():
         e[Rih] = rms([r["err"] for r in rows])
         l1[Rih] = rms([r["l1"] for r in rows])
         its[Rih] = [r["it"] for r in rows]
-        print(f"  Ri/h={Rih:3d}  c_Gamma rel err {[f'{r['err']:+.3e}' for r in rows]}  L1 {l1[Rih]:.3e}"
-              f"  inner flux/(q area)-1 {[f'{r['fin']:+.1e}' for r in rows]}  iters {[r['it'] for r in rows]}")
+        print(f"  Ri/h={Rih:3d}  c_Gamma rel err {[format(r['err'], '+.3e') for r in rows]}  L1 {l1[Rih]:.3e}"
+              f"  inner flux/(q area)-1 {[format(r['fin'], '+.1e') for r in rows]}  iters {[r['it'] for r in rows]}")
         for r in rows:
             check(r["conv"], f"Ri/h={Rih}: converged ({r['it']} iterations)")
             check(r["rungs"][1] + r["rungs"][2] + r["rungs"][3] == 0, f"Ri/h={Rih}: R0 = 100 % ({r['rungs']})")
@@ -314,7 +314,7 @@ def gate_g2():
         rows = [g2_case(Rih, off, mgbox=True) for off in OFFSETS]
         itm[Rih] = [r["it"] for r in rows]
         print(f"  Ri/h={Rih:3d}  n={mg_box(int(math.ceil(5.0 * Rih)) + 6)}  c_Gamma rel err "
-              f"{[f'{r['err']:+.3e}' for r in rows]}  iters {itm[Rih]}")
+              f"{[format(r['err'], '+.3e') for r in rows]}  iters {itm[Rih]}")
         for r in rows:
             check(r["conv"], f"Ri/h={Rih} (mg box): converged ({r['it']} iterations)")
     print(f"  (native boxes, correctness only: iters {[max(its[k]) for k in sorted(its)]})")
@@ -354,7 +354,7 @@ def gate_g3a():
             rows = [g3a_case(Rh, off, Da) for off in OFFSETS]
             e[Rh] = rms([r["err"] for r in rows])
             its[Rh] = [r["it"] for r in rows]
-            print(f"  Da={Da:6.1f} R/h={Rh:3d}  Sh rel err {[f'{r['err']:+.3e}' for r in rows]}  iters {[r['it'] for r in rows]}")
+            print(f"  Da={Da:6.1f} R/h={Rh:3d}  Sh rel err {[format(r['err'], '+.3e') for r in rows]}  iters {[r['it'] for r in rows]}")
             for r in rows:
                 check(r["conv"], f"Da={Da} R/h={Rh}: converged ({r['it']} iterations)")
                 check(r["rungs"][1] + r["rungs"][2] + r["rungs"][3] == 0, f"Da={Da} R/h={Rh}: R0 = 100 %")
@@ -424,7 +424,7 @@ def gate_g3b():
             t0 = time.time()
             rows = [g3b_case(Rh, off, Bi) for off in OFFSETS]
             e[Rh] = rms([r["err"] for r in rows])
-            print(f"  Bi={Bi:6.1f} R/h={Rh:3d}  mu rel err {[f'{r['err']:+.3e}' for r in rows]}"
+            print(f"  Bi={Bi:6.1f} R/h={Rh:3d}  mu rel err {[format(r['err'], '+.3e') for r in rows]}"
                   f"  identity/|dM| <= {max(r['idrel'] for r in rows):.1e}"
                   f"  iters/step {min(min(r['its']) for r in rows)}..{max(max(r['its']) for r in rows)}"
                   f"  ({time.time() - t0:.0f} s)")
@@ -541,7 +541,7 @@ def gate_g7():
             rows = [g7a_case(Rh, off, neumann) for off in OFFSETS]
             e[Rh] = rms([r["err"] for r in rows])
             print(f"  {'neumann  j11p^2' if neumann else 'dirichlet j01^2'} R/h={Rh:3d}  rel err "
-                  f"{[f'{r['err']:+.3e}' for r in rows]}  iters/step {min(min(r['its']) for r in rows)}..{max(max(r['its']) for r in rows)}")
+                  f"{[format(r['err'], '+.3e') for r in rows]}  iters/step {min(min(r['its']) for r in rows)}..{max(max(r['its']) for r in rows)}")
             for r in rows:
                 check(r["conv"], f"R/h={Rh}: converged")
                 check(r["rungs"][1] + r["rungs"][2] + r["rungs"][3] == 0, f"R/h={Rh}: R0 = 100 %")
@@ -554,7 +554,7 @@ def gate_g7():
     for Rh in (16, 32, 64):
         rows = [g7b_case(Rh, off) for off in OFFSETS]
         e[Rh] = rms([r["err"] for r in rows])
-        print(f"  R/h={Rh:3d}  Nu_T rel err {[f'{r['err']:+.3e}' for r in rows]}  iters/solve "
+        print(f"  R/h={Rh:3d}  Nu_T rel err {[format(r['err'], '+.3e') for r in rows]}  iters/solve "
               f"{min(min(r['its']) for r in rows)}..{max(max(r['its']) for r in rows)}")
         for r in rows:
             check(r["conv"], f"R/h={Rh}: converged")
@@ -1196,7 +1196,7 @@ def gate_g8():
     for Rh in (16, 32, 64):
         rows = [g8_case(Rh, off) for off in OFFSETS]
         e[Rh] = rms([r["err"] for r in rows])
-        print(f"  R/h={Rh:3d}  rel err {[f'{r['err']:+.3e}' for r in rows]}  iterations "
+        print(f"  R/h={Rh:3d}  rel err {[format(r['err'], '+.3e') for r in rows]}  iterations "
               f"{[r['its'] for r in rows]}  census Pe_h {rows[0]['pe_h']:.3f}  Ubar/U - 1 "
               f"{rows[0]['ubar'] - 1.0:+.2e}  |J - J_fields| / |J| <= {max(r['jdiff'] for r in rows):.1e}"
               f"  incompatibility {max(r['incompat'] for r in rows):.1e}")
@@ -1219,7 +1219,7 @@ def gate_g8():
         rows = [g8_case(Rh, off, nbox=mg_box(2 * Rh + 6), nz=mg_box(4)) for off in OFFSETS]
         its.append(max(r["its"] for r in rows))
         print(f"  R/h={Rh:3d}  iterations {[r['its'] for r in rows]}  rel err "
-              f"{[f'{r['err']:+.3e}' for r in rows]}")
+              f"{[format(r['err'], '+.3e') for r in rows]}")
         for r in rows:
             check(r["conv"], f"R/h={Rh} mg box: converged")
     check(max(its) <= 30, f"G8 singular steady: <= 30 iterations at every rung ({its})")
@@ -1300,7 +1300,7 @@ def gate_g5b():
     for n in (mg_box(20), mg_box(40), mg_box(80)):
         rows = [g5b_case(n, off) for off in OFFSETS]
         mx.append(max(r["its"] for r in rows))
-        print(f"  n={n:3d}  iterations {[r['its'] for r in rows]}  k* {[f'{r['k']:.6f}' for r in rows]}")
+        print(f"  n={n:3d}  iterations {[r['its'] for r in rows]}  k* {[format(r['k'], '.6f') for r in rows]}")
         for r in rows:
             check(r["conv"], f"n={n}: converged")
     check(max(mx) <= 30, f"G5b singular: <= 30 iterations at every rung ({mx})")
@@ -2257,7 +2257,7 @@ def gate_g13(cases=G13_CASES, rungs=(8, 16, 32)):
             F[Rh] = float(np.mean([r["F"] for r in rows]))
             its[Rh] = [r["it"] for r in rows]
             fr = [g13_rungs(r["cen"]) for r in rows]
-            print(f"  {case:7s} R/h={Rh:3d}  F = {[f'{r['F']:.6e}' for r in rows]} (mean {F[Rh]:.6e})  iters {its[Rh]}"
+            print(f"  {case:7s} R/h={Rh:3d}  F = {[format(r['F'], '.6e') for r in rows]} (mean {F[Rh]:.6e})  iters {its[Rh]}"
                   f"  two-sided {[r['cen']['num_two_sided'] for r in rows]}  thin {[r['cen']['num_thin_solid'] for r in rows]}"
                   f"  rungs {[p for _, p in fr]}")
             for r, (r2, _) in zip(rows, fr):
