@@ -31,7 +31,7 @@ The short working reference is [`../CLAUDE.md`](../CLAUDE.md); suite-wide contra
 | [scalar_ibm_log.md](scalar_ibm_log.md) | 2026-10 | Append-only log: the 2-D prototype rounds, every work order's numbers, and every ruling (D-WO*). Grep it; do not read it whole. |
 | [scalar_ibm_brief.md](scalar_ibm_brief.md), [scalar_ibm_brief_A2.md](scalar_ibm_brief_A2.md) | 2026-10 | The architect briefs behind the design and behind Amendment A2 (steady advection). |
 | [scalar_ibm_literature/](scalar_ibm_literature) | 2026-10 | Literature digests: L1 cut-cell/EB, L2 interfaces and conjugate transport, L3 particle-resolved benchmarks, R building blocks. |
-| [scalar_ibm_register_entries.md](scalar_ibm_register_entries.md), [scalar_ibm_naming_rows.md](scalar_ibm_naming_rows.md), [scalar_units_register_entry.md](scalar_units_register_entry.md) | 2026-10-04 | PROPOSED text for `../../docs/decisions/flow.md`, `DECISIONS.md` and `NAMING.md`, to be placed when the branch lands; delete them once placed. |
+| [scalar_ibm_naming_rows.md](scalar_ibm_naming_rows.md) | 2026-10-04 | PROPOSED rows for `../../docs/NAMING.md` (pending Frank's naming decisions). The register entries were placed in `../../docs/decisions/flow.md` and `core.md` (umbrella 4661441). |
 | [scalar_ibm_baseline_hashes.txt](scalar_ibm_baseline_hashes.txt) | 2026-10-02 | The 12 legacy state hashes (gate G12) the cut-cell work must keep. |
 
 [`data/`](data) holds the raw logs and probe scripts the collocated campaign produced.

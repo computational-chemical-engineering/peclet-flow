@@ -96,7 +96,7 @@ If it lands, the G12 `scalar` hash becomes 438db94e.
     (an implicit internal ρc_p = 1).
   - Also fixed: `vof_interface_area` in plic mode on box cells.
   - Open: the q-kernels carry no w_a (pre-existing; box cells only).
-  - Register entry text: `doc/scalar_units_register_entry.md`. It goes into
+  - Register entry: PLACED in the umbrella (4661441); formerly proposed to go into
     ../docs/decisions/flow.md + DECISIONS.md at landing (umbrella shared checkout; not now).
   - The branch could land on flow main independently. Needs Frank's OK.
   Formerly: **MERGE ORDER:** `scalar-units` → `scalar-ibm` BEFORE WO-3. WO-3 must reuse its UnitScales helpers
