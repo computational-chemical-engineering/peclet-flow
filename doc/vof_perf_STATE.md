@@ -19,7 +19,7 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
   (algebraic only until H-6): 8x3 per CCD 90.72, 6x4 106.53, 3x8 107.87. Generic build 97.95
   (znver4 5 % faster). TBFsolver 8x3 same node 45.45-46.04. Old published 144 ms (old protocol).
   kprof 1x24: 937 launches/step (F4 not triggered), projection 55.3 of 93.7 ms.
-- **A(b) landed 2026-10-08** (flow bb10f56, fbe8721): the host `mg_bottom_factor` runs a bitwise
+- **A(b) landed 2026-10-08** (flow 62f91ef, 591bde4): the host `mg_bottom_factor` runs a bitwise
   host schedule (same scalars, ~2.5 barriers per tile, vectorized lanes); factor bytes, U8, host
   G-BIT (OMP 1/8/24, `direct`) and CUDA identical to main. Workstation: 5.6-6.5 -> 1.05-1.5 ms per
   factor (kprof 1x24: 6.6 -> 1.5-1.8 ms/step). DECISION `kBottomHostFactorTeam = 2` (alternative 4)

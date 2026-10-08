@@ -1002,8 +1002,8 @@ all `Cuda memory space failed to allocate` on a GPU shared with another session 
 ## 2026-10-08 — A(b): the host bottom factor, a bitwise host schedule (branch bottom-factor-host)
 
 USER DECISION 2026-10-08: A(b) (faster factor, bitwise) first; A(a) (factor reuse across steps,
-a numerics change) not in scope. Commits bb10f56 (host schedule + `teamAlgorithm` oracle hook +
-ctest U8 + `bench_bottom_factor`), fbe8721 (`kBottomHostFactorTeam = 2`).
+a numerics change) not in scope. Commits 62f91ef (host schedule + `teamAlgorithm` oracle hook +
+ctest U8 + `bench_bottom_factor`), 591bde4 (`kBottomHostFactorTeam = 2`).
 
 **Root cause (measured, `bench_bottom_factor`, walls-y 16x12x8: P 12, b 128 = the column's
 bottom; workstation 5965WX under load ~20).** The team kernel's order is T-independent as the
@@ -1032,9 +1032,9 @@ inside the load noise (`cc_smooth` 31-41 ms).
 **DECISION:** `kBottomHostFactorTeam = 2` (a constant of its own; the FCG solve keeps
 `kBottomHostTeam = 8`): the fastest size that is stable under load here. Alternative 4 (best on a
 quiet box) pending the genoa sweep in `bubble_column_perf/s1/s1_bfac.slurm` (written, NOT
-submitted: needs the user's OK). Reversible by reverting fbe8721.
+submitted: needs the user's OK). Reversible by reverting 591bde4.
 
-**Gates (rebased on main f19ac4b, then onto 41da997 (clang-format of scalar sources only: rebuilt, bottom_direct + state_hash rechecked identical); baseline worktree at f19ac4b, host rebuilt, CUDA fresh trees
+**Gates (rebased on main f19ac4b, then onto 41da997 + afbc8b6 (clang-format of scalar sources, a ci.yml comment: rebuilt, bottom_direct + state_hash rechecked identical); baseline worktree at f19ac4b, host rebuilt, CUDA fresh trees
 nvcc 13.4; every artifact checked newer than the rebuild start).** Factor bytes Q|Y|e|s|stat vs the
 baseline: identical (walls-y 804884 B, periodic 1161236 B), host and CUDA. ctest `bottom_direct`:
 U8 (host schedule vs team algorithm, FP32 + FP64, T 1/2/4, production floor and the 1e30 restart
