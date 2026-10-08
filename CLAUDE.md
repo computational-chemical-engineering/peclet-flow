@@ -708,7 +708,7 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - **Conjugate contacts and sub-cell gaps are not resolved.** The point-sampled SDF closes fluid
     wedges thinner than ~h, so a contact neck comes out √(a² + Rh) instead of a, and conducting
     sub-cell gaps fuse.
-- **Do not reverse** (proposed register entries in `doc/scalar_ibm_register_entries.md`):
+- **Do not reverse** (register: `../docs/decisions/flow.md`, the cut-cell scalar entries of 2026-10-04):
   - a short or κ-dependent probe (AMReX; erratic order 0.4–1.2);
   - unit storage (first order; it loses 2–12 % of the mass);
   - the series-resistance / GFM wall flux (first order);
