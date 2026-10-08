@@ -484,11 +484,18 @@ inline constexpr long kBottomMaxCells = 8192;
 inline constexpr double kBottomTau = 1e-5;
 inline constexpr int kBottomMaxComponents = 64;  // B1b (§5.14): more -> GraphAMG
 inline constexpr int kBottomCap = 100;
-// §14 H-1: the team size of the factor and solve launches on a HOST backend, min(this,
-// team_size_max) -- one Zen CCX. The factor and M are bitwise independent of T by construction
-// (§13.2), and on a host backend the FCG's reductions are single-lane (BottomKernel::teamSum /
-// teamMax), so the host bottom's bits do not depend on T or OMP_NUM_THREADS; T affects speed only.
+// §14 H-1: the team size of the solve launch on a HOST backend, min(this, team_size_max) -- one
+// Zen CCX (the factor launch: kBottomHostFactorTeam). The factor and M are bitwise independent of T
+// by construction (§13.2), and on a host backend the FCG's reductions are single-lane
+// (BottomKernel::teamSum / teamMax), so the host bottom's bits do not depend on T or
+// OMP_NUM_THREADS; T affects speed only.
 inline constexpr int kBottomHostTeam = 8;
+// §14 H-1, A(b): the FACTOR launch's host team size. The host schedule (mg_bottom_direct.hpp) has
+// ~2.5 barriers per tile and one-thread diagonal tiles, so it scales little past two threads:
+// bench_bottom_factor (16x12x8 walls-y, P = 12, b = 128) on a loaded 24-core Zen 3, ms per factor,
+// T = 1 / 2 / 3 / 4 / 8: 1.44 / 1.09 / 0.93-1.79 / 0.86-1.70 / 1.43-1.88 -- two is the fastest
+// size that is also stable under load. Bitwise free, like kBottomHostTeam.
+inline constexpr int kBottomHostFactorTeam = 2;
 
 struct BottomLevel {
   C3 ext{0, 0, 0}, inner{0, 0, 0};
@@ -2944,12 +2951,13 @@ class CutcellMG {
       setSlot(kBottomFlag, 0.0);
     }
   }
-  // A launch's team size: min(1024, team_size_max) when team <= 0 -- min(kBottomHostTeam,
+  // A launch's team size: min(1024, team_size_max) when team <= 0 -- min(hostTeam,
   // team_size_max) on a host backend (§14 H-1) -- else `team` clamped to team_size_max; with
   // `probe` false a positive `team` (a size this kernel already ran with) is used as is.
   // `scratch` = the team scratch (level 0) the kernel requests, in bytes.
   template <class K>
-  static int directTeam(const K& k, int team, bool probe, std::size_t scratch = 0) {
+  static int directTeam(const K& k, int team, bool probe, std::size_t scratch = 0,
+                        int hostTeam = kBottomHostTeam) {
     if (team > 0 && !probe)
       return team;
     Kokkos::TeamPolicy<CCExec> pol(CCExec(), 1, 1);
@@ -2958,7 +2966,7 @@ class CutcellMG {
     const int tmax = std::min(1024, pol.team_size_max(k, Kokkos::ParallelForTag()));
     if (team > 0)
       return std::min(team, tmax);
-    return kHostMemory ? std::min(kBottomHostTeam, tmax) : tmax;
+    return kHostMemory ? std::min(hostTeam, tmax) : tmax;
   }
   // The factor launch: one team, T = directTeam(team) (the U3 hook passes T; the factor is bitwise
   // independent of it). `teamAlgorithm` (a test hook, U8) runs the team algorithm on a host
@@ -2978,7 +2986,7 @@ class CutcellMG {
     k.tauPiv0 = tauPiv0;
     k.teamAlgorithm = teamAlgorithm ? 1 : 0;
     const std::size_t scratch = BottomFactorKernel<FR, FPC>::scratchBytes(D.pl.b);
-    const int T = directTeam(k, team, probe, scratch);
+    const int T = directTeam(k, team, probe, scratch, kBottomHostFactorTeam);
     Kokkos::parallel_for(
         "peclet::flow::mg_bottom_factor",
         Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T).set_scratch_size(0, Kokkos::PerTeam(scratch)),
