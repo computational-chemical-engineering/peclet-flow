@@ -2040,9 +2040,20 @@ class CutcellMG {
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
     auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
-    matvec(Ap, x);                                                          // r = b - A x
-    Kokkos::deep_copy(CCExec(), r, b);
-    axpy(r, -1.0, Ap);
+    if (zeroGuess_) {
+      // H-2c (§8): the caller guarantees x0 = +0, so A x0 = +0 in every cell and
+      // b + (-1)(+0) = b for every b (+-0 included): r = b with no matvec. The matvec's only
+      // side effect on x, the ghost fill of the non-wrap path, is kept.
+      if (!fusedWrapReads()) {
+        fill(l0, x);
+        applyOutflowGhost(l0, x);
+      }
+      Kokkos::deep_copy(CCExec(), r, b);
+    } else {
+      matvec(Ap, x);  // r = b - A x
+      Kokkos::deep_copy(CCExec(), r, b);
+      axpy(r, -1.0, Ap);
+    }
     removeMean(l0, r);                // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);  // host read (once per solve)
     int it = 0;
@@ -4001,6 +4012,9 @@ class CutcellMG {
   // projection, flow doc/collocated_varrho_forces.md §4.6 / WO-P5). ref <= 0 restores the
   // default (stop relative to the initial residual). Callers set it around ONE solve only.
   void setStopReference(double ref) { stopRef_ = ref; }
+  // H-2c (§8): the caller guarantees the initial iterate of the next single-rank PCG solves is
+  // +0 everywhere (projectSolve's cold path), so the solve skips A x0. Set around ONE solve.
+  void setZeroInitialGuess(bool on) { zeroGuess_ = on; }
   // Did the last solveChebyshev(..., guard3 = true) stop on its 3-iteration growth guard?
   bool chebyshevGuardTripped() const { return chebGuardTripped_; }
   // max|b| over the fluid cells after the null-space (mean) projection -- the drivers' norm.
@@ -4325,6 +4339,7 @@ class CutcellMG {
   int dirTeam_ = 0, dirFacTeam_ = 0;
   double dirPivotTol_ = kBottomPivotTol;
   double stopRef_ = -1.0;       // see setStopReference
+  bool zeroGuess_ = false;      // see setZeroInitialGuess
   std::vector<double> lvTime_;  // per-level V-cycle wall time (mgDebugLevel() >= 3)
   int lvCycles_ = 0;
   // Zero-gradient (Neumann) coarse ghost before the prolongation on wall/inflow faces — the WO-H

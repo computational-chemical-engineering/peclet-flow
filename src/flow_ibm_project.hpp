@@ -1377,7 +1377,16 @@ void Solver<Grid>::projectSolve() {
   // initial guess instead of zeroing.
   if (!pwarm_)
     Kokkos::deep_copy(phi1_, 0.0);
-  lastPressureIters_ = solvePressureSystem(rhs1_, phi1_);
+  // H-2c: on the cold path phi1_ is +0, and the single-rank PCG skips its A x0 (scoped to this
+  // one solve, exception-safe).
+  {
+    struct ZeroGuessScope {
+      CutcellMG& mg;
+      ~ZeroGuessScope() { mg.setZeroInitialGuess(false); }
+    } zeroGuessScope{mg_};
+    mg_.setZeroInitialGuess(!pwarm_);
+    lastPressureIters_ = solvePressureSystem(rhs1_, phi1_);
+  }
   // ISSUES sweep item 6: a solve that gave up on a non-finite recurrence scalar reports the
   // iteration CAP (see CutcellMG::solvePCG) and raises this flag, so `pressure_solve_failed()`
   // and the usual rule-3b "no capped solve" check both catch it. It used to print one line to
