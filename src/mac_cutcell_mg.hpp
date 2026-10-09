@@ -2070,6 +2070,36 @@ class CutcellMG {
         },
         Kokkos::Sum<double, CCMem>(slot(kMsum)));
   }
+  // C3 (§6 (iii)): removeMeanHostCounted's stop-guarded subtract (mean = kMsum / nFluid) and
+  // maxabsTo's max|f| over the fluid cells into slot k in one pass. Max is order-free: bitwise
+  // to mgmeans + mgmax. hostKrylovFusion() only.
+  void meanSubtractMaxTo(Level& lv, CCField f, int k) {
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    CCField ff = f;
+    FPV ac = lv.AC;
+    const bool all = lv.allFluid;
+    const long cnt = lv.nFluid;
+    auto ks = ks_;
+    ccReduce3(
+        "mgmeans_max", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int z, double& m) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          if (!(cnt == 0 || ks(kStop) != 0.0)) {
+            const double mean = ks(kMsum) / (double)cnt;
+            if (all)
+              ff(i) -= mean;
+            else
+              meanSubtractCell(ff, ac, i, mean);
+          }
+          if (all || ac(i) > 1e-30f) {
+            const double v = Kokkos::fabs(ff(i));
+            if (v > m)
+              m = v;
+          }
+        },
+        Kokkos::Max<double, CCMem>(slot(k)));
+  }
   void maxabsTo(Level& lv, CCField a, int k) {
     C3 e = lv.ext;
     const int g = lv.g;
@@ -2192,8 +2222,7 @@ class CutcellMG {
             });
         if (fuseC) {
           pcgUpdateSum(l0, x, r, p, Ap);  // C2: the update + the fluid sum of r
-          meanSubtractHostCounted(l0, r, /*stopGuard=*/true);  // removeMean's subtract half
-          maxabsTo(l0, r, kRn);
+          meanSubtractMaxTo(l0, r, kRn);  // C3: the stop-guarded subtract + max|r|
         } else {
           Kokkos::parallel_for(  // x += alpha p; r -= alpha Ap (axpy's expressions)
               "mgpcg_update", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
