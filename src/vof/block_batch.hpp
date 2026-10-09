@@ -1091,6 +1091,7 @@ inline void vofBatchBox(const VofBlockTable& T, double eps, SField out, int stri
 /// `csfFaceCurvature` + `csfFaceForce`).
 struct VofCurvJob {
   double *c, *mx, *my, *mz, *al, *kap, *br;
+  int* slot;     ///< the block's slot map (design G §5.2): absolute `cListG_` positions
   double* f[3];  ///< the block's CSF face force, per component
   I3 e, n;
   int g;
@@ -1104,6 +1105,7 @@ struct VofCurvTable {
   long off[kVofBlockBatch + 1];
   int nj;
   int base;
+  PvPolygon* cache;  ///< the chunk's polygon cache, indexed like the grown list (design G §5.2)
 };
 
 template <class F>
@@ -1185,8 +1187,8 @@ inline void vofCurvCompact(const VofCurvTable& T, bool grown, LField list, LFiel
       });
 }
 
-/// `reconstructPlanes` (worklist mode), part 1: zero the four plane fields over the grown region.
-/// Host: the grown rows (H-4b).
+/// `reconstructPlanes` (worklist mode), part 1: zero the four plane fields and clear the slot map
+/// (design G §5.2) over the grown region. Host: the grown rows (H-4b).
 template <class Exec = SExec>
 inline void vofCurvPlanesZero(const VofCurvTable& T) {
   if constexpr (kVofHostExec<Exec>) {
@@ -1203,6 +1205,7 @@ inline void vofCurvPlanesZero(const VofCurvTable& T) {
             J.my[i0 + x] = 0.0;
             J.mz[i0 + x] = 0.0;
             J.al[i0 + x] = 0.0;
+            J.slot[i0 + x] = -1;
           }
         });
     return;
@@ -1217,23 +1220,30 @@ inline void vofCurvPlanesZero(const VofCurvTable& T) {
         J.my[i] = 0.0;
         J.mz[i] = 0.0;
         J.al[i] = 0.0;
+        J.slot[i] = -1;
       });
 }
 
-/// Part 2: `wyReconstructCell` over the grown interfacial list (upper bound: the grown region).
-/// Host: the exact counts (H-4a).
+/// Entry `q` (an absolute grown-list position) of job `k` of the planes pass (below).
+KOKKOS_INLINE_FUNCTION void vofCurvPlaneEntry(const VofCurvTable& T, int k, long q, LField list) {
+  const VofCurvJob& J = T.job[k];
+  const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+  const long i = list(q);
+  wyReconstructCell(VofRawField{J.c}, i, sy, sz, VofRawField{J.mx}, VofRawField{J.my},
+                    VofRawField{J.mz}, VofRawField{J.al});
+  pvPolygonBuild(J.mx[i], J.my[i], J.mz[i], J.al[i], T.cache[q]);
+  J.slot[i] = static_cast<int>(q);
+}
+
+/// Part 2: `wyReconstructCell` over the grown interfacial list (upper bound: the grown region), and
+/// each cell's polygon cache entry from the plane it just wrote, at its list position `q`, which
+/// becomes its slot (design G §5.2). Host: the exact counts (H-4a).
 template <class Exec = SExec>
 inline void vofCurvPlanesList(const VofCurvTable& T, LField list, LField start, LField end) {
   if constexpr (kVofHostExec<Exec>) {
-    vofHostListFor<Exec>("vof::block::batch_curv_planes", T.nj, vofListCount(T, start, end),
-                         [=](const int k, const long t) {
-                           const long q = start(T.base + k) + t;
-                           const VofCurvJob& J = T.job[k];
-                           const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
-                           wyReconstructCell(VofRawField{J.c}, list(q), sy, sz, VofRawField{J.mx},
-                                             VofRawField{J.my}, VofRawField{J.mz},
-                                             VofRawField{J.al});
-                         });
+    vofHostListFor<Exec>(
+        "vof::block::batch_curv_planes", T.nj, vofListCount(T, start, end),
+        [=](const int k, const long t) { vofCurvPlaneEntry(T, k, start(T.base + k) + t, list); });
     return;
   }
   Kokkos::parallel_for(
@@ -1243,10 +1253,7 @@ inline void vofCurvPlanesList(const VofCurvTable& T, LField list, LField start, 
         const long q = start(T.base + k) + (t - T.off[k]);
         if (q >= end(T.base + k))
           return;
-        const VofCurvJob& J = T.job[k];
-        const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
-        wyReconstructCell(VofRawField{J.c}, list(q), sy, sz, VofRawField{J.mx}, VofRawField{J.my},
-                          VofRawField{J.mz}, VofRawField{J.al});
+        vofCurvPlaneEntry(T, k, q, list);
       });
 }
 
@@ -1315,9 +1322,9 @@ inline void vofCurvFallbackTeams(const VofCurvTable& T, LField list, LField star
           const VofCurvJob& J = T.job[k];
           const long i = list(start(T.base + k) + (g - cum[k]));
           const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
-          curvFallbackTeam(tm, terms, i, VofRawField{J.c}, VofRawField{J.mx}, VofRawField{J.my},
-                           VofRawField{J.mz}, VofRawField{J.al}, VofRawField{J.kap},
-                           VofRawField{J.br}, sy, sz, kPvHalf, J.dW, J.cmin, J.ieps, J.gm);
+          curvFallbackTeam(tm, terms, i, VofPvCached{J.slot, T.cache}, VofRawField{J.mx},
+                           VofRawField{J.my}, VofRawField{J.mz}, VofRawField{J.kap},
+                           VofRawField{J.br}, sy, sz, kPvHalf, J.dW, J.cmin, J.gm);
           tm.team_barrier();  // the single lane is done with `terms` before the next entry's map
         }
       });
@@ -1337,7 +1344,8 @@ KOKKOS_INLINE_FUNCTION void vofCurvListEntry(const VofCurvTable& T, int pass, in
     return;
   }
   if (pass == 1) {
-    curvFallbackCell(i, c, mx, my, mz, al, kap, br, sy, sz, kPvHalf, J.dW, J.cmin, J.ieps, J.gm);
+    curvFallbackCell(i, VofPvCached{J.slot, T.cache}, mx, my, mz, kap, br, sy, sz, kPvHalf, J.dW,
+                     J.cmin, J.gm);
     return;
   }
   long* ct = &cnt(8 * (T.base + k));
