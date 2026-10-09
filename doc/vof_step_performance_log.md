@@ -1075,3 +1075,39 @@ The node's base (97.6) is 4.5 ms above S-1's 93.1 on tcn1088 (node-to-node); the
 the number: -16.6 ms/step. Q-H3 for the factor: T = 6 (walls-y best; periodic within 0.02 of T = 8);
 the shipped constant 2 costs ~0.45 ms/step — change pending (bitwise).
 
+
+## 2026-10-09 — design G (tier-3 curvature cost): WO-0, WO-1 (core), WO-2a + WO-2c land; WO-2b, WO-3 held
+
+Design `doc/vof_curvature_cost_design.md`. Worktrees flow-curvcost / core-curvcost; base = detached
+fedadb2 + core ecedb9b. Gate scripts and raw outputs: `~/Codes/bubble_column_perf/curv_impl/`
+(`gate_curv.sh` G-BIT A/B, `gate_num.sh` WO-3, `battery.sh`, `perf.sh`, `DECISIONS_LOG.md`).
+
+- **WO-0.** Harness rebuilt on main (1 thread, load 37): tier 3 81.2 ms, plicPolygon 50.0 (62 %),
+  V5 22.2, V6 12.7 (max rel dk 7.20e-15) — §2.3 within +12 %. Census at ckpt_t43 (1 warm + 2):
+  interfacial 19961, HF 12992, HF mixed 35, PV 6934, none 0 (= §2.1).
+- **WO-1, core 4806f87 (main; NOT tagged, see below).** ctest vof_pvcache T1-T5 pass on CUDA and
+  OpenMP: T1/T2/T3 0 mismatches over 1e5 cases, prefilter false skips 0, skips 100 % of the
+  outside-support rejections; T4 worst/tol 0.05 on the 34810 accepted cases with cj > 0.2 (edge-on
+  cosMin <= 0 cases INFO); T5 analytic to 1e-15 / 1e-12. Core battery CUDA 100/100, plain 78/78.
+- **WO-2a + WO-2c (bitwise).** G-BIT vs base, each on its own backend: host znver3, host generic,
+  CUDA (RTX 5080): state_hash 12 identical + np2 identical, 50-step dump bitwise (24 arrays, iters
+  13.06 mean), per-block colour + kappa bitwise, census identical. WO-2a alone also passed host and
+  CUDA. Batteries: host 231/231 (95 + 136 MPI), CUDA 231/231 (scalar_cutcell_g4 once at -j4,
+  passed serially). G-PERF: harness tier 3 78.8 -> 22.2 ms (3.5x, V5); RTX 5080
+  vofCurvFallbackTeams 4.92 -> 2.78 ms/step (nsys, 2 rounds; target <= 1.6 needed WO-2b); host 1x24
+  curvature stage 38.0 / 40.0 -> 29.3 / 25.0 ms (workstation at load 41-47: indicative only; the
+  genoa number belongs in S-2).
+- **WO-2b HELD (not bitwise on CUDA).** Bubble column 50-step dump differs at rel 8.7e-15..2.2e-14
+  (state_hash incl. vof_droplet identical: the structured path is thread-per-target). Bisect: 2a
+  bitwise; compaction + single-lane `pvFitAccumLower` bitwise; no compaction + entry-parallel
+  `pvFitAccumEntry` differs — the per-lane entry form compiles differently under nvcc in this kernel
+  although core T3 is bitwise. Design R1: stop, no `__fmul_rn`. Branch `origin/curvcost-held`.
+- **WO-3 HELD (two gate failures).** On the held commit vs WO-2 host: 50-step max rel 2.7e-14
+  (<< N50 2.5e-9), iterations identical, div ratio 1.000, kappa rel 3.6e-15, census identical, the
+  study gates' physics identical to printed digits. Fails: test_vof_surface_tension aborts — P6's
+  deliberately unguarded eps = 0 droplets (on main already kappa 2.9e14 / 1.0e24, peak |u| 0.38 /
+  0.61) cross the WY CFL cap at steps 21 / 14 (uncaught exception); gate E's host oracle is
+  pvFitAdd, so host-bitwise E needs the oracle moved to the moment form (495/32768 cells, 8.6e-16).
+- **Core tag not cut**: a `v*` tag runs core's Release workflow, which publishes to PyPI (no
+  environment protection) — the brief said tag only, no publish. Flow keeps `PECLET_CORE_TAG`
+  v1.4.0 (CI builds flow main against core main); the release cycle cuts core 1.5.0 and repins.
