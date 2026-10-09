@@ -2042,6 +2042,34 @@ class CutcellMG {
         },
         slot(k));
   }
+  // C2 (§6 (ii), amendment 4): x += alpha p, r -= alpha Ap (mgpcg_update's expressions, skipped
+  // once the stop flag is set) over the INNER cells, and the fluid sum of the new r into kMsum
+  // with removeMeanHostCounted's body and lane order -- bitwise to mgpcg_update + that sum on
+  // every inner cell. The ghost entries of x and r are no longer updated: no reader consumes
+  // them (the A3 wrap reads wrap inner cells, the V-cycle reads r's inner cells, the reductions
+  // and the final removeMean run over inner cells). A stopped iteration adds nothing; its sum is
+  // never used (the stop-guarded subtract skips). hostKrylovFusion() only.
+  void pcgUpdateSum(Level& l0, CCField x, CCField r, CCField p, CCField Ap) {
+    const C3 e = l0.ext;
+    const int g = l0.g;
+    CCField xx = x, rr = r, pp = p, aa = Ap;
+    FPV ac = l0.AC;
+    const bool all = l0.allFluid;
+    auto ks = ks_;
+    ccReduce3Lanes(
+        "mgpcg_update_sum", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x_, int y, int z, double& s) {
+          if (ks(kStop) != 0.0)
+            return;
+          const long i = (long)x_ + (long)y * e.x + (long)z * (long)e.x * e.y;
+          const double a = ks(kAlpha), na = -a;
+          xx(i) += a * pp(i);
+          rr(i) += na * aa(i);
+          if (all || ac(i) > 1e-30f)
+            s += rr(i);
+        },
+        Kokkos::Sum<double, CCMem>(slot(kMsum)));
+  }
   void maxabsTo(Level& lv, CCField a, int k) {
     C3 e = lv.ext;
     const int g = lv.g;
@@ -2162,17 +2190,23 @@ class CutcellMG {
                   ks(kStop) = brkPAp;
               }
             });
-        Kokkos::parallel_for(  // x += alpha p; r -= alpha Ap (axpy's expressions)
-            "mgpcg_update", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
-            KOKKOS_LAMBDA(std::size_t i) {
-              if (ks(kStop) != 0.0)
-                return;
-              const double a = ks(kAlpha), na = -a;
-              xx(i) += a * pp(i);
-              rr(i) += na * aa(i);
-            });
-        removeMean(l0, r, /*stopGuard=*/true);
-        maxabsTo(l0, r, kRn);
+        if (fuseC) {
+          pcgUpdateSum(l0, x, r, p, Ap);  // C2: the update + the fluid sum of r
+          meanSubtractHostCounted(l0, r, /*stopGuard=*/true);  // removeMean's subtract half
+          maxabsTo(l0, r, kRn);
+        } else {
+          Kokkos::parallel_for(  // x += alpha p; r -= alpha Ap (axpy's expressions)
+              "mgpcg_update", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
+              KOKKOS_LAMBDA(std::size_t i) {
+                if (ks(kStop) != 0.0)
+                  return;
+                const double a = ks(kAlpha), na = -a;
+                xx(i) += a * pp(i);
+                rr(i) += na * aa(i);
+              });
+          removeMean(l0, r, /*stopGuard=*/true);
+          maxabsTo(l0, r, kRn);
+        }
         Kokkos::deep_copy(kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));  // THE read
         const double pAp = kpk_(0), rn = kpk_(1), stop = kpk_(2);
         noteBottomFlag(kpk_(3));  // a non-finite scalar in a device bottom solve
@@ -4183,6 +4217,16 @@ class CutcellMG {
               s += ff(i);
           },
           Kokkos::Sum<double, CCMem>(slot(kMsum)));
+    meanSubtractHostCounted(lv, f, stopGuard);
+  }
+  // The subtract half of removeMeanHostCounted: f -= kMsum / nFluid on the fluid cells (skipped
+  // with `stopGuard` once the PCG stop flag is set).
+  void meanSubtractHostCounted(Level& lv, CCField f, bool stopGuard) {
+    C3 e = lv.ext;
+    const int g = lv.g;
+    CCField ff = f;
+    FPV ac = lv.AC;
+    const bool all = lv.allFluid;
     auto ks = ks_;
     const long cnt = lv.nFluid;
     const bool guard = stopGuard;
