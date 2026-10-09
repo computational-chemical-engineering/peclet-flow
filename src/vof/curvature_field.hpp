@@ -182,22 +182,45 @@ KOKKOS_INLINE_FUNCTION void curvFallbackStore(long i, const PvFit& fit, SF kap, 
 }
 
 // ---- tier 3 at cost (design G, `doc/vof_curvature_cost_design.md` §5.2-§5.4) -----------------
+
+/// ONE compiled device body per tier-3 piece (C1 ruling, design G WO-3). Inlined into each kernel,
+/// nvcc contracts the same source (`a*b + c` -> FMA) differently per call site, so the batched and
+/// the per-block kernels disagreed at round-off (C1 failed on CUDA; bitwise with `--fmad=false`).
+/// Kept out of line in the DEVICE pass only, the moment build and the team body are each compiled
+/// once and every kernel calls that one copy. Host passes stay inlined (contract-off there).
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#define PECLET_VOF_DEVICE_NOINLINE __noinline__
+#else
+#define PECLET_VOF_DEVICE_NOINLINE
+#endif
+
+/// `pvMomentsBuild`, the one call every planes pass and the dense accessor make (out of line on a
+/// device, see `PECLET_VOF_DEVICE_NOINLINE`).
+KOKKOS_INLINE_FUNCTION PECLET_VOF_DEVICE_NOINLINE void curvMomentsBuild(double mx, double my,
+                                                                        double mz, double alpha,
+                                                                        const VofMetric& g,
+                                                                        PvMoments& P) {
+  pvMomentsBuild(mx, my, mz, alpha, g, P);
+}
 //
-// Each interfacial cell's PLIC polygon is built ONCE per curvature pass, in the planes pass, into a
-// per-cell cache indexed by a slot map, and every target reads it (it used to be rebuilt by each of
-// the ~16 targets whose 5^3 stencil holds the cell: 63 % of tier 3). The tier-3 body is one
-// template over an ENTRY ACCESSOR, so the compacted path (`VofPvCached`: the slot map + the cache)
-// and the dense compaction oracle (`VofPvOnTheFly`: the entry built from the planes on the spot)
-// share one body; both hand out bit-identical entries because both run `pvPolygonBuild` on the
-// same plane.
+// Each interfacial cell's PLIC polygon data is built ONCE per curvature pass, in the planes pass,
+// into a per-cell cache indexed by a slot map, and every target reads it (the polygon used to be
+// rebuilt by each of the ~16 targets whose 5^3 stencil holds the cell: 63 % of tier 3, and then
+// re-integrated in each target's frame: another 30 %). The cache holds the polygon's 3-D area
+// moments (core `PvMoments`), and each target TRANSFORMS them into its frame (`pvTermMoments`):
+// the same integrals as the Green's-theorem terms, a RECORDED change at round-off (WO-3). The
+// tier-3 body is one template over an ENTRY ACCESSOR, so the compacted path (`VofPvCached`: the
+// slot map + the cache) and the dense compaction oracle (`VofPvOnTheFly`: the entry built from the
+// planes on the spot) share one body; both hand out bit-identical entries because both run
+// `pvMomentsBuild` on the same plane and metric.
 
 /// The cache-backed accessor: `slot[j] >= 0` iff cell `j` of the grown region is interfacial, and
 /// `cache[slot[j]]` is its entry (written by the planes pass of the same cascade).
 struct VofPvCached {
   const int* slot;
-  const PvPolygon* cache;
+  const PvMoments* cache;
   KOKKOS_INLINE_FUNCTION bool present(long j) const { return slot[j] >= 0; }
-  KOKKOS_INLINE_FUNCTION const PvPolygon& entry(long j) const { return cache[slot[j]]; }
+  KOKKOS_INLINE_FUNCTION const PvMoments& entry(long j) const { return cache[slot[j]]; }
 };
 
 /// The on-the-fly accessor of the dense mode (`useWorklist = false`, no list and no slot): the
@@ -206,68 +229,27 @@ template <class SF>
 struct VofPvOnTheFly {
   SF c, mx, my, mz, al;
   double ieps;
+  VofMetric g;
   KOKKOS_INLINE_FUNCTION bool present(long j) const { return vofIsInterface(c(j), ieps); }
-  KOKKOS_INLINE_FUNCTION PvPolygon entry(long j) const {
-    PvPolygon P;
-    pvPolygonBuild(mx(j), my(j), mz(j), al(j), P);
+  KOKKOS_INLINE_FUNCTION PvMoments entry(long j) const {
+    PvMoments P;
+    curvMomentsBuild(mx(j), my(j), mz(j), al(j), g, P);
     return P;
   }
 };
 
-/// Tier 3's fit frame for a target with PLIC normal `(m0, m1, m2)` and cached polygon `P`: the unit
-/// PHYSICAL normal `nn` (V2.4; identity at h = 1), the tangents `t1`, `t2`, and the origin `org` =
-/// the target cell's own PLIC centroid in target-centred cell units. false when there is no
-/// normal. The pre-cache `curvFallbackFrame` with `plicPolygon` replaced by the cached polygon: the
-/// same expressions in the same order (bitwise).
-KOKKOS_INLINE_FUNCTION bool curvFallbackFrameCached(double m0, double m1, double m2,
-                                                    const PvPolygon& P, const VofMetric& g,
-                                                    double nn[3], double t1[3], double t2[3],
-                                                    double org[3]) {
-  const double mi[3] = {m0, m1, m2};
-  nn[0] = nn[1] = nn[2] = 0.0;
-  if (!(vofPhysNormalInv(mi, g, nn) > 0.0))
-    return false;
-  curvFrame(nn, t1, t2);
-  double ctr[3], area;
-  polygonAreaCentroid(P.v, P.nv, ctr, area);
-  org[0] = ctr[0] - 0.5;
-  org[1] = ctr[1] - 0.5;
-  org[2] = ctr[2] - 0.5;
-  return true;
-}
-
-/// One stencil cell's PV term from its cache entry (design G §5.3, V5): the support prefilter,
-/// then `pvTermNormal` and `pvTermPolygon` — `pvFitTerm` bit for bit wherever it accepts, and a
-/// rejection wherever it rejects (core `test_vof_pvcache` T2).
-KOKKOS_INLINE_FUNCTION bool curvPvTermCached(PvTerm& t, const PvPolygon& P, double mx, double my,
-                                             double mz, const double off[3], const double org[3],
-                                             const double t1[3], const double t2[3],
-                                             const double nn[3], double dW, double cmin,
-                                             const VofMetric& g) {
-  t.ok = false;
-  if (pvOutsideSupport(P, off, org, dW, g))
-    return false;
-  double np[3];
-  if (!pvTermNormal(mx, my, mz, t1, t2, nn, cmin, g, np))
-    return false;
-  if (P.nv < 3)
-    return false;
-  return pvTermPolygon(t, np, P.v, P.nv, off, org, t1, t2, nn, dW, g);
-}
-
-/// Tier 3 for one target, one thread (host): the frame from the target's entry, the 5^3 stencil in
-/// canonical order, lower-triangle accumulation, the solve. `acc` is `VofPvCached` or
-/// `VofPvOnTheFly`.
+/// Tier 3 for one target, one thread (host): the frame from the target's entry
+/// (`pvFrameMoments`: the physical normal, its tangents, the polygon's area centroid as the
+/// origin), the 5^3 stencil in canonical order (`pvTermMoments`), lower-triangle accumulation, the
+/// solve. `acc` is `VofPvCached` or `VofPvOnTheFly`.
 template <class SF, class Acc>
-KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, const Acc& acc, SF mx, SF my, SF mz, SF kap,
-                                             SF br, long sy, long sz, int gr, double dW,
-                                             double cmin, VofMetric g) {
+KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, const Acc& acc, SF kap, SF br, long sy,
+                                             long sz, int gr, double dW, double cmin, VofMetric g) {
   if (br(i) >= 0.0)
     return;
 
   double nn[3], t1[3], t2[3], org[3];
-  const auto& Pi = acc.entry(i);
-  if (!curvFallbackFrameCached(mx(i), my(i), mz(i), Pi, g, nn, t1, t2, org)) {
+  if (!pvFrameMoments(acc.entry(i), g, nn, t1, t2, org)) {
     kap(i) = 0.0;
     br(i) = static_cast<double>(kCurvNoEstimate);
     return;
@@ -284,27 +266,31 @@ KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, const Acc& acc, SF mx, SF m
         const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
                                static_cast<double>(oz)};
         PvTerm t;
-        if (curvPvTermCached(t, acc.entry(j), mx(j), my(j), mz(j), off, org, t1, t2, nn, dW, cmin,
-                             g))
+        if (pvTermMoments(t, acc.entry(j), off, org, t1, t2, nn, dW, cmin, g))
           pvFitAccumLower(fit, t);
       }
   curvFallbackStore(i, fit, kap, br);
 }
 
-/// Team scratch of the device tier-3 body: the compacted stencil's canonical offset indices and
-/// their terms (about 9.5 KB at the 5^3 stencil).
+/// Team scratch of the device tier-3 body: the compacted stencil's canonical offset indices, their
+/// terms, and the 27 accumulated entries (about 10 KB at the 5^3 stencil).
 using VofPvTerms = Kokkos::View<PvTerm*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
 using VofPvInts = Kokkos::View<int*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+using VofPvDbls = Kokkos::View<double*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
 struct VofPvTeamScratch {
   VofPvInts kidx;
   VofPvTerms term;
+  VofPvDbls ent;
   /// Per-team level-0 scratch bytes for a stencil of `nk` offsets.
   static std::size_t shmem(int nk) {
-    return VofPvInts::shmem_size(nk) + VofPvTerms::shmem_size(nk);
+    return VofPvInts::shmem_size(nk) + VofPvTerms::shmem_size(nk) +
+           VofPvDbls::shmem_size(kPvEntries);
   }
   template <class Member>
   KOKKOS_INLINE_FUNCTION VofPvTeamScratch(const Member& tm, int nk)
-      : kidx(tm.team_scratch(0), nk), term(tm.team_scratch(0), nk) {}
+      : kidx(tm.team_scratch(0), nk)
+      , term(tm.team_scratch(0), nk)
+      , ent(tm.team_scratch(0), kPvEntries) {}
 };
 
 /// `curvFallbackCell` for one target on a whole team (design G §5.4; the team shape of C3,
@@ -312,22 +298,23 @@ struct VofPvTeamScratch {
 /// (deterministic, so no broadcast); then
 ///   (1) a team scan COMPACTS the `(2gr+1)^3` stencil to its interfacial cells, keeping the
 ///       canonical order `k = ((oz+gr)(2gr+1) + (oy+gr))(2gr+1) + (ox+gr)`;
-///   (2) the lanes map those `n` cells to `PvTerm`s (`curvPvTermCached`);
-/// and ONE lane folds the accepted terms in canonical order (`pvFitAccumLower`) and solves. The
-/// compaction only drops the non-interfacial slots, whose terms were never accepted, so the fold
-/// is the one-thread body's sum term for term: bit for bit `curvFallbackCell`'s. A warp
-/// reduction is NOT used (register: not bitwise). Every lane must call it (it holds team
-/// barriers).
+///   (2) the lanes map those `n` cells to `PvTerm`s (`pvTermMoments`);
+///   (3) ENTRY-PARALLEL accumulation: lane `e` sums entry `e` of the 27 (lower triangle + b) over
+///       the accepted terms in canonical order, from 0.0, with `pvFitAccum`'s expression;
+/// and one lane assembles the fit and solves. Each entry is the one-thread body's sum, term for
+/// term in the same order; under nvcc's FMA contraction the per-lane expression rounds
+/// differently from the single-lane fold, so on CUDA this is part of WO-3's RECORDED round-off
+/// change (with `--fmad=false` the two are bitwise). A warp reduction is NOT used (register: not
+/// bitwise). Every lane must call it (it holds team barriers). Out of line on a device
+/// (`PECLET_VOF_DEVICE_NOINLINE`): the batched and the per-block kernels run one compiled body.
 template <class Member, class SF, class Acc>
-KOKKOS_INLINE_FUNCTION void curvFallbackTeam(const Member& tm, const VofPvTeamScratch& sc, long i,
-                                             const Acc& acc, SF mx, SF my, SF mz, SF kap, SF br,
-                                             long sy, long sz, int gr, double dW, double cmin,
-                                             VofMetric g) {
+KOKKOS_INLINE_FUNCTION PECLET_VOF_DEVICE_NOINLINE void curvFallbackTeam(
+    const Member& tm, const VofPvTeamScratch& sc, long i, const Acc& acc, SF kap, SF br, long sy,
+    long sz, int gr, double dW, double cmin, VofMetric g) {
   if (br(i) >= 0.0)  // uniform across the team: nothing writes br(i) before the barriers below
     return;
   double nn[3], t1[3], t2[3], org[3];
-  const bool framed =
-      curvFallbackFrameCached(mx(i), my(i), mz(i), acc.entry(i), g, nn, t1, t2, org);
+  const bool framed = pvFrameMoments(acc.entry(i), g, nn, t1, t2, org);
   const int side = 2 * gr + 1, nk = side * side * side;
   int n = 0;
   if (framed) {
@@ -351,22 +338,33 @@ KOKKOS_INLINE_FUNCTION void curvFallbackTeam(const Member& tm, const VofPvTeamSc
       const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
                              static_cast<double>(oz)};
       PvTerm t;
-      curvPvTermCached(t, acc.entry(j), mx(j), my(j), mz(j), off, org, t1, t2, nn, dW, cmin, g);
+      pvTermMoments(t, acc.entry(j), off, org, t1, t2, nn, dW, cmin, g);
       sc.term(p) = t;
     });
+    tm.team_barrier();
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, kPvEntries), [&](const int e) {
+      double a = 0.0;
+      for (int p = 0; p < n; ++p)
+        if (sc.term(p).ok)
+          pvFitAccumEntry(a, sc.term(p), e);
+      sc.ent(e) = a;
+    });
   }
-  tm.team_barrier();  // the terms are in scratch, and every lane has read br(i)
+  tm.team_barrier();  // the entries are in scratch, and every lane has read br(i)
   Kokkos::single(Kokkos::PerTeam(tm), [&]() {
     if (!framed) {
       kap(i) = 0.0;
       br(i) = static_cast<double>(kCurvNoEstimate);
       return;
     }
-    PvFit fit;
-    pvFitInit(fit);
+    int npoly = 0;
     for (int p = 0; p < n; ++p)
-      if (sc.term(p).ok)
-        pvFitAccumLower(fit, sc.term(p));
+      npoly += sc.term(p).ok ? 1 : 0;
+    double ent[kPvEntries];
+    for (int e = 0; e < kPvEntries; ++e)
+      ent[e] = sc.ent(e);
+    PvFit fit;
+    pvFitFromEntries(fit, ent, npoly);
     curvFallbackStore(i, fit, kap, br);
   });
 }
@@ -392,7 +390,7 @@ struct VofRawField {
 struct VofCurvFallbackJob {
   double *c, *mx, *my, *mz, *al, *kap, *br;
   const int* slot;         ///< the cascade's slot map (design G §5.2)
-  const PvPolygon* cache;  ///< ... and its per-cell polygon cache
+  const PvMoments* cache;  ///< ... and its per-cell moment cache
   const long* list;
   long n, sy, sz;
   int gr;
@@ -413,7 +411,7 @@ struct VofCurvFallbackTable {
 class VofCurvature {
  public:
   using IField = Kokkos::View<int*, SMem>;
-  using PolyCache = Kokkos::View<PvPolygon*, SMem>;
+  using MomCache = Kokkos::View<PvMoments*, SMem>;
   /// Per-call census of the cascade over this block's inner region (LOCAL; a distributed caller
   /// sums them itself — the driver stays MPI-free, exactly as `WyAdvector` does).
   struct Stats {
@@ -456,11 +454,11 @@ class VofCurvature {
     listG_ = LField("vof::curv::listG", grown);
     listI_ = LField("vof::curv::listI", (long)n_.x * n_.y * n_.z);
     // Design G §5.2: the slot map over the extended block (read only inside the grown region,
-    // where the planes pass writes it) and the per-cell polygon cache, sized to listG_'s capacity
+    // where the planes pass writes it) and the per-cell moment cache, sized to listG_'s capacity
     // on the first worklist planes pass (`ensureCache_`; a block-container cascade whose passes are
     // batched never runs one and never allocates it).
     slot_ = IField("vof::curv::slot", len_);
-    cache_ = PolyCache();
+    cache_ = MomCache();
   }
 
   bool ready() const { return kappa_.extent(0) != 0; }
@@ -513,7 +511,7 @@ class VofCurvature {
   /// container's batched cascade (`vof/block_batch.hpp`), which drives the passes itself.
   SField planeM(int d) const { return d == 0 ? mx_ : (d == 1 ? my_ : mz_); }
   SField planeAlpha() const { return alpha_; }
-  /// The slot map of the polygon cache (design G §5.2), for the batched cascade, which writes it
+  /// The slot map of the moment cache (design G §5.2), for the batched cascade, which writes it
   /// with positions into its own chunk-level cache.
   IField slotMap() const { return slot_; }
 
@@ -744,7 +742,6 @@ class VofCurvature {
               const int side = 2 * J.gr + 1;
               const VofPvTeamScratch sc(tm, side * side * side);
               curvFallbackTeam(tm, sc, J.list[t - T.off[b]], VofPvCached{J.slot, J.cache},
-                               VofRawField{J.mx}, VofRawField{J.my}, VofRawField{J.mz},
                                VofRawField{J.kap}, VofRawField{J.br}, J.sy, J.sz, J.gr, J.dW,
                                J.cmin, J.gm);
             });
@@ -757,8 +754,7 @@ class VofCurvature {
             while (t >= T.off[b + 1])
               ++b;
             const VofCurvFallbackJob& J = T.job[b];
-            curvFallbackCell(J.list[t - T.off[b]], VofPvCached{J.slot, J.cache}, VofRawField{J.mx},
-                             VofRawField{J.my}, VofRawField{J.mz}, VofRawField{J.kap},
+            curvFallbackCell(J.list[t - T.off[b]], VofPvCached{J.slot, J.cache}, VofRawField{J.kap},
                              VofRawField{J.br}, J.sy, J.sz, J.gr, J.dW, J.cmin, J.gm);
           });
     }
@@ -831,6 +827,7 @@ class VofCurvature {
     const long sy = e_.x, sz = static_cast<long>(e_.x) * e_.y;
     SField mx = mx_, my = my_, mz = mz_, al = alpha_;
     const double ieps = interfaceEps;
+    const VofMetric gm = metric;  // `g` is the ghost width in this scope
     if (useWorklist) {
       // The same two things the dense kernel does, as two coherent kernels: a branchless zeroing
       // sweep (a pure store, bandwidth-bound) and the MYC reconstruction over the compacted list.
@@ -839,7 +836,7 @@ class VofCurvature {
       // cache entry from the plane it just wrote and records its slot.
       ensureCache_();
       IField slot = slot_;
-      PolyCache cache = cache_;
+      MomCache cache = cache_;
       Kokkos::parallel_for(
           "vof::curv::planes_zero",
           MDRange3<SExec>(SExec(), {g - gr, g - gr, g - gr},
@@ -858,7 +855,7 @@ class VofCurvature {
           KOKKOS_LAMBDA(long t) {
             const long i = list(t);
             wyReconstructCell(c, i, sy, sz, mx, my, mz, al);
-            pvPolygonBuild(mx(i), my(i), mz(i), al(i), cache(t));
+            curvMomentsBuild(mx(i), my(i), mz(i), al(i), gm, cache(t));
             slot(i) = static_cast<int>(t);
           });
       return;
@@ -939,15 +936,15 @@ class VofCurvature {
       const VofPvCached acc{slot_.data(), cache_.data()};
       Kokkos::parallel_for(
           "vof::curv::pv_list", Kokkos::RangePolicy<SExec>(SExec(), 0, nI_), KOKKOS_LAMBDA(long t) {
-            curvFallbackCell(list(t), acc, mx, my, mz, kap, br, sy, sz, gr, dW, cmin, gm);
+            curvFallbackCell(list(t), acc, kap, br, sy, sz, gr, dW, cmin, gm);
           });
       return;
     }
-    const VofPvOnTheFly<SField> acc{c, mx, my, mz, al, ieps};
+    const VofPvOnTheFly<SField> acc{c, mx, my, mz, al, ieps, gm};
     Kokkos::parallel_for(
         "vof::curv::pv", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
         KOKKOS_LAMBDA(int x, int y, int z) {
-          curvFallbackCell(L3(x, y, z, e), acc, mx, my, mz, kap, br, sy, sz, gr, dW, cmin, gm);
+          curvFallbackCell(L3(x, y, z, e), acc, kap, br, sy, sz, gr, dW, cmin, gm);
         });
   }
 
@@ -1033,9 +1030,9 @@ class VofCurvature {
   LField listG_, listI_;  // WO-V9: the compacted interfacial-cell lists
   long nG_ = 0, nI_ = 0;  // ... and their lengths from the last compact()
   IField slot_;           // design G §5.2: grown-list position of each interfacial cell, else -1
-  PolyCache cache_;       // ... and each one's polygon, in grown-list order
+  MomCache cache_;        // ... and each one's polygon, in grown-list order
 
-  /// Allocate the polygon cache at `listG_`'s capacity. Uninitialized: the planes pass writes
+  /// Allocate the moment cache at `listG_`'s capacity. Uninitialized: the planes pass writes
   /// every entry a later pass reads.
   void ensureCache_() {
     const long cap = static_cast<long>(listG_.extent(0));
@@ -1043,7 +1040,7 @@ class VofCurvature {
       throw std::runtime_error(
           "peclet::flow::vof::VofCurvature: grown list capacity >= 2^31 (the slot map is int)");
     if (static_cast<long>(cache_.extent(0)) < cap)
-      cache_ = PolyCache(
+      cache_ = MomCache(
           Kokkos::view_alloc(std::string("vof::curv::cache"), Kokkos::WithoutInitializing), cap);
   }
 };

@@ -1105,7 +1105,7 @@ struct VofCurvTable {
   long off[kVofBlockBatch + 1];
   int nj;
   int base;
-  PvPolygon* cache;  ///< the chunk's polygon cache, indexed like the grown list (design G §5.2)
+  PvMoments* cache;  ///< the chunk's moment cache, indexed like the grown list (design G §5.2)
 };
 
 template <class F>
@@ -1231,12 +1231,12 @@ KOKKOS_INLINE_FUNCTION void vofCurvPlaneEntry(const VofCurvTable& T, int k, long
   const long i = list(q);
   wyReconstructCell(VofRawField{J.c}, i, sy, sz, VofRawField{J.mx}, VofRawField{J.my},
                     VofRawField{J.mz}, VofRawField{J.al});
-  pvPolygonBuild(J.mx[i], J.my[i], J.mz[i], J.al[i], T.cache[q]);
+  curvMomentsBuild(J.mx[i], J.my[i], J.mz[i], J.al[i], J.gm, T.cache[q]);
   J.slot[i] = static_cast<int>(q);
 }
 
 /// Part 2: `wyReconstructCell` over the grown interfacial list (upper bound: the grown region), and
-/// each cell's polygon cache entry from the plane it just wrote, at its list position `q`, which
+/// each cell's moment cache entry from the plane it just wrote, at its list position `q`, which
 /// becomes its slot (design G §5.2). Host: the exact counts (H-4a).
 template <class Exec = SExec>
 inline void vofCurvPlanesList(const VofCurvTable& T, LField list, LField start, LField end) {
@@ -1322,8 +1322,7 @@ inline void vofCurvFallbackTeams(const VofCurvTable& T, LField list, LField star
           const VofCurvJob& J = T.job[k];
           const long i = list(start(T.base + k) + (g - cum[k]));
           const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
-          curvFallbackTeam(tm, sc, i, VofPvCached{J.slot, T.cache}, VofRawField{J.mx},
-                           VofRawField{J.my}, VofRawField{J.mz}, VofRawField{J.kap},
+          curvFallbackTeam(tm, sc, i, VofPvCached{J.slot, T.cache}, VofRawField{J.kap},
                            VofRawField{J.br}, sy, sz, kPvHalf, J.dW, J.cmin, J.gm);
           tm.team_barrier();  // the single lane is done with the scratch before the next entry's
                               // scan
@@ -1348,8 +1347,7 @@ KOKKOS_INLINE_FUNCTION void vofCurvListEntry(const VofCurvTable& T, int pass, in
       return;
   }
   if (pass == 1 || all) {
-    curvFallbackCell(i, VofPvCached{J.slot, T.cache}, mx, my, mz, kap, br, sy, sz, kPvHalf, J.dW,
-                     J.cmin, J.gm);
+    curvFallbackCell(i, VofPvCached{J.slot, T.cache}, kap, br, sy, sz, kPvHalf, J.dW, J.cmin, J.gm);
     if (!all)
       return;
   }

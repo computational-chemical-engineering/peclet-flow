@@ -1916,13 +1916,13 @@ class VofBlockSet {
         cListG_ = LField(
             Kokkos::view_alloc(std::string("vof::block::batch_curv_listG"), Kokkos::WithoutInitializing),
             rg);
-      // design G §5.2: the chunk's polygon cache, sized and reallocated exactly like cListG_ (the
+      // design G §5.2: the chunk's moment cache, sized and reallocated exactly like cListG_ (the
       // counts stay on the device); its positions are the slots, hence the int guard
       if (rg >= (1L << 31))
         throw std::runtime_error(
             "peclet::flow::vof::VofBlockSet: grown list capacity >= 2^31 (the slot map is int)");
       if (static_cast<long>(cCacheG_.extent(0)) < rg)
-        cCacheG_ = Kokkos::View<PvPolygon*, SMem>(
+        cCacheG_ = Kokkos::View<PvMoments*, SMem>(
             Kokkos::view_alloc(std::string("vof::block::batch_curv_cacheG"), Kokkos::WithoutInitializing),
             rg);
       T.cache = cCacheG_.data();
@@ -2380,7 +2380,7 @@ class VofBlockSet {
   LField dRange_[6];              ///< the debris lists' per-job ranges: sD, eD, sR, eR, sA, eA
   Kokkos::View<int*, SMem> dCap_; ///< per job: some attached cell was capped at 1
   LField cListG_, cListI_, cStartG_, cEndG_, cStartI_, cEndI_;  ///< the batched cascade's lists
-  Kokkos::View<PvPolygon*, SMem> cCacheG_;  ///< ... and its polygon cache (design G §5.2)
+  Kokkos::View<PvMoments*, SMem> cCacheG_;  ///< ... and its moment cache (design G §5.2)
   LField cCnt_;                   ///< per job: the 7 census counters + the clip count
   LField::host_mirror_type cCntHost_;
   SField pk_;                     ///< the per-job packet of read #2 (`kPk` doubles per block)

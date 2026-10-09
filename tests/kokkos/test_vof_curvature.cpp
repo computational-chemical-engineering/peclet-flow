@@ -465,6 +465,8 @@ void gateTranslating() {
 // cascade rather than the same code twice.
 void gateDeviceHost() {
   std::printf("\n=== E  device kernel vs serial host loop (same backend, bitwise)\n");
+  // Tier 3 of the oracle is the moment form the driver ships (design G WO-3); the pre-WO-3
+  // Green's-theorem form is evaluated alongside and reported as INFO.
   const int N = 32;
   const double h = 1.0 / N, R = 0.3;
   Case cs;
@@ -486,9 +488,16 @@ void gateDeviceHost() {
 
   long bitDiff = 0, cmp = 0;
   double maxDiff = 0.0;
+  // INFO: the pre-WO-3 tier 3 (per-target Green's-theorem terms, `pvFitAdd`), which the shipped
+  // moment form matches to round-off (design G WO-3: 495/32768 cells, max 8.6e-16 at the change).
+  long oldDiff = 0, oldBranch = 0;
+  double oldMax = 0.0;
   const int gr = vf::kPvHalf;
-  // host planes over the inner region grown by kPvHalf
+  const vf::VofMetric gm = cs.curv.metric;
+  const double dW = cs.curv.weightWidth * gm.maxH();
+  // host planes and their PLIC polygons' area moments over the inner region grown by kPvHalf
   std::vector<double> hm(3 * ch.extent(0), 0.0), ha(ch.extent(0), 0.0);
+  std::vector<vf::PvMoments> hp(ch.extent(0));
   for (int z = g - gr; z < g + N + gr; ++z)
     for (int y = g - gr; y < g + N + gr; ++y)
       for (int x = g - gr; x < g + N + gr; ++x) {
@@ -505,6 +514,7 @@ void gateDeviceHost() {
         hm[3 * i + 1] = m[1];
         hm[3 * i + 2] = m[2];
         ha[i] = vf::plicAlpha(m[0], m[1], m[2], C(i));
+        vf::pvMomentsBuild(m[0], m[1], m[2], ha[i], gm, hp[i]);
       }
 
   for (int z = g; z < g + N; ++z)
@@ -552,19 +562,12 @@ void gateDeviceHost() {
             branch = (t == 0) ? vf::kCurvHf : vf::kCurvHfMixed;
           }
           if (branch < 0) {
-            const double m0 = hm[3 * i], m1 = hm[3 * i + 1], m2 = hm[3 * i + 2];
-            const double n2 = m0 * m0 + m1 * m1 + m2 * m2;
-            if (!(n2 > 0.0)) {
+            // tier 3 as shipped since design G WO-3: the cells' polygon area moments transformed
+            // into the target's frame (`pvFrameMoments`, `pvTermMoments`), full accumulation.
+            double nn[3], t1[3], t2[3], org[3];
+            if (!vf::pvFrameMoments(hp[i], gm, nn, t1, t2, org)) {
               branch = vf::kCurvNoEstimate;
             } else {
-              const double invn = 1.0 / std::sqrt(n2);
-              const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
-              double t1[3], t2[3];
-              vf::curvFrame(nn, t1, t2);
-              double v[8][3], ctr[3], area;
-              const int nv = vf::plicPolygon(m0, m1, m2, ha[i], v);
-              vf::polygonAreaCentroid(v, nv, ctr, area);
-              const double org[3] = {ctr[0] - 0.5, ctr[1] - 0.5, ctr[2] - 0.5};
               vf::PvFit fit;
               vf::pvFitInit(fit);
               for (int oz = -gr; oz <= gr; ++oz)
@@ -575,8 +578,9 @@ void gateDeviceHost() {
                       continue;
                     const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
                                            static_cast<double>(oz)};
-                    vf::pvFitAdd(fit, hm[3 * j], hm[3 * j + 1], hm[3 * j + 2], ha[j], off, org, t1,
-                                 t2, nn, cs.curv.weightWidth, cs.curv.cosMin);
+                    vf::PvTerm t;
+                    if (vf::pvTermMoments(t, hp[j], off, org, t1, t2, nn, dW, cs.curv.cosMin, gm))
+                      vf::pvFitAccum(fit, t);
                   }
               double a[6];
               bool red = false;
@@ -586,6 +590,52 @@ void gateDeviceHost() {
                 kappa = vf::paraboloidKappa(a);
                 branch = red ? vf::kCurvPvReduced : vf::kCurvPv;
               }
+            }
+            // INFO: the same target through the pre-WO-3 Green's-theorem terms (`pvFitAdd`).
+            double kOld = 0.0;
+            int bOld = vf::kCurvNoEstimate;
+            {
+              const double m0 = hm[3 * i], m1 = hm[3 * i + 1], m2 = hm[3 * i + 2];
+              const double n2 = m0 * m0 + m1 * m1 + m2 * m2;
+              if (!(n2 > 0.0)) {
+                bOld = vf::kCurvNoEstimate;
+              } else {
+                const double invn = 1.0 / std::sqrt(n2);
+                const double nn[3] = {m0 * invn, m1 * invn, m2 * invn};
+                double t1[3], t2[3];
+                vf::curvFrame(nn, t1, t2);
+                double v[8][3], ctr[3], area;
+                const int nv = vf::plicPolygon(m0, m1, m2, ha[i], v);
+                vf::polygonAreaCentroid(v, nv, ctr, area);
+                const double org[3] = {ctr[0] - 0.5, ctr[1] - 0.5, ctr[2] - 0.5};
+                vf::PvFit fit;
+                vf::pvFitInit(fit);
+                for (int oz = -gr; oz <= gr; ++oz)
+                  for (int oy = -gr; oy <= gr; ++oy)
+                    for (int ox = -gr; ox <= gr; ++ox) {
+                      const long j = L3(x + ox, y + oy, z + oz, e);
+                      if (!vf::wyIsMixed(C(j)))
+                        continue;
+                      const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
+                                             static_cast<double>(oz)};
+                      vf::pvFitAdd(fit, hm[3 * j], hm[3 * j + 1], hm[3 * j + 2], ha[j], off, org,
+                                   t1, t2, nn, cs.curv.weightWidth, cs.curv.cosMin);
+                    }
+                double a[6];
+                bool red = false;
+                if (!vf::pvFitSolve(fit, a, red)) {
+                  bOld = vf::kCurvNoEstimate;
+                } else {
+                  kOld = vf::paraboloidKappa(a);
+                  bOld = red ? vf::kCurvPvReduced : vf::kCurvPv;
+                }
+              }
+            }
+            if (bOld != branch)
+              ++oldBranch;
+            else if (kOld != kappa) {
+              ++oldDiff;
+              oldMax = std::max(oldMax, std::fabs(kOld - kappa));
             }
           }
         }
@@ -598,6 +648,10 @@ void gateDeviceHost() {
       }
   std::printf("  %ld cells compared:  %ld bitwise identical, %ld differing (max |d| %.3e)\n", cmp,
               cmp - bitDiff, bitDiff, maxDiff);
+  std::printf(
+      "  INFO vs the pre-WO-3 Green's-theorem oracle: %ld kappa differing (max |d| %.3e), "
+      "%ld branch flips\n",
+      oldDiff, oldMax, oldBranch);
   if (std::is_same<peclet::flow::SMem, Kokkos::HostSpace>::value) {
     CHECK(bitDiff == 0);
   } else {
