@@ -1196,3 +1196,25 @@ now carries the PCG loop's level-0 matvec.
   nothing to save), launches/step 1078.2 -> 1067.7. The rest of F-2 (<= 25 `bc_vel` launches) is not reachable under
   H-3(e) (phase-1 attribution: the remaining fills sit between dependent passes). Not taken (not ruled): the same
   pair before the loop (initial fill + resid, then the first colour-0 fill).
+
+### Phase 2 end — batteries and kernel A/B (1x24, kp, 20-step diff, 3 interleaved rounds)
+
+- Batteries on `023934f`: host 231/231 (95 + 136); CUDA 231 (scalar_cutcell_g4, _g6_2, _g6_3, _g13 failed at -j6 and
+  passed on the serial rerun: shared-GPU contention, as before).
+- A/B at load 4.4-14 (other users quiet; the load is mostly this A/B's own runs). A = phase-1 tip `a1a9a33`,
+  B = C0 `4f4ae8d`, C = phase-2 tip `023934f` (worktrees `flow-projcost-p1`, `flow-projcost-c0`):
+
+| quantity | A | B (C0) | C (tip) |
+|---|---|---|---|
+| launches/step | 1159.2 | 1159.2 | 1067.7 |
+| kernel ms/step, min (med) | 142.6 (145.7) | 157.9 (160.8) | 130.0 (142.6) |
+| projection kernels ms, min (med) | 76.1 (78.2) | 79.0 (86.5) | 63.8 (67.8) |
+| mgdot / mgmeanr / mgmeans ms | 1.37 / 1.73 / 3.62 | 1.52 / 1.28 / 3.99 | 0 / 0.14 / 0.21 (+ mgmeans_max 1.40, mgmeans_dot 1.95) |
+| cc_smooth us/launch | 124.7 | 122.8 | 92.4 (A/C 1.35: S within P0's 1.28-1.40) |
+
+- C0 timing gate, re-measured twice at low load: mgdot per launch B/A 1.11 and 1.00, mgmeanr 0.74 and 0.85 (second run
+  load 7.5-14). NOT MET. At 1x24 a level-0 dot takes 53-64 us = 12.6 MB at 200-240 GB/s: bandwidth-bound, not
+  add-chain-bound, so the 4 lanes buy nothing on this workstation at 24 threads (they do at OMP 1: 0.27x, microbench).
+  The §3.2 premise (175 us/launch, chain-bound) was measured on genoa; unmeasured there. Reported to the caller;
+  C0 is not reverted on timing (caller's ruling).
+- S timing gate: MET at low load (cc_smooth A/C per launch 1.35).
