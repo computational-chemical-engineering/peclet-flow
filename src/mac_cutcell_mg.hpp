@@ -1945,7 +1945,7 @@ class CutcellMG {
     CCField aa = a, bb = b;
     FPV ac = lv.AC;
     if (hostAllFluid(lv)) {  // H-1: no AC read
-      ccReduce3(
+      ccReduce3Lanes(
           "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
           KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
             const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
@@ -1954,7 +1954,7 @@ class CutcellMG {
           slot(k));
       return;
     }
-    ccReduce3(
+    ccReduce3Lanes(
         "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
@@ -1980,7 +1980,7 @@ class CutcellMG {
     CCField pp = p, rr = r, zz = z;
     FPV ac = lv.AC;
     const bool all = hostAllFluid(lv);
-    ccReduce3(
+    ccReduce3Lanes(
         "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
         KOKKOS_LAMBDA(int x, int y, int zc, double& acc) {
           const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
@@ -4044,7 +4044,7 @@ class CutcellMG {
     FPV ac = lv.AC;
     double s = 0;
     if (hostAllFluid(lv))  // H-1: no AC read
-      ccReduce3(
+      ccReduce3Lanes(
           "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
           KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
             const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
@@ -4052,7 +4052,7 @@ class CutcellMG {
           },
           s);
     else
-      ccReduce3(
+      ccReduce3Lanes(
           "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
           KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
             const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
@@ -4102,8 +4102,8 @@ class CutcellMG {
 #endif
   }
   // H-1 (§8, host single rank): removeMean with the level's precomputed fluid count -- the sum
-  // reduces in the same pencil order (B2) as the {sum, count} pair, and an all-fluid level reads no
-  // AC. Same cells, same order, same mean: bitwise to the single-rank path below.
+  // reduces in the same 4-lane pencil order (C0) as the {sum, count} pair, and an all-fluid level
+  // reads no AC. Same cells, same order, same mean: bitwise to the single-rank path below.
   void removeMeanHostCounted(Level& lv, CCField f, bool stopGuard) {
     C3 e = lv.ext;
     const int g = lv.g;
@@ -4111,14 +4111,14 @@ class CutcellMG {
     FPV ac = lv.AC;
     const bool all = lv.allFluid;
     if (all)
-      ccReduce3(
+      ccReduce3Lanes(
           "mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
           KOKKOS_LAMBDA(int x, int y, int z, double& s) {
             s += ff((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
           },
           Kokkos::Sum<double, CCMem>(slot(kMsum)));
     else
-      ccReduce3(
+      ccReduce3Lanes(
           "mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
           KOKKOS_LAMBDA(int x, int y, int z, double& s) {
             const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
@@ -4153,8 +4153,9 @@ class CutcellMG {
     const int g = lv.g;
     CCField ff = f;
     FPV ac = lv.AC;
-    // the {sum, count} body; ccReduce3 runs it in B2's pencil order on a host backend (§5.8) and
-    // as the MDRange reduction it always was on a device
+    // the {sum, count} body; ccReduce3Lanes runs it in the 4-lane pencil order on a host backend
+    // (WO-C0, doc/vof_projection_cost_design.md §6) and as the MDRange reduction it always was on a
+    // device
     auto body = KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
       const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
       if (ac(i) > 1e-30f) {
@@ -4168,8 +4169,8 @@ class CutcellMG {
         removeMeanHostCounted(lv, f, stopGuard);
         return;
       }
-      ccReduce3("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body,
-                Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
+      ccReduce3Lanes("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body,
+                     Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
       auto ks = ks_;
       auto kc = kcnt_;
       const bool guard = stopGuard;
@@ -4187,7 +4188,7 @@ class CutcellMG {
     }
     double sum = 0;
     long cnt = 0;
-    ccReduce3("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body, sum, cnt);
+    ccReduce3Lanes("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body, sum, cnt);
     double dcnt = (double)cnt;
     allreduceSum2(sum, dcnt
 #ifdef PECLET_FLOW_MPI

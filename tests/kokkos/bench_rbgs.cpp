@@ -13,6 +13,10 @@
 //       (c) D-lite: FP32 face weights, FP64 arithmetic and iterates, flux/correction form (§4.3);
 //       (d) the FP32 flux pass, the §4.4.3 bodies exactly as written.
 //     The rounds interleave the four forms; min, median and max ms per pass are printed.
+// `bench_rbgs c0 [rounds] [launches]` times the WO-C0 reductions (§6 amendment 1): the level-0
+// dot r.z over the inner 128x96x64 cells (all-fluid body, and the AC-masked body with every
+// cell fluid), B2's scalar pencil order (ccReduce3) against the 4-lane order (ccReduce3Lanes),
+// interleaved; min/median microseconds per launch and the relative difference of the two sums.
 // The coefficients are a DOCUMENTED SYNTHETIC field, not a solver state: rho = 1 (liquid) and
 // rho = 0.02 inside 24 spheres of radius 6 cells (a smoothed one-cell interface), the staggered
 // c_f = open_f * rho0 / rho_f with the arithmetic face mean and rho0 = 1 (buildRhoCoeff), open = 1
@@ -389,12 +393,84 @@ int runP0(int rounds, int passes) {
   return 0;
 }
 
+// WO-C0 instrument: the dot r.z in B2's order (ccReduce3) vs the 4-lane order (ccReduce3Lanes).
+int runC0(int rounds, int launches) {
+  const int conc = pf::CCExec().concurrency();
+  std::printf("C0 exec %s concurrency %d rounds %d launches/round %d\n", pf::CCExec::name(), conc,
+              rounds, launches);
+  loadavg("start");
+  const int g = 1;
+  const pf::C3 n{128, 96, 64}, e{n.x + 2 * g, n.y + 2 * g, n.z + 2 * g};
+  const long N = (long)e.x * e.y * e.z;
+  pf::CCField r("r", N), z("z", N);
+  pf::FPV ac("ac", N);
+  auto hr = Kokkos::create_mirror_view(r), hz = Kokkos::create_mirror_view(z);
+  auto ha = Kokkos::create_mirror_view(ac);
+  unsigned s = 12345u;
+  for (long i = 0; i < N; ++i) {
+    s = s * 1664525u + 1013904223u;
+    hr(i) = (double)(s >> 8) / 16777216.0 - 0.5;
+    s = s * 1664525u + 1013904223u;
+    hz(i) = (double)(s >> 8) / 16777216.0 - 0.5;
+    ha(i) = 1.0;
+  }
+  Kokkos::deep_copy(r, hr);
+  Kokkos::deep_copy(z, hz);
+  Kokkos::deep_copy(ac, ha);
+  const pf::C3 lo{g, g, g}, hi{e.x - g, e.y - g, e.z - g};
+  auto all = KOKKOS_LAMBDA(int x, int y, int zc, double& acc) {
+    const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+    acc += r(i) * z(i);
+  };
+  auto msk = KOKKOS_LAMBDA(int x, int y, int zc, double& acc) {
+    const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+    if (ac(i) > 1e-30f)
+      acc += r(i) * z(i);
+  };
+  const char* names[4] = {"all-fluid B2 (ccReduce3)", "all-fluid 4-lane", "masked B2 (ccReduce3)",
+                          "masked 4-lane"};
+  std::vector<double> us[4];
+  double val[4] = {0, 0, 0, 0};
+  for (int rd = 0; rd < rounds; ++rd)
+    for (int v = 0; v < 4; ++v) {
+      Kokkos::fence();
+      Kokkos::Timer t;
+      for (int k = 0; k < launches; ++k) {
+        double d = 0;
+        if (v == 0)
+          pf::ccReduce3("c0_b2", lo, hi, all, d);
+        else if (v == 1)
+          pf::ccReduce3Lanes("c0_lanes", lo, hi, all, d);
+        else if (v == 2)
+          pf::ccReduce3("c0_b2m", lo, hi, msk, d);
+        else
+          pf::ccReduce3Lanes("c0_lanesm", lo, hi, msk, d);
+        val[v] = d;
+      }
+      Kokkos::fence();
+      us[v].push_back(t.seconds() * 1e6 / launches);
+    }
+  for (int v = 0; v < 4; ++v) {
+    const Stat st = stats(us[v]);
+    const Stat s0 = stats(us[v & 2]);
+    std::printf("C0 %-26s min %.2f med %.2f max %.2f us/launch | this/B2 (min) %.3f | sum %.17g\n",
+                names[v], st.mn, st.med, st.mx, st.mn / s0.mn, val[v]);
+  }
+  std::printf("C0 rel diff lanes vs B2: all %.3e masked %.3e\n",
+              std::fabs(val[1] - val[0]) / std::fabs(val[0]),
+              std::fabs(val[3] - val[2]) / std::fabs(val[2]));
+  loadavg("end");
+  return 0;
+}
+
 }  // namespace p0bench
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   int rc = 0;
-  if (argc > 1 && std::strcmp(argv[1], "p0") == 0) {
+  if (argc > 1 && std::strcmp(argv[1], "c0") == 0) {
+    rc = p0bench::runC0(argc > 2 ? std::atoi(argv[2]) : 7, argc > 3 ? std::atoi(argv[3]) : 200);
+  } else if (argc > 1 && std::strcmp(argv[1], "p0") == 0) {
     rc = p0bench::runP0(argc > 2 ? std::atoi(argv[2]) : 5, argc > 3 ? std::atoi(argv[3]) : 40);
   } else {
     rc = p0bench::runRbgs((argc > 1) ? std::atoi(argv[1]) : 128,

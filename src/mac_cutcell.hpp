@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -399,6 +400,66 @@ inline void ccReduce3(const char* name, C3 lo, C3 hi, F f, R&&... reducers) {
   } else {
     Kokkos::parallel_reduce(name, MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}), f,
                             std::forward<R>(reducers)...);
+  }
+}
+
+// The 4-LANE pencil order (doc/vof_projection_cost_design.md §6 amendment 1, WO-C0, a recorded
+// order) for the Krylov SUM reductions of CutcellMG and the kernels fused with them. Host: the
+// same row partition as ccReduce3; within a row, lane l = (x - lo.x) & 3 accumulates its cells in
+// ascending x from 0, the row value is (s0 + s1) + (s2 + s3), the thread accumulator adds the row
+// values in row order and Kokkos combines the thread partials in thread order (as B2). A cell the
+// functor masks out adds nothing to its lane (no +0.0). Four independent add chains instead of
+// one: the reduction is no longer bound by the loop-carried scalar add. Sums only (a value, a
+// View, or Kokkos::Sum); max/min reductions keep ccReduce3. The device branch IS ccReduce3's
+// (same policy, same functor: device bits unchanged, §2 device caveat).
+namespace ccdetail {
+template <class R, bool = Kokkos::is_reducer_v<R>>
+struct IsLaneSum : std::true_type {};  // a scalar result, or a View holding it
+template <class R>
+struct IsLaneSum<R, true> : std::false_type {};
+template <class T, class S>
+struct IsLaneSum<Kokkos::Sum<T, S>, true> : std::true_type {};
+template <class T>
+struct Lanes4 {
+  T v[4] = {T(0), T(0), T(0), T(0)};
+  T row() const { return (v[0] + v[1]) + (v[2] + v[3]); }
+};
+template <class F, class... T>
+inline void laneRow(const F& f, int x0, int x1, int y, int z, T&... acc) {
+  std::tuple<Lanes4<T>...> lanes;
+  std::apply(
+      [&](Lanes4<T>&... l) {
+        int x = x0;
+        for (; x + 3 < x1; x += 4) {
+          f(x, y, z, l.v[0]...);
+          f(x + 1, y, z, l.v[1]...);
+          f(x + 2, y, z, l.v[2]...);
+          f(x + 3, y, z, l.v[3]...);
+        }
+        for (int k = 0; x < x1; ++x, ++k)
+          f(x, y, z, l.v[k]...);
+        ((acc += l.row()), ...);
+      },
+      lanes);
+}
+}  // namespace ccdetail
+template <class F, class... R>
+inline void ccReduce3Lanes(const char* name, C3 lo, C3 hi, F f, R&&... reducers) {
+  static_assert((ccdetail::IsLaneSum<std::decay_t<R>>::value && ...),
+                "ccReduce3Lanes: sum reductions only (max/min keep ccReduce3)");
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    CCExec space;
+    const int ny = hi.y - lo.y > 0 ? hi.y - lo.y : 0, nz = hi.z - lo.z > 0 ? hi.z - lo.z : 0;
+    const long rows = hi.x > lo.x ? (long)ny * nz : 0;
+    Kokkos::parallel_reduce(
+        name, Kokkos::RangePolicy<CCExec>(space, 0, rows),
+        [=](long r, typename ccdetail::ReduceValue<R>::type&... acc) {
+          const int y = lo.y + (int)(r % ny), z = lo.z + (int)(r / ny);
+          ccdetail::laneRow(f, lo.x, hi.x, y, z, acc...);
+        },
+        std::forward<R>(reducers)...);
+  } else {
+    ccReduce3(name, lo, hi, f, std::forward<R>(reducers)...);
   }
 }
 
