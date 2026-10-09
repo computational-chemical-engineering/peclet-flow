@@ -494,8 +494,10 @@ inline constexpr int kBottomHostTeam = 8;
 // ~2.5 barriers per tile and one-thread diagonal tiles, so it scales little past two threads:
 // bench_bottom_factor (16x12x8 walls-y, P = 12, b = 128) on a loaded 24-core Zen 3, ms per factor,
 // T = 1 / 2 / 3 / 4 / 8: 1.44 / 1.09 / 0.93-1.79 / 0.86-1.70 / 1.43-1.88 -- two is the fastest
-// size that is also stable under load. Bitwise free, like kBottomHostTeam.
-inline constexpr int kBottomHostFactorTeam = 2;
+// size that is also stable under load. Bitwise free, like kBottomHostTeam. Genoa (Snellius job
+// 27783375, 1 task x 24 cores, 30 reps, median, walls-y P12 b128): T = 1 / 2 / 4 / 6 / 8 / 24:
+// 2.10 / 1.51 / 1.24 / 1.08 / 1.20 / 2.46 ms -- six is the best there (Q-H3), hence 6.
+inline constexpr int kBottomHostFactorTeam = 6;
 
 struct BottomLevel {
   C3 ext{0, 0, 0}, inner{0, 0, 0};
