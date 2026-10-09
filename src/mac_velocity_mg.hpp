@@ -53,6 +53,46 @@ inline void residualVarPin(CCField r, CCConst x, CCConst b, FPC AC, FPC AW, FPC 
       });
 }
 
+// F-1 (doc/vof_projection_cost_design.md §7, applied where the stop residual actually lives:
+// Solver::velSweepLoop's stencil functor): max|r| and max|b - r| over the inner cells with
+// residualVarPin's VERBATIM cell body, r taken as 0 on the held normal-Dirichlet plane (index
+// `holdIdx` along `holdAxis`, exactly the inner cells zeroPlane zeroes; holdAxis < 0 = none). No
+// write of r. Max is order-free: bitwise to residualVarPin + zeroPlane + maxAbsDiffInner(b, r) +
+// maxAbsInner(r) on every backend; `bmax` = max|b| (maxAbsInner(b), the stop scale's |b|).
+inline void residualVarPinMax(CCConst x, CCConst b, FPC AC, FPC AW, FPC AE, FPC AS, FPC AN, FPC AB,
+                              FPC AT, CCConst pin, C3 e, int g, int holdAxis, int holdIdx,
+                              double& rmax, double& bdmax, double& bmax) {
+  const bool hasPin = (pin.extent(0) != 0);
+  ccReduce3(
+      "peclet::flow::vmg_resid_max", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz, double& m, double& d, double& bm) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        double r;
+        if (hasPin && pin(i) > 0.5) {
+          r = 0.0;
+        } else {
+          const double Ax = (double)AC(i) * x(i) + (double)AE(i) * x(i + sx) +
+                            (double)AW(i) * x(i - sx) + (double)AN(i) * x(i + sy) +
+                            (double)AS(i) * x(i - sy) + (double)AT(i) * x(i + sz) +
+                            (double)AB(i) * x(i - sz);
+          r = b(i) - Ax;
+        }
+        if (holdAxis >= 0 && (holdAxis == 0 ? lx : (holdAxis == 1 ? ly : lz)) == holdIdx)
+          r = 0.0;
+        const double ar = Kokkos::fabs(r);
+        if (ar > m)
+          m = ar;
+        const double ad = Kokkos::fabs(b(i) - r);
+        if (ad > d)
+          d = ad;
+        const double ab = Kokkos::fabs(b(i));
+        if (ab > bm)
+          bm = ab;
+      },
+      Kokkos::Max<double>(rmax), Kokkos::Max<double>(bdmax), Kokkos::Max<double>(bmax));
+}
+
 // masked trilinear prolongation (mg_prolong_masked_k): like prolongAdd but does NOT add the coarse
 // correction into a fine cell whose mask < eps (the clean-fluid exclude mask is 0 at IBM cut+solid
 // cells).

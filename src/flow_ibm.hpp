@@ -2445,6 +2445,8 @@ class Solver {
   // Common tail of a residual evaluation: the held normal-Dirichlet face is imposed, not solved
   // (excluded), remember max|A u| for the convergence scale, return max|r|.
   double finishResidual(int c);
+  // the axis of component c's held normal-Dirichlet residual plane (index G), or -1
+  int heldResidualPlane(int c) const;
 
 
   std::function<double()> stencilResidual(int c, bool exchange = false);
@@ -2456,6 +2458,8 @@ class Solver {
   std::function<double()> constCoeffResidual(int c, double bx, double by, double bz, double Ac);
 
 
+  // velSweepLoop's |b| for the stop scale: -1 = "the residual functor's max|b|" (F-1, set in
+  // lastBNorm_ by stencilResidual / constCoeffResidual), 0 without a residual stop
   double stencilBnorm(int c);
 
 
@@ -4843,6 +4847,7 @@ class Solver {
   CCField velRes_;                 // scratch for the stencil-path residual
   CCField chebD_;                  // scratch: the Chebyshev search direction (see chebSolveComp)
   double lastAxNorm_ = 0.0;        // max|A u| of the last residual evaluation (scale)
+  double lastBNorm_ = 0.0;         // max|b| of the last stencil-functor residual (F-1)
   int pcgMaxit_ = 500;
   double pcgRtol_ = 1e-10;  // cut-cell pressure MG-PCG
   bool useChebyshev_ = false,

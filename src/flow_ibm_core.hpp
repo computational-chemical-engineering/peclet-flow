@@ -1436,7 +1436,8 @@ void Solver<Grid>::velSweepLoop(Fill&& fill, Color&& sweepColor, ColorDu&& sweep
     // sweep always runs -- a negligible cost against the 8-9 the solve typically takes.
     fill();
     (void)gmax(resid());
-    scale = std::max(gmax(bnorm), gmax(lastAxNorm_));
+    // F-1: bnorm < 0 = max|b| from the residual functor's evaluation just above (stencilBnorm)
+    scale = std::max(gmax(bnorm >= 0.0 ? bnorm : lastBNorm_), gmax(lastAxNorm_));
   }
   for (int it = 0; it < velIters_; ++it) {
     fill();
@@ -1492,12 +1493,19 @@ VelocityMG::Comm Solver<Grid>::vmgComm() const {
 }
 
 template <class Grid>
-double Solver<Grid>::finishResidual(int c) {
+int Solver<Grid>::heldResidualPlane(int c) const {
   if (hasBc_) {
     const int t = bc_[2 * c];
     if ((t == 1 || t == 2 || t == 4) && touchesGlobalFace(2 * c))
-      zeroPlane(velRes_, e_, c, G);
+      return c;
   }
+  return -1;
+}
+
+template <class Grid>
+double Solver<Grid>::finishResidual(int c) {
+  if (heldResidualPlane(c) >= 0)
+    zeroPlane(velRes_, e_, c, G);
   lastAxNorm_ = peclet::flow::maxAbsDiffInner(CCConst(C[c].b), CCConst(velRes_), e_, G);
   return maxAbsInner(CCConst(velRes_), e_, G);
 }
@@ -1515,10 +1523,15 @@ std::function<double()> Solver<Grid>::stencilResidual(int c, bool exchange) {
 #else
     (void)exchange;
 #endif
-    residualVarPin(velRes_, CCConst(C[c].u), CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW),
-                   FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT),
-                   CCConst(C[c].mask), e_, G);
-    return finishResidual(c);
+    // F-1 (doc/vof_projection_cost_design.md §7): one max reduction, no write of velRes_ (read
+    // only by finishResidual; the Chebyshev path forms its own); finishResidual's held plane
+    double rmax = 0.0, bdmax = 0.0, bmax = 0.0;
+    residualVarPinMax(CCConst(C[c].u), CCConst(C[c].b), FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE),
+                      FPC(C[c].AS), FPC(C[c].AN), FPC(C[c].AB), FPC(C[c].AT), CCConst(C[c].mask),
+                      e_, G, heldResidualPlane(c), G, rmax, bdmax, bmax);
+    lastAxNorm_ = bdmax;
+    lastBNorm_ = bmax;
+    return rmax;
   };
 }
 
@@ -1532,15 +1545,19 @@ std::function<double()> Solver<Grid>::constCoeffResidual(int c, double bx, doubl
   const bool an = u_.aniso;
   return [this, c, bx, by, bz, Ac, an]() {
     const I3 e{e_.x, e_.y, e_.z};
-    diffResidual(velRes_, CCConst(C[c].u), CCConst(C[c].b), e, G, bx, by, bz, Ac,
-                 CCConst(bcDcorr_[c]), an);
-    return finishResidual(c);
+    double rmax = 0.0, bdmax = 0.0, bmax = 0.0;  // F-1: one max reduction, no write of velRes_
+    diffResidualMax(CCConst(C[c].u), CCConst(C[c].b), e, G, bx, by, bz, Ac, CCConst(bcDcorr_[c]),
+                    an, heldResidualPlane(c), G, rmax, bdmax, bmax);
+    lastAxNorm_ = bdmax;
+    lastBNorm_ = bmax;
+    return rmax;
   };
 }
 
 template <class Grid>
 double Solver<Grid>::stencilBnorm(int c) {
-  return velocityResidualTolerance() > 0.0 ? maxAbsInner(CCConst(C[c].b), e_, G) : 0.0;
+  (void)c;  // F-1: max|b| comes from the stencil / constant-coefficient residual functors
+  return velocityResidualTolerance() > 0.0 ? -1.0 : 0.0;
 }
 
 template <class Grid>

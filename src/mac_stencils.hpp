@@ -132,6 +132,54 @@ inline void diffResidualT(SField r, SConst c, SConst b, I3 e, int g, double bx, 
       });
 }
 
+// F-1 (doc/vof_projection_cost_design.md §7, velSweepLoop's constant-coefficient stop functor):
+// max|r| and max|b - r| with diffResidualT's VERBATIM cell body, r taken as 0 on the held plane
+// (index `holdIdx` along `holdAxis`; < 0 = none), no write of r. Max is order-free: bitwise to
+// diffResidual + zeroPlane + the two max reductions; `bmax` = max|b|.
+template <bool Aniso>
+inline void diffResidualMaxT(SConst c, SConst b, I3 e, int g, double bx, double by, double bz,
+                             double Ac, SConst dcorr, int holdAxis, int holdIdx, double& rmax,
+                             double& bdmax, double& bmax) {
+  SExec space;
+  const bool hasD = (dcorr.extent(0) != 0);
+  using MD = MDRange3<SExec>;
+  Kokkos::parallel_reduce(
+      "peclet::flow::diff_resid_max", MD(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+      KOKKOS_LAMBDA(int x, int y, int z, double& m, double& d, double& bm) {
+        const long i = L3(x, y, z, e), sx = 1, sy = e.x, sz = static_cast<long>(e.x) * e.y;
+        const double b0 = bx, b1 = by, b2 = bz;  // first-capture outside the constexpr-if (nvcc)
+        const double nE = c(i + sx), nW = c(i - sx), nN = c(i + sy), nS = c(i - sy), nT = c(i + sz),
+                     nB = c(i - sz);
+        double sum;
+        if constexpr (Aniso)
+          sum = b0 * (nE + nW) + b1 * (nN + nS) + b2 * (nT + nB);
+        else
+          sum = b0 * (nE + nW + nN + nS + nT + nB);
+        double r = b(i) - ((Ac + (hasD ? dcorr(i) : 0.0)) * c(i) - sum);
+        if (holdAxis >= 0 && (holdAxis == 0 ? x : (holdAxis == 1 ? y : z)) == holdIdx)
+          r = 0.0;
+        const double ar = Kokkos::fabs(r);
+        if (ar > m)
+          m = ar;
+        const double ad = Kokkos::fabs(b(i) - r);
+        if (ad > d)
+          d = ad;
+        const double ab = Kokkos::fabs(b(i));
+        if (ab > bm)
+          bm = ab;
+      },
+      Kokkos::Max<double>(rmax), Kokkos::Max<double>(bdmax), Kokkos::Max<double>(bmax));
+}
+inline void diffResidualMax(SConst c, SConst b, I3 e, int g, double bx, double by, double bz,
+                            double Ac, SConst dcorr, bool aniso, int holdAxis, int holdIdx,
+                            double& rmax, double& bdmax, double& bmax) {
+  if (aniso)
+    diffResidualMaxT<true>(c, b, e, g, bx, by, bz, Ac, dcorr, holdAxis, holdIdx, rmax, bdmax, bmax);
+  else
+    diffResidualMaxT<false>(c, b, e, g, bx, by, bz, Ac, dcorr, holdAxis, holdIdx, rmax, bdmax,
+                            bmax);
+}
+
 // Per-axis entry point (see diffSmoothColor's ANISO DISPATCH note: the summation order differs).
 inline void diffResidual(SField r, SConst c, SConst b, I3 e, int g, double bx, double by, double bz,
                          double Ac, SConst dcorr, bool aniso) {

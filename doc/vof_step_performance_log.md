@@ -1178,3 +1178,14 @@ now carries the PCG loop's level-0 matvec.
 - Case kernel A/B (kp 1x24, C0 tree vs S, 3 rounds, load 41-58): `cc_smooth` per launch B/A 0.32, `cc_residual` 0.37;
   kernel totals spread 3-8x between rounds. Outside P0 (1.28-1.40) +-10 %, in the faster direction, and the runs
   are oversubscribed: PENDING a re-measure at low load (same treatment as C0's timing gate).
+
+### WO-F1 / WO-F2 — momentum stop residual (caller's rulings 2026-10-09: F-1 apply at the live site; F-2 dedupe only)
+
+- F-1. The design names `VelocityMG::solve`; the bubble column's live momentum stop is the RB-GS sweep loop
+  (`Solver::velSweepLoop`, functors `stencilResidual` / `constCoeffResidual` -> `finishResidual`). Applied there:
+  `residualVarPinMax` / `diffResidualMax` form each cell's residual with the verbatim body, take r = 0 on the held
+  plane (`heldResidualPlane`, zeroPlane's cells), and return max|r|, max|b - r| and max|b| (the scale's |b|, so
+  `stencilBnorm` returns -1 = "from the functor"); no write of `velRes_` (its only other reader, the Chebyshev
+  momentum path, forms its own residual and keeps `finishResidual`). G-BIT host PASS vs `ref/c0_omp`, CUDA PASS;
+  targeted pressure 13/13, velocity/BC 27/27. 1x8: `vmg_maxabs` 14.25 -> 0, `vmg_maxabsdiff` 11.25 -> 0,
+  `vmg_zero_plane` -> 0, `vmg_resid` -> `vmg_resid_max` 11.25; launches/step 1107.0 -> 1078.2.
