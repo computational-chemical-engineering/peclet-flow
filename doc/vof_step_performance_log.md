@@ -1189,3 +1189,10 @@ now carries the PCG loop's level-0 matvec.
   momentum path, forms its own residual and keeps `finishResidual`). G-BIT host PASS vs `ref/c0_omp`, CUDA PASS;
   targeted pressure 13/13, velocity/BC 27/27. 1x8: `vmg_maxabs` 14.25 -> 0, `vmg_maxabsdiff` 11.25 -> 0,
   `vmg_zero_plane` -> 0, `vmg_resid` -> `vmg_resid_max` 11.25; launches/step 1107.0 -> 1078.2.
+- F-2 (dedupe only). After a residual check that does not stop, the next iteration's colour-0 fill is the same
+  functor on the same field with no write between (resid writes nothing since F-1; the exchanging functor runs
+  with an empty fill), and a ghost fill is a function of the inner cells: skipped. G-BIT host PASS vs `ref/c0_omp`,
+  CUDA PASS; pressure 13/13, velocity/BC 27/27. 1x8: `bc_vel` 67.25 -> 62.0 (the 3 stopping checks per step keep
+  nothing to save), launches/step 1078.2 -> 1067.7. The rest of F-2 (<= 25 `bc_vel` launches) is not reachable under
+  H-3(e) (phase-1 attribution: the remaining fills sit between dependent passes). Not taken (not ruled): the same
+  pair before the loop (initial fill + resid, then the first colour-0 fill).
