@@ -1961,6 +1961,33 @@ class CutcellMG {
         },
         slot(k));
   }
+  // H-2b (§8): p = z and r^T z into slot k. On the host single-rank fused-wrap V-cycle (even
+  // level 0 with a coarser level) in ONE pass over the inner cells, with dotTo's body and order:
+  // there no pass writes a ghost of z (precondVcycle zeroes it, the wrap smoother and residual
+  // fill nothing, prolongAdd writes inner cells), so z's ghosts are +0 and p's, never copied, stay
+  // the +0 they always hold. Elsewhere the copy and dotTo (§2: a device sum-fusion can change the
+  // reduction tree).
+  void copyDotTo(Level& lv, CCField p, CCField r, CCField z, int k) {
+    if (!(kHostMemory && fusedWrapSmooth(lv) && lv_.size() > 1)) {
+      Kokkos::deep_copy(CCExec(), p, z);
+      dotTo(lv, r, z, k);
+      return;
+    }
+    C3 e = lv.ext;
+    const int g = lv.g;
+    CCField pp = p, rr = r, zz = z;
+    FPV ac = lv.AC;
+    const bool all = hostAllFluid(lv);
+    ccReduce3(
+        "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int zc, double& acc) {
+          const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+          pp(i) = zz(i);
+          if (all || ac(i) > 1e-30f)
+            acc += rr(i) * zz(i);
+        },
+        slot(k));
+  }
   void maxabsTo(Level& lv, CCField a, int k) {
     C3 e = lv.ext;
     const int g = lv.g;
@@ -2006,8 +2033,7 @@ class CutcellMG {
     post_ = post;
     bottom_ = bottom;
     ensureScalars();
-    Level& l0 = lv_[0];
-    Kokkos::deep_copy(CCExec(), l0.x, x);
+    Level& l0 = lv_[0];  // H-2b: l0.x is not staged (no reader between or inside the solves)
     auto matvec = [&](CCField y, CCField v) {
       matvecOverlap(l0, y, v);
       if (star)
@@ -2027,8 +2053,7 @@ class CutcellMG {
     ++dbgSolve_;
     if (r0 > 0.0 && std::isfinite(r0)) {
       precond(z, r);
-      Kokkos::deep_copy(CCExec(), p, z);
-      dotTo(l0, r, z, kRz);
+      copyDotTo(l0, p, r, z, kRz);       // p = z; r^T z into kRz
       const double rz0 = readSlot(kRz);  // host read (the initial guard)
       if (!std::isfinite(rz0)) {
         solveFailed_ = true;  // see solvePCG
@@ -2126,9 +2151,7 @@ class CutcellMG {
         it = maxit - 1;
       }
     }
-    Kokkos::deep_copy(CCExec(), l0.x, x);
-    removeMean(l0, l0.x);
-    Kokkos::deep_copy(CCExec(), x, l0.x);
+    removeMean(l0, x);  // H-2b: in place (was the l0.x round trip; same cells, same values)
     return it;
   }
 
