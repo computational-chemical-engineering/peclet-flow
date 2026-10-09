@@ -737,8 +737,29 @@ class VelocityMG {
     post_ = post;
     bottom_ = bottom;
     Level& l0 = lv_[0];
-    Kokkos::deep_copy(l0.rhs, b);
-    Kokkos::deep_copy(l0.x, x);
+    // H-2d (doc/vof_projection_cost_design.md §8, perf A5's pattern): on a single rank the solve
+    // runs on the caller's Views -- level 0's rhs and x are rebound to b and x and restored at
+    // exit -- instead of staging copies in and out. No pass writes level 0's rhs (the V-cycle
+    // writes rhs on the coarse levels only, by restriction), so the const b is only read.
+    struct Restore {
+      Level& l;
+      CCField rhs, x;
+      bool on;
+      ~Restore() {
+        if (on) {
+          l.rhs = rhs;
+          l.x = x;
+        }
+      }
+    } restore{l0, l0.rhs, l0.x, false};
+    if (!distributed_ && b.extent(0) == l0.n && x.extent(0) == l0.n) {
+      restore.on = true;
+      l0.rhs = CCField(const_cast<double*>(b.data()), l0.n);  // unmanaged alias, read only
+      l0.x = x;
+    } else {
+      Kokkos::deep_copy(l0.rhs, b);
+      Kokkos::deep_copy(l0.x, x);
+    }
     auto gmax = [&](double v) {
 #ifdef PECLET_FLOW_MPI
       if (distributed_ && comm != MPI_COMM_NULL) {
@@ -818,7 +839,8 @@ class VelocityMG {
         }
       }
     }
-    Kokkos::deep_copy(x, l0.x);
+    if (!restore.on)
+      Kokkos::deep_copy(x, l0.x);
     return used;
   }
   double lastResidualRatio() const { return lastResRatio_; }
