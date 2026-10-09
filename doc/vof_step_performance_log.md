@@ -1153,3 +1153,7 @@ no overlay), singular operator, level 0 at width G; elsewhere the separate kerne
 - C1 (matvec + p.Ap, `cc_apply_exact_dot` / `cc_apply_dot`; not under the "all" mean-removal scope): G-BIT host PASS
   vs `ref/c0_omp` (hash 12 + np2 identical, 4 dumps bitwise, 10.00 it/step), CUDA PASS vs `ref/gbit_cuda`;
   targeted ctests 13/13. Launches/step 1159.2 -> 1146.1 (1x8 kp; `mgdot` p.Ap gone, 13.05 fused launches).
+- C2 (update over inner rows + fluid sum of r, `mgpcg_update_sum`; ghosts of x, r no longer updated: their readers
+  -- the A3 wrap matvec/smoother/residual, the V-cycle's rhs reads, the reductions, `copyInner`, the bfp split and
+  non-finite check -- read inner cells only): G-BIT host PASS vs `ref/c0_omp` (10.00 it/step), CUDA PASS;
+  targeted ctests 13/13. Launches/step 1146.1 -> 1133.0 (1x8).
