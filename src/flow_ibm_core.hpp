@@ -1439,8 +1439,16 @@ void Solver<Grid>::velSweepLoop(Fill&& fill, Color&& sweepColor, ColorDu&& sweep
     // F-1: bnorm < 0 = max|b| from the residual functor's evaluation just above (stencilBnorm)
     scale = std::max(gmax(bnorm >= 0.0 ? bnorm : lastBNorm_), gmax(lastAxNorm_));
   }
+  // F-2 (doc/vof_projection_cost_design.md §7, the caller's dedupe ruling): a residual check
+  // that does not stop leaves the ghosts its fill() wrote current -- resid() writes no field the
+  // fill touches (the stencil / constant-coefficient functors write nothing since F-1; the
+  // exchanging functor runs with an empty fill) -- so the next iteration's colour-0 fill, the
+  // same functor on the same field, is skipped (a ghost fill is a function of the inner cells).
+  bool ghostsCurrent = false;
   for (int it = 0; it < velIters_; ++it) {
-    fill();
+    if (!ghostsCurrent)
+      fill();
+    ghostsCurrent = false;
     sweepColor(0);
     fill();
     if (useRes) {
@@ -1460,6 +1468,7 @@ void Solver<Grid>::velSweepLoop(Fill&& fill, Color&& sweepColor, ColorDu&& sweep
           used = it + 1;
           break;
         }
+        ghostsCurrent = true;
       }
     } else if (velTol_ > 0.0) {
       double du = sweepColorDu(1);
