@@ -29,6 +29,8 @@
 // Usage:
 //   ./mg_dense_precond --n 8 --levels 3 --geom periodic|wallz --ratio 1e3 --out M.bin
 //   ./mg_dense_precond --sweep --outdir <dir>        (the whole geom x ratio battery)
+//   ... --precision fp32   M = the FP32 V-cycle (doc/vof_projection_cost_design.md §4, G-D2),
+//                          written as M_vf32_*; compare with mg_precond_fp32cmp.py
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -52,6 +54,8 @@ struct Config {
   int levels = 3;
   int geom = 0;      // 0 = fully periodic, 1 = walls +-z
   double ratio = 1;  // density contrast of a sharp mid-height z-slab (1 = uniform coefficient)
+  bool fp32 =
+      false;  // --precision fp32: M = the FP32 V-cycle (doc/vof_projection_cost_design.md §4)
 };
 
 const char* geomName(int g) {
@@ -88,6 +92,8 @@ void run(const Config& cfg, const std::string& outdir) {
     bc[5] = 1;  // +z wall
   }
   mg.setBoundaryConditions(bc);
+  if (cfg.fp32)
+    mg.setVcyclePrecision(CutcellMG::kVcycleFp32);
 
   // Face coefficients c_f = open_f * rho0/rho_f, arithmetic face mean of rho (buildRhoCoeff), from
   // a SHARP mid-height slab: rho = rho0 below, rho0*ratio above. Uniform openness 1 — the geometry
@@ -157,7 +163,27 @@ void run(const Config& cfg, const std::string& outdir) {
   // --- the preconditioner M, column by column ---------------------------------------------------
   // Exactly solvePCG's `precond` lambda, preceded by the mean removal CG applies to the residual
   // before every preconditioner application (removeMean(l0, r) in the CG loop).
-  for (long c = 0; c < n; ++c) {
+  // --precision fp32 (G-D2, §13): the FP32 V-cycle as the eligible PCG applies it --
+  // precondVcycleFp32(z, r, e) with e = ilogb(max|r|), the power-of-two input scaling of §4.4.4.
+  if (cfg.fp32) {
+    if (const char* why = mg.fp32VcycleIneligible(true)) {
+      std::fprintf(stderr, "mg_dense_precond --precision fp32: not eligible: %s\n", why);
+      std::exit(2);
+    }
+    CCField z("z", next);
+    for (long c = 0; c < n; ++c) {
+      Kokkos::deep_copy(hv, 0.0);
+      hv(idx[(size_t)c]) = 1.0;
+      Kokkos::deep_copy(v, hv);
+      mg.removeMean(l0, v);
+      const double rn = mg.maxabs(l0, v);
+      mg.precondVcycleFp32(z, v, std::ilogb(rn), -1, CCField());
+      Kokkos::deep_copy(hy2, z);
+      for (long r = 0; r < n; ++r)
+        M[(size_t)r * (size_t)n + (size_t)c] = hy2(idx[(size_t)r]);
+    }
+  }
+  for (long c = 0; c < (cfg.fp32 ? 0 : n); ++c) {
     Kokkos::deep_copy(hv, 0.0);
     hv(idx[(size_t)c]) = 1.0;
     Kokkos::deep_copy(v, hv);
@@ -205,9 +231,9 @@ void run(const Config& cfg, const std::string& outdir) {
   const double skew = std::sqrt(fs) / std::sqrt(fa + 1e-300);
 
 #ifdef PECLET_FLOW_OPERATOR_DOUBLE
-  const char* prec = "double";
+  const char* prec = cfg.fp32 ? "vf32" : "double";  // vf32: the FP32 V-cycle on the double operator
 #else
-  const char* prec = "float";
+  const char* prec = cfg.fp32 ? "vf32float" : "float";
 #endif
   std::printf(
       "%-8s %-8s ratio %-9.3g  skew %.4e   A*1 defect: abs %.3e  /max|a| %.3e  /min|a| %.3e\n",
@@ -246,6 +272,8 @@ int main(int argc, char** argv) {
       outdir = next();
     else if (a == "--sweep")
       sweep = true;
+    else if (a == "--precision")
+      cfg.fp32 = std::strcmp(next(), "fp32") == 0;
   }
   Kokkos::initialize(argc, argv);
   {

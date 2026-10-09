@@ -243,7 +243,8 @@ KOKKOS_INLINE_FUNCTION void bcZeroPressureGhostCell(const FV& phi, long base, lo
 // cell (cell-centered). Used for the collocated pressure increment phi at walls so the
 // cell-centered correction carries no spurious normal acceleration (the same role pressureBcGhost
 // plays for P in the predictor).
-inline void bcNeumannGhost(BField f, B3 ext, int g, int a, int s) {
+template <class FV>
+inline void bcNeumannGhostT(FV f, B3 ext, int g, int a, int s) {
   BExec space;
   int dims[3];
   long strides[3];
@@ -260,6 +261,9 @@ inline void bcNeumannGhost(BField f, B3 ext, int g, int a, int s) {
         bcNeumannGhostCell(f, static_cast<long>(p0) * sb + static_cast<long>(p1) * sc, sa, bic, lo,
                            hi);
       });
+}
+inline void bcNeumannGhost(BField f, B3 ext, int g, int a, int s) {
+  bcNeumannGhostT(f, ext, g, a, s);
 }
 
 // Zero-gradient (Neumann) outflow velocity ghost for component comp on one face.
