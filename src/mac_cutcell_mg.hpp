@@ -1990,6 +1990,58 @@ class CutcellMG {
         },
         slot(k));
   }
+  // C (doc/vof_projection_cost_design.md §6): eligibility of the fused host Krylov kernels of
+  // solvePCGResident -- host memory, single rank with the precomputed fluid count (H-1), the A3
+  // wrap reads (no outflow face, no overlay), a singular operator (the mean projection runs), and
+  // level 0 at the matvec's ghost width. Elsewhere the separate kernels (the device keeps them:
+  // §2, a device sum-fusion can change the reduction tree).
+  bool hostKrylovFusion() const {
+    const Level& l0 = lv_[0];
+    return kHostMemory && fusedWrapReads() && removeMean_ && l0.nFluid >= 0 && l0.g == G;
+  }
+  // C1 (§6 (i)): y = A v (matvecOverlap's A3 wrap cell body, exact flux or band form) and
+  // v^T y into slot k in ONE lane pass over the inner cells, with dotTo's mask, operand order and
+  // lane order: bitwise to matvecOverlap(l0, y, v) + dotTo(l0, v, y, k). hostKrylovFusion() only.
+  void matvecDotTo(Level& l0, CCField y, CCField v, int k) {
+    const C3 e = l0.ext, n = l0.inner;
+    const int g = G;
+    CCField yy = y;
+    CCConst vv = v;
+    FPV ac = l0.AC;
+    const bool all = hostAllFluid(l0);
+    if (exactResidual_) {
+      CCConst ox = l0.ox, oy = l0.oy, oz = l0.oz;
+      const double gfx = gfx_, gfy = gfy_, gfz = gfz_;
+      ccReduce3Lanes(
+          "peclet::flow::cc_apply_exact_dot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int lx, int ly, int lz, double& acc) {
+            const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+            const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+            const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+            const double a = cutcellApplyExactCell(vv, ox, oy, oz, i, sx, sy, sz, w.xp, w.xm, w.yp,
+                                                   w.ym, w.zp, w.zm, gfx, gfy, gfz);
+            yy(i) = a;
+            if (all || ac(i) > 1e-30f)
+              acc += vv(i) * a;
+          },
+          slot(k));
+      return;
+    }
+    FPC AC = l0.AC, AFX = l0.AFX, AFY = l0.AFY, AFZ = l0.AFZ;
+    ccReduce3Lanes(
+        "peclet::flow::cc_apply_dot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz, double& acc) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+          const double a = cutcellApplyFaceCell(vv, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm,
+                                                w.yp, w.ym, w.zp, w.zm);
+          yy(i) = a;
+          if (all || ac(i) > 1e-30f)
+            acc += vv(i) * a;
+        },
+        slot(k));
+  }
   void maxabsTo(Level& lv, CCField a, int k) {
     C3 e = lv.ext;
     const int g = lv.g;
@@ -2088,11 +2140,16 @@ class CutcellMG {
       CCField xx = x, rr = r, pp = p, zz = z, aa = Ap;
       const double brkPAp = kBrkPAp, brkRz = kBrkRz;  // by value into the kernels
       bool exited = false;
+      const bool fuseC = hostKrylovFusion();  // C1-C4 (§6): the fused host kernels
       for (; it < maxit; ++it) {
-        matvec(Ap, p);
-        if (meanRemovalAll_)
-          removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
-        dotTo(l0, p, Ap, kPAp);
+        if (fuseC && !meanRemovalAll_) {
+          matvecDotTo(l0, Ap, p, kPAp);  // C1: Ap = A p and p^T Ap in one pass (star == nullptr)
+        } else {
+          matvec(Ap, p);
+          if (meanRemovalAll_)
+            removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
+          dotTo(l0, p, Ap, kPAp);
+        }
         if (dbgBrkWhich_ == 1 && it == dbgBrkIter_)
           setSlot(kPAp, std::numeric_limits<double>::quiet_NaN());
         Kokkos::parallel_for(  // alpha = rz / pAp, or the pAp breakdown flag
