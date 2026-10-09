@@ -21,7 +21,14 @@ import sys
 
 SRC = pathlib.Path(__file__).resolve().parents[2] / "src"
 
-CAST = re.compile(r"\(\s*float\s*\)|static_cast\s*<\s*float\s*>|View<\s*float\s*\*")
+# WO-D0 (doc/vof_projection_cost_design.md §12): also a `float` template ARGUMENT (`X<float>`,
+# `X<float, ...>`, `X<..., float>`) and a `float` template-parameter DEFAULT (`class R = float`,
+# `typename R = float`) -- the forms the FP32 bottom factor and the FP32 V-cycle data take.
+CAST = re.compile(
+    r"\(\s*float\s*\)|static_cast\s*<\s*float\s*>|View<\s*float\s*\*"
+    r"|<\s*float\s*[,>]|,\s*float\s*>"
+    r"|\b(?:class|typename)\s+\w+\s*=\s*float\b"
+)
 
 # Whole files exempt from this test, with the reason (also stated in the file's own header
 # comment as PRECISION-EXEMPT so a reader of the file sees it too, not just this list).

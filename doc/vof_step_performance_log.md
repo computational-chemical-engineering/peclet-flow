@@ -1228,3 +1228,13 @@ now carries the PCG loop's level-0 matvec.
   fill) and scalar max-allreduces. Skipped: `ghostsCurrent` starts at `useRes`. G-BIT host PASS vs `ref/c0_omp`
   (4 dumps bitwise, 10.00 it/step), CUDA PASS vs `ref/gbit_cuda`; pressure 13/13, velocity/BC 27/27.
   1x8 kp: `bc_vel` 62.0 -> 59.0, launches/step 1067.7 -> 1061.7.
+
+### WO-D0 — the float guard covers template arguments and defaults
+
+- `no_float_operator_casts` also flags `X<float>` / `X<float, ...>` / `X<..., float>` and `class|typename R = float`.
+  The extended guard found 8 lines; the note names two (`BottomDirect<float>`, `FR = float`). Marked
+  `PRECISION-EXEMPT` with their reason: the §13 FP32 bottom factor (`BottomDirect<float>` x2, `FR = float`,
+  `FacReal = float`) and four pre-G.6 float defaults whose production instantiations name `mreal`/`MReal`
+  (`IbmOverlayT`, `GpOverlayT`, `gpMakeOverlay` defaults; the unused `GpOverlay` alias). No code changed.
+  `using VReal = float;` added beside `MReal` with the §4.4.2 marker. A planted `BottomDirect<float> planted_;`
+  without the marker: guard rc 1 (names the line); real tree rc 0; static ctests 3/3.

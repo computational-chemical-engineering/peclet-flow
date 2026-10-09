@@ -97,7 +97,7 @@ using peclet::core::scheme::GpState;
 /// (gpApplyDelta). Orders may differ (the mixed/deferred-correction scheme: rhs_order=2 keeps
 /// the 2nd-order steady constraint, matrix_order=1 keeps the matrix 7-point and near-symmetric —
 /// the operator mismatch converges through the time stepping, measured rate ~0.4).
-template <class Space, class Real = float>
+template <class Space, class Real = float>  // PRECISION-EXEMPT: production names MReal
 struct GpOverlayT {
   Kokkos::View<int*, Space> cell;               // packed INNER flat index x + y*nx + z*nx*ny
   Kokkos::View<Real*, Space> rescale;           // rho = min(1, min_f D_f) of the MATRIX weights
@@ -109,9 +109,9 @@ struct GpOverlayT {
 };
 template <class Real>
 using GpOverlayReal = GpOverlayT<CCMem, Real>;
-using GpOverlay = GpOverlayReal<float>;
+using GpOverlay = GpOverlayReal<float>;  // PRECISION-EXEMPT: pre-G.6 alias; production: MReal
 
-template <class Real = float>
+template <class Real = float>  // PRECISION-EXEMPT: the production call names MReal
 inline GpOverlayReal<Real> gpMakeOverlay(long n) {
   GpOverlayReal<Real> ov;
   ov.cell = Kokkos::View<int*, CCMem>("gp_cell", n);

@@ -139,7 +139,7 @@ KOKKOS_INLINE_FUNCTION Real poly_Nbc_mp_sw_avg(Real xi_m, Real xi_p) {
 // memory space AND the storage precision (G.6) so the device build and a HostSpace reference
 // share the same fill code, and a `-DPECLET_FLOW_OPERATOR_DOUBLE` build carries the overlay in
 // double end to end instead of narrowing it to float at this SoA.
-template <class Space, class Real = float>
+template <class Space, class Real = float>  // PRECISION-EXEMPT: production names mreal
 struct IbmOverlayT {
   using value_type = Real;
   Kokkos::View<int*, Space> cell_index;
