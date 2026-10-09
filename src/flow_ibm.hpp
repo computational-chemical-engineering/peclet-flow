@@ -513,6 +513,13 @@ class Solver {
   // bottom solve, naming the failed condition, where ineligible), 2 "algebraic" (GraphAMG always).
   // Live; independent of the geometry.
   void setPressureBottomSolver(int engine);
+  // Precision of the pressure V-cycle preconditioner (doc/vof_projection_cost_design.md §4.4.6):
+  // 0 "auto" (FP32 where CutcellMG::fp32VcycleIneligible holds, else FP64), 1 "fp64" (DEFAULT),
+  // 2 "fp32" (raises at the solve, naming the failed condition, where ineligible). Live: the FP32
+  // weights are rebuilt from the stored level openness at once.
+  void setPressureVcyclePrecision(int mode);
+  // The precision the last pressure solve's V-cycles used: true = FP32.
+  bool pressureVcycleFp32() const;
 
   // Coarse-level telescoping of the pressure multigrid (mac_cutcell_mg.hpp Telescope): when a
   // per-rank block turns odd, merge ORB siblings onto fewer ranks and keep coarsening instead of
