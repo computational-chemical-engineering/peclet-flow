@@ -37,7 +37,9 @@
 //      residue in every cell its sweeps touch; those cells satisfy `0 < C < 1`, so the curvature
 //      cascade builds a zero-area PLIC polygon for them and returns |kappa| up to 1e8. Gated both
 //      ways: with the guard (default eps = 1e-8) a real droplet's spurious currents DECAY, with
-//      `set_vof_interface_eps(0)` they grow by three orders in 20 steps.
+//      `set_vof_interface_eps(0)` they grow by three orders in 20 steps. An unguarded run that
+//      is destroyed outright -- its velocity crosses the Weymouth-Yue CFL cap and `step()` throws
+//      -- is the expected outcome too; any other exception still fails.
 //
 //   P7 SPURIOUS CURRENTS WITH THE REAL CURVATURE — the capillary number a resolved static droplet
 //      actually settles at, and its convergence with resolution. A measurement, reported and
@@ -45,6 +47,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <Kokkos_Core.hpp>
 #include <memory>
 #include <stdexcept>
@@ -360,12 +363,29 @@ void gateWispGuard() {
       auto s = makeDroplet(c);
       double u0 = 0, uMax = 0, kmax = 0;
       for (int k = 0; k < 40; ++k) {
-        s->step();
+        if (eps > 0.0) {
+          s->step();
+        } else {
+          // Unguarded: the garbage curvature may drive the velocity past the CFL cap, and the
+          // advector refuses the step. That is the arm's "destroyed" outcome, not a failure.
+          try {
+            s->step();
+          } catch (const std::runtime_error& e) {
+            if (!std::strstr(e.what(), "exceeds the Weymouth-Yue boundedness cap"))
+              throw;
+            std::printf("  n = %2d  eps = %-6g  DESTROYED at step %d (peak max|u| %.3e): %s\n",
+                        ns[i], eps, k + 1, uMax, e.what());
+            uMax = -1.0;  // marks the destroyed run: the expected outcome, nothing more to gate
+            break;
+          }
+        }
         const double u = maxVel(*s);
         if (k == 0)
           u0 = u;
         uMax = std::fmax(uMax, u);
       }
+      if (uMax < 0.0)
+        continue;
       const double uEnd = maxVel(*s);
       const auto ka = s->getVofCurvature();
       const auto br = s->getVofCurvatureBranch();
