@@ -1113,3 +1113,4 @@ at load 21, 8.5 (218) at load 36 (oversubscribed); OMP 8 2.0 (2.0); OMP 1 0.44; 
   §4.3 rejection quantitatively; FP32 is 3.3x faster.
 - F4 (§10): 840 launches x 4 µs ≈ 3.4 ms on the workstation (< 5): not triggered here; the genoa
   t_L is measured at S-3.
+- WO-H1 (all-fluid flag + fluid count, host single rank): G-BIT host PASS (hash 12+1 identical, 4 dumps bitwise, 10.00 / 13.06 it/step).
