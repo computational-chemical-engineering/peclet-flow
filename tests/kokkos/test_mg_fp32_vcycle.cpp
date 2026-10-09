@@ -29,7 +29,13 @@
 ///   G-D2 (a) scale covariance B(2^k r) = 2^k B(r) bitwise for k in {-40, 0, 37}, and (d) the
 ///       nonlinearity |B(r1 + r2) - B r1 - B r2|_2 / |B r1|_2 <= 1e-4 on the column's level 0
 ///       (B = one FP32 V-cycle as the PCG applies it); the FP32 / FP64 V-cycle difference is
-///       printed for the record.
+///       printed for the record;
+///   G-D3 (b)-(e) on the three problems, PCG and FCG, 'fp32' against 'fp64' on the same build:
+///       (a) iterations <= fp64 + max(1, 5 %) at rtol 1e-8 (cap 200); (b) the attainable floor
+///       (rtol 1e-14, cap 300) <= 2x fp64's; (c) at exit max|P(b - A x)| / max|P b| <= 1.5 rtol;
+///       (d) no capped solve where fp64 converges, no failure flag; (e) the health ratio
+///       |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| (setHealthTrace) has median <= 1e-2 per solve.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -473,6 +479,7 @@ void preconditionerChecks(const Problem& P, bool nonlinearity) {
     check(nl <= 1e-4, P.name + ": G-D2 (d) |B(r1+r2) - B r1 - B r2| / |B r1| = " + num(nl));
   }
   // for the record: the same r through today's FP64 V-cycle
+  mg.setVcyclePrecision(CutcellMG::kVcycleFp64);
   CCField r = toDevice(r1, "r"), z("z", n);
   mg.removeMean(l0, r);
   mg.precondVcycle(z, r);
@@ -515,6 +522,85 @@ Solve solve(const Problem& P, int mode) {
   out.fp32 = mg.lastVcycleFp32();
   out.x = toHost(x);
   return out;
+}
+
+// One single-rank solve for G-D3 (driver 0 = PCG, 1 = FCG): iterations, failure, the FP32 flag,
+// the exit's true relative residual max|P(b - A x)| / max|P b|, and the health ratios.
+struct KrylovRun {
+  int it = 0;
+  bool failed = false, fp32 = false;
+  double trueRel = 0.0, healthMedian = 0.0;
+};
+KrylovRun krylov(const Problem& P, int mode, int driver, double rtol, int maxit) {
+  CutcellMG mg;
+  setUp(mg, P, mode);
+  mg.setHealthTrace(true);
+  const C3 e = P.ext();
+  const std::size_t n = (std::size_t)e.x * e.y * e.z;
+  std::vector<double> hb(n, 0.0);
+  for (int z = 0; z < P.nz; ++z)
+    for (int y = 0; y < P.ny; ++y)
+      for (int x = 0; x < P.nx; ++x)
+        hb[P.idx(x, y, z)] = std::sin(0.3 * x + 0.1) * std::cos(0.2 * y) + 0.1 * std::sin(0.5 * z);
+  CCField b = toDevice(hb, "b"), x("x", n), r("r", n), p("p", n), zz("z", n), zp("zp", n),
+          Ap("Ap", n);
+  CutcellMG::Level& l0 = mg.level(0);
+  mg.removeMean(l0, b);  // the projection's compatible rhs
+  KrylovRun out;
+  out.it = driver == 0 ? mg.solvePCG(b, x, r, p, zz, Ap, maxit, rtol, 2, 2, 12)
+                       : mg.solveFCG(b, x, r, p, zz, zp, Ap, maxit, rtol, 2, 2, 12);
+  out.failed = mg.lastSolveFailed();
+  out.fp32 = mg.lastVcycleFp32();
+  // the true residual of the returned x, mean-projected
+  mg.matvecOverlap(l0, Ap, x);
+  CCField t("t", n);
+  Kokkos::deep_copy(t, b);
+  auto th = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), t);
+  auto ah = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Ap);
+  for (std::size_t i = 0; i < n; ++i)
+    th(i) -= ah(i);
+  Kokkos::deep_copy(t, th);
+  mg.removeMean(l0, t);
+  out.trueRel = mg.maxabs(l0, t) / mg.maxabs(l0, b);
+  std::vector<double> h = mg.healthLog();
+  if (!h.empty()) {
+    std::sort(h.begin(), h.end());
+    out.healthMedian = h[h.size() / 2];
+  }
+  return out;
+}
+
+void solverChecks(const Problem& P) {
+  for (int driver : {0, 1}) {
+    const std::string tag = P.name + (driver == 0 ? " PCG" : " FCG");
+    const KrylovRun a64 = krylov(P, CutcellMG::kVcycleFp64, driver, 1e-8, 200),
+                    a32 = krylov(P, CutcellMG::kVcycleFp32, driver, 1e-8, 200);
+    const int slack = std::max(1, (int)std::ceil(0.05 * a64.it));
+    // (a), (c), (d) compare against an FP64 solve that converged for real (cyl / pack at 1e4 cap
+    // or diverge in FP64 too: the coarsening limit of CLAUDE.md "Pressure solve")
+    const bool valid = a64.it < 200 && a64.trueRel <= 1.5e-8;
+    if (!valid) {
+      std::printf("  %-72s (info)\n",
+                  (tag + ": fp64 does not converge (it " + std::to_string(a64.it) + ", true " +
+                   num(a64.trueRel) + "); fp32 it " + std::to_string(a32.it) + ", true " +
+                   num(a32.trueRel) + ": (a), (c), (d) n/a")
+                      .c_str());
+    } else {
+      check(a32.fp32 && !a64.fp32 && a32.it <= a64.it + slack,
+            tag + ": G-D3 (a) iterations fp32 " + std::to_string(a32.it) + " vs fp64 " +
+                std::to_string(a64.it));
+      check(a32.trueRel <= 1.5e-8, tag + ": G-D3 (c) exit max|P(b - Ax)|/max|Pb| = " +
+                                       num(a32.trueRel) + " (fp64 " + num(a64.trueRel) + ")");
+      check(!a32.failed && a32.it < 200, tag + ": G-D3 (d) no failure, not capped");
+    }
+    check(a32.healthMedian <= 1e-2, tag + ": G-D3 (e) health median " + num(a32.healthMedian) +
+                                        " (fp64 " + num(a64.healthMedian) + ")");
+    const KrylovRun f64 = krylov(P, CutcellMG::kVcycleFp64, driver, 1e-14, 300),
+                    f32 = krylov(P, CutcellMG::kVcycleFp32, driver, 1e-14, 300);
+    check(f32.trueRel <= 2.0 * f64.trueRel,
+          tag + ": G-D3 (b) floor fp32 " + num(f32.trueRel) + " vs fp64 " + num(f64.trueRel) +
+              " (it " + std::to_string(f32.it) + " / " + std::to_string(f64.it) + ")");
+  }
 }
 
 void eligibilityChecks() {
@@ -577,6 +663,7 @@ int main(int argc, char** argv) {
       dataChecks(P);
       kernelChecks(P);
       preconditionerChecks(P, P.name == "column");
+      solverChecks(P);
     }
     eligibilityChecks();
     std::printf("%s (%d failure%s)\n", fails ? "FAIL" : "PASS", fails, fails == 1 ? "" : "s");

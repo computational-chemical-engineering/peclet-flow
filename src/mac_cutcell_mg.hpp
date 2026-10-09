@@ -2332,9 +2332,20 @@ class CutcellMG {
       ExitDot& d;
       ~ExitDotScope() { d = ExitDot{}; }
     } exitDotScope{exitDot_};
+    // D (§4.4.5): the FP32 V-cycle on an eligible solve; it takes e = ilogb(max|r|) of the vector
+    // it preconditions (r0 before the loop, the packet's rn inside it) and forms r^T z in its exit
+    const bool f32 = fp32VcycleSolve();
+    lastVcycleFp32_ = f32;
+    const bool health = trace || healthTrace_;
+    healthLog_.clear();
+    int eNext = 0;
     // C4: r^T z from the V-cycle's level-0 exit pass (and p = z there under copyDotTo's fusion
     // condition); a V-cycle without that exit (one level) leaves `done` false -> the old kernels
     auto precondDot = [&](int k, CCField pz) {
+      if (f32) {
+        precondVcycleFp32(z, r, eNext, k, pz);
+        return true;
+      }
       exitDot_ = ExitDot{fuseC ? k : -1, pz, false};
       precond(z, r);
       const bool done = exitDot_.done;
@@ -2343,6 +2354,7 @@ class CutcellMG {
     };
     if (r0 > 0.0 && std::isfinite(r0)) {
       const bool copyFused = kHostMemory && fusedWrapSmooth(l0) && lv_.size() > 1;
+      eNext = std::ilogb(r0);
       if (!precondDot(kRz, copyFused ? p : CCField()))
         copyDotTo(l0, p, r, z, kRz);  // p = z; r^T z into kRz
       else if (!copyFused)
@@ -2427,8 +2439,18 @@ class CutcellMG {
           exited = true;
           break;
         }
+        eNext = std::ilogb(rn);
+        const double rzOld = health ? dot(l0, r, z) : 0.0;  // r_{k+1}^T z_k (the instrument)
         if (!precondDot(kRzNew, CCField()))  // C4: r^T z_new from the V-cycle exit pass
           dotTo(l0, r, z, kRzNew);
+        if (health) {
+          const double rzNew = readSlot(kRzNew);
+          const double ratio = rzNew != 0.0 ? std::abs(rzOld / rzNew) : 0.0;
+          healthLog_.push_back(ratio);
+          if (trace)
+            printf("[mg]   it %3d  health |r^T z_k| / |r^T z_{k+1}| = %.3e%s\n", it + 1, ratio,
+                   f32 ? " (fp32 V-cycle)" : "");
+        }
         if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
           setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
         Kokkos::parallel_for(  // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
@@ -2492,8 +2514,17 @@ class CutcellMG {
       if (star)
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
-    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
-    matvec(Ap, x);                                                          // r = b - A x
+    // D (§4.4.5): the FP32 V-cycle on an eligible solve, e = ilogb(max|r|); FCG keeps its own dots
+    const bool f32 = fp32VcycleSolve();
+    lastVcycleFp32_ = f32;
+    healthLog_.clear();
+    auto precond = [&](CCField zz, CCField rr, double rn) {
+      if (f32)
+        precondVcycleFp32(zz, rr, std::ilogb(rn), -1, CCField());
+      else
+        precondVcycle(zz, rr);  // A5
+    };
+    matvec(Ap, x);  // r = b - A x
     Kokkos::deep_copy(CCExec(), r, b);
     axpy(r, -1.0, Ap);
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
@@ -2514,7 +2545,7 @@ class CutcellMG {
              rtol, pre, post, bottom);
     ++dbgSolve_;
     if (r0 > 0.0 && std::isfinite(r0)) {
-      precond(z, r);
+      precond(z, r, r0);
       Kokkos::deep_copy(CCExec(), p, z);
       double rz = dot(l0, r, z);
       if (!std::isfinite(rz)) {
@@ -2553,7 +2584,7 @@ class CutcellMG {
           break;
         }
         Kokkos::deep_copy(CCExec(), zp, z);  // z_k, before the preconditioner overwrites it
-        precond(z, r);
+        precond(z, r, rn);
         const double rznew = dot(l0, r, z), rzcross = dot(l0, r, zp);
         if (!std::isfinite(rznew) || !std::isfinite(rzcross)) {
           solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
@@ -2569,6 +2600,8 @@ class CutcellMG {
         if (trace)
           printf("[mg]   it %3d  beta=%.6e  pr=%.3e (|r^T z_k| / |r^T z_{k+1}|)\n", it + 1, beta,
                  rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
+        if (healthTrace_)  // §4.4.5: FCG forms this dot anyway
+          healthLog_.push_back(rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
         aypx(p, beta, z);
         rz = rznew;
       }
@@ -2945,6 +2978,15 @@ class CutcellMG {
     vcycle(0, /*sym=*/true);
   }
   void vcycle(int L, bool sym) {
+    if (L == 0) {  // D (§4.4.6): every FP64 V-cycle passes here, the FP32 one never does
+      lastVcycleFp32_ = false;
+      if (vprec_ == kVcycleFp32) {
+        const char* why = fp32VcycleIneligible(true);
+        throw std::runtime_error(
+            std::string("set_pressure_vcycle_precision('fp32'): not eligible here: ") +
+            (why ? why : fp32VcycleIneligible(false)));
+      }
+    }
     if (mgDebugLevel() >= 3) {
       const auto t0 = std::chrono::steady_clock::now();
       vcycleImpl(L, sym);
@@ -3137,6 +3179,24 @@ class CutcellMG {
     checkFp32DecoupledSets();
 #endif
   }
+  // §4.4.1, §4.4.6: does this solve run the FP32 V-cycle? Evaluated once per solve by
+  // solvePCGResident and solveFCG; 'fp32' raises naming the failed condition where ineligible.
+  bool fp32VcycleSolve() {
+    if (vprec_ == kVcycleFp64)
+      return false;
+    if (const char* why = fp32VcycleIneligible(true)) {
+      if (vprec_ == kVcycleFp32)
+        throw std::runtime_error(
+            std::string("set_pressure_vcycle_precision('fp32'): not eligible here: ") + why);
+      return false;
+    }
+    return true;
+  }
+  // §4.4.5 health instrument: |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| per iteration of the
+  // single-rank PCG / FCG, formed (one extra dot) only while tracing (PECLET_FLOW_MG_DEBUG >= 2,
+  // printed) or under this test hook (recorded, healthLog(): the last solve's ratios).
+  void setHealthTrace(bool on) { healthTrace_ = on; }
+  const std::vector<double>& healthLog() const { return healthLog_; }
   // §4.4.4: one FP32 V-cycle z = M r on an eligible solve (the caller checked
   // fp32VcycleIneligible). e = ilogb(max|r|) of the vector being preconditioned: the input is
   // scaled by 2^-e and the output by 2^e, both exact. k >= 0: r^T z over the fluid cells into slot
@@ -4942,6 +5002,8 @@ class CutcellMG {
   int vprec_ = kVcycleFp64;
   bool opBuilt_ = false;
   bool lastVcycleFp32_ = false;
+  bool healthTrace_ = false;       // §4.4.5 test hook (setHealthTrace)
+  std::vector<double> healthLog_;  // the last single-rank PCG / FCG solve's health ratios
   // The `agglomerateBottom()` auto criterion: agglomerate once the coarsest GLOBAL grid exceeds
   // this many cells on any axis (`setAgglomerationExtent`).
   int agglomExtent_ = 4;

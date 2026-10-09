@@ -1273,3 +1273,27 @@ now carries the PCG loop's level-0 matvec.
   sym(M32) on the mean-free subspace equals FP64's to 6 digits in all 16 (FP64 is already indefinite at 1e3+ walled /
   1e4 periodic: e.g. wallz n16 1e4 -1.008500e2 vs -1.008501e2): G-D2 PASS 16/16.
 - G-BIT 'fp64': host PASS vs `ref/c0_omp`, CUDA PASS vs `ref/gbit_cuda`; pressure 13/13; D ctests 2/2 host, 1/1 CUDA.
+
+### WO-D3 commit 1 — integration (default 'fp64'): STOPPED at G-D3 (branch `projcost-d3-wip`, not on `projcost`)
+
+- Wiring: `fp32VcycleSolve()` once per solve in `solvePCGResident` (e = ilogb(r0), then ilogb of the packet's rn; r.z
+  from the FP32 exit into kRz / kRzNew) and `solveFCG` (e from r0 / rn; own dots); `vcycle(0)` reports FP64 and raises
+  under a forced 'fp32' on any other driver; health ratio |r_{k+1}.z_k|/|r_{k+1}.z_{k+1}| traced (MG_DEBUG >= 2) or
+  recorded (`setHealthTrace`). Study options `--vcycle-precision` (prof.py, d1_tolerance.py column, the probe,
+  precision_ab.py contrast) and prof.py `--fcg`. G-BIT 'fp64': host PASS vs `ref/c0_omp`, CUDA PASS vs `ref/gbit_cuda`.
+- G-D4 ('fp32' forced vs the post-C references): host 1x8/1x24 and CUDA NUMCMP PASS (rel 2.4e-14 .. 6.5e-14, iterations
+  500/653 identical, div ratio 1.000); d1cmp PASS host and CUDA (column 21103 = 21103 iterations, drift 5.2e-12).
+- G-D3 PASS parts: RCP bed (precision_ab contrast) 13,13,14,14 / 12,13,13,14 / 21,25,27,28 identical fp32 = fp64;
+  ctest column PCG/FCG (a) 18/18, 17/17, (b) floor 1.0e-12 vs 1.4e-12, (c) 9.8e-9, (d) ok; probe: 53 configurations
+  where FP64 converges, +2 iterations of 12664 (one round-off-rhs solve 8 -> 13, div 2e-21).
+- G-D3 FAIL 1, (e): the health-ratio median <= 1e-2 is not met by the FP64 V-cycle itself: bubble column PCG
+  per-solve medians 0.32-0.47 (fp64) = 0.32-0.47 (fp32); FCG 0.064-0.084 both; synthetic column PCG 0.195 / FCG 0.056
+  both. FP32 leaves the ratio unchanged (it is R != cP^T, §4.2 P7); the absolute threshold is unattainable.
+- G-D3 FAIL 2, (a)/(d) at high contrast with walls (probe hydro slab 1e3/1e4, PCG and FCG; FP64 itself caps later
+  and ends at div O(1)): from the SAME initial state (step 1) FP32 caps where FP64 took 124 (box 1e4 pcg), 123 (pack 1e3
+  fcg), 135 (pack 1e4 fcg) and costs 22 -> 104 (box 1e4 fcg); once better (200 -> 184). The dense tool shows
+  |dM|/|M| ~ 6e-8 there, but sym(M) is already indefinite in FP64 at these ratios, so CG/FCG trajectories are chaotic.
+- WO-D4c not implemented: the existing host-loop FCG (same recurrence) already fails both items with FP32.
+- Projection A/B ('fp64' vs 'fp32' on one build, prof.py 30 steps rtol 1e-8, 3 interleaved rounds, min (+spread)):
+  CUDA 12.28 (+0.01) -> 9.81 (+0.02) ms, 0.799; host 1x8 69.9 (+11.7) -> 66.6 (+8.2), 0.953 (load 3.9-5.5); 1x24
+  56.8 (+1.8) -> 52.2 (+2.8), 0.918 (load 5.5-8.2). Iterations 10.0 = 10.0.

@@ -23,6 +23,8 @@ Usage:
     PYTHONPATH=<flow build> OMP_NUM_THREADS=8 OMP_PROC_BIND=false \\
         python tests/study/vof_perf/d1_tolerance.py --out DIR [--cases static,hysing,column]
             [--rtols 1e-10,1e-9,1e-8,1e-7,1e-6] [--column-steps 2000] [--ckpt PATH] [--case-dir DIR]
+            [--vcycle-precision auto|fp64|fp32]   (the column's V-cycle precision, §4 of
+                                                 doc/vof_projection_cost_design.md)
 """
 import json
 import os
@@ -46,6 +48,10 @@ CASE_DIR = arg("--case-dir", os.path.expanduser(
     "~/Codes/peclet-examples/benchmarks/bubble-column/scripts"))
 CKPT = arg("--ckpt", os.path.expanduser(
     "~/Codes/bubble_column_perf/ckpt_t43.npz"))
+# doc/vof_projection_cost_design.md §4: the V-cycle precision of the COLUMN case (its PCG is the
+# only Krylov solve here; the static and Hysing cases run Chebyshev, where the FP32 V-cycle never
+# applies, so they keep the build's default)
+VPREC = arg("--vcycle-precision", "")
 
 # the two study scripts read sys.argv at import: hand them none of ours
 sys.argv = [sys.argv[0]]
@@ -80,6 +86,8 @@ def run_column(rtol):
     s.set_field("p", pres)
     s.diagnostics.set_vof_step_parity(step)
     s.set_pressure_pcg(True, 800, rtol)
+    if VPREC:
+        s.diagnostics.set_pressure_vcycle_precision(VPREC)
     v0 = np.array([b["volume"] for b in s.diagnostics.vof_block_stats()])
     rec = {k: [] for k in ("t", "dt", "p_iters", "mom_residual", "mom_time", "step_time",
                            "div_proj", "vol", "ux")}
