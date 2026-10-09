@@ -1254,3 +1254,22 @@ now carries the PCG loop's level-0 matvec.
   bitwise on the ineligible solves. Host 52/52 checks, CUDA ctest pass.
 - G-BIT (default 'fp64'): host PASS vs `ref/c0_omp` (4 dumps, 10.00 it/step), CUDA PASS vs `ref/gbit_cuda`; pressure
   13/13; mg_fp32_vcycle + cutcellmg_aniso_mpi_np2 2/2.
+
+### WO-D2 — FP32 kernels (default 'fp64': inert)
+
+- `src/mg_fp32_vcycle.hpp` (new; §4.4.3 bodies `fp32Diag`/`fp32Flux`/smooth/residual; wrap smoother: host pencils
+  with the S-peeled rows, device MDRange; residual; entry; restrict f->f (x 1/count, 0.125f at ratio 2) and f->d;
+  prolong f<-f (0.25f/0.75f, `1.0f - w`) and f<-d). `CutcellMG::precondVcycleFp32(z, r, e, k, p)` runs entry, the FP32
+  `vcycleImpl` schedule (`vcycleFp32Impl`, bottom FP64 as today) and the exit (fluid mean of (double)xf in C0 lane
+  order, z = 2^e((double)xf - m), r.z into slot k). FP32 `fillWrap` (templated) and `applyNeumannGhost`
+  (`bcNeumannGhostT`) are the same copies. Eligibility gains `!meanRemovalAll_` (§4.2 P8: "fine scope, as today";
+  flagged to the caller). Drivers not wired yet.
+- G-D1 (ctest `mg_fp32_vcycle`, every non-bottom level of column/cyl/pack): (a) residual of c*1 exactly 0 (c = 1, -3.7,
+  1e5, 2^-60); (e) host colour passes + residual == scalar float reference bitwise; CUDA within 2.3e-7 (FMA).
+  G-D2 (a) B(2^k r) = 2^k B(r) bitwise k = -40, 0, 37 (host and CUDA); (d) nonlinearity 1.37e-7 (CUDA 1.39e-7)
+  <= 1e-4; |B32 r - B64 r|/|B64 r| = 5.2e-8 .. 7.4e-8 (info).
+- G-D2 dense tool (`mg_dense_precond --precision fp32`, double operator, n 8/16 x periodic/wallz x ratio 1..1e4, 3
+  levels; `mg_precond_fp32cmp.py`): (c) |M32 - M64|_F/|M64|_F 3.9e-8 .. 8.8e-8 (gate 1e-4 / 1e-3); (b) lambda_min of
+  sym(M32) on the mean-free subspace equals FP64's to 6 digits in all 16 (FP64 is already indefinite at 1e3+ walled /
+  1e4 periodic: e.g. wallz n16 1e4 -1.008500e2 vs -1.008501e2): G-D2 PASS 16/16.
+- G-BIT 'fp64': host PASS vs `ref/c0_omp`, CUDA PASS vs `ref/gbit_cuda`; pressure 13/13; D ctests 2/2 host, 1/1 CUDA.

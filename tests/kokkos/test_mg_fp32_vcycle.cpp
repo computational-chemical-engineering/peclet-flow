@@ -22,7 +22,14 @@
 ///       and a single-level configuration and on a face weight below 1e-30 (the distributed case
 ///       is checked in the MPI ctest cutcellmg_aniso_mpi);
 ///   (f) on the ineligible outflow and odd-dimension configurations a PCG solve with 'auto' is
-///       bitwise (x, iterations) to 'fp64' and reports FP64.
+///       bitwise (x, iterations) to 'fp64' and reports FP64;
+///   (a) the FP32 residual of x = c * 1, b = 0 is exactly 0 for c in {1, -3.7, 1e5, 2^-60};
+///   (e) host: one FP32 smoother colour pass and the FP32 residual equal a scalar plain-float
+///       reference of §4.4.3 bitwise (device: within 1e-5 relative -- the device contracts FMAs);
+///   G-D2 (a) scale covariance B(2^k r) = 2^k B(r) bitwise for k in {-40, 0, 37}, and (d) the
+///       nonlinearity |B(r1 + r2) - B r1 - B r2|_2 / |B r1|_2 <= 1e-4 on the column's level 0
+///       (B = one FP32 V-cycle as the PCG applies it); the FP32 / FP64 V-cycle difference is
+///       printed for the record.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -306,6 +313,176 @@ void dataChecks(const Problem& P) {
   check(none, P.name + ": 'fp64' allocates no FP32 data");
 }
 
+constexpr bool kHost = std::is_same_v<CCMem, Kokkos::HostSpace>;
+
+// a deterministic pseudo-random field on the inner cells of level lv (0 in the ghosts)
+template <class T>
+std::vector<T> randomInner(const HostLevel& h, unsigned seed, double lo, double hi) {
+  std::mt19937 gen(seed);
+  std::uniform_real_distribution<double> uni(lo, hi);
+  std::vector<T> v((std::size_t)h.e.x * h.e.y * h.e.z, (T)0);
+  h.forInner([&](int, int, int, long i, const CcNbrs&) { v[i] = (T)uni(gen); });
+  return v;
+}
+template <class T>
+Kokkos::View<T*, CCMem> upload(const std::vector<T>& v, const char* name) {
+  Kokkos::View<T*, CCMem> f(name, v.size());
+  auto h = Kokkos::create_mirror_view(f);
+  for (std::size_t i = 0; i < v.size(); ++i)
+    h(i) = v[i];
+  Kokkos::deep_copy(f, h);
+  return f;
+}
+// The scalar plain-float reference of §4.4.3 (one colour pass / the residual), written out.
+struct FloatRef {
+  const HostLevel& h;
+  float q(const std::vector<float>& x, long i, const CcNbrs& w) const {
+    const long sy = h.e.x, sz = (long)h.e.x * h.e.y;
+    const float xi = x[i];
+    float acc = h.WX[i] * (xi - x[w.xm]);
+    acc = acc + h.WX[i + 1] * (xi - x[w.xp]);
+    acc = acc + h.WY[i] * (xi - x[w.ym]);
+    acc = acc + h.WY[i + sy] * (xi - x[w.yp]);
+    acc = acc + h.WZ[i] * (xi - x[w.zm]);
+    acc = acc + h.WZ[i + sz] * (xi - x[w.zp]);
+    return acc;
+  }
+  void pass(std::vector<float>& x, const std::vector<float>& b, int color) const {
+    h.forInner([&](int lx, int ly, int lz, long i, const CcNbrs& w) {
+      if (((lx + ly + lz) & 1) != color)
+        return;
+      const float d = h.Dsum(i);
+      if (d == 0.0f)
+        return;
+      x[i] = x[i] + (b[i] - q(x, i, w)) / d;
+    });
+  }
+  void residual(std::vector<float>& r, const std::vector<float>& x,
+                const std::vector<float>& b) const {
+    h.forInner([&](int, int, int, long i, const CcNbrs& w) { r[i] = b[i] - q(x, i, w); });
+  }
+};
+double maxRel(const std::vector<float>& a, const std::vector<float>& b) {
+  double m = 0.0, s = 0.0;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    m = std::max(m, (double)std::fabs(a[i] - b[i]));
+    s = std::max(s, (double)std::fabs(b[i]));
+  }
+  return s > 0 ? m / s : m;
+}
+
+// G-D1 (a), (e) on every non-bottom level of P.
+void kernelChecks(const Problem& P) {
+  CutcellMG mg;
+  setUp(mg, P, CutcellMG::kVcycleFp32);
+  for (int L = 0; L + 1 < mg.nLevels(); ++L) {
+    CutcellMG::Level& lv = mg.level(L);
+    HostLevel h(lv);
+    char tag[96];
+    std::snprintf(tag, sizeof tag, "%s L%d", P.name.c_str(), L);
+    // (a) x = c 1, b = 0 -> r = 0 exactly
+    bool zero = true;
+    for (double c : {1.0, -3.7, 1e5, std::ldexp(1.0, -60)}) {
+      Kokkos::deep_copy(lv.xf, (VReal)c);
+      Kokkos::deep_copy(lv.rhsf, 0.0f);
+      Kokkos::deep_copy(lv.resf, 1.0f);
+      residualFp32Wrap(lv.resf, VConst(lv.xf), VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
+                       VConst(lv.WZ), lv.ext, lv.inner, lv.g);
+      const std::vector<float> r = toHost(lv.resf);
+      h.forInner([&](int, int, int, long i, const CcNbrs&) { zero = zero && r[i] == 0.0f; });
+    }
+    check(zero, std::string(tag) + ": (a) the FP32 residual of c * 1 is exactly 0");
+    // (e) one colour pass of each colour, and the residual, against the float reference
+    const FloatRef ref{h};
+    std::vector<float> x = randomInner<float>(h, 3 + L, -1.0, 1.0),
+                       b = randomInner<float>(h, 5 + L, -1.0, 1.0);
+    VField xd = upload(x, "x"), bd = upload(b, "b"), rd("r", x.size());
+    double dev = 0.0;
+    bool bits = true;
+    for (int color : {0, 1}) {
+      ref.pass(x, b, color);
+      cutcellSmoothColorFp32Wrap(xd, VConst(bd), VConst(lv.WX), VConst(lv.WY), VConst(lv.WZ),
+                                 lv.ext, lv.inner, C3{0, 0, 0}, lv.g, color);
+      const std::vector<float> got = toHost(xd);
+      bits = bits && std::memcmp(got.data(), x.data(), x.size() * sizeof(float)) == 0;
+      dev = std::max(dev, maxRel(got, x));
+    }
+    std::vector<float> r(x.size(), 0.0f);
+    ref.residual(r, x, b);
+    Kokkos::deep_copy(xd, upload(x, "x2"));
+    residualFp32Wrap(rd, VConst(xd), VConst(bd), VConst(lv.WX), VConst(lv.WY), VConst(lv.WZ),
+                     lv.ext, lv.inner, lv.g);
+    const std::vector<float> gotr = toHost(rd);
+    bits = bits && std::memcmp(gotr.data(), r.data(), r.size() * sizeof(float)) == 0;
+    dev = std::max(dev, maxRel(gotr, r));
+    if (kHost)
+      check(bits,
+            std::string(tag) + ": (e) smoother passes + residual == float reference, bitwise");
+    else
+      check(dev <= 1e-5, std::string(tag) + ": (e) device vs float reference, max rel " + num(dev));
+  }
+}
+
+// G-D2 (a), (d) and the FP32 / FP64 difference on level 0 of P (B = one FP32 V-cycle, z = B r).
+void preconditionerChecks(const Problem& P, bool nonlinearity) {
+  CutcellMG mg;
+  setUp(mg, P, CutcellMG::kVcycleFp32);
+  CutcellMG::Level& l0 = mg.level(0);
+  const std::size_t n = l0.n;
+  {  // the driver's smoothing schedule (2, 2, 12): a zero-iteration solve sets it
+    CCField s0("s0", n), s1("s1", n), s2("s2", n), s3("s3", n), s4("s4", n), s5("s5", n);
+    mg.solvePCG(s0, s1, s2, s3, s4, s5, 0, 1e-8, 2, 2, 12);
+  }
+  HostLevel h(l0);
+  auto B = [&](const std::vector<double>& rv) {
+    CCField r = toDevice(rv, "r"), z("z", n);
+    mg.removeMean(l0, r);
+    mg.precondVcycleFp32(z, r, std::ilogb(mg.maxabs(l0, r)), -1, CCField());
+    return std::make_pair(toHost(z), toHost(r));
+  };
+  const std::vector<double> r1 = randomInner<double>(h, 21, -1.0, 1.0),
+                            r2 = randomInner<double>(h, 22, -1.0, 1.0);
+  const auto z1 = B(r1);
+  bool cov = true;
+  for (int k : {-40, 0, 37}) {
+    std::vector<double> rk(r1);
+    for (double& v : rk)
+      v = std::ldexp(v, k);
+    const auto zk = B(rk);
+    h.forInner([&](int, int, int, long i, const CcNbrs&) {
+      cov = cov && zk.first[i] == std::ldexp(z1.first[i], k);
+    });
+  }
+  check(cov, P.name + ": G-D2 (a) B(2^k r) == 2^k B(r) bitwise, k = -40, 0, 37");
+  auto norm = [&](auto f) {
+    long double s2 = 0;
+    h.forInner([&](int, int, int, long i, const CcNbrs&) {
+      const long double v = f(i);
+      s2 += v * v;
+    });
+    return (double)std::sqrt(s2);
+  };
+  if (nonlinearity) {
+    std::vector<double> r12(r1);
+    for (std::size_t i = 0; i < r12.size(); ++i)
+      r12[i] += r2[i];
+    const auto z2 = B(r2), z12 = B(r12);
+    const double nl =
+        norm([&](long i) { return (long double)z12.first[i] - z1.first[i] - z2.first[i]; }) /
+        norm([&](long i) { return (long double)z1.first[i]; });
+    check(nl <= 1e-4, P.name + ": G-D2 (d) |B(r1+r2) - B r1 - B r2| / |B r1| = " + num(nl));
+  }
+  // for the record: the same r through today's FP64 V-cycle
+  CCField r = toDevice(r1, "r"), z("z", n);
+  mg.removeMean(l0, r);
+  mg.precondVcycle(z, r);
+  const std::vector<double> z64 = toHost(z);
+  const double d = norm([&](long i) { return (long double)z1.first[i] - z64[i]; }) /
+                   norm([&](long i) { return (long double)z64[i]; });
+  std::printf("  %-72s %s\n", (P.name + ": |B32 r - B64 r| / |B64 r| = " + num(d)).c_str(),
+              "(info)");
+}
+
 // A PCG solve of P from x = 0 on a fresh hierarchy; mode as given.
 struct Solve {
   int it = -1;
@@ -396,8 +573,11 @@ int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
     std::printf("mg_fp32_vcycle (doc/vof_projection_cost_design.md §4, G-D1)\n");
-    for (const Problem& P : {columnProblem(), cylProblem(), packProblem()})
+    for (const Problem& P : {columnProblem(), cylProblem(), packProblem()}) {
       dataChecks(P);
+      kernelChecks(P);
+      preconditionerChecks(P, P.name == "column");
+    }
     eligibilityChecks();
     std::printf("%s (%d failure%s)\n", fails ? "FAIL" : "PASS", fails, fails == 1 ? "" : "s");
   }

@@ -581,6 +581,10 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, i
       });
 }
 
+}  // namespace peclet::flow
+#include "mg_fp32_vcycle.hpp"  // D: the FP32 V-cycle kernels (doc/vof_projection_cost_design.md §4)
+namespace peclet::flow {
+
 // --- The direct bottom solve (doc/vof_step_performance_design.md §5.7, §5.14, §13, §14 H-1) -----
 // On every backend (host backends since §14 H-1) an ELIGIBLE agglomerated bottom (single rank,
 // singular operator, <= 8192 inner cells, 1-64 fluid components (BottomLabelKernel), an axis whose
@@ -1676,7 +1680,11 @@ class CutcellMG {
   // its trilinear prolongation. The pressure MG only ever received the Dirichlet half
   // (applyOutflowGhost) — CLAUDE.md's "the trilinear prolongation fills the non-periodic boundary
   // ghosts (Neumann -> zero-gradient, Dirichlet -> 0)" described the intent, not the code.
-  void applyNeumannGhost(const Level& lv, CCField x, int g = G) {
+  void applyNeumannGhost(const Level& lv, CCField x, int g = G) { applyNeumannGhostT(lv, x, g); }
+  // D: the FP32 coarse iterate's zero-gradient ghost before the FP32 prolongation (same copies).
+  void applyNeumannGhost(const Level& lv, VField x, int g = G) { applyNeumannGhostT(lv, x, g); }
+  template <class V>
+  void applyNeumannGhostT(const Level& lv, V x, int g) {
     if (!hasBC_ || !bcGhost_)
       return;
     B3 e{lv.ext.x, lv.ext.y, lv.ext.z};
@@ -1684,7 +1692,7 @@ class CutcellMG {
       for (int s = 0; s < 2; ++s) {
         const int t = bc_[2 * a + s];
         if ((t == 1 || t == 2 || t == 4) && touchesGlobalFace(lv, 2 * a + s))
-          bcNeumannGhost(x, e, g, a, s);
+          bcNeumannGhostT(x, e, g, a, s);
       }
   }
   // Does this rank's block on level `lv` touch global domain face f? Always true single-rank
@@ -3129,6 +3137,122 @@ class CutcellMG {
     checkFp32DecoupledSets();
 #endif
   }
+  // §4.4.4: one FP32 V-cycle z = M r on an eligible solve (the caller checked
+  // fp32VcycleIneligible). e = ilogb(max|r|) of the vector being preconditioned: the input is
+  // scaled by 2^-e and the output by 2^e, both exact. k >= 0: r^T z over the fluid cells into slot
+  // k (and p = z when p is allocated) in the exit pass; k < 0: no dot. z's ghosts are not written
+  // (the A3 wrap paths never read them). Uses the schedule (pre_, post_, bottom_) of the driver.
+  void precondVcycleFp32(CCField zz, CCField rr, int e, int k, CCField p) {
+    Level& l0 = lv_[0];
+    ensureScalars();
+    // 1. entry: rhsf = fl32(2^-e r); the first pre-smooth colour pass from x = 0 (colour 0)
+    entryFp32(l0.xf, l0.rhsf, CCConst(rr), VConst(l0.WX), VConst(l0.WY), VConst(l0.WZ),
+              std::ldexp(1.0, -e), l0.ext, parityOg(l0), l0.g, /*color=*/0, pre_ > 0);
+    vcycleFp32Impl(0, /*sym=*/true);                 // 2., 3.
+    exitFp32(l0, zz, rr, std::ldexp(1.0, e), k, p);  // 4.
+  }
+  // The red-black sweeps of smooth() on the FP32 data (wrap reads; every non-bottom level is
+  // fusedWrapSmooth by eligibility). skipFirst: the entry pass already did the first colour.
+  void smoothFp32(Level& lv, int sweeps, bool reverse, bool skipFirst) {
+    const C3 og = parityOg(lv);
+    for (int k = 0; k < sweeps; ++k)
+      for (int s = 0; s < 2; ++s) {
+        if (skipFirst) {
+          skipFirst = false;
+          continue;
+        }
+        const int color = reverse ? (1 - s) : s;
+        cutcellSmoothColorFp32Wrap(lv.xf, VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
+                                   VConst(lv.WZ), lv.ext, lv.inner, og, lv.g, color);
+      }
+  }
+  // §4.4.4 item 2 (and 3 at the bottom interface): vcycleImpl's single-rank schedule on the FP32
+  // data of level L < bottom.
+  void vcycleFp32Impl(int L, bool sym) {
+    Level& lv = lv_[L];
+    smoothFp32(lv, pre_, false, /*skipFirst=*/L == 0 && pre_ > 0);
+    residualFp32Wrap(lv.resf, VConst(lv.xf), VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
+                     VConst(lv.WZ), lv.ext, lv.inner, lv.g);
+    Level& cs = lv_[L + 1];
+    if (L + 2 == (int)lv_.size()) {  // the bottom: its FP64 x, rhs and engine, as today
+      restrictFp32ToDZeroX(cs.rhs, cs.x, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
+                           lv.ratio);
+      vcycle(L + 1, sym);
+      fill(cs, cs.x);
+      applyOutflowGhost(cs, cs.x, cs.g);
+      applyNeumannGhost(cs, cs.x, cs.g);
+      prolongFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+    } else {
+      restrictFp32ZeroX(cs.rhsf, cs.xf, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
+                        lv.ratio);
+      vcycleFp32Impl(L + 1, sym);
+      fillWrap(cs, cs.xf);  // fill()'s single-rank periodic copy (no outflow face: eligibility)
+      applyNeumannGhost(cs, cs.xf, cs.g);
+      prolongFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+    }
+    smoothFp32(lv, post_, /*reverse=*/sym, false);
+  }
+  // §4.4.4 item 4, the level-0 EXIT (replaces removeMean(l0, z) and the r^T z dot): the fluid
+  // mean m of (double)xf (C0's lane order on a host backend), then one pass z = s ((double)xf - m)
+  // on fluid cells and z = s (double)xf on the other inner cells (s = 2^e), accumulating r^T z over
+  // the fluid cells into slot k (C4's order) when k >= 0, and p = z when p is allocated.
+  void exitFp32(Level& l0, CCField zz, CCField rr, double s, int k, CCField p) {
+    const C3 e = l0.ext;
+    const int g = l0.g;
+    VConst xf = l0.xf;
+    CCField z = zz, pp = p;
+    CCConst r = rr;
+    FPV ac = l0.AC;
+    const bool counted = kHostMemory && l0.nFluid >= 0;  // H-1: the precomputed fluid count
+    const bool all = counted && l0.allFluid;
+    const long cnt0 = l0.nFluid;
+    auto ks = ks_;
+    auto kc = kcnt_;
+    if (counted)
+      ccReduce3Lanes(
+          "peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int zc, double& a) {
+            const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+            if (all || ac(i) > 1e-30f)
+              a += (double)xf(i);
+          },
+          Kokkos::Sum<double, CCMem>(slot(kMsum)));
+    else
+      ccReduce3Lanes(
+          "peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int zc, double& a, long& c) {
+            const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+            if (ac(i) > 1e-30f) {
+              a += (double)xf(i);
+              c += 1;
+            }
+          },
+          Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
+    const bool copyP = p.extent(0) != 0;
+    auto body = KOKKOS_LAMBDA(int x, int y, int zc, double& acc) {
+      const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+      const long cnt = counted ? cnt0 : kc();
+      const bool fluid = all || ac(i) > 1e-30f;
+      const double xd = (double)xf(i);
+      const double zi = (fluid && cnt != 0) ? s * (xd - ks(kMsum) / (double)cnt) : s * xd;
+      z(i) = zi;
+      if (copyP)
+        pp(i) = zi;
+      if (fluid)
+        acc += r(i) * zi;
+    };
+    if (k >= 0) {
+      ccReduce3Lanes("peclet::flow::mgmeans_dot_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+                     body, slot(k));
+    } else {
+      ccFor3(
+          "peclet::flow::mgmeans_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int zc) {
+            double unused = 0.0;
+            body(x, y, zc, unused);
+          });
+    }
+  }
   // Test hook (tests/kokkos/test_mg_fp32_vcycle.cpp): mark / unmark an overlay solve, as
   // OverlayScope does for the star and ghost-projection drivers.
   void debugSetOverlaySolve(bool on) { overlaySolve_ = on; }
@@ -3191,6 +3315,10 @@ class CutcellMG {
         return "a non-bottom level has an odd inner dimension";
     if (!(exactResidual_ || std::is_same_v<MReal, double>))
       return "the outer operator is float (MReal = float without the exact residual)";
+    // §4.2 P8: the scheme removes the mean at the level-0 exit only ("fine scope, as today"); the
+    // legacy every-level scope (set_pressure_mean_removal('all')) keeps the FP64 V-cycle.
+    if (meanRemovalAll_)
+      return "the mean-removal scope is 'all' (the FP32 V-cycle removes the mean at level 0 only)";
     for (std::size_t L = 0; L + 1 < lv_.size(); ++L)
       if (!lv_[L].wOk)
         return "a face weight is outside {0} or [1e-30, 1e30] (or the FP32 weights are not built)";
@@ -4039,7 +4167,8 @@ class CutcellMG {
   // bit-identical (pure copies). The V-cycle calls this before every smoother colour, so the three
   // launches it replaces were two thirds of the solve's kernel launches, and on the coarse levels
   // the launch, not the copy, is the cost.
-  void fillWrap(Level& lv, CCField f) {
+  template <class V>  // CCField; D: also the FP32 coarse iterate (VField), the same copies
+  void fillWrap(Level& lv, V f) {
     CCExec space;
     const C3 e = lv.ext;
     const int G = lv.g;  // shadows the class constant: this level's ghost width
@@ -4056,7 +4185,7 @@ class CutcellMG {
       // three coordinates wrap to, so the result is identical. No simd mark: a row's source and
       // destination can share the row (the x-ghost slab).
       const long rZ = 2L * G * e.y, rY = (long)nz * 2 * G, rX = (long)nz * ny;
-      CCField ff = f;
+      V ff = f;
       auto copyRow = [=](long dst, long src) {  // one full x row, wrapped along x
         for (int x = 0; x < G; ++x)
           ff(dst + x) = ff(src + x + nx);
@@ -4097,7 +4226,7 @@ class CutcellMG {
                            Kokkos::RangePolicy<CCExec>(space, 0, rZ + rY + rX), row);
       return;
     }
-    CCField ff = f;
+    V ff = f;
     Kokkos::parallel_for(
         "peclet::flow::mg_pfill3", Kokkos::RangePolicy<CCExec>(space, 0, nZ + nY + nX),
         KOKKOS_LAMBDA(long t) {
