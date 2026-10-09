@@ -522,6 +522,16 @@ void Solver<Grid>::setPressureBottomSolver(int engine) {
 }
 
 template <class Grid>
+void Solver<Grid>::setPressureVcyclePrecision(int mode) {
+  mg_.setVcyclePrecision(mode);
+}
+
+template <class Grid>
+bool Solver<Grid>::pressureVcycleFp32() const {
+  return mg_.lastVcycleFp32();
+}
+
+template <class Grid>
 void Solver<Grid>::setPressureTelescope(bool on) {
   mg_.setTelescope(on);
 }

@@ -733,6 +733,33 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "bottom solve, naming the failed condition, where it is not eligible; 'algebraic' "
           "forces GraphAMG (the A/B instrument). doc/vof_step_performance_design.md §13, §14 "
           "H-1.")
+      .def(
+          "set_pressure_vcycle_precision",
+          [](D& diag, const std::string& mode) {
+            if (mode == "auto")
+              diag.s->setPressureVcyclePrecision(0);
+            else if (mode == "fp64")
+              diag.s->setPressureVcyclePrecision(1);
+            else if (mode == "fp32")
+              diag.s->setPressureVcyclePrecision(2);
+            else
+              throw std::runtime_error("set_pressure_vcycle_precision: 'auto' | 'fp64' | 'fp32'");
+          },
+          nb::arg("mode"),
+          "Precision of the V-cycle that preconditions the single-rank pressure PCG / FCG. 'fp64' "
+          "(DEFAULT): today's V-cycle. 'fp32': FP32 face weights (the diagonal derived, never "
+          "stored), FP32 iterates and flux-form arithmetic on every level above the bottom, the "
+          "input scaled by an exact power of two; the Krylov matvec, dots, mean projection and "
+          "stop test stay FP64 -- raises at the solve, naming the failed condition, where not "
+          "eligible (multi-rank, an outflow face, an overlay solve, a non-bottom level with an "
+          "odd inner dimension, a float outer operator, a face weight outside [1e-30, 1e30], a "
+          "driver other than PCG / FCG). 'auto': FP32 where eligible, else FP64. Takes effect at "
+          "once. doc/vof_projection_cost_design.md §4.")
+      .def(
+          "pressure_vcycle_precision",
+          [](D& diag) { return std::string(diag.s->pressureVcycleFp32() ? "fp32" : "fp64"); },
+          "The precision ('fp32' or 'fp64') the last pressure solve's V-cycles used "
+          "(set_pressure_vcycle_precision); 'fp64' before any FP32 solve.")
       .def("set_pressure_graph_amg", [](D& diag, bool on) { return diag.s->setPressureGraphAmg(on); }, nb::arg("on"),
            "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
            "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "

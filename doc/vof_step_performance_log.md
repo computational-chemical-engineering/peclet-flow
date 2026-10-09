@@ -1238,3 +1238,19 @@ now carries the PCG loop's level-0 matvec.
   (`IbmOverlayT`, `GpOverlayT`, `gpMakeOverlay` defaults; the unused `GpOverlay` alias). No code changed.
   `using VReal = float;` added beside `MReal` with the §4.4.2 marker. A planted `BottomDirect<float> planted_;`
   without the marker: guard rc 1 (names the line); real tree rc 0; static ctests 3/3.
+
+### WO-D1 — FP32 data and eligibility (default 'fp64': inert)
+
+- Per non-bottom level (single rank, no outflow, mode != 'fp64'): `WX, WY, WZ, xf, rhsf, resf` (`VReal`), built in
+  `setOpenness`'s face-build kernel (`buildCutcellOpFaceFp32`, same operands as `cutcellBuildFaceOpCell`, one Max
+  reduction = the §4.4.1 (5) range check -> `Level::wOk`); the setter rebuilds them from the stored openness.
+  `fp32VcycleIneligible(krylov)` names the first failed §4.4.1 condition. API: `diagnostics.set_pressure_vcycle_precision
+  ('auto'|'fp64'|'fp32')`, `diagnostics.pressure_vcycle_precision()` (NAMING.md checked: `set_pressure_*` + readback,
+  as `set_pressure_bottom_solver`). Nothing reads the FP32 data yet.
+- G-D1 (new ctest `mg_fp32_vcycle`; column 128x96x64 walls y ratio 50, cyl 32^3 and pack 64^3 at 1e4, synthetic):
+  (b) symmetry <= 3e-19; (c) max|w/t - 1| <= 5.93e-8 (2^-24 = 5.96e-8), decoupled sets equal on every level (pack L0
+  46541 = 46541); setter rebuild == fused build bitwise; 'fp64' allocates nothing; (d) outflow / odd / one level /
+  tiny face / overlay / non-Krylov caller ineligible, distributed in `cutcellmg_aniso_mpi_np2`; (f) 'auto' == 'fp64'
+  bitwise on the ineligible solves. Host 52/52 checks, CUDA ctest pass.
+- G-BIT (default 'fp64'): host PASS vs `ref/c0_omp` (4 dumps, 10.00 it/step), CUDA PASS vs `ref/gbit_cuda`; pressure
+  13/13; mg_fp32_vcycle + cutcellmg_aniso_mpi_np2 2/2.

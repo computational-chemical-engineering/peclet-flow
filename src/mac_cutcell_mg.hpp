@@ -536,6 +536,42 @@ inline void restrictAvgZeroX(CCField coarse, CCField coarseX, CCConst fine, C3 c
                 (long)(icz + gc) * (long)cext.x * cext.y) = 0.0;
       });
 }
+// D (doc/vof_projection_cost_design.md §4.4.2): the FP32 V-cycle's face weights
+// WX = fl32(t_x), t_x = ox * gfx (POSITIVE; likewise y, z) over [0, ext), from the operands of
+// cutcellBuildFaceOpCell. With `fp64` the same kernel also writes the FP64 face form with that
+// cell body, unchanged (setOpenness's build); without it only the weights (the precision setter's
+// rebuild from the stored openness). Returns 1 when a face weight t of the box violates
+// t == 0 || 1e-30 <= t <= 1e30 (the face-range check, §4.4.1 (5)), else 0. One max reduction.
+template <class OpV, class WV>
+inline int buildCutcellOpFaceFp32(OpV AC, OpV AFX, OpV AFY, OpV AFZ, WV WX, WV WY, WV WZ,
+                                  CCConst ox, CCConst oy, CCConst oz, C3 e, int gb, double gfx,
+                                  double gfy, double gfz, bool fp64) {
+  int bad = 0;
+  ccReduce3(
+      "peclet::flow::cc_build_op", C3{0, 0, 0}, C3{e.x, e.y, e.z},
+      KOKKOS_LAMBDA(int lx, int ly, int lz, int& acc) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        if (fp64) {
+          const bool diag =
+              lx >= gb && lx < e.x - gb && ly >= gb && ly < e.y - gb && lz >= gb && lz < e.z - gb;
+          cutcellBuildFaceOpCell(AC, AFX, AFY, AFZ, ox, oy, oz, i, sx, sy, sz, gfx, gfy, gfz, diag);
+        }
+        const double tw = ox(i) * gfx;
+        const double ts = oy(i) * gfy;
+        const double tb = oz(i) * gfz;
+        WX(i) = (VReal)tw;
+        WY(i) = (VReal)ts;
+        WZ(i) = (VReal)tb;
+        const bool okw = tw == 0.0 || (tw >= 1e-30 && tw <= 1e30);
+        const bool oks = ts == 0.0 || (ts >= 1e-30 && ts <= 1e30);
+        const bool okb = tb == 0.0 || (tb >= 1e-30 && tb <= 1e30);
+        if (!(okw && oks && okb))
+          acc = 1;
+      },
+      Kokkos::Max<int>(bad));
+  return bad > 0 ? 1 : 0;  // the identity of Max<int> is INT_MIN: no violating face leaves it
+}
 inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, int gc, C3 finner,
                        C3 ratio) {
   ccFor3(
@@ -976,6 +1012,13 @@ class CutcellMG {
     // setOpenness at each operator build (noteFluidCells). nFluid < 0: not known -> today's path.
     long nFluid = -1;
     bool allFluid = false;
+    // D (doc/vof_projection_cost_design.md §4.4.2; single rank, non-bottom levels, built only while
+    // the V-cycle precision is not 'fp64'): the FP32 face weights w_f = fl32(t_f) > 0 -- no
+    // diagonal in any precision, D_i is summed from the six weights -- and the FP32 iterates.
+    // wOk: this level's weights are built from the current openness and passed the face-range
+    // check (§4.4.1 (5)).
+    Kokkos::View<VReal*, CCMem> WX, WY, WZ, xf, rhsf, resf;
+    bool wOk = false;
 #ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;  // per-level topology (decomposed)
     std::shared_ptr<GridHalo<double>> dev;      // per-level ghost exchange
@@ -1110,6 +1153,7 @@ class CutcellMG {
   // cubic), capped at nLevels (mirrors DistributedPoissonMG::init uniform path).
   void init(int nx, int ny, int nz, int nLevels) {
     lv_.clear();
+    opBuilt_ = false;  // D: no operator (and no FP32 weights) on the new hierarchy yet
     amg_.reset();
     eigWarm_ = false;  // D3: the kept power-iteration vectors belong to the old hierarchy
     gnxF_ = nx;
@@ -1334,6 +1378,7 @@ class CutcellMG {
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     lv_.clear();
+    opBuilt_ = false;  // D: no operator (and no FP32 weights) on the new hierarchy yet
     amg_.reset();
     eigWarm_ = false;  // D3: the kept power-iteration vectors belong to the old hierarchy
     distributed_ = true;
@@ -1781,9 +1826,14 @@ class CutcellMG {
         f);  // periodic fine-level openness ghosts (the operator reads the + neighbour face);
              // idempotent when the caller already filled them, required when it passed inner-only.
     applyBoundaryOpenness(
-        f);  // re-impose non-periodic wall/inflow faces the periodic fill clobbered
-    buildCutcellOpFace(f.AC, f.AFX, f.AFY, f.AFZ, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
-                       f.ext, G, idx2, idy2, idz2);
+        f);            // re-impose non-periodic wall/inflow faces the periodic fill clobbered
+    if (fp32Build(0))  // D: the FP32 weights in the same kernel (§4.4.2)
+      f.wOk = buildCutcellOpFaceFp32(f.AC, f.AFX, f.AFY, f.AFZ, f.WX, f.WY, f.WZ, CCConst(f.ox),
+                                     CCConst(f.oy), CCConst(f.oz), f.ext, G, idx2, idy2, idz2,
+                                     true) == 0;
+    else
+      buildCutcellOpFace(f.AC, f.AFX, f.AFY, f.AFZ, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
+                         f.ext, G, idx2, idy2, idz2);
     noteFluidCells(f);
 #ifdef PECLET_FLOW_MPI
     // A telescope point gathers this level's openness onto the group roots (all group ranks take
@@ -1828,8 +1878,14 @@ class CutcellMG {
       // so they come out bit-identical to the owning rank's inner rows — the redundant ring
       // re-smoothing of the CA sweep reads them. Inner rows are computed from the same operands
       // as the g-box build (identical). g=1 levels keep the inner-only build.
-      buildCutcellOpFace(c.AC, c.AFX, c.AFY, c.AFZ, CCConst(c.ox), CCConst(c.oy), CCConst(c.oz),
-                         c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy, idz2 * sz);
+      if (fp32Build(L))  // D: the FP32 weights in the same kernel (§4.4.2)
+        c.wOk =
+            buildCutcellOpFaceFp32(c.AC, c.AFX, c.AFY, c.AFZ, c.WX, c.WY, c.WZ, CCConst(c.ox),
+                                   CCConst(c.oy), CCConst(c.oz), c.ext, c.g == 2 ? c.g - 1 : c.g,
+                                   idx2 * sx, idy2 * sy, idz2 * sz, true) == 0;
+      else
+        buildCutcellOpFace(c.AC, c.AFX, c.AFY, c.AFZ, CCConst(c.ox), CCConst(c.oy), CCConst(c.oz),
+                           c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy, idz2 * sz);
       noteFluidCells(c);
 #ifdef PECLET_FLOW_MPI
       if (c.tele) {
@@ -1854,6 +1910,10 @@ class CutcellMG {
     facStale_ = true;
     if (!bottomConnKnown_ && bottomStore_)
       evalBottomComponents();
+    opBuilt_ = true;
+#ifndef NDEBUG
+    checkFp32DecoupledSets();
+#endif
   }
 
   // CG preconditioned by one symmetric V-cycle (solve_pcg port). rhs on level 0; solution left in
@@ -3024,6 +3084,117 @@ class CutcellMG {
   bool fusedWrapReads() const { return !distributed_ && !hasOutflow_ && !overlaySolve_; }
   bool fusedWrapSmooth(const Level& lv) const {
     return fusedWrapReads() && lv.inner.x % 2 == 0 && lv.inner.y % 2 == 0 && lv.inner.z % 2 == 0;
+  }
+  // --- D: the FP32 V-cycle preconditioner (doc/vof_projection_cost_design.md §4) -------------
+  // The V-cycle precision mode (§4.4.6): 'auto' = FP32 where fp32VcycleIneligible() is null, else
+  // FP64; 'fp64'; 'fp32' = FP32 or a raise naming the failed condition.
+  enum : int { kVcycleAuto = 0, kVcycleFp64 = 1, kVcycleFp32 = 2 };
+  // Does level L carry the FP32 data (§4.4.2)? Single rank, no outflow face, a non-bottom level,
+  // and the mode is not 'fp64'. Allocates the level's six FP32 arrays (zero) on first use; a level
+  // that does not carry them is marked stale (wOk = false).
+  bool fp32Build(int L) {
+    Level& lv = lv_[L];
+    if (vprec_ == kVcycleFp64 || distributed_ || hasOutflow_ || L + 1 >= (int)lv_.size()) {
+      lv.wOk = false;
+      return false;
+    }
+    if (lv.WX.extent(0) != lv.n) {
+      lv.WX = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_wx", lv.n);
+      lv.WY = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_wy", lv.n);
+      lv.WZ = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_wz", lv.n);
+      lv.xf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_xf", lv.n);
+      lv.rhsf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_rhsf", lv.n);
+      lv.resf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_resf", lv.n);
+    }
+    return true;
+  }
+  // The FP32 weights of every carrying level from the STORED level openness (the setter's
+  // rebuild; setOpenness builds them in its own kernel). Same operands as setOpenness: level L's
+  // metric is gf * (1 / cfac^2), which is gf itself on level 0.
+  void buildFp32Weights() {
+    if (!opBuilt_)
+      return;  // the next setOpenness builds them
+    for (int L = 0; L < (int)lv_.size(); ++L) {
+      Level& lv = lv_[L];
+      if (!fp32Build(L))
+        continue;
+      const double sx = 1.0 / (double)(lv.cfac.x * lv.cfac.x),
+                   sy = 1.0 / (double)(lv.cfac.y * lv.cfac.y),
+                   sz = 1.0 / (double)(lv.cfac.z * lv.cfac.z);
+      lv.wOk = buildCutcellOpFaceFp32(lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.WX, lv.WY, lv.WZ,
+                                      CCConst(lv.ox), CCConst(lv.oy), CCConst(lv.oz), lv.ext, lv.g,
+                                      gfx_ * sx, gfy_ * sy, gfz_ * sz, false) == 0;
+    }
+#ifndef NDEBUG
+    checkFp32DecoupledSets();
+#endif
+  }
+  // Test hook (tests/kokkos/test_mg_fp32_vcycle.cpp): mark / unmark an overlay solve, as
+  // OverlayScope does for the star and ghost-projection drivers.
+  void debugSetOverlaySolve(bool on) { overlaySolve_ = on; }
+  void setVcyclePrecision(int mode) {
+    vprec_ = mode;
+    buildFp32Weights();  // takes effect at once (§4.4.6)
+  }
+  int vcyclePrecision() const { return vprec_; }
+  // The precision the last solve's V-cycles used (§4.4.6): true = FP32.
+  bool lastVcycleFp32() const { return lastVcycleFp32_; }
+  // The decoupled cells of a carrying level, counted two ways: FP32 (all six weights 0, D_i == 0)
+  // and FP64 (AC < 1e-30). The face-range check makes the sets equal (§4.4.1 (5)).
+  void fp32DecoupledCounts(int L, long& n32, long& n64) {
+    const Level& lv = lv_[L];
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    Kokkos::View<const VReal*, CCMem> WX = lv.WX, WY = lv.WY, WZ = lv.WZ;
+    FPV AC = lv.AC;
+    n32 = 0;
+    n64 = 0;
+    ccReduce3(
+        "peclet::flow::mg_fp32_decoupled", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int lx, int ly, int lz, long& a, long& b) {
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          if (WX(i) == 0.0f && WX(i + sx) == 0.0f && WY(i) == 0.0f && WY(i + sy) == 0.0f &&
+              WZ(i) == 0.0f && WZ(i + sz) == 0.0f)
+            a += 1;
+          if (AC(i) < 1e-30)
+            b += 1;
+        },
+        n32, n64);
+  }
+#ifndef NDEBUG
+  void checkFp32DecoupledSets() {
+    for (int L = 0; L < (int)lv_.size(); ++L)
+      if (lv_[L].wOk) {
+        long n32 = 0, n64 = 0;
+        fp32DecoupledCounts(L, n32, n64);
+        assert(n32 == n64 && "D: the FP32 decoupled set must equal the FP64 AC < 1e-30 set");
+      }
+  }
+#endif
+  // Eligibility of the FP32 V-cycle for the current solve (§4.4.1): nullptr when every condition
+  // holds, else the first failed one. `krylov`: the preconditioner is called from
+  // solvePCGResident or solveFCG (condition 1).
+  const char* fp32VcycleIneligible(bool krylov) const {
+    if (!krylov)
+      return "the V-cycle is not the preconditioner of the single-rank PCG or FCG driver";
+    if (distributed_)
+      return "the solve is distributed (multi-rank)";
+    if (hasOutflow_)
+      return "an outflow face is present";
+    if (overlaySolve_)
+      return "the solve carries an overlay (star couplings / ghost projection)";
+    if (lv_.size() < 2)
+      return "the hierarchy has a single level";
+    for (std::size_t L = 0; L + 1 < lv_.size(); ++L)
+      if (!fusedWrapSmooth(lv_[L]))
+        return "a non-bottom level has an odd inner dimension";
+    if (!(exactResidual_ || std::is_same_v<MReal, double>))
+      return "the outer operator is float (MReal = float without the exact residual)";
+    for (std::size_t L = 0; L + 1 < lv_.size(); ++L)
+      if (!lv_[L].wOk)
+        return "a face weight is outside {0} or [1e-30, 1e30] (or the FP32 weights are not built)";
+    return nullptr;
   }
   // Marks a solve that carries an overlay (star couplings / the ghost-projection BiCGStab) for its
   // whole duration, every exit path included.
@@ -4637,6 +4808,11 @@ class CutcellMG {
   // P1 of the defect-correction campaign — the exact (matrix-free, double, flux-form) level-0
   // operator apply in the residual and the Krylov matvec. See mac_cutcell.hpp.
   bool exactResidual_ = false;
+  // D (§4.4.6): the V-cycle precision mode (kVcycleAuto / kVcycleFp64 / kVcycleFp32); 'fp64' until
+  // WO-D3's promotion. opBuilt_: setOpenness has built the operator of the current hierarchy.
+  int vprec_ = kVcycleFp64;
+  bool opBuilt_ = false;
+  bool lastVcycleFp32_ = false;
   // The `agglomerateBottom()` auto criterion: agglomerate once the coarsest GLOBAL grid exceeds
   // this many cells on any axis (`setAgglomerationExtent`).
   int agglomExtent_ = 4;

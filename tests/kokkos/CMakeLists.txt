@@ -405,6 +405,14 @@ target_include_directories(test_bottom_direct PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test_bottom_direct PRIVATE Kokkos::kokkos)
 add_test(NAME bottom_direct COMMAND test_bottom_direct)
 set_tests_properties(bottom_direct PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
+# doc/vof_projection_cost_design.md §4 (WO-D1..D3): the FP32 V-cycle preconditioner -- its face
+# weights (rounding, symmetry, the decoupled set), eligibility, and bitwise FP64 fallback (G-D1).
+add_executable(test_mg_fp32_vcycle test_mg_fp32_vcycle.cpp)
+target_include_directories(test_mg_fp32_vcycle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_mg_fp32_vcycle PRIVATE Kokkos::kokkos)
+add_test(NAME mg_fp32_vcycle COMMAND test_mg_fp32_vcycle)
+set_tests_properties(mg_fp32_vcycle PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
 # The factor launch's timing probe (§14 H-1): min / median ms per team size, bitwise check across
 # them. An instrument, not a gate: LABELS bench (excluded by `ctest -LE bench`).
 add_executable(bench_bottom_factor bench_bottom_factor.cpp)

@@ -154,6 +154,19 @@ int main(int argc, char** argv) {
     auto hx = setupAndSolve(mg, l0.ext, l0.og, nx, ny, nz, /*collective=*/true, &it);
     const std::vector<C3> tab = mg.levelRatios();
 
+    // G-D1(d) (doc/vof_projection_cost_design.md §13): the FP32 V-cycle is never eligible on a
+    // distributed hierarchy, and no FP32 data is built there, whatever the mode.
+    if (size > 1) {
+      mg.setVcyclePrecision(CutcellMG::kVcycleAuto);
+      const char* why = mg.fp32VcycleIneligible(true);
+      if (!why || std::string(why).find("distributed") == std::string::npos ||
+          mg.level(0).WX.extent(0) != 0) {
+        ++fail;
+        std::fprintf(stderr, "[rank %d] FP32 V-cycle eligible on a distributed hierarchy\n", rank);
+      }
+      mg.setVcyclePrecision(CutcellMG::kVcycleFp64);
+    }
+
     // 1. the level table is the same on every rank (a pure function of replicated data).
     {
       int nl = (int)tab.size(), nlMin = 0, nlMax = 0;
