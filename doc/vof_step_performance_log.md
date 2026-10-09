@@ -1218,3 +1218,13 @@ now carries the PCG loop's level-0 matvec.
   The §3.2 premise (175 us/launch, chain-bound) was measured on genoa; unmeasured there. Reported to the caller;
   C0 is not reverted on timing (caller's ruling).
 - S timing gate: MET at low load (cc_smooth A/C per launch 1.35).
+
+### WO-F2b — the fill pair before the sweep loop (caller's ruling 2026-10-09: dedupe if provably identical)
+
+- `velSweepLoop`'s scale check runs `fill(); resid()` and the first iteration then ran `fill()` again before
+  colour 0. Same functor object on the same field (every caller passes one `fill` lambda: `fillVelGhostsTo(u, c, 0)`,
+  `fillVelGhosts(c, 1)`, `fillGhostsFaces(u)` or the empty one of the exchanging paths); between them only `resid()`
+  (writes the scalars `lastAxNorm_`/`lastBNorm_`, no field, since F-1; the exchanging functor runs with an empty
+  fill) and scalar max-allreduces. Skipped: `ghostsCurrent` starts at `useRes`. G-BIT host PASS vs `ref/c0_omp`
+  (4 dumps bitwise, 10.00 it/step), CUDA PASS vs `ref/gbit_cuda`; pressure 13/13, velocity/BC 27/27.
+  1x8 kp: `bc_vel` 62.0 -> 59.0, launches/step 1067.7 -> 1061.7.
