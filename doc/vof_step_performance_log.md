@@ -1111,3 +1111,29 @@ fedadb2 + core ecedb9b. Gate scripts and raw outputs: `~/Codes/bubble_column_per
 - **Core tag not cut**: a `v*` tag runs core's Release workflow, which publishes to PyPI (no
   environment protection) — the brief said tag only, no publish. Flow keeps `PECLET_CORE_TAG`
   v1.4.0 (CI builds flow main against core main); the release cycle cuts core 1.5.0 and repins.
+
+## 2026-10-09 — design G finish: WO-2b (compaction) lands; WO-3 held again (C1 on CUDA)
+
+Worktree flow-curvfin (curvcost-held rebased on 197f777), core 4806f87; scripts and raw outputs
+`~/Codes/bubble_column_perf/curv_fin/` (`gate_curv.sh`, `gate_num.sh`, `battery.sh`, `perf.sh`).
+
+- **fmad experiment.** nvcc `--fmad=false` on every TU, base 197f777 vs the held WO-2b (compaction
+  + entry-parallel): G-BIT PASS (state_hash 12 + np2, dump 24 arrays, census, kappa). The held
+  WO-2b's CUDA difference is FMA contraction of the per-lane form, not order.
+- **WO-2b = compaction + single-lane `pvFitAccumLower`, bitwise.** G-BIT vs base: host znver3 1x8
+  and CUDA, state_hash 12 + np2 identical, dump bitwise (iters 13.06), census identical; curvature
+  / ST / blocks / overlap ctests print identical digits on both backends (C1 0 fields). Batteries
+  -LE bench host 231/231, CUDA 231/231. GPU A/B (5080 shared with another job, 2 rounds):
+  `vofCurvFallbackTeams` 3.55 -> 2.68 ms/step (target 1.6: miss), curvature stage 6.19 -> 5.31.
+- **P6 test fix** (own commit): the eps = 0 arm accepts a CFL-cap throw as "destroyed".
+- **WO-3 + entry-parallel (recorded) HELD.** Host vs WO-2b: 50-step max rel 2.71e-14 (N50 host
+  2.52e-9), iters identical, div ratio 1.000, kappa after 1 step 3.56e-15, census identical; CUDA:
+  3.27e-14, iters identical, kappa 4.45e-15, census identical; state_hash: vof_droplet only, np2
+  identical. Host ctests: identical digits but gate E's new INFO line (old oracle 495 cells,
+  8.6e-16) and P6 eps = 0 DESTROYED at steps 22 / 15; gate E host 0 cells vs the moment-form
+  oracle. Study static/wave/lamb/hysing1/2: physics identical; static's eps = 0 instrument now
+  diverges at step 16. **Blocker: C1 fails on CUDA** (3 CSF fields, batched vs per-block): the
+  moment form alone (single-lane) fails, the entry-parallel form alone fails, and moments +
+  entry-parallel are C1-bitwise with `--fmad=false`, so nvcc contracts the same source differently
+  in the batched and the per-block kernels. GPU A/B: `vofCurvFallbackTeams` 0.57 ms/step,
+  curvature stage 3.17 ms. Branch `origin/curvcost-wo3-held`.

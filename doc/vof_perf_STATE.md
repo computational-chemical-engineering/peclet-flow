@@ -28,12 +28,14 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
   best (T=2 1.51, T=8 1.20; team kernel 9-18 ms) -> PENDING: set `kBottomHostFactorTeam` 2 -> 6
   (bitwise, ~-0.45 ms/step; do it with the next code package). Peclet 1x24 now ~81 vs TBFsolver 46.
 - **G (tier-3 curvature cost) partly landed 2026-10-09**: WO-1 kernels in core main 4806f87 (core
-  tag NOT cut: a `v*` tag publishes to PyPI), WO-2a (per-cell polygon cache + support prefilter +
-  lower-triangle accumulation) and WO-2c (host fused list pass) on flow main, bitwise host + CUDA.
-  HELD on `origin/curvcost-held`: WO-2b (entry-parallel accumulation not bitwise under nvcc in
-  the team kernel) and WO-3 (moment cache: numerics clean, but P6's unguarded eps = 0 droplets now
-  diverge and gate E's oracle needs the moment form) — both need the architect. Numbers: log
-  2026-10-09.
+  tag NOT cut: a `v*` tag publishes to PyPI); on flow main, bitwise host + CUDA: WO-2a (polygon
+  cache + support prefilter + lower triangle), WO-2c (host fused list pass), WO-2b (device
+  neighbour compaction, single-lane fold; 5080 tier 3 3.55 -> 2.68 ms on a shared GPU, target 1.6
+  missed). HELD on `origin/curvcost-wo3-held`: WO-3 (moment cache) + entry-parallel accumulation,
+  recorded change clean (50-step 2.7e-14 / 3.3e-14, iterations identical; tier 3 0.57 ms, stage
+  6.19 -> 3.17 ms) but **C1 (batched == per-block) fails on CUDA**: nvcc contracts the moment and
+  per-lane code differently in the two kernels (bitwise with `--fmad=false`). Needs a ruling
+  (C1 tolerance on CUDA, or one shared kernel). Numbers: log 2026-10-09 "design G finish".
 - PARKED: E2(a) constant-coefficient driver; E2(b) FFT solver DROPPED 2026-10-08 (register).
 
 **Next action.**
