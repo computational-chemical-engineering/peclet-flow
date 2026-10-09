@@ -1331,35 +1331,39 @@ inline void vofCurvFallbackTeams(const VofCurvTable& T, LField list, LField star
 }
 
 /// Entry `q` (an absolute list position) of job `k` of a cascade list pass (see below): the body
-/// shared by the device and host launch forms.
+/// shared by the device and host launch forms. `pass` 0 = tiers 1-2, 1 = tier 3, 2 = the clip,
+/// 3 = the census, 4 = all four in that order (the host's fused pass, design G §5.5).
 KOKKOS_INLINE_FUNCTION void vofCurvListEntry(const VofCurvTable& T, int pass, int k, long q,
                                              LField list, LField cnt) {
   const VofCurvJob& J = T.job[k];
   const long i = list(q);
   const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
   const VofRawField c{J.c}, mx{J.mx}, my{J.my}, mz{J.mz}, al{J.al}, kap{J.kap}, br{J.br};
-  if (pass == 0) {
+  const bool all = pass == 4;
+  if (pass == 0 || all) {
     curvHeightCell(i, c, mx, my, mz, al, kap, br, 1L, sy, sz, J.mtol, J.ptW, J.ieps, J.forceFb,
                    J.oneDir, J.useFit, J.gm, J.peps);
-    return;
+    if (!all)
+      return;
   }
-  if (pass == 1) {
+  if (pass == 1 || all) {
     curvFallbackCell(i, VofPvCached{J.slot, T.cache}, mx, my, mz, kap, br, sy, sz, kPvHalf, J.dW,
                      J.cmin, J.gm);
-    return;
+    if (!all)
+      return;
   }
   long* ct = &cnt(8 * (T.base + k));
-  if (pass == 2) {
+  if (pass == 2 || all) {
     const double km = J.km;
-    if (!(km > 0.0))
-      return;  // this cascade's clip is off (VofCurvature::clipPass returns 0)
+    // km <= 0: this cascade's clip is off (VofCurvature::clipPass returns 0).
     // `!(|k| <= km)` rather than `|k| > km`: a NaN curvature is clipped (to +km, the sign of
     // a NaN is meaningless) and counted, never silently kept.
-    if (csfKappaDefined(br(i)) && !(Kokkos::fabs(kap(i)) <= km)) {
+    if (km > 0.0 && csfKappaDefined(br(i)) && !(Kokkos::fabs(kap(i)) <= km)) {
       kap(i) = (kap(i) == kap(i)) ? Kokkos::copysign(km, kap(i)) : km;
       Kokkos::atomic_add(&ct[7], 1L);
     }
-    return;
+    if (!all)
+      return;
   }
   const int b = static_cast<int>(br(i));
   if (b == kCurvNone)
@@ -1409,6 +1413,26 @@ inline void vofCurvListPass(const VofCurvTable& T, int pass, LField list, LField
           return;
         vofCurvListEntry(T, pass, k, q, list, cnt);
       });
+}
+
+/// The whole cascade list stage of a chunk: tiers 1-2, tier 3, the clip (only if some job clips),
+/// the census. A device runs the four passes (tier 3 as teams); a HOST runs ONE fused list pass
+/// that calls them in that order per entry (design G §5.5) — bitwise, because each entry's tier 3
+/// reads only its own branch (written by its own tiers 1-2) plus planes, colour and cache written
+/// before the launch, the clip touches only its own kappa, and the census counts are integer
+/// atomics.
+template <class Exec = SExec>
+inline void vofCurvListPasses(const VofCurvTable& T, bool anyClip, LField list, LField start,
+                              LField end, LField cnt) {
+  if constexpr (kVofHostExec<Exec>) {
+    vofCurvListPass<Exec>(T, 4, list, start, end, cnt);
+    return;
+  }
+  vofCurvListPass<Exec>(T, 0, list, start, end, cnt);  // tiers 1-2
+  vofCurvListPass<Exec>(T, 1, list, start, end, cnt);  // tier 3
+  if (anyClip)
+    vofCurvListPass<Exec>(T, 2, list, start, end, cnt);  // the admissibility clip
+  vofCurvListPass<Exec>(T, 3, list, start, end, cnt);    // the census
 }
 
 /// The three CSF face-force components at the low faces of inner cell `i` of job `J` (the

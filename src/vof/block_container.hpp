@@ -1936,11 +1936,7 @@ class VofBlockSet {
             ri);
       vofCurvCompact(T, false, cListI_, cStartI_, cEndI_);
       vofCurvHfReset(T);
-      vofCurvListPass(T, 0, cListI_, cStartI_, cEndI_, cCnt_);  // tiers 1-2
-      vofCurvListPass(T, 1, cListI_, cStartI_, cEndI_, cCnt_);  // tier 3
-      if (anyClip)
-        vofCurvListPass(T, 2, cListI_, cStartI_, cEndI_, cCnt_);  // the admissibility clip
-      vofCurvListPass(T, 3, cListI_, cStartI_, cEndI_, cCnt_);    // the census
+      vofCurvListPasses(T, anyClip, cListI_, cStartI_, cEndI_, cCnt_);  // tiers 1-3, clip, census
       vofCsfForceBatch(T, sigma, wgt[0], wgt[1], wgt[2]);
     }
     Kokkos::deep_copy(cCntHost_, cCnt_);  // the one read of the curvature stage
