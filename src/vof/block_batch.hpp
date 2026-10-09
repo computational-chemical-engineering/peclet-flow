@@ -1293,8 +1293,9 @@ inline void vofCurvHfReset(const VofCurvTable& T) {
 /// the device (§4.6), so the league cannot be the number of entries; instead a FIXED league of
 /// persistent warp-teams strides over the concatenated device-counted entries
 /// `g = league_rank, league_rank + league_size, ...`, each entry handled by `curvFallbackTeam` (the
-/// same body as `VofCurvature::fallbackBatch`'s team path: canonical-order accumulation, bit for
-/// bit the one-thread `curvFallbackCell`). No host read, no empty teams.
+/// same body as `VofCurvature::fallbackBatch`'s team path: neighbour compaction + canonical-order
+/// accumulation, design G §5.4, bit for bit the one-thread `curvFallbackCell`). No host read, no
+/// empty teams.
 ///
 /// League size: one team per hardware warp slot, `concurrency() / kVofWarp` (on CUDA = SMs x
 /// resident threads per SM / 32), capped by `kVofTier3MaxTeams`. Teams beyond the resident
@@ -1302,15 +1303,14 @@ inline void vofCurvHfReset(const VofCurvTable& T) {
 inline constexpr int kVofTier3MaxTeams = 1 << 16;
 inline void vofCurvFallbackTeams(const VofCurvTable& T, LField list, LField start, LField end) {
   using Policy = Kokkos::TeamPolicy<SExec>;
-  using Terms = Kokkos::View<PvTerm*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
   constexpr int side = 2 * kPvHalf + 1, nk = side * side * side;
   const int league =
       std::max(1, std::min(kVofTier3MaxTeams, static_cast<int>(SExec().concurrency() / kVofWarp)));
   Policy pol(SExec(), league, kVofWarp);
-  pol.set_scratch_size(0, Kokkos::PerTeam(Terms::shmem_size(nk)));
+  pol.set_scratch_size(0, Kokkos::PerTeam(VofPvTeamScratch::shmem(nk)));
   Kokkos::parallel_for(
       "vof::block::batch_curv_pv_team", pol, KOKKOS_LAMBDA(const typename Policy::member_type& tm) {
-        Terms terms(tm.team_scratch(0), nk);
+        const VofPvTeamScratch sc(tm, nk);
         long cum[kVofBlockBatch + 1];  // device prefix of the jobs' entry counts
         cum[0] = 0;
         for (int k = 0; k < T.nj; ++k)
@@ -1322,10 +1322,11 @@ inline void vofCurvFallbackTeams(const VofCurvTable& T, LField list, LField star
           const VofCurvJob& J = T.job[k];
           const long i = list(start(T.base + k) + (g - cum[k]));
           const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
-          curvFallbackTeam(tm, terms, i, VofPvCached{J.slot, T.cache}, VofRawField{J.mx},
+          curvFallbackTeam(tm, sc, i, VofPvCached{J.slot, T.cache}, VofRawField{J.mx},
                            VofRawField{J.my}, VofRawField{J.mz}, VofRawField{J.kap},
                            VofRawField{J.br}, sy, sz, kPvHalf, J.dW, J.cmin, J.gm);
-          tm.team_barrier();  // the single lane is done with `terms` before the next entry's map
+          tm.team_barrier();  // the single lane is done with the scratch before the next entry's
+                              // scan
         }
       });
 }

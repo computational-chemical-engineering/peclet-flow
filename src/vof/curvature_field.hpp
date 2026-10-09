@@ -291,37 +291,70 @@ KOKKOS_INLINE_FUNCTION void curvFallbackCell(long i, const Acc& acc, SF mx, SF m
   curvFallbackStore(i, fit, kap, br);
 }
 
-/// `curvFallbackCell` for one target on a whole team (C3, `doc/vof_step_performance_design.md`
-/// §4.7, §5.11): every lane computes the frame (deterministic, so no broadcast), the lanes map the
-/// `(2gr+1)^3` stencil offsets to `PvTerm`s in `terms` (team scratch) in the canonical index
-/// `k = ((oz+gr)(2gr+1) + (oy+gr))(2gr+1) + (ox+gr)`, and ONE lane folds the accepted terms in
-/// `k` order and solves. The map runs in parallel; the reduction keeps `curvFallbackCell`'s order,
-/// so the result is bit for bit the one-thread body's. Every lane must call it (it holds a team
-/// barrier).
-template <class Member, class SF, class Acc, class Scratch>
-KOKKOS_INLINE_FUNCTION void curvFallbackTeam(const Member& tm, Scratch terms, long i,
+/// Team scratch of the device tier-3 body: the compacted stencil's canonical offset indices and
+/// their terms (about 9.5 KB at the 5^3 stencil).
+using VofPvTerms = Kokkos::View<PvTerm*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+using VofPvInts = Kokkos::View<int*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+struct VofPvTeamScratch {
+  VofPvInts kidx;
+  VofPvTerms term;
+  /// Per-team level-0 scratch bytes for a stencil of `nk` offsets.
+  static std::size_t shmem(int nk) {
+    return VofPvInts::shmem_size(nk) + VofPvTerms::shmem_size(nk);
+  }
+  template <class Member>
+  KOKKOS_INLINE_FUNCTION VofPvTeamScratch(const Member& tm, int nk)
+      : kidx(tm.team_scratch(0), nk), term(tm.team_scratch(0), nk) {}
+};
+
+/// `curvFallbackCell` for one target on a whole team (design G §5.4; the team shape of C3,
+/// `doc/vof_step_performance_design.md` §4.7, §5.11). Every lane computes the frame
+/// (deterministic, so no broadcast); then
+///   (1) a team scan COMPACTS the `(2gr+1)^3` stencil to its interfacial cells, keeping the
+///       canonical order `k = ((oz+gr)(2gr+1) + (oy+gr))(2gr+1) + (ox+gr)`;
+///   (2) the lanes map those `n` cells to `PvTerm`s (`curvPvTermCached`);
+/// and ONE lane folds the accepted terms in canonical order (`pvFitAccumLower`) and solves. The
+/// compaction only drops the non-interfacial slots, whose terms were never accepted, so the fold
+/// is the one-thread body's sum term for term: bit for bit `curvFallbackCell`'s. A warp
+/// reduction is NOT used (register: not bitwise). Every lane must call it (it holds team
+/// barriers).
+template <class Member, class SF, class Acc>
+KOKKOS_INLINE_FUNCTION void curvFallbackTeam(const Member& tm, const VofPvTeamScratch& sc, long i,
                                              const Acc& acc, SF mx, SF my, SF mz, SF kap, SF br,
                                              long sy, long sz, int gr, double dW, double cmin,
                                              VofMetric g) {
-  if (br(i) >= 0.0)  // uniform across the team: nothing writes br(i) before the barrier below
+  if (br(i) >= 0.0)  // uniform across the team: nothing writes br(i) before the barriers below
     return;
   double nn[3], t1[3], t2[3], org[3];
   const bool framed =
       curvFallbackFrameCached(mx(i), my(i), mz(i), acc.entry(i), g, nn, t1, t2, org);
   const int side = 2 * gr + 1, nk = side * side * side;
-  if (framed)
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, nk), [&](const int k) {
+  int n = 0;
+  if (framed) {
+    Kokkos::parallel_scan(
+        Kokkos::TeamThreadRange(tm, nk),
+        [&](const int k, int& upd, const bool final) {
+          const int ox = k % side - gr, oy = (k / side) % side - gr, oz = k / (side * side) - gr;
+          const long j = i + (long)ox + (long)oy * sy + (long)oz * sz;
+          if (acc.present(j)) {
+            if (final)
+              sc.kidx(upd) = k;
+            ++upd;
+          }
+        },
+        n);
+    tm.team_barrier();
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, n), [&](const int p) {
+      const int k = sc.kidx(p);
       const int ox = k % side - gr, oy = (k / side) % side - gr, oz = k / (side * side) - gr;
       const long j = i + (long)ox + (long)oy * sy + (long)oz * sz;
+      const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
+                             static_cast<double>(oz)};
       PvTerm t;
-      t.ok = false;
-      if (acc.present(j)) {
-        const double off[3] = {static_cast<double>(ox), static_cast<double>(oy),
-                               static_cast<double>(oz)};
-        curvPvTermCached(t, acc.entry(j), mx(j), my(j), mz(j), off, org, t1, t2, nn, dW, cmin, g);
-      }
-      terms(k) = t;
+      curvPvTermCached(t, acc.entry(j), mx(j), my(j), mz(j), off, org, t1, t2, nn, dW, cmin, g);
+      sc.term(p) = t;
     });
+  }
   tm.team_barrier();  // the terms are in scratch, and every lane has read br(i)
   Kokkos::single(Kokkos::PerTeam(tm), [&]() {
     if (!framed) {
@@ -331,9 +364,9 @@ KOKKOS_INLINE_FUNCTION void curvFallbackTeam(const Member& tm, Scratch terms, lo
     }
     PvFit fit;
     pvFitInit(fit);
-    for (int k = 0; k < nk; ++k)
-      if (terms(k).ok)
-        pvFitAccumLower(fit, terms(k));
+    for (int p = 0; p < n; ++p)
+      if (sc.term(p).ok)
+        pvFitAccumLower(fit, sc.term(p));
     curvFallbackStore(i, fit, kap, br);
   });
 }
@@ -695,13 +728,12 @@ class VofCurvature {
         // C3 (§5.11): one team (a warp) per target on a device; the host keeps one thread per
         // target below.
         using Policy = Kokkos::TeamPolicy<SExec>;
-        using Terms = Kokkos::View<PvTerm*, SExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
         int gr = 0;
         for (int k = 0; k < T.nj; ++k)
           gr = std::max(gr, T.job[k].gr);
         const int nk = (2 * gr + 1) * (2 * gr + 1) * (2 * gr + 1);
         Policy pol(SExec(), T.off[T.nj], kVofWarp);
-        pol.set_scratch_size(0, Kokkos::PerTeam(Terms::shmem_size(nk)));
+        pol.set_scratch_size(0, Kokkos::PerTeam(VofPvTeamScratch::shmem(nk)));
         Kokkos::parallel_for(
             "vof::curv::pv_batch_team", pol, KOKKOS_LAMBDA(const typename Policy::member_type& tm) {
               const long t = tm.league_rank();
@@ -710,8 +742,8 @@ class VofCurvature {
                 ++b;
               const VofCurvFallbackJob& J = T.job[b];
               const int side = 2 * J.gr + 1;
-              Terms terms(tm.team_scratch(0), side * side * side);
-              curvFallbackTeam(tm, terms, J.list[t - T.off[b]], VofPvCached{J.slot, J.cache},
+              const VofPvTeamScratch sc(tm, side * side * side);
+              curvFallbackTeam(tm, sc, J.list[t - T.off[b]], VofPvCached{J.slot, J.cache},
                                VofRawField{J.mx}, VofRawField{J.my}, VofRawField{J.mz},
                                VofRawField{J.kap}, VofRawField{J.br}, J.sy, J.sz, J.gr, J.dW,
                                J.cmin, J.gm);
