@@ -27,15 +27,12 @@ handles; no GPU<->host transfers in the step. Yardstick: TBFsolver on the bubble
   `mg_bottom_factor` 13.2 -> 1.56 ms/step. Genoa factor sweep (walls-y P12 b128): host T=6 1.08 ms
   best (T=2 1.51, T=8 1.20; team kernel 9-18 ms) -> PENDING: set `kBottomHostFactorTeam` 2 -> 6
   (bitwise, ~-0.45 ms/step; do it with the next code package). Peclet 1x24 now ~81 vs TBFsolver 46.
-- **G (tier-3 curvature cost) partly landed 2026-10-09**: WO-1 kernels in core main 4806f87 (core
-  tag NOT cut: a `v*` tag publishes to PyPI); on flow main, bitwise host + CUDA: WO-2a (polygon
-  cache + support prefilter + lower triangle), WO-2c (host fused list pass), WO-2b (device
-  neighbour compaction, single-lane fold; 5080 tier 3 3.55 -> 2.68 ms on a shared GPU, target 1.6
-  missed). HELD on `origin/curvcost-wo3-held`: WO-3 (moment cache) + entry-parallel accumulation,
-  recorded change clean (50-step 2.7e-14 / 3.3e-14, iterations identical; tier 3 0.57 ms, stage
-  6.19 -> 3.17 ms) but **C1 (batched == per-block) fails on CUDA**: nvcc contracts the moment and
-  per-lane code differently in the two kernels (bitwise with `--fmad=false`). Needs a ruling
-  (C1 tolerance on CUDA, or one shared kernel). Numbers: log 2026-10-09 "design G finish".
+- **G (tier-3 curvature cost) LANDED 2026-10-09**: WO-1 kernels in core main 4806f87 (core tag
+  NOT cut: a `v*` tag publishes to PyPI); on flow main WO-2a, WO-2c, WO-2b (bitwise host + CUDA) and
+  WO-3 (moment cache + device entry-parallel accumulation, RECORDED: 50-step 2.7e-14 / 2.5e-14,
+  iterations identical). The moment build and the team body are device-`__noinline__` so C1 stays
+  bitwise on CUDA. RTX 5080 (shared): tier 3 3.55 -> 0.575 ms, curvature stage 6.19 -> ~3.3 ms.
+  Genoa G-PERF (stage <= 4.5 ms) belongs in the next S-2 run. Numbers: log 2026-10-09.
 - PARKED: E2(a) constant-coefficient driver; E2(b) FFT solver DROPPED 2026-10-08 (register).
 
 **Next action.**

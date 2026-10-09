@@ -1137,3 +1137,15 @@ Worktree flow-curvfin (curvcost-held rebased on 197f777), core 4806f87; scripts 
   entry-parallel are C1-bitwise with `--fmad=false`, so nvcc contracts the same source differently
   in the batched and the per-block kernels. GPU A/B: `vofCurvFallbackTeams` 0.57 ms/step,
   curvature stage 3.17 ms. Branch `origin/curvcost-wo3-held`.
+
+## 2026-10-09 — design G: WO-3 lands (C1 ruling: one compiled device body)
+
+- **C1 ruling** (coordinator): `curvMomentsBuild` and `curvFallbackTeam` are `__noinline__` in
+  the device pass only (`PECLET_VOF_DEVICE_NOINLINE`), host inlined. C1 bitwise on CUDA (0 CSF
+  fields; it was 3 with the inlined form). No tolerance needed.
+- **WO-3 (flow 17ba0f9, recorded) vs WO-2b 45fda3d.** 50-step max rel host 2.714e-14, CUDA
+  2.469e-14 (N50 host 2.522e-9); iterations identical; div ratio 1.000; kappa 3.56e-15 / 4.45e-15;
+  census identical; state_hash: vof_droplet only. ctests identical digits both backends (E host 0,
+  CUDA 687 <= 1.2e-15; P6 eps = 0 destroyed at the CFL cap). Study physics identical.
+- **G-PERF** (5080 shared, interleaved, 2 rounds): `vofCurvFallbackTeams` 2.70 / 2.88 -> 0.575 /
+  0.576 ms/step (target 0.8); curvature stage 5.65 / 5.03 -> 3.28 / 3.39 ms.
