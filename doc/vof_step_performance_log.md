@@ -1117,3 +1117,4 @@ at load 21, 8.5 (218) at load 36 (oversubscribed); OMP 8 2.0 (2.0); OMP 1 0.44; 
 - WO-H2a (coefficients built into MG level 0, single rank w/o outflow; setOpenness skips aliased copies): G-BIT host PASS (10.00 it/step).
 - WO-H2b (PCG: no l0.x staging, final removeMean in place, p = z fused into r.z on host fused-wrap path): G-BIT host PASS (10.00 it/step).
 - WO-H2c (zero-guess PCG skips A x0; projectSolve cold path, scoped): G-BIT host PASS (10.00 it/step).
+- WO-H2d (VMG solve on the caller's b, x: level-0 rhs/x rebound, single rank): G-BIT host PASS (10.00 it/step).
