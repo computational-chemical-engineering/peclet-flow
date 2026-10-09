@@ -1444,7 +1444,8 @@ void Solver<Grid>::velSweepLoop(Fill&& fill, Color&& sweepColor, ColorDu&& sweep
   // fill touches (the stencil / constant-coefficient functors write nothing since F-1; the
   // exchanging functor runs with an empty fill) -- so the next iteration's colour-0 fill, the
   // same functor on the same field, is skipped (a ghost fill is a function of the inner cells).
-  bool ghostsCurrent = false;
+  // F-2b: the same holds for the scale check above (fill, resid, then the first colour-0 fill).
+  bool ghostsCurrent = useRes;
   for (int it = 0; it < velIters_; ++it) {
     if (!ghostsCurrent)
       fill();
