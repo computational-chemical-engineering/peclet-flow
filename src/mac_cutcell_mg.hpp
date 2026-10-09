@@ -892,6 +892,11 @@ class CutcellMG {
     CCField x, rhs, res, ox, oy, oz;
     // A2 face form (mac_pressure.hpp): the diagonal + one coefficient per face, full extent.
     FPV AC, AFX, AFY, AFZ;
+    // H-1 (doc/vof_projection_cost_design.md §8, host single rank only): the count of inner FLUID
+    // cells (AC > 1e-30f, the reductions' predicate) and whether that is every inner cell, set by
+    // setOpenness at each operator build (noteFluidCells). nFluid < 0: not known -> today's path.
+    long nFluid = -1;
+    bool allFluid = false;
 #ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;  // per-level topology (decomposed)
     std::shared_ptr<GridHalo<double>> dev;      // per-level ghost exchange
@@ -1632,6 +1637,36 @@ class CutcellMG {
     }
   }
 
+  // H-1 (§8): count a level's inner fluid cells once per operator build, with the reductions'
+  // predicate, so the host reductions can drop the AC read on an all-fluid level and removeMean
+  // its count reduction. Host single rank only; the device and the distributed path keep their
+  // kernels (§2 device reduction caveat; the distributed count needs its Allreduce anyway).
+  void noteFluidCells(Level& lv) {
+    lv.nFluid = -1;
+    lv.allFluid = false;
+    if (!kHostMemory || distributed_)
+      return;
+    C3 e = lv.ext;
+    const int g = lv.g;
+    FPV ac = lv.AC;
+    long cnt = 0;
+    ccReduce3(
+        "mgfluidcount", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int z, long& k) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          if (ac(i) > 1e-30f)
+            k += 1;
+        },
+        cnt);
+    lv.nFluid = cnt;
+    lv.allFluid = cnt == (long)lv.inner.x * lv.inner.y * lv.inner.z;
+  }
+  // H-1: the host single-rank all-fluid fast path of the reductions below (same cells, same
+  // order as the masked body; the device never takes it).
+  bool hostAllFluid(const Level& lv) const {
+    return kHostMemory && !distributed_ && lv.nFluid >= 0 && lv.allFluid;
+  }
+
   // rediscretized cut-cell operator on every level from the fine face openness (idx2 = 1/dx^2
   // fine).
   void setOpenness(CCConst ox, CCConst oy, CCConst oz, double idx2, double idy2, double idz2) {
@@ -1655,6 +1690,7 @@ class CutcellMG {
         f);  // re-impose non-periodic wall/inflow faces the periodic fill clobbered
     buildCutcellOpFace(f.AC, f.AFX, f.AFY, f.AFZ, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
                        f.ext, G, idx2, idy2, idz2);
+    noteFluidCells(f);
 #ifdef PECLET_FLOW_MPI
     // A telescope point gathers this level's openness onto the group roots (all group ranks take
     // part); the next level coarsens from that stage. A rank idling below holds no next level, so
@@ -1700,6 +1736,7 @@ class CutcellMG {
       // as the g-box build (identical). g=1 levels keep the inner-only build.
       buildCutcellOpFace(c.AC, c.AFX, c.AFY, c.AFZ, CCConst(c.ox), CCConst(c.oy), CCConst(c.oz),
                          c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy, idz2 * sz);
+      noteFluidCells(c);
 #ifdef PECLET_FLOW_MPI
       if (c.tele) {
         teleGather(c, c.ox, c.tele->ox);
@@ -1890,6 +1927,16 @@ class CutcellMG {
     const int g = lv.g;
     CCField aa = a, bb = b;
     FPV ac = lv.AC;
+    if (hostAllFluid(lv)) {  // H-1: no AC read
+      ccReduce3(
+          "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            acc += aa(i) * bb(i);
+          },
+          slot(k));
+      return;
+    }
     ccReduce3(
         "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
@@ -1904,6 +1951,18 @@ class CutcellMG {
     const int g = lv.g;
     CCField aa = a;
     FPV ac = lv.AC;
+    if (hostAllFluid(lv)) {  // H-1: no AC read
+      ccReduce3(
+          "mgmax", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            const double v = Kokkos::fabs(aa(i));
+            if (v > acc)
+              acc = v;
+          },
+          Kokkos::Max<double, CCMem>(slot(k)));
+      return;
+    }
     ccReduce3(
         "mgmax", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
         KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
@@ -3930,14 +3989,23 @@ class CutcellMG {
     CCField aa = a, bb = b;
     FPV ac = lv.AC;
     double s = 0;
-    ccReduce3(
-        "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
-        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          if (ac(i) > 1e-30f)
+    if (hostAllFluid(lv))  // H-1: no AC read
+      ccReduce3(
+          "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
             acc += aa(i) * bb(i);
-        },
-        s);
+          },
+          s);
+    else
+      ccReduce3(
+          "mgdot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            if (ac(i) > 1e-30f)
+              acc += aa(i) * bb(i);
+          },
+          s);
 #ifdef PECLET_FLOW_MPI
     return allreduce(s, MPI_SUM_, lv.comm);
 #else
@@ -3951,22 +4019,73 @@ class CutcellMG {
     CCField aa = a;
     FPV ac = lv.AC;
     double m = 0;
-    ccReduce3(
-        "mgmax", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
-        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
-          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          if (ac(i) > 1e-30f) {
+    if (hostAllFluid(lv))  // H-1: no AC read
+      ccReduce3(
+          "mgmax", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
             const double v = Kokkos::fabs(aa(i));
             if (v > acc)
               acc = v;
-          }
-        },
-        Kokkos::Max<double>(m));
+          },
+          Kokkos::Max<double>(m));
+    else
+      ccReduce3(
+          "mgmax", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            if (ac(i) > 1e-30f) {
+              const double v = Kokkos::fabs(aa(i));
+              if (v > acc)
+                acc = v;
+            }
+          },
+          Kokkos::Max<double>(m));
 #ifdef PECLET_FLOW_MPI
     return allreduce(m, MPI_MAX_, lv.comm);
 #else
     return allreduce(m, MPI_MAX_);
 #endif
+  }
+  // H-1 (§8, host single rank): removeMean with the level's precomputed fluid count -- the sum
+  // reduces in the same pencil order (B2) as the {sum, count} pair, and an all-fluid level reads no
+  // AC. Same cells, same order, same mean: bitwise to the single-rank path below.
+  void removeMeanHostCounted(Level& lv, CCField f, bool stopGuard) {
+    C3 e = lv.ext;
+    const int g = lv.g;
+    CCField ff = f;
+    FPV ac = lv.AC;
+    const bool all = lv.allFluid;
+    if (all)
+      ccReduce3(
+          "mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, double& s) {
+            s += ff((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
+          },
+          Kokkos::Sum<double, CCMem>(slot(kMsum)));
+    else
+      ccReduce3(
+          "mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, double& s) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            if (ac(i) > 1e-30f)
+              s += ff(i);
+          },
+          Kokkos::Sum<double, CCMem>(slot(kMsum)));
+    auto ks = ks_;
+    const long cnt = lv.nFluid;
+    const bool guard = stopGuard;
+    ccFor3(
+        "mgmeans", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, KOKKOS_LAMBDA(int x, int y, int z) {
+          if (cnt == 0 || (guard && ks(kStop) != 0.0))
+            return;
+          const double mean = ks(kMsum) / (double)cnt;
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          if (all)
+            ff(i) -= mean;
+          else
+            meanSubtractCell(ff, ac, i, mean);
+        });
   }
   // Single rank (A6, §5.6): the {sum, count} reduce into device slots with the same policy and
   // functor, and the subtract kernel forms mean = sum / count itself -- no host read. With
@@ -3991,6 +4110,10 @@ class CutcellMG {
     };
     if (!distributed_) {
       ensureScalars();
+      if (kHostMemory && lv.nFluid >= 0) {  // H-1: the precomputed count, no count reduction
+        removeMeanHostCounted(lv, f, stopGuard);
+        return;
+      }
       ccReduce3("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body,
                 Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
       auto ks = ks_;
