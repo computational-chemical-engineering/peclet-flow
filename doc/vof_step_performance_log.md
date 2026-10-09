@@ -1126,3 +1126,22 @@ at load 21, 8.5 (218) at load 36 (oversubscribed); OMP 8 2.0 (2.0); OMP 1 0.44; 
 - WO-S modeled saving (from P0, 1x24): (b)/(a) 1.28-1.40 on the work part of `cc_smooth` (12.4 - 1.7 launch floor) -> -2.3...-3.1 ms, plus the wrap residual/matvec (2.9 ms at the same ratio) -0.6...-0.8: S ≈ -2.9...-3.9 ms/step.
 - Phase-1 kernel profile A/B (kp at 1x24, 20-step diff, 3 interleaved rounds, load 21-28: step ms within noise): launches/step 1164.2 -> 1159.2; host deep copies 11 -> 4 (1.58 -> 0.86 ms); memsets 65.05 both; mgmeanr 4.26 -> 1.99 ms, mgdot 3.10 -> 1.84, mgmax 1.41 -> 0.72 (H-1), +mgfluidcount 4 launches 0.17 ms; cc_apply_exact 14.05 -> 13.05 launches (H-2c). Kernel total min 151.4 (base) / 155.5 (cand) ms: load noise (cc_smooth 40.7 / 44.5, untouched).
 - Phase-1 batteries: host 231/231 green (95 + 136); CUDA 231 green (scalar_cutcell_g13 failed at -j6, passed on the serial rerun: the known shared-GPU contention).
+- H's deep-copy target ends at 4 per step, ACCEPTED by the caller (r <- rhs1 and the 3 uOld <- u are outside §8).
+
+### WO-C0 — 4-lane host sum reductions (recorded, host only)
+
+`ccReduce3Lanes` (`src/mac_cutcell.hpp`), used by CutcellMG's `dot`/`dotTo`/`copyDotTo` and every `removeMean` sum
+(single rank and distributed); max reductions and the fluid count keep `ccReduce3`; device branch = `ccReduce3`.
+- G-NUM-P host vs phase-1 ref (`gate_proj/ref/gbit_omp`): max rel u v w p C 4.8e-14 / 6.5e-14 (1x8 / 1x24, rtol 1e-8;
+  N50_8 1.48e-8), 2.5e-14 / 3.3e-14 (1e-10; N50_10 2.52e-9); iterations identical (500 / 653 over 50 steps, per-step
+  diff 0); projected-div ratio max 1.000. d1cmp vs `ref/d1_base_omp` PASS: static du 5.6e-14, Hysing vmax 7.8e-16 /
+  tvmax 0, column drift 5.2e-12, hold-up 0, rise 1.1e-15, 21103 vs 21103 iterations, div ratio 1.000.
+- CUDA: G-BIT PASS vs `ref/gbit_cuda` (hash 12 + np2 identical, dumps bitwise). Host battery 231/231 (95 + 136).
+- All 13 host state hashes move (table in the commit). New host references: `gate_proj/ref/c0_omp` (grun),
+  `gate_proj/ref/d1_c0_omp` (d1, rtol 1e-8 and 1e-7).
+- Microbench `bench_rbgs c0 7 100` (level-0 dot, 128x96x64, min of 7 interleaved rounds, load 52): lanes/B2
+  per launch 0.27 all-fluid / 0.26 masked at OMP 1 (B2 3.4 cycles/cell: the add chain), 0.42 / 0.36 at OMP 8,
+  0.53 / 0.45 at OMP 24; sums agree to 9e-13 relative.
+- Case kernel A/B (kp, phase-1 tip vs C0, 3 interleaved rounds): 1x24 at load 35-40 mgdot 0.91, mgmeanr 0.79;
+  1x8 at load 40-62 mgdot 0.70, mgmeanr 0.80 per launch. The <= 0.5x gate is NOT MET as measured; the host was
+  oversubscribed (kernel totals spread up to 15x). PENDING a re-measure at lower load (caller informed).
