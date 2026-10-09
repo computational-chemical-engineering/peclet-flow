@@ -1145,3 +1145,11 @@ at load 21, 8.5 (218) at load 36 (oversubscribed); OMP 8 2.0 (2.0); OMP 1 0.44; 
 - Case kernel A/B (kp, phase-1 tip vs C0, 3 interleaved rounds): 1x24 at load 35-40 mgdot 0.91, mgmeanr 0.79;
   1x8 at load 40-62 mgdot 0.70, mgmeanr 0.80 per launch. The <= 0.5x gate is NOT MET as measured; the host was
   oversubscribed (kernel totals spread up to 15x). PENDING a re-measure at lower load (caller informed).
+
+### WO-C1..C4 — host Krylov reduction fusion (bitwise vs C0; host single rank, A3 wrap reads)
+
+Eligibility `hostKrylovFusion()`: host memory, single rank with the H-1 count, `fusedWrapReads()` (no outflow,
+no overlay), singular operator, level 0 at width G; elsewhere the separate kernels (device unchanged, §2).
+- C1 (matvec + p.Ap, `cc_apply_exact_dot` / `cc_apply_dot`; not under the "all" mean-removal scope): G-BIT host PASS
+  vs `ref/c0_omp` (hash 12 + np2 identical, 4 dumps bitwise, 10.00 it/step), CUDA PASS vs `ref/gbit_cuda`;
+  targeted ctests 13/13. Launches/step 1159.2 -> 1146.1 (1x8 kp; `mgdot` p.Ap gone, 13.05 fused launches).
