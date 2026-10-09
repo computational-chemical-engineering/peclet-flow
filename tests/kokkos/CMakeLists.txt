@@ -196,7 +196,10 @@ add_test(NAME sdflow_tg COMMAND test_sdflow_tg)
 # Red-black Gauss-Seidel throughput probe (N K on the command line). Registered under the `bench`
 # label so `ctest -N` lists it and `ctest -LE bench` (CI) leaves it out -- nothing is hidden.
 add_executable(bench_rbgs bench_rbgs.cpp)
-target_include_directories(bench_rbgs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src)
+# `bench_rbgs p0 [rounds] [passes]` = the WO-P0 instruments of doc/vof_projection_cost_design.md §12
+# (t_L, the level-0 colour-pass forms a-d); it includes mac_cutcell_mg.hpp, hence the core path.
+target_include_directories(bench_rbgs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
 target_link_libraries(bench_rbgs PRIVATE Kokkos::kokkos)
 add_test(NAME bench_rbgs COMMAND bench_rbgs 64 20)
 set_tests_properties(bench_rbgs PROPERTIES LABELS bench)

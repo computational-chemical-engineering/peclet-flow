@@ -1075,3 +1075,41 @@ The node's base (97.6) is 4.5 ms above S-1's 93.1 on tcn1088 (node-to-node); the
 the number: -16.6 ms/step. Q-H3 for the factor: T = 6 (walls-y best; periodic within 0.02 of T = 8);
 the shipped constant 2 costs ~0.45 ms/step — change pending (bitwise).
 
+
+## 2026-10-09 — Projection-cost package (design doc/vof_projection_cost_design.md)
+
+Worktree `flow-projcost`, branch `projcost` on `fedadb2`. Gates: `~/Codes/bubble_column_perf/gate_proj/`
+(grun/gcmp/battery). References: `gate_proj/ref/base_{omp,cuda}` (repeat PASS),
+N50_8 = 1.477e-8, N50_10 = 2.522e-9 (host and CUDA); 10.00 PCG iterations/step at rtol 1e-8.
+
+### WO-P0 — instruments (workstation 5965WX 24c/48t, RTX 5080; shared, loaded)
+
+`bench_rbgs p0 [rounds] [passes]` (label `bench`): one level-0 colour pass at 128x96x64 (x, z
+periodic, walls in y), 5 interleaved rounds of the four forms. Coefficients: a SYNTHETIC field
+(documented in the file head): rho = 1 / 0.02 in 24 spheres of radius 6 with a one-cell smoothed
+interface, `c_f = open_f rho0/rho_f` (arithmetic face mean, rho0 = 1), y-wall faces closed, gf = 1.
+(b) is checked bitwise against (a) after two passes (0 differing cells, every run).
+
+ms per pass, min (median) over the rounds; ratio = (a)/form:
+
+| form | OMP 24, load 36 | OMP 24, load 21 (3 runs: min ratio) | OMP 8 | OMP 1 (core 5, 4.51 GHz) | CUDA 5080 (3 runs) |
+|---|---|---|---|---|---|
+| (a) fp64 wrap, production | 0.263 (0.277) | 0.273–0.308 | 0.561 | 3.17 = 8.05 ns = **36 cycles/updated cell** | 0.0313–0.0315 |
+| (b) fp64 peeled (§9) | 0.191, 1.375 | 1.279 / 1.283 / 1.397 | 0.340, 1.649 | 1.79, 1.769 | n/a (host only) |
+| (c) D-lite (fp32 faces, fp64 math) | 0.173, 1.522 | 1.380 / 1.445 / 1.504 | 0.471, 1.192 | —, 1.067 | 0.0711–0.0715, **0.441** |
+| (d) fp32 flux (§4.4.3) | 0.189, 1.396 | 1.831 / 1.789 / 1.960 | 0.421, 1.334 | 3.01, 1.052 | 0.0095, **3.29–3.32** |
+
+Empty `parallel_for` (launch + join, fence per launch), t_L min (median) µs: OMP 24 3.5–4.0 (4.0)
+at load 21, 8.5 (218) at load 36 (oversubscribed); OMP 8 2.0 (2.0); OMP 1 0.44; CUDA 6.4 (6.5).
+
+- **S go/no-go (§9 rule, (b) >= 1.2x (a) at OMP 24): GO** — 1.28–1.40 over four runs.
+- **D's expected host range, re-stated from (d)/(a):** the FP32 smoother pass is 1.4x (loaded) to
+  1.8–2.0x (load 21) faster than today's pass at 24 threads (single thread only 1.05x: the wrapped
+  x-neighbour gathers bound the scalar loop, so the FP32 SIMD width pays only when bandwidth is the
+  limit). `cc_smooth` 12.4 -> 6.3–8.9 ms, D total ≈ −5…−8.5 host, i.e. the note's −6.5 (−5…−8.5)
+  stands. Against the peeled FP64 pass (b), the unpeeled FP32 pass is 1.1–1.4x: D's FP32 bodies
+  should take S's peeling too (§9 "later their FP32 siblings").
+- D-lite on the GPU is 2.3x SLOWER than (a) (FP64-issue bound, 12 extra FP64 ops/cell), the
+  §4.3 rejection quantitatively; FP32 is 3.3x faster.
+- F4 (§10): 840 launches x 4 µs ≈ 3.4 ms on the workstation (< 5): not triggered here; the genoa
+  t_L is measured at S-3.
