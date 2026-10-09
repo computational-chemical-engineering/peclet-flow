@@ -79,6 +79,9 @@ using MReal = float;  // operator storage = CUDA mreal
 #endif
 using FPV = Kokkos::View<MReal*, CCMem>;
 using FPC = Kokkos::View<const MReal*, CCMem>;
+// The FP32 V-cycle's storage and arithmetic type (doc/vof_projection_cost_design.md §4.4.2).
+using VReal = float;  // PRECISION-EXEMPT: FP32 V-cycle preconditioner below the exact FP64 Krylov
+                      // (doc/vof_projection_cost_design.md §4)
 
 // coarsen staggered face openness: each coarse face = average of the ratio_b*ratio_c fine sub-faces
 // it spans (mg_coarsen_open_avg_k port). gc/gf: coarse/fine block ghost widths (they can differ —
@@ -701,7 +704,7 @@ struct BottomLabelKernel {
 // The bottom solve kernel: one TeamPolicy(1, T) launch per bottom solve. FCG in FP64 on the stored
 // operator (A0 cell bodies); M = the direct factor `dir` (FacReal = float in production), whose
 // dir.stat(0) = 0 (a factor that failed even with the largest shift) takes the failure path.
-template <class FacReal = float>
+template <class FacReal = float>  // PRECISION-EXEMPT: the FP32 direct factor under an FP64 FCG
 struct BottomKernel {
   using Member = Kokkos::TeamPolicy<CCExec>::member_type;
   BottomDirect<FacReal> dir;
@@ -3204,7 +3207,7 @@ class CutcellMG {
     dirKc_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_bottom_kc", kBottomMaxComponents);
     dirAug_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_bottom_aug", kBottomMaxComponents);
     dirPlanes_ = bottomChoosePlanes(bt.inner, bc_);
-    dir_ = BottomDirect<float>::allocate(dirPlanes_, bt.ext);
+    dir_ = BottomDirect<float>::allocate(dirPlanes_, bt.ext);  // PRECISION-EXEMPT: §13 FP32 factor
     dirTeam_ = 0;
     dirFacTeam_ = 0;
   }
@@ -3246,7 +3249,7 @@ class CutcellMG {
              bt.inner.x, bt.inner.y, bt.inner.z,
              bottomConnected_ ? "" : " -> GraphAMG (more than 64, or none)");
   }
-  template <class FR = float>
+  template <class FR = float>  // PRECISION-EXEMPT: the FP32 direct factor under an FP64 FCG
   BottomKernel<FR> makeBottomKernel(bool precondOnly) {
     ensureScalars();
     Level& bt = lv_.back();
@@ -4603,7 +4606,7 @@ class CutcellMG {
   // pivot floor (kBottomPivotTol; the U5 hook raises it).
   bool bottomStore_ = false;
   BottomPlanes dirPlanes_;
-  BottomDirect<float> dir_;
+  BottomDirect<float> dir_;  // PRECISION-EXEMPT: the FP32 direct factor under an FP64 FCG (§13)
   Kokkos::View<int*, CCMem> dirKc_;
   Kokkos::View<double*, CCMem> dirAug_;
   bool facStale_ = true;
