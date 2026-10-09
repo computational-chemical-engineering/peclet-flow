@@ -1157,3 +1157,5 @@ no overlay), singular operator, level 0 at width G; elsewhere the separate kerne
   -- the A3 wrap matvec/smoother/residual, the V-cycle's rhs reads, the reductions, `copyInner`, the bfp split and
   non-finite check -- read inner cells only): G-BIT host PASS vs `ref/c0_omp` (10.00 it/step), CUDA PASS;
   targeted ctests 13/13. Launches/step 1146.1 -> 1133.0 (1x8).
+- C3 (stop-guarded mean subtract + max|r|, `mgmeans_max`, a max reduction): G-BIT host PASS vs `ref/c0_omp`
+  (10.00 it/step), CUDA PASS; targeted ctests 13/13. Launches/step 1133.0 -> 1120.0 (1x8).
