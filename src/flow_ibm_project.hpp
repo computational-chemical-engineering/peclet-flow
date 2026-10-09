@@ -1286,6 +1286,13 @@ void Solver<Grid>::projectBuildCoefficients() {
   // averaging) treat them exactly like openness. Rebuilt every step (rho may be closure/transport
   // driven); Chebyshev bounds are invalidated (stale bounds under changing coefficients diverge
   // silently — PCG is the recommended/default driver here).
+  // H-2a (doc/vof_projection_cost_design.md §8): on a single rank without an outflow face the
+  // coefficients are built straight into the MG's level-0 fields (no staging copies); otherwise
+  // into cx1_/cy1_/cz1_, which setOpenness copies, as before.
+  const bool inPlace = !mg_.distributed() && !hasOutflow_;
+  CCField cx = inPlace ? mg_.level0Coefficient(0) : cx1_;
+  CCField cy = inPlace ? mg_.level0Coefficient(1) : cy1_;
+  CCField cz = inPlace ? mg_.level0Coefficient(2) : cz1_;
   if (varRho_) {
     fillPropGhosts(rhoField_);
     copyBlockShifted(rho1_, e1_, CCConst(rhoField_), e_, G - 1);
@@ -1293,18 +1300,18 @@ void Solver<Grid>::projectBuildCoefficients() {
     // choice); the harmonic sibling is the opt-in WO-J knob and must be paired with the matching
     // correction in projectVelocities or the projection stops being exact (mac_pressure.hpp).
     if (rhoFaceHarmonic_)
-      buildRhoCoeffHarm(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
-                        CCConst(rho1_), rho_, e1_, 1);
+      buildRhoCoeffHarm(cx, cy, cz, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(rho1_),
+                        rho_, e1_, 1);
     else
-      buildRhoCoeff(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(rho1_),
-                    rho_, e1_, 1);
+      buildRhoCoeff(cx, cy, cz, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(rho1_), rho_,
+                    e1_, 1);
     // WO-R2 item 1: buildRhoCoeff covers the LOW domain face of each axis (an inner index) but
     // not the HIGH one (a ghost index). Fill the high outflow planes here, and tell the MG to
     // carry the caller's coefficient at every Dirichlet domain face instead of re-imposing the
     // literal openness 1.0 (which used to overwrite `rho0/rho_f` with 1 on BOTH sides and made
     // the low-side outlet inconsistent with projectCorrectVar by the full density ratio).
     {
-      CCField cc[3] = {cx1_, cy1_, cz1_};
+      CCField cc[3] = {cx, cy, cz};
       CCField oo[3] = {ox1_, oy1_, oz1_};
       for (int a = 0; a < 3; ++a)
         if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1))
@@ -1313,7 +1320,7 @@ void Solver<Grid>::projectBuildCoefficients() {
     }
     mg_.setBoundaryConditions(bc_);
     mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
-    mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
+    mg_.setOpenness(CCConst(cx), CCConst(cy), CCConst(cz), u_.w[0], u_.w[1], u_.w[2]);
     mg_.setOutflowCoefficient(false);
     // The spectrum changed with the coefficients: re-estimated by the solve, warm-started from
     // the previous estimate's iterates when the bounds being dropped were valid (D3, §5.13).
@@ -1341,21 +1348,21 @@ void Solver<Grid>::projectBuildCoefficients() {
       // eps-CONSERVATIVE pair: c_f = open * (eps_f rho idt)/(eps_f rho idt + beta_f), matching
       // the eps-weighted momentum diagonal; the eps of the flux cancels the eps of the inertia
       // (see mac_pressure.hpp). Correction: projectCorrectPorousCons below.
-      buildPorousCoeffCons(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
-                           CCConst(eps1_), CCConst(beta1_), hasDrag_, rho_ / dt_, e1_, 1);
+      buildPorousCoeffCons(cx, cy, cz, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(eps1_),
+                           CCConst(beta1_), hasDrag_, rho_ / dt_, e1_, 1);
     } else if (hasDrag_) {
-      buildPorousCoeffDrag(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
-                           CCConst(eps1_), CCConst(beta1_), rho_ / dt_, e1_, 1);
+      buildPorousCoeffDrag(cx, cy, cz, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(eps1_),
+                           CCConst(beta1_), rho_ / dt_, e1_, 1);
     } else {
-      buildPorousCoeff(cx1_, cy1_, cz1_, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_),
-                       CCConst(eps1_), e1_, 1);
+      buildPorousCoeff(cx, cy, cz, CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), CCConst(eps1_), e1_,
+                       1);
     }
     mg_.setBoundaryConditions(bc_);
     // SCALING_ISSUES #3: the widened porous builders above wrote the HIGH Dirichlet face plane
     // too, so the outlet row carries open_f*eps_f (and w_f) exactly like every inner face,
     // instead of the literal openness 1.0.
     mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
-    mg_.setOpenness(CCConst(cx1_), CCConst(cy1_), CCConst(cz1_), u_.w[0], u_.w[1], u_.w[2]);
+    mg_.setOpenness(CCConst(cx), CCConst(cy), CCConst(cz), u_.w[0], u_.w[1], u_.w[2]);
     mg_.setOutflowCoefficient(false);
     chebWarmOk_ = chebWarmOk_ || chebBoundsSet_;  // a coefficient rebuild, as above (D3)
     chebBoundsSet_ = false;

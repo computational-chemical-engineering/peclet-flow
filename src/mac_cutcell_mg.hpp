@@ -1667,6 +1667,16 @@ class CutcellMG {
     return kHostMemory && !distributed_ && lv.nFluid >= 0 && lv.allFluid;
   }
 
+  // H-2a (§8): the level-0 face field of axis a, as the destination of a caller's per-step
+  // coefficient builder (single rank, no outflow face: setOpenness then overwrites every ghost by
+  // the periodic fill and re-imposes the wall faces, so the field's previous ghost content cannot
+  // leak; the outflow-coefficient plane snapshot would read it, so outflow keeps the copies).
+  CCField level0Coefficient(int a) const {
+    const Level& f = lv_[0];
+    return a == 0 ? f.ox : (a == 1 ? f.oy : f.oz);
+  }
+  bool distributed() const { return distributed_; }
+
   // rediscretized cut-cell operator on every level from the fine face openness (idx2 = 1/dx^2
   // fine).
   void setOpenness(CCConst ox, CCConst oy, CCConst oz, double idx2, double idy2, double idz2) {
@@ -1677,9 +1687,14 @@ class CutcellMG {
     gfx_ = idx2;
     gfy_ = idy2;
     gfz_ = idz2;
-    Kokkos::deep_copy(f.ox, ox);
-    Kokkos::deep_copy(f.oy, oy);
-    Kokkos::deep_copy(f.oz, oz);
+    // H-2a (§8): a caller that built its coefficients straight into level 0 (level0Coefficient)
+    // hands the same Views back -- nothing to stage.
+    if (ox.data() != f.ox.data())
+      Kokkos::deep_copy(f.ox, ox);
+    if (oy.data() != f.oy.data())
+      Kokkos::deep_copy(f.oy, oy);
+    if (oz.data() != f.oz.data())
+      Kokkos::deep_copy(f.oz, oz);
     if (outflowCoeff_)
       saveOutflowPlanes(f);  // WO-R2: the high-side outflow coefficient lives on a ghost index
                              // that the fill below wraps over -- snapshot it first.
