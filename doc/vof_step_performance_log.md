@@ -1159,3 +1159,8 @@ no overlay), singular operator, level 0 at width G; elsewhere the separate kerne
   targeted ctests 13/13. Launches/step 1146.1 -> 1133.0 (1x8).
 - C3 (stop-guarded mean subtract + max|r|, `mgmeans_max`, a max reduction): G-BIT host PASS vs `ref/c0_omp`
   (10.00 it/step), CUDA PASS; targeted ctests 13/13. Launches/step 1133.0 -> 1120.0 (1x8).
+- C4 (r.z in the level-0 V-cycle exit mean-subtract, `mgmeans_dot`; before the loop it also writes p = z under
+  copyDotTo's H-2b condition; one-level hierarchies keep dotTo/copyDotTo): G-BIT host PASS vs `ref/c0_omp`
+  (10.00 it/step), CUDA PASS; targeted ctests 13/13. Launches/step 1120.0 -> 1107.0 (1x8).
+- C1..C4 total: 1159.2 -> 1107.0 launches/step = -52.2 = -4.0 per PCG iteration (13.05 iterations/step);
+  the note's fifth launch (exit-mean lanes) is C0's order, not a launch.

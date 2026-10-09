@@ -1995,6 +1995,14 @@ class CutcellMG {
   // wrap reads (no outflow face, no overlay), a singular operator (the mean projection runs), and
   // level 0 at the matvec's ghost width. Elsewhere the separate kernels (the device keeps them:
   // §2, a device sum-fusion can change the reduction tree).
+  // C4: a pending request of solvePCGResident to form r^T z (slot k; and p = z when p is
+  // allocated) in the level-0 exit pass of the next V-cycle; k < 0 = none (every other driver).
+  struct ExitDot {
+    int k = -1;
+    CCField p;
+    bool done = false;
+  };
+  ExitDot exitDot_;
   bool hostKrylovFusion() const {
     const Level& l0 = lv_[0];
     return kHostMemory && fusedWrapReads() && removeMean_ && l0.nFluid >= 0 && l0.g == G;
@@ -2174,9 +2182,26 @@ class CutcellMG {
       printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
              pre, post, bottom);
     ++dbgSolve_;
-    if (r0 > 0.0 && std::isfinite(r0)) {
+    const bool fuseC = hostKrylovFusion();  // C1-C4 (§6): the fused host kernels
+    struct ExitDotScope {                   // C4's request never outlives this solve
+      ExitDot& d;
+      ~ExitDotScope() { d = ExitDot{}; }
+    } exitDotScope{exitDot_};
+    // C4: r^T z from the V-cycle's level-0 exit pass (and p = z there under copyDotTo's fusion
+    // condition); a V-cycle without that exit (one level) leaves `done` false -> the old kernels
+    auto precondDot = [&](int k, CCField pz) {
+      exitDot_ = ExitDot{fuseC ? k : -1, pz, false};
       precond(z, r);
-      copyDotTo(l0, p, r, z, kRz);       // p = z; r^T z into kRz
+      const bool done = exitDot_.done;
+      exitDot_ = ExitDot{};
+      return done;
+    };
+    if (r0 > 0.0 && std::isfinite(r0)) {
+      const bool copyFused = kHostMemory && fusedWrapSmooth(l0) && lv_.size() > 1;
+      if (!precondDot(kRz, copyFused ? p : CCField()))
+        copyDotTo(l0, p, r, z, kRz);  // p = z; r^T z into kRz
+      else if (!copyFused)
+        Kokkos::deep_copy(CCExec(), p, z);
       const double rz0 = readSlot(kRz);  // host read (the initial guard)
       if (!std::isfinite(rz0)) {
         solveFailed_ = true;  // see solvePCG
@@ -2198,7 +2223,6 @@ class CutcellMG {
       CCField xx = x, rr = r, pp = p, zz = z, aa = Ap;
       const double brkPAp = kBrkPAp, brkRz = kBrkRz;  // by value into the kernels
       bool exited = false;
-      const bool fuseC = hostKrylovFusion();  // C1-C4 (§6): the fused host kernels
       for (; it < maxit; ++it) {
         if (fuseC && !meanRemovalAll_) {
           matvecDotTo(l0, Ap, p, kPAp);  // C1: Ap = A p and p^T Ap in one pass (star == nullptr)
@@ -2258,8 +2282,8 @@ class CutcellMG {
           exited = true;
           break;
         }
-        precond(z, r);
-        dotTo(l0, r, z, kRzNew);
+        if (!precondDot(kRzNew, CCField()))  // C4: r^T z_new from the V-cycle exit pass
+          dotTo(l0, r, z, kRzNew);
         if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
           setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
         Kokkos::parallel_for(  // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
@@ -2903,6 +2927,11 @@ class CutcellMG {
       prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
     }
     smooth(lv, post_, /*reverse=*/sym);
+    if (L == 0 && exitDot_.k >= 0) {  // C4: the exit subtract also forms r^T z (solvePCGResident)
+      removeMeanDotTo(lv, exitDot_.k, exitDot_.p);
+      exitDot_.done = true;
+      return;
+    }
     if (meanRemovalAll_ || L == 0)
       removeMean(lv, lv.x);
   }
@@ -4225,6 +4254,11 @@ class CutcellMG {
   // reduces in the same 4-lane pencil order (C0) as the {sum, count} pair, and an all-fluid level
   // reads no AC. Same cells, same order, same mean: bitwise to the single-rank path below.
   void removeMeanHostCounted(Level& lv, CCField f, bool stopGuard) {
+    meanSumHostCounted(lv, f);
+    meanSubtractHostCounted(lv, f, stopGuard);
+  }
+  // The sum half of removeMeanHostCounted: the fluid sum of f into kMsum (4-lane order).
+  void meanSumHostCounted(Level& lv, CCField f) {
     C3 e = lv.ext;
     const int g = lv.g;
     CCField ff = f;
@@ -4246,7 +4280,6 @@ class CutcellMG {
               s += ff(i);
           },
           Kokkos::Sum<double, CCMem>(slot(kMsum)));
-    meanSubtractHostCounted(lv, f, stopGuard);
   }
   // The subtract half of removeMeanHostCounted: f -= kMsum / nFluid on the fluid cells (skipped
   // with `stopGuard` once the PCG stop flag is set).
@@ -4270,6 +4303,37 @@ class CutcellMG {
           else
             meanSubtractCell(ff, ac, i, mean);
         });
+  }
+  // C4 (§6 amendment 2): the level-0 V-cycle exit removeMean of z = lv.x (removeMeanHostCounted:
+  // the sum, then the subtract) with r^T z (r = lv.rhs) accumulated in the subtract pass, with
+  // dotTo's mask, operand order and 4-lane order -- bitwise to removeMean(lv, z) + dotTo(lv, r,
+  // z, k). With `p` allocated also p = z (copyDotTo's H-2b fusion, under its own condition).
+  void removeMeanDotTo(Level& lv, int k, CCField p) {
+    meanSumHostCounted(lv, lv.x);
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    CCField zz = lv.x, rr = lv.rhs, pp = p;
+    FPV ac = lv.AC;
+    const bool all = lv.allFluid, copyP = p.extent(0) != 0;
+    const long cnt = lv.nFluid;
+    auto ks = ks_;
+    ccReduce3Lanes(
+        "mgmeans_dot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int zc, double& acc) {
+          const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+          if (cnt != 0) {
+            const double mean = ks(kMsum) / (double)cnt;
+            if (all)
+              zz(i) -= mean;
+            else
+              meanSubtractCell(zz, ac, i, mean);
+          }
+          if (copyP)
+            pp(i) = zz(i);
+          if (all || ac(i) > 1e-30f)
+            acc += rr(i) * zz(i);
+        },
+        slot(k));
   }
   // Single rank (A6, §5.6): the {sum, count} reduce into device slots with the same policy and
   // functor, and the subtract kernel forms mean = sum / count itself -- no host read. With
