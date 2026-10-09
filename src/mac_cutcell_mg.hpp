@@ -302,6 +302,63 @@ KOKKOS_INLINE_FUNCTION CcNbrs ccWrapNbrs(int lx, int ly, int lz, C3 n, int g, lo
   w.zp = (lz == g + n.z - 1) ? i - (long)(n.z - 1) * sz : i + sz;
   return w;
 }
+// S (doc/vof_projection_cost_design.md §9, WO-S): the host row of an A3 wrap kernel with the row
+// ends PEELED. Per row the y/z neighbour offsets once (ccWrapNbrs' selects, loop-invariant in a
+// row); the first and last cell of the row take ccWrapNbrs (today's body); the interior reads
+// i +- 1, so the x-neighbour loads are affine instead of gathers. Same cells, same body, same
+// operands: bitwise to the ccWrapNbrs form. `cell(i, xp, xm, yp, ym, zp, zm)` is called for the
+// cells lx = lx0, lx0 + step, ... <= g + n.x - 1 of the row (step 2: one colour of the smoother).
+template <class Cell>
+KOKKOS_INLINE_FUNCTION void ccWrapRowPeeled(int ly, int lz, C3 e, C3 n, int g, int lx0, int step,
+                                            const Cell& cell) {
+  const long sy = e.x, sz = (long)e.x * e.y;
+  const long base = (long)ly * sy + (long)lz * sz;
+  const long dym = (ly == g) ? (long)(n.y - 1) * sy : -sy;
+  const long dyp = (ly == g + n.y - 1) ? -(long)(n.y - 1) * sy : sy;
+  const long dzm = (lz == g) ? (long)(n.z - 1) * sz : -sz;
+  const long dzp = (lz == g + n.z - 1) ? -(long)(n.z - 1) * sz : sz;
+  const int lxLast = g + n.x - 1;
+  if (lx0 > lxLast)
+    return;
+  const int last = lx0 + ((lxLast - lx0) / step) * step;  // the row's last cell of the pass
+  auto scalar = [&](int lx) {
+    const long i = (long)lx + base;
+    const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+    cell(i, w.xp, w.xm, w.yp, w.ym, w.zp, w.zm);
+  };
+  int lo = lx0, hi = last;  // inclusive
+  if (lo == g) {
+    scalar(lo);
+    lo += step;
+  }
+  const bool peelLast = hi == lxLast && hi >= lo;
+  if (peelLast)
+    hi -= step;
+  PECLET_FLOW_OMP_SIMD  // same as the unpeeled loop: independent cells
+      for (int lx = lo; lx <= hi; lx += step) {
+    const long i = (long)lx + base;
+    cell(i, i + 1, i - 1, i + dyp, i + dym, i + dzp, i + dzm);
+  }
+  if (peelLast)
+    scalar(lxLast);
+}
+// Every inner cell of a wrap kernel on a host backend, row-peeled (ccFor3's host structure: the
+// (y, z) row partition, the serial cutoff).
+template <class Cell>
+inline void ccWrapForPeeled(const char* name, C3 e, C3 n, int g, const Cell& cell) {
+  CCExec space;
+  const int nyi = e.y - 2 * g, nzi = e.z - 2 * g;
+  const long rows = (long)nyi * nzi;
+  auto row = [=](long t) {
+    ccWrapRowPeeled(g + (int)(t % nyi), g + (int)(t / nyi), e, n, g, g, 1, cell);
+  };
+  if (hostRunSerial(rows * (e.x - 2 * g))) {
+    for (long t = 0; t < rows; ++t)
+      row(t);
+    return;
+  }
+  Kokkos::parallel_for(name, Kokkos::RangePolicy<CCExec>(space, 0, rows), row);
+}
 // cutcellSmoothColorFace with wrapped neighbour reads (n = the level's inner dims, all even).
 inline void cutcellSmoothColorFaceWrap(CCField phi, CCConst b, FPC AC, FPC AFX, FPC AFY, FPC AFZ,
                                        C3 e, C3 n, C3 og, int g, int color) {
@@ -313,13 +370,12 @@ inline void cutcellSmoothColorFaceWrap(CCField phi, CCConst b, FPC AC, FPC AFX, 
       const int ly = g + (int)(t % nyi), lz = g + (int)(t / nyi);
       const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
       const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
-      PECLET_FLOW_OMP_SIMD  // same-colour cells are independent (ccFor3's contract)
-          for (int lx = g + ((P ^ (g & 1)) & 1); lx < e.x - g; lx += 2) {
-        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        const CcNbrs w = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
-        cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
-                              w.zp, w.zm);
-      }
+      // S: the row ends peeled (same-colour cells are independent: ccFor3's contract)
+      ccWrapRowPeeled(ly, lz, e, n, g, g + ((P ^ (g & 1)) & 1), 2,
+                      [&](long i, long xp, long xm, long yp, long ym, long zp, long zm) {
+                        cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, xp, xm, yp,
+                                              ym, zp, zm);
+                      });
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
       for (long t = 0; t < (long)nyi * nzi; ++t)
@@ -346,6 +402,15 @@ inline void cutcellSmoothColorFaceWrap(CCField phi, CCConst b, FPC AC, FPC AFX, 
 // residualCutcellFace with wrapped reads of x.
 inline void residualCutcellFaceWrap(CCField r, CCConst x, CCConst b, FPC AC, FPC AFX, FPC AFY,
                                     FPC AFZ, C3 e, C3 n, int g) {
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {  // S
+    const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+    ccWrapForPeeled("peclet::flow::cc_residual", e, n, g,
+                    [=](long i, long xp, long xm, long yp, long ym, long zp, long zm) {
+                      cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, xp, xm, yp,
+                                              ym, zp, zm);
+                    });
+    return;
+  }
   ccFor3(
       "peclet::flow::cc_residual", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
@@ -371,6 +436,15 @@ inline void applyCutcellOpFaceWrap(CCField y, CCConst x, FPC AC, FPC AFX, FPC AF
 }
 inline void applyCutcellOpExactWrap(CCField y, CCConst x, CCConst ox, CCConst oy, CCConst oz, C3 e,
                                     C3 n, int g, double gfx, double gfy, double gfz) {
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {  // S
+    const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+    ccWrapForPeeled("peclet::flow::cc_apply_exact", e, n, g,
+                    [=](long i, long xp, long xm, long yp, long ym, long zp, long zm) {
+                      y(i) = cutcellApplyExactCell(x, ox, oy, oz, i, sx, sy, sz, xp, xm, yp, ym, zp,
+                                                   zm, gfx, gfy, gfz);
+                    });
+    return;
+  }
   ccFor3(
       "peclet::flow::cc_apply_exact", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {

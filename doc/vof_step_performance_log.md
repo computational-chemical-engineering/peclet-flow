@@ -1164,3 +1164,17 @@ no overlay), singular operator, level 0 at width G; elsewhere the separate kerne
   (10.00 it/step), CUDA PASS; targeted ctests 13/13. Launches/step 1120.0 -> 1107.0 (1x8).
 - C1..C4 total: 1159.2 -> 1107.0 launches/step = -52.2 = -4.0 per PCG iteration (13.05 iterations/step);
   the note's fifth launch (exit-mean lanes) is C0's order, not a launch.
+
+### WO-S — host wrap kernels with the row ends peeled (bitwise; P0 = GO)
+
+`ccWrapRowPeeled` / `ccWrapForPeeled`: per row the y/z offsets once, first/last cell with `ccWrapNbrs`, interior
+`i +- 1`; host branches of `cutcellSmoothColorFaceWrap`, `residualCutcellFaceWrap`, `applyCutcellOpExactWrap`.
+Not applied (not named in §9; open for the caller): `applyCutcellOpFaceWrap` and C1's fused `matvecDotTo`, which
+now carries the PCG loop's level-0 matvec.
+- G-BIT host PASS vs `ref/c0_omp` (10.00 it/step); CUDA PASS (device untouched); targeted ctests 13/13.
+- `bench_rbgs p0 5 40`: the production pass (a) now equals the peeled reference (b) (OMP 24: 0.180 vs 0.179 ms;
+  OMP 1: 1.157 vs 1.139 ms). Against P0's unpeeled (a): 0.263-0.308 -> 0.180 ms at OMP 24 (1.46-1.71x), 3.17 -> 1.16 ms
+  at OMP 1.
+- Case kernel A/B (kp 1x24, C0 tree vs S, 3 rounds, load 41-58): `cc_smooth` per launch B/A 0.32, `cc_residual` 0.37;
+  kernel totals spread 3-8x between rounds. Outside P0 (1.28-1.40) +-10 %, in the faster direction, and the runs
+  are oversubscribed: PENDING a re-measure at low load (same treatment as C0's timing gate).
