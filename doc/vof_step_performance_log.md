@@ -1429,3 +1429,17 @@ now carries the PCG loop's level-0 matvec.
   the G-D4 dumps. Iterations unchanged (13.06 / 10.00 per step at 1e-8 / 1e-10). ctest mg_fp32_vcycle +7 D5 checks
   (allocation pattern; fp32 -> fp64 at run time bitwise to 'fp64' throughout; back to 'fp32' releases, bitwise to
   the first FP32 solve; exact off after a deferred build bitwise to the eager build): host 101, CUDA 100 PASS.
+
+### Phase 3b end — CUDA battery STOPPED on the D default (2026-10-15)
+
+- CUDA battery on 37f8f5f (D default) and on fd5166d (D5): the same 9 failures after the serial rerun (232 - 9),
+  none new with D5; on the rebased tip 4037569 it was 232/232. Eight are np1 tests that compare a distributed np=1
+  run bitwise (tol 0) with a single-rank run (sdflow_colocated, varmu, cellforce, cutcellmg_aniso, vof_wetting,
+  vof_wetting_dynamic, movingscene_advect, wall_slip): device 'auto' now runs the FP32 V-cycle single-rank while
+  the distributed path stays FP64 (e.g. varmu du 5.6e-16, sdflow_colocated advect rel 1.5e-11). The ninth,
+  units_scale_invariance, sees p differ by 2.0e-11 / 1.05e-10 (TOL 1e-13) between the scaled runs: the FP32
+  weights' rounding is not scale-invariant. Host battery 232/232 (host 'auto' = FP64). Open question to the caller.
+- Projection A/B on the D5 build ('fp64' = the rebased tip bitwise vs 'fp32'; 3 interleaved rounds, min (+spread)):
+  CUDA 12.28 (+0.02) -> 9.96 (+0.01) ms, 0.811, step 23.08 -> 20.87 ms, load 7.4-8.3; host 1x8 68.67 (+8.87) ->
+  61.23 (+10.79) ms, 0.892, load 3.4-4.5; 1x24 54.63 (+9.36) -> 48.29 (+5.75) ms, 0.884, load 4.5-8.3 (host > 0.88:
+  'auto' stays FP64 there, as ruled). Iterations 10.0 = 10.0 per step at 1e-8.
