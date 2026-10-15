@@ -1444,6 +1444,33 @@ now carries the PCG loop's level-0 matvec.
   61.23 (+10.79) ms, 0.892, load 3.4-4.5; 1x24 54.63 (+9.36) -> 48.29 (+5.75) ms, 0.884, load 4.5-8.3 (host > 0.88:
   'auto' stays FP64 there, as ruled). Iterations 10.0 = 10.0 per step at 1e-8.
 
+### WO-X1 — the resident PCG honours `stopRef_` (recorded; Q-P7, design §11 (i))
+Branch `projcost-x1` on `37f8f5f`. `solvePCGResident` stops on `rn < rtol * rref`,
+`rref = stopRef_ > 0 ? stopRef_ : r0` (the distributed loop's, FCG's and Chebyshev's test).
+Unset (every caller but `solveBalancedForceSystem`) `rref` is `r0`: bitwise.
+- G-BIT host (`ref/r_omp`): hash 12/12 + np2 identical; d8/d24 x 1e-8/1e-10 bitwise, iters 10.00 / 13.06.
+  CUDA (`ref/d3_cuda`): hash 12/12 + np2 identical; d8 1e-8/1e-10 bitwise. No state_hash line
+  changes: no case runs the balanced-force projection on a single rank under PCG. No re-baseline.
+- Host battery (`ctest -LE bench`): 232/232 green (96 + 136 np), no reruns. CUDA battery: the coordinator's.
+- G-NUM-P 4/5 host (`d1cmp` vs `ref/d1_r_omp`): PASS, all differences 0, column iters 21103 = ref.
+- Collocated variable-ρ ctests on CUDA (16, incl. balanced_force(_mpi_np1/2/4), vof_collocated(_mpi),
+  telescope_varrho, cell_force_placement, collocated_stability_guard, balanced_force_restart): green.
+- Balanced-force iterations, host 1x8, default driver (MG-PCG 500 / 1e-10), the drops of
+  `tests/study/balanced_force_cost.py` with BFP ON (instrument `gate_proj/x1_iters.py`), total
+  over the run, before → after:
+
+  | case | steps | staggered | collocated |
+  |---|---|---|---|
+  | moving (U 0.02) | 30 | 913 → 961 | 982 → 1036 |
+  | static (height-function κ) | 50 | 1583 → 1541 | 1813 → 1704 |
+  | static-k (κ = 1/R) | 50 | 1006 → 655 | 997 → 680 |
+
+  Main-projection iterations and max|u| unchanged to the printed digits. Moving drop: MORE
+  iterations, because its warm residual exceeds the full right-hand side (trace, collocated: r0 =
+  3.2 … 6.5 against a stop below 1.7e-10 at rtol 1e-10, so max|D(O c β)| < r0); static-k: the
+  steady 9–11 → 3–5 per step. The first balanced-force solve of every case (static: the first two) caps at 500 before and
+  after (r/r0 = 2.4e-2 at the cap, moving collocated): pre-existing, not touched here.
+
 ### Landing (2026-10-16) — USER ruling 2026-10-15: the defaults do not change
 
 - Ruling (gate_proj/DECISIONS_PROJ.log): the FP32 V-cycle stays opt-in ('fp64' default) and E stays opt-in ('zero'

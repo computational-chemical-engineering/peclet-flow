@@ -2355,6 +2355,10 @@ class CutcellMG {
     }
     removeMean(l0, r);                // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);  // host read (once per solve)
+    // The stop reference, as in solvePCG's distributed loop, solveFCG and solveChebyshev: r0, or
+    // the caller's FULL right-hand-side norm when one is set (setStopReference; only the
+    // balanced-force projection sets it). Unset, rref IS r0: `rtol * rref` is the old test bitwise.
+    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
     int it = 0;
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
     if (trace)
@@ -2468,7 +2472,7 @@ class CutcellMG {
         }
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * r0) {
+        if (rn < rtol * rref) {
           ++it;
           exited = true;
           break;
