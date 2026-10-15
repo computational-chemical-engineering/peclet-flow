@@ -746,16 +746,17 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
               throw std::runtime_error("set_pressure_vcycle_precision: 'auto' | 'fp64' | 'fp32'");
           },
           nb::arg("mode"),
-          "Precision of the V-cycle that preconditions the single-rank pressure PCG / FCG. 'fp64' "
-          "(DEFAULT): today's V-cycle. 'fp32': FP32 face weights (the diagonal derived, never "
-          "stored), FP32 iterates and flux-form arithmetic on every level above the bottom, the "
-          "input scaled by an exact power of two; the Krylov matvec, dots, mean projection and "
-          "stop test stay FP64 -- raises at the solve, naming the failed condition, where not "
-          "eligible (multi-rank, an outflow face, an overlay solve, a non-bottom level with an "
-          "odd inner dimension, a float outer operator, a face weight outside [1e-30, 1e30], the "
-          "mean-removal scope 'all', a driver other than PCG / FCG). 'auto': FP32 where eligible, "
-          "else FP64. Takes effect at once. Outside the CG drivers' rated contrast (density ratio "
-          "above ~1e3 with walls) both precisions may cap; FP32 may cap earlier. "
+          "Precision of the V-cycle that preconditions the single-rank pressure PCG / FCG. 'auto'"
+          " (DEFAULT): FP32 where eligible on a GPU backend, else FP64 (host backends: FP64, the "
+          "host gain is below 12 %). 'fp64': the double V-cycle. 'fp32': FP32 face weights (the "
+          "diagonal derived, never stored), FP32 iterates and flux-form arithmetic on every level"
+          " above the bottom, the input scaled by an exact power of two; the Krylov matvec, dots,"
+          " mean projection and stop test stay FP64 -- raises at the solve, naming the failed "
+          "condition, where not eligible (multi-rank, an outflow face, an overlay solve, a "
+          "non-bottom level with an odd inner dimension, a float outer operator, a face weight "
+          "outside [1e-30, 1e30], the mean-removal scope 'all', a driver other than PCG / FCG). "
+          "Takes effect at once. Outside the CG drivers' rated contrast (density ratio above ~1e3"
+          " with walls) both precisions may cap; FP32 may cap earlier. "
           "doc/vof_projection_cost_design.md §4.")
       .def(
           "pressure_vcycle_precision",

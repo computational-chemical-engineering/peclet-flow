@@ -3144,7 +3144,7 @@ class CutcellMG {
   // that does not carry them is marked stale (wOk = false).
   bool fp32Build(int L) {
     Level& lv = lv_[L];
-    if (vprec_ == kVcycleFp64 || distributed_ || hasOutflow_ || L + 1 >= (int)lv_.size()) {
+    if (!fp32Mode() || distributed_ || hasOutflow_ || L + 1 >= (int)lv_.size()) {
       lv.wOk = false;
       return false;
     }
@@ -3179,10 +3179,15 @@ class CutcellMG {
     checkFp32DecoupledSets();
 #endif
   }
+  // §4.4.6, Q-P1 (WO-D3 commit 2): does the mode ask for the FP32 V-cycle on this backend? 'fp32'
+  // always; 'auto' on device backends only -- the host projection gains < 12 % (A/B 0.954 at 1x8,
+  // 0.896 at 1x24 against the 0.88 gate; CUDA 0.815), so host 'auto' is today's FP64 V-cycle and
+  // builds no FP32 data.
+  bool fp32Mode() const { return vprec_ == kVcycleFp32 || (vprec_ == kVcycleAuto && !kHostMemory); }
   // §4.4.1, §4.4.6: does this solve run the FP32 V-cycle? Evaluated once per solve by
   // solvePCGResident and solveFCG; 'fp32' raises naming the failed condition where ineligible.
   bool fp32VcycleSolve() {
-    if (vprec_ == kVcycleFp64)
+    if (!fp32Mode())
       return false;
     if (const char* why = fp32VcycleIneligible(true)) {
       if (vprec_ == kVcycleFp32)
@@ -4997,9 +5002,10 @@ class CutcellMG {
   // P1 of the defect-correction campaign — the exact (matrix-free, double, flux-form) level-0
   // operator apply in the residual and the Krylov matvec. See mac_cutcell.hpp.
   bool exactResidual_ = false;
-  // D (§4.4.6): the V-cycle precision mode (kVcycleAuto / kVcycleFp64 / kVcycleFp32); 'fp64' until
-  // WO-D3's promotion. opBuilt_: setOpenness has built the operator of the current hierarchy.
-  int vprec_ = kVcycleFp64;
+  // D (§4.4.6): the V-cycle precision mode (kVcycleAuto / kVcycleFp64 / kVcycleFp32); 'auto' since
+  // WO-D3's promotion (FP32 on eligible device solves, fp32Mode). opBuilt_: setOpenness has built
+  // the operator of the current hierarchy.
+  int vprec_ = kVcycleAuto;
   bool opBuilt_ = false;
   bool lastVcycleFp32_ = false;
   bool healthTrace_ = false;       // §4.4.5 test hook (setHealthTrace)

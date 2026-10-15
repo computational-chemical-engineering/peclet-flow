@@ -514,8 +514,8 @@ class Solver {
   // Live; independent of the geometry.
   void setPressureBottomSolver(int engine);
   // Precision of the pressure V-cycle preconditioner (doc/vof_projection_cost_design.md §4.4.6):
-  // 0 "auto" (FP32 where CutcellMG::fp32VcycleIneligible holds, else FP64), 1 "fp64" (DEFAULT),
-  // 2 "fp32" (raises at the solve, naming the failed condition, where ineligible). Live: the FP32
+  // 0 "auto" (DEFAULT; FP32 on a device backend where CutcellMG::fp32VcycleIneligible holds, else
+  // FP64; host backends FP64), 1 "fp64", 2 "fp32" (raises at the solve, naming the failed condition, where ineligible). Live: the FP32
   // weights are rebuilt from the stored level openness at once.
   void setPressureVcyclePrecision(int mode);
   // The precision the last pressure solve's V-cycles used: true = FP32.

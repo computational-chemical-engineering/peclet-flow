@@ -1394,3 +1394,16 @@ now carries the PCG loop's level-0 matvec.
 - Projection A/B on the rebased build ('fp64' vs 'fp32', prof.py 30 steps rtol 1e-8, 3 interleaved rounds, min
   (+spread)): CUDA 12.28 (+0.05) -> 10.01 (+0.01) ms, 0.815 (<= 0.88); host 1x8 62.69 -> 59.79, 0.954; 1x24 57.09 ->
   51.13, 0.896 (load 7.7-9.4). Iterations 10.0 = 10.0. Same verdict as phase 3: 'auto' = FP32 on device only.
+
+### WO-D3 commit 2 — "D default": 'auto' = FP32 V-cycle on device backends only (Q-P1; host gain < 12 %)
+
+- Perf gate (projection A/B on the rebased build, 3 interleaved rounds, min (+spread), load 7.7-9.4): CUDA 12.28 ->
+  10.01 ms, 0.815 <= 0.88 PASS; host 1x8 0.954, 1x24 0.896 > 0.88 -> `fp32Mode()`: 'fp32' always, 'auto' only where
+  `!kHostMemory`. Host 'auto' builds no FP32 data (ctest check).
+- Host 'auto' (the new default) bitwise to 'fp64': G-BIT PASS vs `ref/r_omp` (saved as `ref/d3_omp`). CUDA 'auto' is
+  bitwise to the forced-'fp32' G-D4 dumps; NUMCMP vs `ref/r_cuda` PASS (rel 5.0e-14 / 2.5e-14, iterations 500 / 653
+  identical, div ratio 1.000); d1cmp PASS (21103 = 21103, drift 5.2e-12; `ref/d1_d3_cuda`). New CUDA ref `ref/d3_cuda`.
+- CUDA state_hash old -> new (np2 unchanged): colocated_embed 83b45c93b49c -> d3224126afbc, colocated_gauge_exact
+  7687786ac7eb -> f51471270a07, colocated_plain 628e98a87dbc -> b9e4ccc87102, porous 25f0ba690c91 -> 7ca6f39d89e7,
+  scalar 69ef3c8a947d -> 2b669f85548d, scene_moving 2fdef25e2f91 -> 14fd3b6138f2, staggered_bed 15748848338a ->
+  56b52c908927. ctest mg_fp32_vcycle PASS host (94 checks) and CUDA (93). Host battery 232/232; CUDA battery: see the phase-3b handoff.

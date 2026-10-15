@@ -301,7 +301,7 @@ void dataChecks(const Problem& P) {
     fused.back().insert(fused.back().end(), h.WZ.begin(), h.WZ.end());
   }
   // the setter's rebuild from the stored openness == the fused build, bitwise
-  mg.setVcyclePrecision(CutcellMG::kVcycleAuto);
+  mg.setVcyclePrecision(CutcellMG::kVcycleFp32);
   bool same = true;
   for (int L = 0; L + 1 < nl; ++L) {
     CutcellMG::Level& lv = mg.level(L);
@@ -626,7 +626,7 @@ void eligibilityChecks() {
   } cases[] = {{&out, "outflow"}, {&odd, "odd"}, {&one, "single level"}, {&tiny, "face weight"}};
   for (const Case& c : cases) {
     CutcellMG mg;
-    setUp(mg, *c.P, CutcellMG::kVcycleAuto);
+    setUp(mg, *c.P, CutcellMG::kVcycleFp32);
     const char* why = mg.fp32VcycleIneligible(true);
     check(why && std::string(why).find(c.want) != std::string::npos,
           c.P->name + ": (d) ineligible: " + (why ? why : "(eligible!)"));
@@ -634,7 +634,7 @@ void eligibilityChecks() {
   {  // the overlay (test hook) and a non-Krylov caller, on an otherwise eligible problem
     Problem ok = makeProblem("eligible", 16, 16, 16, 3, bcPer, ones, uni);
     CutcellMG mg;
-    setUp(mg, ok, CutcellMG::kVcycleAuto);
+    setUp(mg, ok, CutcellMG::kVcycleFp32);
     check(mg.fp32VcycleIneligible(true) == nullptr, "eligible 16^3: eligible");
     const char* why = mg.fp32VcycleIneligible(false);
     check(why && std::string(why).find("PCG or FCG") != std::string::npos,
@@ -644,6 +644,24 @@ void eligibilityChecks() {
     check(why && std::string(why).find("overlay") != std::string::npos,
           std::string("eligible 16^3 + overlay: (d) ") + (why ? why : "(eligible!)"));
     mg.debugSetOverlaySolve(false);
+  }
+  {  // WO-D3 commit 2: 'auto' (the default) = FP32 on device backends only; host 'auto' is FP64,
+     // bitwise to 'fp64', and builds no FP32 data
+    Problem ok = makeProblem("eligible", 16, 16, 16, 3, bcPer, ones, uni);
+    CutcellMG dflt;
+    check(dflt.vcyclePrecision() == CutcellMG::kVcycleAuto, "the default mode is 'auto'");
+    const Solve a = solve(ok, CutcellMG::kVcycleFp64), b = solve(ok, CutcellMG::kVcycleAuto);
+    const bool bits = a.x.size() == b.x.size() &&
+                      std::memcmp(a.x.data(), b.x.data(), a.x.size() * sizeof(double)) == 0;
+    check(CutcellMG::kHostMemory ? (!b.fp32 && bits && a.it == b.it) : b.fp32,
+          std::string("eligible 16^3: 'auto' ") + (CutcellMG::kHostMemory
+                                                       ? "on host == 'fp64' bitwise, FP64 reported"
+                                                       : "on device runs the FP32 V-cycle"));
+    if (CutcellMG::kHostMemory) {
+      CutcellMG mg;
+      setUp(mg, ok, CutcellMG::kVcycleAuto);
+      check(mg.level(0).WX.extent(0) == 0, "eligible 16^3: host 'auto' builds no FP32 data");
+    }
   }
   // (f) 'auto' on the ineligible solvable configurations is bitwise to 'fp64'
   for (const Problem* P : {&out, &odd}) {
