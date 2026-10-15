@@ -1375,17 +1375,59 @@ void Solver<Grid>::projectSolve() {
   // mac_multigrid): MG-PCG by default, or the communication-light Chebyshev driver (bounds
   // estimated once, then reused). Warm start (CUDA pwarm_): keep the previous step's phi1_ as the
   // initial guess instead of zeroing.
-  if (!pwarm_)
-    Kokkos::deep_copy(phi1_, 0.0);
-  // H-2c: on the cold path phi1_ is +0, and the single-rank PCG skips its A x0 (scoped to this
-  // one solve, exception-safe).
-  {
-    struct ZeroGuessScope {
+  // E (doc/vof_projection_cost_design.md §5.3, set_pressure_initial_guess): the projected guess
+  // on an eligible solve ('auto' / 'projected'); 'zero' (the default) is the cold path below.
+  bool guess = false;
+  if (pguessMode_ != 1) {
+    const char* why = projectedGuessIneligible();
+    if (why && pguessMode_ == 2)
+      throw std::runtime_error(
+          std::string("set_pressure_initial_guess('projected'): not eligible here: ") + why);
+    guess = why == nullptr;
+  }
+  if (!guess) {
+    pguessCount_ = 0;  // the history holds consecutive projected-guess solves only
+    if (!pwarm_)
+      Kokkos::deep_copy(phi1_, 0.0);
+    // H-2c: on the cold path phi1_ is +0, and the single-rank PCG skips its A x0 (scoped to this
+    // one solve, exception-safe).
+    {
+      struct ZeroGuessScope {
+        CutcellMG& mg;
+        ~ZeroGuessScope() { mg.setZeroInitialGuess(false); }
+      } zeroGuessScope{mg_};
+      mg_.setZeroInitialGuess(!pwarm_);
+      lastPressureIters_ = solvePressureSystem(rhs1_, phi1_);
+    }
+  } else {
+    // Buffers: phi1_ holds phi^n, phiPrev1_ phi^{n-1} (history 2); the solve writes into
+    // phiPrev1_, then the handles swap (no copies). History 0 is the cold solve, bitwise.
+    const int driver = useFcg_ ? 2 : 1;
+    if (phiPrev1_.extent(0) != n1_) {
+      phiPrev1_ = CCField("phiPrev1", n1_);
+      pguessCount_ = 0;
+    }
+    if (driver != pguessDriver_)
+      pguessCount_ = 0;  // a driver change
+    pguessDriver_ = driver;
+    const int hist = std::min(pguessCount_, pguessHistMax_);
+    struct GuessScope {
       CutcellMG& mg;
-      ~ZeroGuessScope() { mg.setZeroInitialGuess(false); }
-    } zeroGuessScope{mg_};
-    mg_.setZeroInitialGuess(!pwarm_);
-    lastPressureIters_ = solvePressureSystem(rhs1_, phi1_);
+      ~GuessScope() {
+        mg.setZeroInitialGuess(false);
+        mg.clearProjectedGuess();
+      }
+    } guessScope{mg_};
+    if (hist == 0) {
+      Kokkos::deep_copy(phiPrev1_, 0.0);
+      mg_.setZeroInitialGuess(true);
+    }
+    mg_.setProjectedGuess(phi1_, hist);
+    lastPressureIters_ = solvePressureSystem(rhs1_, phiPrev1_);
+    std::swap(phi1_, phiPrev1_);
+    pguessCount_ = std::min(pguessCount_ + 1, pguessHistMax_);
+    if (mg_.lastSolveFailed() || lastPressureIters_ >= pcgMaxit_)
+      pguessCount_ = 0;  // a failed or capped solve
   }
   // ISSUES sweep item 6: a solve that gave up on a non-finite recurrence scalar reports the
   // iteration CAP (see CutcellMG::solvePCG) and raises this flag, so `pressure_solve_failed()`

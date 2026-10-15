@@ -91,6 +91,7 @@ std::vector<double> Solver<Grid>::getVelocity(int c) {
 
 template <class Grid>
 void Solver<Grid>::setVelocity(int c, const std::vector<double>& v) {
+  pguessCount_ = 0;  // E: a state write (doc/vof_projection_cost_design.md §5.3)
   const double k = u_.velToInt(c);
   if (k != 1.0) {
     std::vector<double> vi(v.size());

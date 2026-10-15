@@ -1471,6 +1471,38 @@ Unset (every caller but `solveBalancedForceSystem`) `rref` is `r0`: bitwise.
   steady 9–11 → 3–5 per step. The first balanced-force solve of every case (static: the first two) caps at 500 before and
   after (r/r0 = 2.4e-2 at the cap, moving collocated): pre-existing, not touched here.
 
+### WO-E0 — the projected initial guess behind the 'zero' default (2026-10-15): STOPPED at G-E5 (G-NUM-P 3)
+
+- `diagnostics.set_pressure_initial_guess(mode, history=2)` ('zero' default | 'projected' | 'auto'), §5.3 as
+  written: `CutcellMG::projectedGuess` shared by `solvePCGResident` and `solveFCG` (one host packet {rref, G11, G12,
+  G22, g1, g2}, Cholesky 2x2, cold fallback c = 0), `Solver::projectSolve` swaps `phi1_`/`phiPrev1_` (no copies;
+  grep: no other holder of the `phi1_` handle). History resets: setter, geometry (`setSolidDevice`,
+  `allocateBlock`), `set_field` u/v/w/p/phi, `set_state`, `set_velocity`, a driver change, a failed/capped solve,
+  any solve that does not take the guess. FP32 V-cycle (CUDA 'auto') scale exponent under E = ilogb(rref) (the
+  host holds no other value, §5.3/§5.4; B(2^k r) = 2^k B(r) bitwise, G-D2(a)). E trace: `PECLET_FLOW_MG_DEBUG=2`.
+- G-BIT 'zero': host PASS vs `ref/r_omp`, CUDA PASS vs `ref/d3_cuda` (state_hash + np2 + 50-step dumps).
+- PROTOCOL: prof.py's default `--flux python` writes u (`set_velocity`) after every step = a state write, so E
+  never engages there (every solve cold, bitwise 'zero'). All E A/B below use `--flux device` on both sides
+  (the 'zero' side = this build's default). d1_tolerance's column has no per-step write.
+- Bubble column from ckpt_t43, rtol 1e-8, host 1x8 (CUDA identical to the digits shown), iterations:
+  | history | 50 steps zero -> E | 300 steps zero -> E | saving/step (300) | max step excess | eps_g median |
+  |---|---|---|---|---|---|
+  | 1 | 500 -> 450 | 3056 -> 2796 | 0.867 | 0 | 0.159 |
+  | 2 | 500 -> 451 | 3056 -> 2806 | 0.833 | 0 | 0.158 |
+  rtol 1e-10, 50 steps, h2: 653 -> 605. d1 column (2000 steps, h2): 21103 -> 19765 (0.67/step).
+- G-E1 (||x - x0||_A <= ||x||_A, every solve, traced) PASS (max 1.000 = the cold first solve); G-E2 max
+  resid/rref 9.93e-9 <= 1.5e-8 PASS; G-E3 step 1 and the step after a `set_field` bitwise to 'zero' (PCG and FCG)
+  PASS; G-E4 IBM cylinder N=32, 20 steps: x0 = 0 on every non-fluid cell PASS (eps_g median 9.3e-3); G-E6 cylinder
+  Stokes 400 steps PCG: k rel 3.9e-16 PASS, iterations 2799 -> 1063 (last 100 steps 7 -> 2/solve).
+- G-NUM-P 1 PASS (rel 9.05e-10 <= N50_8, 2.16e-12 <= N50_10); 2 (E1 variant) PASS; 4/5 PASS (static, Hysing
+  untouched -- Chebyshev; column drift 6.8e-13, hold-up 3.3e-12, rise 3.0e-13 within the ref's own spread).
+  **3 FAILS:** max_open_divergence_projected per step <= 2x ref: 1e-8 50 steps 1.92 (pass), 300 steps max 4.08 (16/300
+  steps > 2, median 1.09, p90 1.80), 1e-10 50 steps 4.52 (6/50), d1 column 6.80. E's max over the 300 steps is
+  1.19e-8 against the reference's 1.48e-8 (0.80x). Mechanism: both stop at max|r| < rtol rref; the cold solve's
+  last V-cycle (~6x contraction) lands anywhere in (rtol/6, rtol) rref, so a per-step ratio of a changed iteration
+  path is bounded by ~6, not 2. Open for the design session; WO-E1 not taken (its rule needs G-NUM-P).
+- Host battery 232/232 (96 np + 136). Committed on the side branch `projcost-e0-wip` only (not on `projcost-e0`).
+
 ### Landing (2026-10-16) — USER ruling 2026-10-15: the defaults do not change
 
 - Ruling (gate_proj/DECISIONS_PROJ.log): the FP32 V-cycle stays opt-in ('fp64' default) and E stays opt-in ('zero'
@@ -1492,3 +1524,9 @@ Unset (every caller but `solveBalancedForceSystem`) `rref` is `r0`: bitwise.
   6.53e-8, slab 8.02e-8 host); new walled slab (32^3, heavy below at 1e3, walls +-z): FP64 FCG converges (52 its,
   required) and G-D3 (a)-(e) pass (fp32 52 its, health 0.439 = 0.439); FP64 PCG does NOT converge on it (true
   residual 172 at 1e3, 0.085 at 1e2 after 200 its), so PCG keeps (a)-(e) n/a there and runs (b).
+- Step 3: cherry-picked X1 (8871e42) and E0 (d3ca14c); log entries kept, in date order. Merge in
+  `solvePCGResident`: E0's guess / cold block, then X1's `rref = stopRef_ > 0 ? stopRef_ : r0` (as in `solveFCG`).
+  E stays 'zero' by default; E1 NOT promoted (USER ruling), its measured saving 0.83-0.87 it/step (bubble column,
+  300 steps, history 2 / 1) parked until a distributed E exists; G-NUM-P 3 is n/a under the 'zero' default.
+  Host: G-BIT PASS vs `ref/r_omp`; 'fp32' 4/4 bitwise vs `ref/d3f32_omp`; 'projected' (history 2, --flux device)
+  4/4 bitwise vs the E0 evidence `e0/ev_omp`.

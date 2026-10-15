@@ -25,6 +25,8 @@ Usage:
             [--rtols 1e-10,1e-9,1e-8,1e-7,1e-6] [--column-steps 2000] [--ckpt PATH] [--case-dir DIR]
             [--vcycle-precision fp64|fp32]   (the column's V-cycle precision, §4 of
                                                  doc/vof_projection_cost_design.md)
+            [--initial-guess auto|zero|projected [--guess-history 1|2]]   (the column's
+                                                 pressure initial guess, §5 of the same note)
 """
 import json
 import os
@@ -52,6 +54,9 @@ CKPT = arg("--ckpt", os.path.expanduser(
 # only Krylov solve here; the static and Hysing cases run Chebyshev, where the FP32 V-cycle never
 # applies, so they keep the build's default)
 VPREC = arg("--vcycle-precision", "")
+# §5: the column's pressure initial guess (the Chebyshev cases are not eligible)
+GUESS = arg("--initial-guess", "")
+GHIST = int(arg("--guess-history", "2"))
 
 # the two study scripts read sys.argv at import: hand them none of ours
 sys.argv = [sys.argv[0]]
@@ -88,6 +93,8 @@ def run_column(rtol):
     s.set_pressure_pcg(True, 800, rtol)
     if VPREC:
         s.diagnostics.set_pressure_vcycle_precision(VPREC)
+    if GUESS:
+        s.diagnostics.set_pressure_initial_guess(GUESS, GHIST)
     v0 = np.array([b["volume"] for b in s.diagnostics.vof_block_stats()])
     rec = {k: [] for k in ("t", "dt", "p_iters", "mom_residual", "mom_time", "step_time",
                            "div_proj", "vol", "ux")}

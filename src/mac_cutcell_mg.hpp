@@ -2090,20 +2090,31 @@ class CutcellMG {
     kRzNew = 5,
     kBeta = 6,
     kAlpha = 7,
-    kMsum = 8
+    kMsum = 8,
+    // E (doc/vof_projection_cost_design.md §5.3): the projected initial guess's ONE host packet
+    // {rref, G11, G12, G22, g1, g2}, contiguous (kGuessPacket slots from kGRref)
+    kGRref = 9,
+    kG11 = 10,
+    kG12 = 11,
+    kG22 = 12,
+    kGb1 = 13,
+    kGb2 = 14
   };
-  static constexpr int kNSlots = 9;
+  static constexpr int kNSlots = 15;
+  static constexpr int kGuessPacket = 6;
   static constexpr int kPacket = 4;  // the per-iteration host packet {pAp, rn, stop, bottomFlag}
   static constexpr double kBrkPAp = 1.0, kBrkRz = 2.0;  // the stop codes (slot kStop)
   Kokkos::View<double*, CCMem> ks_;                     // the scalar slots
   Kokkos::View<long, CCMem> kcnt_;                      // removeMean's fluid-cell count
   Kokkos::View<double*, Kokkos::HostSpace> kpk_;  // the host packet {pAp, rn, stop, bottomFlag}
+  Kokkos::View<double*, Kokkos::HostSpace> kgp_;  // E's host packet {rref, G11, G12, G22, g1, g2}
   void ensureScalars() {
     if (ks_.extent(0) == (std::size_t)kNSlots)
       return;
     ks_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_krylov_scalars", kNSlots);
     kcnt_ = Kokkos::View<long, CCMem>("peclet::flow::mg_mean_count");
     kpk_ = Kokkos::View<double*, Kokkos::HostSpace>("peclet::flow::mg_krylov_packet", kPacket);
+    kgp_ = Kokkos::View<double*, Kokkos::HostSpace>("peclet::flow::mg_guess_packet", kGuessPacket);
   }
   Kokkos::View<double, CCMem> slot(int k) const {
     return Kokkos::View<double, CCMem>(ks_.data() + k);
@@ -2323,6 +2334,207 @@ class CutcellMG {
     dbgBrkWhich_ = which;
     dbgBrkIter_ = iter;
   }
+  // --- E (doc/vof_projection_cost_design.md §5.2, §5.3): the projected initial guess ----------
+  // E1 (§5.3 step 3): y = A v (matvecOverlap's A3 wrap cell body, exact flux or band form, as
+  // matvecDotTo) with v^T y -> kvy, v^T r -> kvr and, when ND == 3, w^T y -> kwy, in ONE lane
+  // pass over the inner cells (fluid cells; the 4-lane host order). hostKrylovFusion() only.
+  template <int ND>
+  void matvecGuessDots(Level& l0, CCField y, CCField v, CCField w, CCField r, int kvy, int kvr,
+                       int kwy) {
+    static_assert(ND == 2 || ND == 3, "matvecGuessDots: two or three dots");
+    const C3 e = l0.ext, n = l0.inner;
+    const int g = G;
+    CCField yy = y;
+    CCConst vv = v, ww = w, rr = r;
+    FPV ac = l0.AC;
+    const bool all = hostAllFluid(l0);
+    const bool exact = exactResidual_;
+    CCConst ox = l0.ox, oy = l0.oy, oz = l0.oz;
+    const double gfx = gfx_, gfy = gfy_, gfz = gfz_;
+    FPC AC = l0.AC, AFX = l0.AFX, AFY = l0.AFY, AFZ = l0.AFZ;
+    auto cell = KOKKOS_LAMBDA(int lx, int ly, int lz, long& i)->double {
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      i = (long)lx + (long)ly * sy + (long)lz * sz;
+      const CcNbrs nb = ccWrapNbrs(lx, ly, lz, n, g, i, sy, sz);
+      const double a = exact ? cutcellApplyExactCell(vv, ox, oy, oz, i, sx, sy, sz, nb.xp, nb.xm,
+                                                     nb.yp, nb.ym, nb.zp, nb.zm, gfx, gfy, gfz)
+                             : cutcellApplyFaceCell(vv, AC, AFX, AFY, AFZ, i, sx, sy, sz, nb.xp,
+                                                    nb.xm, nb.yp, nb.ym, nb.zp, nb.zm);
+      yy(i) = a;
+      return a;
+    };
+    if constexpr (ND == 2) {
+      ccReduce3Lanes(
+          "peclet::flow::mg_guess_apply_dots", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int lx, int ly, int lz, double& svy, double& svr) {
+            long i = 0;
+            const double a = cell(lx, ly, lz, i);
+            if (all || ac(i) > 1e-30f) {
+              svy += vv(i) * a;
+              svr += vv(i) * rr(i);
+            }
+          },
+          Kokkos::Sum<double, CCMem>(slot(kvy)), Kokkos::Sum<double, CCMem>(slot(kvr)));
+    } else {
+      ccReduce3Lanes(
+          "peclet::flow::mg_guess_apply_dots", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int lx, int ly, int lz, double& svy, double& svr, double& swy) {
+            long i = 0;
+            const double a = cell(lx, ly, lz, i);
+            if (all || ac(i) > 1e-30f) {
+              svy += vv(i) * a;
+              svr += vv(i) * rr(i);
+              swy += ww(i) * a;
+            }
+          },
+          Kokkos::Sum<double, CCMem>(slot(kvy)), Kokkos::Sum<double, CCMem>(slot(kvr)),
+          Kokkos::Sum<double, CCMem>(slot(kwy)));
+    }
+  }
+  // §5.3 step 3, the guess of ONE single-rank PCG / FCG solve (guessHist_ > 0): r = P b,
+  // rref = max|r|; A v1 -> av1 with G11 = v1^T A v1, g1 = v1^T r; with hist 2 (v2 = x = phi^{n-1})
+  // A v2 -> av2 with G22, G12 = v1^T A v2, g2 = v2^T r; ONE host packet read; the 2x2 Galerkin
+  // system by Cholesky in double; then x = c1 v1 + c2 v2 on the fluid cells (0 elsewhere, ghosts
+  // 0) and r -= c1 A v1 + c2 A v2, P r. c = (0, 0) (no positive G11, a non-finite scalar) leaves
+  // the cold state exactly: x = 0 (full extent), r = P b. Returns rref, the stop reference (the
+  // zero-guess residual: today's r0 when x0 = 0). `fused`: the host lane kernels (C1's pattern);
+  // elsewhere the separate matvec and dots (§2 device caveat). *r0w: max|r| after the guess when
+  // the caller traces (one extra read, trace only).
+  // The solves' level-0 matvec (matvecOverlap + the optional star overlay) as a member: a
+  // function-local lambda type may not parameterize a function holding extended device lambdas.
+  void guessMatvec(Level& l0, CCField y, CCField v, const StarOverlay* star, int nStar, C3 nnStar) {
+    matvecOverlap(l0, y, v);
+    if (star)
+      starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
+  }
+  double projectedGuess(Level& l0, CCField b, CCField x, CCField r, CCField av1, CCField av2,
+                        const StarOverlay* star, int nStar, C3 nnStar, bool fused, double* r0w) {
+    auto matvec = [&](CCField y, CCField v) { guessMatvec(l0, y, v, star, nStar, nnStar); };
+    ensureScalars();
+    const int hist = guessHist_;
+    CCField v1 = guessV1_;
+    Kokkos::deep_copy(CCExec(), r, b);
+    removeMean(l0, r);  // r = P b (the cold path's r)
+    maxabsTo(l0, r, kGRref);
+    if (fused) {
+      matvecGuessDots<2>(l0, av1, v1, CCField(), r, kG11, kGb1, -1);
+      if (hist == 2)
+        matvecGuessDots<3>(l0, av2, x, v1, r, kG22, kGb2, kG12);
+    } else {
+      matvec(av1, v1);
+      dotTo(l0, v1, av1, kG11);
+      dotTo(l0, v1, r, kGb1);
+      if (hist == 2) {
+        matvec(av2, x);
+        dotTo(l0, x, av2, kG22);
+        dotTo(l0, v1, av2, kG12);
+        dotTo(l0, x, r, kGb2);
+      }
+    }
+    Kokkos::deep_copy(
+        kgp_, Kokkos::subview(ks_, std::make_pair((int)kGRref, (int)kGRref + kGuessPacket)));
+    const double rref = kgp_(0), G11 = kgp_(1), G12 = kgp_(2), G22 = kgp_(3), g1 = kgp_(4),
+                 g2 = kgp_(5);
+    double c1 = 0.0, c2 = 0.0;
+    if (G11 > 0.0 && std::isfinite(G11)) {
+      const double l11 = std::sqrt(G11);
+      double l21 = 0.0, d = 0.0;
+      if (hist == 2) {
+        l21 = G12 / l11;
+        d = G22 - l21 * l21;
+      }
+      if (hist < 2 || !(d > 1e-10 * G22)) {
+        c1 = g1 / G11;
+        c2 = 0.0;
+      } else {
+        const double y1 = g1 / l11, y2 = (g2 - l21 * y1) / std::sqrt(d);
+        c2 = y2 / std::sqrt(d);
+        c1 = (y1 - l21 * c2) / l11;
+      }
+      if (!std::isfinite(c1) || !std::isfinite(c2))
+        c1 = c2 = 0.0;
+    }
+    guessC1_ = c1;
+    guessC2_ = c2;
+    if (c1 == 0.0 && c2 == 0.0) {
+      Kokkos::deep_copy(CCExec(), x, 0.0);  // the cold state exactly (r = P b kept)
+      if (r0w)
+        *r0w = rref;
+      return rref;
+    }
+    {
+      const C3 e = l0.ext;
+      const int g = l0.g;
+      CCField xx = x, rr = r;
+      CCConst vv1 = v1, a1 = av1, a2 = av2;
+      FPV ac = l0.AC;
+      const bool all = hostAllFluid(l0), two = hist == 2;
+      ccFor3(
+          "peclet::flow::mg_guess_x", C3{0, 0, 0}, C3{e.x, e.y, e.z},
+          KOKKOS_LAMBDA(int ix, int iy, int iz) {
+            const long i = (long)ix + (long)iy * e.x + (long)iz * (long)e.x * e.y;
+            if (ix < g || iy < g || iz < g || ix >= e.x - g || iy >= e.y - g || iz >= e.z - g) {
+              xx(i) = 0.0;  // ghosts of the guess: 0
+              return;
+            }
+            const bool fl = all || ac(i) > 1e-30f;
+            xx(i) = fl ? (two ? c1 * vv1(i) + c2 * xx(i) : c1 * vv1(i)) : 0.0;
+            rr(i) -= two ? c1 * a1(i) + c2 * a2(i) : c1 * a1(i);
+          });
+    }
+    removeMean(l0, r);
+    if (r0w)
+      *r0w = maxabs(l0, r);
+    return rref;
+  }
+  // The E trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the solves the PCG trace covers):
+  // G-E1 ||x - x0||_A <= ||x||_A, G-E2 the freshly recomputed max|P(b - A x)| / rref, G-E4 the
+  // number of non-fluid inner cells with x0 != 0. Trace buffers only; the solve is untouched.
+  void guessTraceSave(CCField x) {
+    if (guessX0_.extent(0) != x.extent(0)) {
+      guessX0_ = CCField("peclet::flow::mg_guess_x0", x.extent(0));
+      guessTA_ = CCField("peclet::flow::mg_guess_ta", x.extent(0));
+      guessTB_ = CCField("peclet::flow::mg_guess_tb", x.extent(0));
+    }
+    Kokkos::deep_copy(CCExec(), guessX0_, x);
+  }
+  void guessTraceExit(Level& l0, CCField b, CCField x, double rref, double r0w, int it, int hist,
+                      const StarOverlay* star, int nStar, C3 nnStar) {
+    auto matvec = [&](CCField y, CCField v) { guessMatvec(l0, y, v, star, nStar, nnStar); };
+    CCField ta = guessTA_, tb = guessTB_, x0 = guessX0_, xx = x;
+    Kokkos::parallel_for(
+        "peclet::flow::mg_guess_trace_diff", Kokkos::RangePolicy<CCExec>(CCExec(), 0, x.extent(0)),
+        KOKKOS_LAMBDA(std::size_t i) { ta(i) = xx(i) - x0(i); });
+    matvec(tb, ta);
+    const double eA2 = dot(l0, ta, tb);
+    Kokkos::deep_copy(CCExec(), ta, x);
+    matvec(tb, ta);
+    const double xA2 = dot(l0, ta, tb);
+    Kokkos::deep_copy(CCExec(), ta, b);
+    axpy(ta, -1.0, tb);
+    removeMean(l0, ta);
+    const double rfin = maxabs(l0, ta);
+    long bad = 0;
+    {
+      const C3 e = l0.ext;
+      const int g = l0.g;
+      FPV ac = l0.AC;
+      ccReduce3(
+          "peclet::flow::mg_guess_trace_nonfluid", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int ix, int iy, int iz, long& k) {
+            const long i = (long)ix + (long)iy * e.x + (long)iz * (long)e.x * e.y;
+            if (!(ac(i) > 1e-30f) && x0(i) != 0.0)
+              k += 1;
+          },
+          bad);
+    }
+    printf(
+        "[mg] guess solve %d: hist %d c1 %.17g c2 %.17g rref %.6e r0w %.6e iters %d "
+        "eA %.6e xA %.6e eA/xA %.6e resid/rref %.6e x0_nonfluid_nonzero %ld\n",
+        dbgSolve_ - 1, hist, guessC1_, guessC2_, rref, r0w, it, std::sqrt(std::max(eA2, 0.0)),
+        std::sqrt(std::max(xA2, 0.0)), xA2 > 0.0 ? std::sqrt(std::max(eA2, 0.0) / xA2) : 0.0,
+        rref > 0.0 ? rfin / rref : 0.0, bad);
+  }
   int solvePCGResident(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                        double rtol, int pre, int post, int bottom, const StarOverlay* star,
                        int nStar, C3 nnStar) {
@@ -2339,28 +2551,40 @@ class CutcellMG {
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
     auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
-    if (zeroGuess_) {
-      // H-2c (§8): the caller guarantees x0 = +0, so A x0 = +0 in every cell and
-      // b + (-1)(+0) = b for every b (+-0 included): r = b with no matvec. The matvec's only
-      // side effect on x, the ghost fill of the non-wrap path, is kept.
-      if (!fusedWrapReads()) {
-        fill(l0, x);
-        applyOutflowGhost(l0, x);
-      }
-      Kokkos::deep_copy(CCExec(), r, b);
+    const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
+    // E (§5.3): with a projected guess r0 below is rref = max|P b|, the zero-guess residual (the
+    // guard, the stop and the FP32 V-cycle's scale exponent read it; the host holds no other)
+    const bool guessOn = guessV1_.extent(0) > 0;
+    double r0 = 0.0, r0w = 0.0;
+    if (guessOn && guessHist_ > 0) {
+      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
+                          hostKrylovFusion() && star == nullptr, trace ? &r0w : nullptr);
     } else {
-      matvec(Ap, x);  // r = b - A x
-      Kokkos::deep_copy(CCExec(), r, b);
-      axpy(r, -1.0, Ap);
+      if (zeroGuess_) {
+        // H-2c (§8): the caller guarantees x0 = +0, so A x0 = +0 in every cell and
+        // b + (-1)(+0) = b for every b (+-0 included): r = b with no matvec. The matvec's only
+        // side effect on x, the ghost fill of the non-wrap path, is kept.
+        if (!fusedWrapReads()) {
+          fill(l0, x);
+          applyOutflowGhost(l0, x);
+        }
+        Kokkos::deep_copy(CCExec(), r, b);
+      } else {
+        matvec(Ap, x);  // r = b - A x
+        Kokkos::deep_copy(CCExec(), r, b);
+        axpy(r, -1.0, Ap);
+      }
+      removeMean(l0, r);   // compatibility: project rhs/residual onto the range
+      r0 = maxabs(l0, r);  // host read (once per solve)
+      r0w = r0;
     }
-    removeMean(l0, r);                // compatibility: project rhs/residual onto the range
-    const double r0 = maxabs(l0, r);  // host read (once per solve)
-    // The stop reference, as in solvePCG's distributed loop, solveFCG and solveChebyshev: r0, or
-    // the caller's FULL right-hand-side norm when one is set (setStopReference; only the
+    if (trace && guessOn)
+      guessTraceSave(x);
+    // X1: the stop reference, as in solvePCG's distributed loop, solveFCG and solveChebyshev: r0,
+    // or the caller's FULL right-hand-side norm when one is set (setStopReference; only the
     // balanced-force projection sets it). Unset, rref IS r0: `rtol * rref` is the old test bitwise.
     const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
     int it = 0;
-    const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
     if (trace)
       printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
              pre, post, bottom);
@@ -2514,6 +2738,8 @@ class CutcellMG {
       }
     }
     removeMean(l0, x);  // H-2b: in place (was the l0.x round trip; same cells, same values)
+    if (trace && guessOn)
+      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
@@ -2562,22 +2788,33 @@ class CutcellMG {
       else
         precondVcycle(zz, rr);  // A5
     };
-    matvec(Ap, x);  // r = b - A x
-    Kokkos::deep_copy(CCExec(), r, b);
-    axpy(r, -1.0, Ap);
-    removeMean(l0, r);  // compatibility: project rhs/residual onto the range
-    const double r0 = maxabs(l0, r);
-    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
-    // stop reference is set (setStopReference; only the balanced-force projection sets it).
-    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
-    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
-    int it = 0;
     int dbgRank = 0;
 #ifdef PECLET_FLOW_MPI
     if (distributed_)
       MPI_Comm_rank(comm_, &dbgRank);
 #endif
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && dbgRank == 0;
+    // E (§5.3): with a projected guess r0 is rref = max|P b| (see solvePCGResident)
+    const bool guessOn = guessV1_.extent(0) > 0;
+    double r0 = 0.0, r0w = 0.0;
+    if (guessOn && guessHist_ > 0) {
+      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
+                          hostKrylovFusion() && star == nullptr, trace ? &r0w : nullptr);
+    } else {
+      matvec(Ap, x);  // r = b - A x
+      Kokkos::deep_copy(CCExec(), r, b);
+      axpy(r, -1.0, Ap);
+      removeMean(l0, r);  // compatibility: project rhs/residual onto the range
+      r0 = maxabs(l0, r);
+      r0w = r0;
+    }
+    if (trace && guessOn)
+      guessTraceSave(x);
+    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
+    // stop reference is set (setStopReference; only the balanced-force projection sets it).
+    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
+    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
+    int it = 0;
     if (trace)
       printf("[mg] fcg solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0,
              rtol, pre, post, bottom);
@@ -2647,6 +2884,8 @@ class CutcellMG {
     Kokkos::deep_copy(CCExec(), l0.x, x);
     removeMean(l0, l0.x);
     Kokkos::deep_copy(CCExec(), x, l0.x);
+    if (trace && guessOn)
+      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
@@ -4772,6 +5011,21 @@ class CutcellMG {
   // H-2c (§8): the caller guarantees the initial iterate of the next single-rank PCG solves is
   // +0 everywhere (projectSolve's cold path), so the solve skips A x0. Set around ONE solve.
   void setZeroInitialGuess(bool on) { zeroGuess_ = on; }
+  // E (doc/vof_projection_cost_design.md §5.3): the caller (projectSolve, single rank, PCG or
+  // FCG) asks the NEXT solve to start from the A-norm projection of its solution onto
+  // span{v1} (hist 1) or span{v1, x} (hist 2; the solve's x holds phi^{n-1} and is overwritten
+  // by the guess), and to stop relative to the zero-guess residual max|P b|. hist 0 = none (the
+  // cold solve, untouched). Set around ONE solve; clearProjectedGuess() restores the default.
+  void setProjectedGuess(CCField v1, int hist) {
+    if (distributed_ && hist > 0)
+      throw std::logic_error("CutcellMG::setProjectedGuess: single rank only (§5.3)");
+    guessV1_ = v1;
+    guessHist_ = hist;
+  }
+  void clearProjectedGuess() {
+    guessV1_ = CCField();
+    guessHist_ = 0;
+  }
   // Did the last solveChebyshev(..., guard3 = true) stop on its 3-iteration growth guard?
   bool chebyshevGuardTripped() const { return chebGuardTripped_; }
   // max|b| over the fluid cells after the null-space (mean) projection -- the drivers' norm.
@@ -5145,9 +5399,13 @@ class CutcellMG {
   bool facStale_ = true;
   int dirTeam_ = 0, dirFacTeam_ = 0;
   double dirPivotTol_ = kBottomPivotTol;
-  double stopRef_ = -1.0;       // see setStopReference
-  bool zeroGuess_ = false;      // see setZeroInitialGuess
-  std::vector<double> lvTime_;  // per-level V-cycle wall time (mgDebugLevel() >= 3)
+  double stopRef_ = -1.0;                 // see setStopReference
+  bool zeroGuess_ = false;                // see setZeroInitialGuess
+  CCField guessV1_;                       // E: phi^n (setProjectedGuess)
+  int guessHist_ = 0;                     // E: 0 none, 1 span{phi^n}, 2 span{phi^n, phi^{n-1}}
+  double guessC1_ = 0.0, guessC2_ = 0.0;  // E: the last guess's coefficients (trace)
+  CCField guessX0_, guessTA_, guessTB_;   // E trace buffers (PECLET_FLOW_MG_DEBUG >= 2 only)
+  std::vector<double> lvTime_;            // per-level V-cycle wall time (mgDebugLevel() >= 3)
   int lvCycles_ = 0;
   // Zero-gradient (Neumann) coarse ghost before the prolongation on wall/inflow faces — the WO-H
   // symmetry repair (see applyNeumannGhost). ON by default; `setCoarseGhost(false)` restores the

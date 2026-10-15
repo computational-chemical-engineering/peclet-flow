@@ -28,6 +28,8 @@ Usage:
     --fcg       flexible CG pressure (set_pressure_fcg, cap 800) at --rtol
     --vcycle-precision MODE  diagnostics.set_pressure_vcycle_precision(MODE): fp64 | fp32
                 (doc/vof_projection_cost_design.md §4: the FP32 V-cycle A/B on one build)
+    --initial-guess MODE  diagnostics.set_pressure_initial_guess(MODE, --guess-history H):
+                auto | zero | projected, H = 1 | 2 (default 2) (the same note, §5)
     --div       with --dump: also store each timed step's max_open_divergence_projected() (div),
                 read after the step (G-NUM item 3)
     --stats     with --dump: also store every timed step's measured block statistics (st_volume,
@@ -101,6 +103,9 @@ if "--bottom-solver" in A:
     s.diagnostics.set_pressure_bottom_solver(arg("--bottom-solver", "auto"))
 if "--vcycle-precision" in A:
     s.diagnostics.set_pressure_vcycle_precision(arg("--vcycle-precision", "fp64"))
+if "--initial-guess" in A:
+    s.diagnostics.set_pressure_initial_guess(arg("--initial-guess", "zero"),
+                                             arg("--guess-history", 2, int))
 DIV = "--div" in A
 divs = []
 STATS = "--stats" in A

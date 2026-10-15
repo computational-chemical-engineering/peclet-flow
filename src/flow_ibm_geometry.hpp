@@ -112,6 +112,7 @@ void Solver<Grid>::setSolidDevice(CCField din, bool cutcellPressure) {
   // Every geometry path (set_solid, set_pressure_geometry, set_solid_from_scene, redistribute)
   // lands here: the cut-cell scalar record is stale from now on (rebuilt lazily, §2.5).
   invalidateScalarCutGeometry();
+  pguessCount_ = 0;  // E: a geometry / hierarchy rebuild (doc/vof_projection_cost_design.md §5.3)
   cutcellPressure_ = cutcellPressure;
   setSolidSelectScheme();
   setSolidUploadSdf(din);

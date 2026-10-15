@@ -208,6 +208,8 @@ void Solver<Grid>::pushVofMetric() {
 
 template <class Grid>
 void Solver<Grid>::allocateBlock(int nx, int ny, int nz) {
+  pguessCount_ = 0;  // E: a new block (§5.3)
+  phiPrev1_ = CCField();
   nx_ = nx;
   ny_ = ny;
   nz_ = nz;
@@ -704,6 +706,32 @@ void Solver<Grid>::setPressureWarmstart(bool on) {
 }
 
 template <class Grid>
+void Solver<Grid>::setPressureInitialGuess(int mode, int history) {
+  if (mode < 0 || mode > 2)
+    throw std::runtime_error("set_pressure_initial_guess: 'auto' | 'zero' | 'projected'");
+  if (history != 1 && history != 2)
+    throw std::runtime_error("set_pressure_initial_guess: history must be 1 or 2");
+  pguessMode_ = mode;
+  pguessHistMax_ = history;
+  pguessCount_ = 0;  // a guess-mode change (§5.3)
+}
+
+template <class Grid>
+const char* Solver<Grid>::projectedGuessIneligible() const {
+  // §5.3 eligibility: a Krylov driver (PCG or FCG), the legacy warm start off, no ghost
+  // projection, single rank (v1). The balanced-force solve never takes it (its own call path).
+  if (useChebyshev_)
+    return "the Chebyshev driver (not a Krylov driver; set_pressure_pcg or set_pressure_fcg)";
+  if (ghostProjection_)
+    return "the ghost projection (its BiCGStab driver)";
+  if (pwarm_)
+    return "set_pressure_warmstart(True)";
+  if (distributed_)
+    return "a multi-rank solver (single rank only)";
+  return nullptr;
+}
+
+template <class Grid>
 void Solver<Grid>::setFaceInterp(int mode) {
   if (mode != 0 && mode != 9 && (mode < 5 || mode > 7))
     throw std::runtime_error(
@@ -901,6 +929,7 @@ void Solver<Grid>::seedFaceFieldFromCells() {
 template <class Grid>
 void Solver<Grid>::uploadVelocity(const std::vector<double>& uu, const std::vector<double>& vv,
                                   const std::vector<double>& ww) {
+  pguessCount_ = 0;  // E: a state write (doc/vof_projection_cost_design.md §5.3)
   const std::vector<double>* src[3] = {&uu, &vv, &ww};
   std::vector<double> scaled[3];
   for (int c = 0; c < 3; ++c) {
@@ -2055,6 +2084,8 @@ std::vector<double> Solver<Grid>::getField(const std::string& name) {
 template <class Grid>
 void Solver<Grid>::setField(const std::string& name, const std::vector<double>& v) {
   scatterInner(fields_.at(name).data, v);
+  if (name == "u" || name == "v" || name == "w" || name == "p" || name == "phi")
+    pguessCount_ = 0;  // E: a state write (doc/vof_projection_cost_design.md §5.3)
   // The balanced-force split (doc/collocated_varrho_forces.md §4.6.2): a restart that restores
   // the pressure must restore "p_balanced" with it, or the next ON step re-splits. Flags only.
   if (name == "p")

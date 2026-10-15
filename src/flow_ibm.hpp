@@ -684,6 +684,12 @@ class Solver {
   // steady march -> a more converged phi per fixed solver budget) instead of zeroing the initial
   // guess.
   void setPressureWarmstart(bool on);
+  // Initial guess of the projection solve (doc/vof_projection_cost_design.md §5.3): 0 "auto"
+  // (projected where eligible), 1 "zero" (DEFAULT), 2 "projected" (raises at the solve, naming
+  // the failed condition, where ineligible); history 1 or 2 increments. Resets the history.
+  void setPressureInitialGuess(int mode, int history);
+  // Why the projected guess cannot run on this solver's next projection, or nullptr.
+  const char* projectedGuessIneligible() const;
 
 
   // Collocated cut-cell treatment of the approximate projection (no effect on the staggered path).
@@ -4972,6 +4978,14 @@ class Solver {
   int advScheme_ = 0;         // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true,
        pwarm_ = false;    // incremental-rotational pressure (CUDA default on) + warm-start
+  // E (doc/vof_projection_cost_design.md §5.3, setPressureInitialGuess): the mode, the basis
+  // size, the history held (0, 1, 2: phi1_ = phi^n, phiPrev1_ = phi^{n-1}), the driver of the
+  // solves that built it (1 PCG, 2 FCG), and the second solution buffer (allocated on first use).
+  int pguessMode_ = 1;  // 0 'auto', 1 'zero' (DEFAULT), 2 'projected'
+  int pguessHistMax_ = 2;
+  int pguessCount_ = 0;
+  int pguessDriver_ = 0;
+  CCField phiPrev1_;
   bool dtDirty_ = false;  // set_dt/set_rho/set_mu after set_solid: momentum stencil needs a rebuild
   // Set once setSolidDevice has built the operators. The settings that are FOLDED INTO that build
   // (domain BCs, aperture order, exact crossings / openness overrides, the fluid-only constraint,
