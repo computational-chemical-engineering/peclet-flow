@@ -201,7 +201,8 @@ def rho_field(shape, edge, ratio, N):
 
 
 # --------------------------------------------------------------------------- one configuration
-def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, levels=None):
+def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, levels=None,
+            vprec=None):
     from peclet import flow as F
 
     sdf = GEOMS[geom](N)
@@ -260,12 +261,15 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
         s.set_pressure_fcg(True, MAXIT, RTOL)
     else:
         raise ValueError(driver)
+    if vprec:  # doc/vof_projection_cost_design.md §4: the FP32 V-cycle A/B (G-D3)
+        s.diagnostics.set_pressure_vcycle_precision(vprec)
 
-    iters, divs, t_step, t_proj = [], [], [], []
+    iters, divs, t_step, t_proj, failed = [], [], [], [], []
     t_wall0 = time.perf_counter()
     for _ in range(STEPS):
         s.step()
         iters.append(int(s.diagnostics.last_pressure_iterations()))
+        failed.append(bool(s.diagnostics.pressure_solve_failed()))
         tm = s.diagnostics.last_step_timers()
         t_step.append(float(tm["step"]))
         t_proj.append(float(tm["projection"]))
@@ -295,6 +299,8 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
         t_step_median=float(np.median(t_step)), t_proj_median=float(np.median(t_proj)),
         t_proj_min=float(np.min(t_proj)), t_proj_total=float(np.sum(t_proj)),
         umax=umax,
+        vprec=vprec or "default", vprec_used=s.diagnostics.pressure_vcycle_precision(),
+        failed_steps=int(sum(failed)),
     )
     if not quiet:
         print(f"  {geom:5s} {shape:4s} {edge:6s} r={ratio:<7.0e} {driver:4s} {case:6s} "
@@ -506,6 +512,9 @@ def main():
     ap.add_argument("--bottom", default=None,
                     help="set_pressure_bottom mode ('auto'/'smoother'/'agglomerated'); "
                          "default = the shipped 'auto'")
+    ap.add_argument("--vcycle-precision", default=None,
+                    help="diagnostics.set_pressure_vcycle_precision(MODE) after the driver "
+                         "(auto | fp64 | fp32; doc/vof_projection_cost_design.md §4, G-D3)")
     ap.add_argument("--levels", type=int, default=None,
                     help="pressure MG depth (default floor(log2 N) - 1)")
     args = ap.parse_args()
@@ -542,7 +551,8 @@ def main():
     for i, (g, sh, e, ra, d, ca, n) in enumerate(plan):
         print(f"[{i+1}/{len(plan)}]", end=" ", flush=True)
         records.append(run_one(g, sh, e, ra, d, ca, n, quiet=False,
-                               bottom=args.bottom, levels=args.levels))
+                               bottom=args.bottom, levels=args.levels,
+                               vprec=args.vcycle_precision))
     wall = time.perf_counter() - t0
 
     overhead = None

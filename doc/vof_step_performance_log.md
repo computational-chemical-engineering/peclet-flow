@@ -1347,3 +1347,50 @@ now carries the PCG loop's level-0 matvec.
   sym(M32) on the mean-free subspace equals FP64's to 6 digits in all 16 (FP64 is already indefinite at 1e3+ walled /
   1e4 periodic: e.g. wallz n16 1e4 -1.008500e2 vs -1.008501e2): G-D2 PASS 16/16.
 - G-BIT 'fp64': host PASS vs `ref/c0_omp`, CUDA PASS vs `ref/gbit_cuda`; pressure 13/13; D ctests 2/2 host, 1/1 CUDA.
+
+### WO-D3 commit 1 — integration (default 'fp64'): first pass STOPPED at G-D3 (2026-10-09; resumed in phase 3b below)
+
+- Wiring: `fp32VcycleSolve()` once per solve in `solvePCGResident` (e = ilogb(r0), then ilogb of the packet's rn; r.z
+  from the FP32 exit into kRz / kRzNew) and `solveFCG` (e from r0 / rn; own dots); `vcycle(0)` reports FP64 and raises
+  under a forced 'fp32' on any other driver; health ratio |r_{k+1}.z_k|/|r_{k+1}.z_{k+1}| traced (MG_DEBUG >= 2) or
+  recorded (`setHealthTrace`). Study options `--vcycle-precision` (prof.py, d1_tolerance.py column, the probe,
+  precision_ab.py contrast) and prof.py `--fcg`. G-BIT 'fp64': host PASS vs `ref/c0_omp`, CUDA PASS vs `ref/gbit_cuda`.
+- G-D4 ('fp32' forced vs the post-C references): host 1x8/1x24 and CUDA NUMCMP PASS (rel 2.4e-14 .. 6.5e-14, iterations
+  500/653 identical, div ratio 1.000); d1cmp PASS host and CUDA (column 21103 = 21103 iterations, drift 5.2e-12).
+- G-D3 PASS parts: RCP bed (precision_ab contrast) 13,13,14,14 / 12,13,13,14 / 21,25,27,28 identical fp32 = fp64;
+  ctest column PCG/FCG (a) 18/18, 17/17, (b) floor 1.0e-12 vs 1.4e-12, (c) 9.8e-9, (d) ok; probe: 53 configurations
+  where FP64 converges, +2 iterations of 12664 (one round-off-rhs solve 8 -> 13, div 2e-21).
+- G-D3 FAIL 1, (e): the health-ratio median <= 1e-2 is not met by the FP64 V-cycle itself: bubble column PCG
+  per-solve medians 0.32-0.47 (fp64) = 0.32-0.47 (fp32); FCG 0.064-0.084 both; synthetic column PCG 0.195 / FCG 0.056
+  both. FP32 leaves the ratio unchanged (it is R != cP^T, §4.2 P7); the absolute threshold is unattainable.
+- G-D3 FAIL 2, (a)/(d) at high contrast with walls (probe hydro slab 1e3/1e4, PCG and FCG; FP64 itself caps later
+  and ends at div O(1)): from the SAME initial state (step 1) FP32 caps where FP64 took 124 (box 1e4 pcg), 123 (pack 1e3
+  fcg), 135 (pack 1e4 fcg) and costs 22 -> 104 (box 1e4 fcg); once better (200 -> 184). The dense tool shows
+  |dM|/|M| ~ 6e-8 there, but sym(M) is already indefinite in FP64 at these ratios, so CG/FCG trajectories are chaotic.
+- WO-D4c not implemented: the existing host-loop FCG (same recurrence) already fails both items with FP32.
+- Projection A/B ('fp64' vs 'fp32' on one build, prof.py 30 steps rtol 1e-8, 3 interleaved rounds, min (+spread)):
+  CUDA 12.28 (+0.01) -> 9.81 (+0.02) ms, 0.799; host 1x8 69.9 (+11.7) -> 66.6 (+8.2), 0.953 (load 3.9-5.5); 1x24
+  56.8 (+1.8) -> 52.2 (+2.8), 0.918 (load 5.5-8.2). Iterations 10.0 = 10.0.
+
+### Phase 3b (2026-10-15) — rebase on 60126ec, the rulings applied, WO-D3 commit 1 lands
+
+- `projcost` rebased onto origin/main 60126ec (design G landed, core v1.5.0); the only conflicts were appends to this
+  log. New references (rebased tip, 'fp64'): `gate_proj/ref/r_{omp,cuda}` (host repeat bitwise; against the old
+  c0/gbit refs only `vof_droplet` and the ckpt_t43 dumps move — design G WO-3), `ref/d1_r_{omp,cuda}` (column 21103
+  iterations, drift 5.2e-12). Host battery 232/232.
+- Rulings (coordinator 2026-10-15): G-D3(e) relative (fp32 per-solve median health <= 1.1x fp64's); (a)/(d) scoped to
+  configurations where fp64 converges (walled hydro slab 1e3/1e4 accepted, R-4 materialized); `!meanRemovalAll_` =
+  eligibility item 6. Design §4.4.1, §13 G-D3, §15 R-4 and the setter docstring amended.
+- G-BIT 'fp64' (D3 wiring): host PASS vs r_omp, CUDA PASS vs r_cuda. G-D4 ('fp32'): NUMCMP PASS host (rel 2.4e-14 ..
+  4.4e-14, iterations 500/653 identical, div ratio 1.000) and CUDA (5.0e-14); d1cmp PASS host and CUDA (21103 = 21103).
+- G-D3 passing: bubble column health per solve fp32/fp64 PCG min 0.870 med 1.000 max 1.000, FCG 1.000 (15 solves);
+  RCP bed 13,13,14,14 / 12,13,13,14 / 21,25,27,28 identical; probe scoped to the 53 configurations where fp64 converges:
+  12664 -> 12666 iterations, one solve over budget (box slab 1e2 FCG hydro step 19, 8 -> 13, div 2.7e-23 -> 2.3e-22:
+  the round-off-rhs solve, ruled PASS), none capped; ctest column PCG / FCG (a)-(e) PASS.
+- (e) on the G-D1 problems where fp64 does NOT converge (cyl, pack at 1e4) failed the relative check (host pack FCG
+  0.687 vs 0.594, fp64 FCG breaking down at it 65; CUDA cyl FCG 0.78 vs 0.545, pack PCG 1.0 vs 0.899, pack FCG 0.705 vs
+  0.5): the medians cover different iteration counts. Second ruling 2026-10-15: (e) scoped like (a)/(d); the ctest
+  prints "(a), (c), (d), (e) n/a" there. ctest `mg_fp32_vcycle` PASS host and CUDA (91 checks, 4 n/a lines).
+- Projection A/B on the rebased build ('fp64' vs 'fp32', prof.py 30 steps rtol 1e-8, 3 interleaved rounds, min
+  (+spread)): CUDA 12.28 (+0.05) -> 10.01 (+0.01) ms, 0.815 (<= 0.88); host 1x8 62.69 -> 59.79, 0.954; 1x24 57.09 ->
+  51.13, 0.896 (load 7.7-9.4). Iterations 10.0 = 10.0. Same verdict as phase 3: 'auto' = FP32 on device only.

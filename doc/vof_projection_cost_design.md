@@ -247,6 +247,10 @@ already projects its rhs (`removeMeanBottom`), as it does today with double roun
    `1e-30 ≤ t ≤ 1e30` (one min/max reduction per level in the build, stored as a flag). This makes
    "all six FP32 weights are 0" the same cell set as the FP64 `AC < 1e-30` set; the build asserts
    the count equality in debug builds.
+6. the mean-removal scope is the fine one (`!meanRemovalAll_`, today's default): the FP32 V-cycle
+   implements only P8's fine scope (the mean removed at the level-0 exit, §4.4.4 item 4); the legacy
+   every-level scope (`set_pressure_mean_removal('all')`) keeps today's FP64 V-cycle. (Added in WO-D2,
+   confirmed by the coordinator 2026-10-15.)
 If any fails, the solve uses today's FP64 V-cycle, unchanged.
 
 **4.4.2 Data** (per level L < bottom, single rank, g = 1):
@@ -707,10 +711,20 @@ and pack, shapes slab and blob, sharp edges, ratios 1e2–1e4; `tests/study/prec
 contrast` (the RCP bed of register P1); the bubble column), `'fp32'` against `'fp64'` on the same
 build:
 (a) outer iterations per solve ≤ fp64 + max(1, 5 %); on the RCP bed at rtol 1e-8, 14/14/28 ± 1;
+    (a) and (d) are scoped to the configurations where fp64 converges in every solve (ruling
+    2026-10-15, R-4): outside the CG drivers' rated contrast (the walled hydro slab at 1e3/1e4,
+    where fp64's sym(M) is already indefinite and fp64 caps too) both precisions may cap and fp32
+    may cap earlier — accepted, no contrast bound in eligibility (it would exclude the bubble column);
 (b) attainable floor (rtol 1e-14, cap 300): `floor_fp32 ≤ 2 × floor_fp64`;
 (c) at exit, the freshly recomputed `max|P(b − Ax)|/max|Pb| ≤ 1.5·rtol`;
 (d) no capped solve where fp64 converges; `pressure_solve_failed()` never set;
-(e) health ratio (traced): median ≤ 1e-2 per solve. Failing (a) or (e) triggers WO-D4c.
+(e) health ratio (traced): fp32's per-solve median ≤ 1.1 × fp64's on the same case and build
+    — scoped like (a)/(d) to the configurations where fp64 converges (ruling 2026-10-15: where fp64
+    breaks down or caps, the two medians cover different iteration counts — G-D1's cyl/pack at 1e4)
+    (ruling 2026-10-15: the original absolute median ≤ 1e-2 is unattainable by fp64 itself — bubble
+    column PCG 0.32–0.47, FCG 0.064–0.084, fp32 identical; the ratio measures R ≠ cPᵀ, §4.2 P7, not
+    the precision). Failing (a) or (e) triggers WO-D4c (not done: the host-loop FCG fails the same
+    items as PCG, recorded in the log).
 
 **G-D4** (case): G-NUM-P 1–6 for `'fp32'` against post-C main, host and CUDA.
 
@@ -806,7 +820,13 @@ WO except C0, whose host order change applies at every np (np-tests at their tol
 - **R-2.** E's gain may be small if curvature noise dominates φ's step-to-step change.
 - **R-3.** C0 changes every host pressure result at the 1e-15 level; the host hashes move once.
 - **R-4.** FP32 at extreme contrast and size (κ ≳ 10¹¹, δ ≈ 2·10⁻²) may cost iterations; G-D3 at
-  1e4 is the evidence boundary, and FCG (WO-D4c) the fallback.
+  1e4 is the evidence boundary, and FCG (WO-D4c) the fallback. **Materialized (WO-D3, 2026-10-09;
+  accepted 2026-10-15):** on the solver probe's walled hydro slab at 1e3/1e4 (PCG and FCG), from the
+  same state FP32 caps where FP64 took 123–135 iterations and once costs 22 → 104; FP64's sym(M) is
+  already indefinite there (dense tool) and FP64 caps later itself (div O(1)). On the 53 probe
+  configurations where FP64 converges in every solve, FP32 costs +2 iterations of 12664. FCG fails the
+  same items, so WO-D4c is not taken. No contrast bound in eligibility (it would exclude the bubble
+  column); the limit is stated in the `set_pressure_vcycle_precision` docstring.
 - **R-5.** H-2a may be impossible (aliasing of the coefficient fields); it is then dropped (−0.4).
 
 ---

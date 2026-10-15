@@ -752,9 +752,11 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "input scaled by an exact power of two; the Krylov matvec, dots, mean projection and "
           "stop test stay FP64 -- raises at the solve, naming the failed condition, where not "
           "eligible (multi-rank, an outflow face, an overlay solve, a non-bottom level with an "
-          "odd inner dimension, a float outer operator, a face weight outside [1e-30, 1e30], a "
-          "driver other than PCG / FCG). 'auto': FP32 where eligible, else FP64. Takes effect at "
-          "once. doc/vof_projection_cost_design.md §4.")
+          "odd inner dimension, a float outer operator, a face weight outside [1e-30, 1e30], the "
+          "mean-removal scope 'all', a driver other than PCG / FCG). 'auto': FP32 where eligible, "
+          "else FP64. Takes effect at once. Outside the CG drivers' rated contrast (density ratio "
+          "above ~1e3 with walls) both precisions may cap; FP32 may cap earlier. "
+          "doc/vof_projection_cost_design.md §4.")
       .def(
           "pressure_vcycle_precision",
           [](D& diag) { return std::string(diag.s->pressureVcycleFp32() ? "fp32" : "fp64"); },

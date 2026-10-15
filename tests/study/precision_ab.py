@@ -182,6 +182,11 @@ def case_porous(N=16, beta=4.0, f_drive=0.2, eps=0.6, dt=0.5, steps=200):
                 porous_residual=float(s.max_porous_residual()))
 
 
+# --vcycle-precision MODE: diagnostics.set_pressure_vcycle_precision(MODE) in case_contrast (the
+# FP32 V-cycle A/B of doc/vof_projection_cost_design.md §4, G-D3 (a) on the RCP bed)
+VPREC = None
+
+
 def case_contrast(Ngs=(48, 64, 96), steps=4, maxit=300, rtol=1e-8, driver="pcg"):
     """THE campaign case: a random close packing whose order-2 (marching-squares) apertures span
     about three decades, which is where the collocated session measured float PCG floor at 8e-7 and
@@ -209,12 +214,15 @@ def case_contrast(Ngs=(48, 64, 96), steps=4, maxit=300, rtol=1e-8, driver="pcg")
         else:
             s.set_pressure_chebyshev(True, maxit, rtol)
         s.set_solid(np.asfortranarray(sdf), cutcell_pressure=True)
+        if VPREC:
+            s.diagnostics.set_pressure_vcycle_precision(VPREC)
         its, t0 = [], time.time()
         for _ in range(steps):
             s.step()
             its.append(int(s.diagnostics.last_pressure_iterations()))
         dt_ = time.time() - t0
         rec = dict(Ng=Ng, phi=phi, levels=lv, driver=driver, iters=its, cap=maxit,
+                   vprec=s.diagnostics.pressure_vcycle_precision() if VPREC else "default",
                    capped=bool(max(its) >= maxit), div=float(s.max_open_divergence()),
                    umean=float(s.get_u().mean()), s_per_step=dt_ / steps)
         out.append(rec)
@@ -393,7 +401,10 @@ def main():
     ap.add_argument("--cases", default="hydro,porous,vof,contrast,zh,perm,cost")
     ap.add_argument("--json", default="")
     ap.add_argument("--label", default="")
+    ap.add_argument("--vcycle-precision", default=None)
     args = ap.parse_args()
+    global VPREC
+    VPREC = args.vcycle_precision
     names = list(CASES) if args.cases == "all" else args.cases.split(",")
     res = dict(label=args.label, build=flow.__file__)
     for nm in names:
