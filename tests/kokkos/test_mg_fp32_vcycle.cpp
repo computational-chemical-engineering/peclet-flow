@@ -40,6 +40,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <random>
@@ -498,9 +499,7 @@ struct Solve {
   bool fp32 = false;
   std::vector<double> x;
 };
-Solve solve(const Problem& P, int mode) {
-  CutcellMG mg;
-  setUp(mg, P, mode);
+Solve solveOn(CutcellMG& mg, const Problem& P) {
   const C3 e = P.ext();
   const std::size_t n = (std::size_t)e.x * e.y * e.z;
   std::vector<double> hb(n, 0.0);
@@ -524,6 +523,11 @@ Solve solve(const Problem& P, int mode) {
   out.fp32 = mg.lastVcycleFp32();
   out.x = toHost(x);
   return out;
+}
+Solve solve(const Problem& P, int mode) {
+  CutcellMG mg;
+  setUp(mg, P, mode);
+  return solveOn(mg, P);
 }
 
 // One single-rank solve for G-D3 (driver 0 = PCG, 1 = FCG): iterations, failure, the FP32 flag,
@@ -674,11 +678,123 @@ void eligibilityChecks() {
   }
 }
 
+// WO-D5 (§4.4.7): with the FP32 V-cycle and an exact outer the non-bottom levels' FP64 V-cycle
+// data are not allocated (level 0 keeps x and AC; the bottom is whole); they are built on demand,
+// bitwise as the eager build, by a run-time switch to 'fp64' and by a non-exact apply.
+void setUpExact(CutcellMG& mg, const Problem& P, int mode, bool exact) {
+  mg.init(P.nx, P.ny, P.nz, P.levels);
+  mg.setBoundaryConditions(P.bc);
+  mg.setExactResidual(exact);
+  mg.setVcyclePrecision(mode);
+  mg.setOpenness(CCConst(toDevice(P.ox, "ox")), CCConst(toDevice(P.oy, "oy")),
+                 CCConst(toDevice(P.oz, "oz")), 1.0, 1.0, 1.0);
+}
+// The FP64 V-cycle data are absent exactly as §4.4.7 lists (true) or all present (false; level
+// 0's rhs only with l0rhs: the A5 V-cycle runs on the caller's vectors and never allocates it)?
+bool fp64Deferred(CutcellMG& mg, bool deferred, bool l0rhs = true) {
+  bool ok = true;
+  const int nl = mg.nLevels();
+  for (int L = 0; L < nl; ++L) {
+    CutcellMG::Level& v = mg.level(L);
+    const bool bottom = L + 1 == nl;
+    const auto has = [&v](const auto& f) { return f.extent(0) == v.n; };
+    const bool dead = deferred && !bottom;
+    ok = ok && has(v.ox) && has(v.oy) && has(v.oz);
+    ok = ok && has(v.x) == (L == 0 || !dead) && has(v.AC) == (L == 0 || !dead);
+    ok = ok && has(v.rhs) == (!dead && (L > 0 || l0rhs)) && has(v.res) == !dead &&
+         has(v.AFX) == !dead && has(v.AFY) == !dead && has(v.AFZ) == !dead;
+  }
+  return ok;
+}
+// The MG level arrays in bytes per fine cell (FP64 data, openness, FP32 data).
+double mgBytesPerCell(CutcellMG& mg) {
+  double b = 0;
+  for (int L = 0; L < mg.nLevels(); ++L) {
+    CutcellMG::Level& v = mg.level(L);
+    b += 8.0 * (double)(v.x.extent(0) + v.rhs.extent(0) + v.res.extent(0) + v.ox.extent(0) +
+                        v.oy.extent(0) + v.oz.extent(0));
+    b += (double)sizeof(FPV::value_type) *
+         (double)(v.AC.extent(0) + v.AFX.extent(0) + v.AFY.extent(0) + v.AFZ.extent(0));
+    b += 4.0 * (double)(v.WX.extent(0) + v.WY.extent(0) + v.WZ.extent(0) + v.xf.extent(0) +
+                        v.rhsf.extent(0) + v.resf.extent(0));
+  }
+  return b / (double)mg.level(0).n;
+}
+bool sameSolve(const Solve& a, const Solve& b) {
+  return a.it == b.it && a.fp32 == b.fp32 && a.x.size() == b.x.size() &&
+         std::memcmp(a.x.data(), b.x.data(), a.x.size() * sizeof(double)) == 0;
+}
+void memoryChecks() {
+  const Problem P = columnProblem();
+  CutcellMG ref64;
+  setUpExact(ref64, P, CutcellMG::kVcycleFp64, true);
+  check(fp64Deferred(ref64, false), "D5 column, 'fp64' exact: every FP64 array allocated");
+  const double b64 = mgBytesPerCell(ref64);
+  const Solve s64 = solveOn(ref64, P);
+  CutcellMG mg;
+  setUpExact(mg, P, CutcellMG::kVcycleFp32, true);
+  check(fp64Deferred(mg, true), "D5 column, 'fp32' exact: the §4.4.7 arrays are not allocated");
+  const double b32 = mgBytesPerCell(mg);
+  std::printf("  %-72s %s\n",
+              ("D5 column: MG level arrays " + num(b64) + " B/cell ('fp64') -> " + num(b32) +
+               " B/cell ('fp32')")
+                  .c_str(),
+              "(info)");
+  const Solve a = solveOn(mg, P);
+  check(a.fp32 && fp64Deferred(mg, true), "D5 column: the FP32 solve allocates no FP64 data");
+  // run-time switch to 'fp64': built on demand, bitwise a hierarchy that was 'fp64' throughout
+  mg.setVcyclePrecision(CutcellMG::kVcycleFp64);
+  const Solve b = solveOn(mg, P);
+  check(sameSolve(b, s64) && fp64Deferred(mg, false, /*l0rhs=*/false),
+        "D5 column: switched to 'fp64' == 'fp64' throughout, bitwise, it " + std::to_string(b.it) +
+            " / " + std::to_string(s64.it));
+  // and back to 'fp32': released again, bitwise the first FP32 solve
+  mg.setVcyclePrecision(CutcellMG::kVcycleFp32);
+  const Solve c = solveOn(mg, P);
+  check(sameSolve(c, a) && fp64Deferred(mg, true),
+        "D5 column: back to 'fp32' releases them, bitwise the first FP32 solve");
+  // a non-exact level-0 apply on the deferred hierarchy builds them: bitwise the eager build
+  CutcellMG eager;
+  setUpExact(eager, P, CutcellMG::kVcycleFp32, false);
+  check(fp64Deferred(eager, false), "D5 column, 'fp32' non-exact: every FP64 array allocated");
+  const Solve e = solveOn(eager, P);
+  CutcellMG lazy;
+  setUpExact(lazy, P, CutcellMG::kVcycleFp32, true);
+  lazy.setExactResidual(false);
+  const Solve l = solveOn(lazy, P);
+  check(sameSolve(l, e) && fp64Deferred(lazy, false),
+        "D5 column: exact off after a deferred build == the eager build, bitwise");
+}
+
+// WO-D5 memory report (not a check; `test_mg_fp32_vcycle --memory N L`): the MG level arrays in
+// bytes per fine cell on an N^3 periodic all-fluid box with L levels -- 'fp64'; 'fp32' with the
+// FP64 V-cycle data built (a non-exact outer: the WO-D3 layout); 'fp32' deferred (§4.4.7).
+void memoryReport(int n, int levels) {
+  auto ones = [](double, double, double) { return 1.0; };
+  const int bcPer[6] = {0, 0, 0, 0, 0, 0};
+  const Problem P = makeProblem("box", n, n, n, levels, bcPer, ones, ones);
+  const struct {
+    const char* what;
+    int mode;
+    bool exact;
+  } rows[] = {{"'fp64'", CutcellMG::kVcycleFp64, true},
+              {"'fp32', FP64 V-cycle data built (the WO-D3 layout)", CutcellMG::kVcycleFp32, false},
+              {"'fp32', FP64 V-cycle data deferred (WO-D5)", CutcellMG::kVcycleFp32, true}};
+  for (const auto& r : rows) {
+    CutcellMG mg;
+    setUpExact(mg, P, r.mode, r.exact);
+    std::printf("D5 memory %d^3 box, %d levels: %s: %.1f B/cell\n", n, mg.nLevels(), r.what,
+                mgBytesPerCell(mg));
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
-  {
+  if (argc >= 4 && std::string(argv[1]) == "--memory") {
+    memoryReport(std::atoi(argv[2]), std::atoi(argv[3]));
+  } else {
     std::printf("mg_fp32_vcycle (doc/vof_projection_cost_design.md §4, G-D1)\n");
     for (const Problem& P : {columnProblem(), cylProblem(), packProblem()}) {
       dataChecks(P);
@@ -687,6 +803,7 @@ int main(int argc, char** argv) {
       solverChecks(P);
     }
     eligibilityChecks();
+    memoryChecks();
     std::printf("%s (%d failure%s)\n", fails ? "FAIL" : "PASS", fails, fails == 1 ? "" : "s");
   }
   Kokkos::finalize();

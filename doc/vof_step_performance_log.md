@@ -1407,3 +1407,25 @@ now carries the PCG loop's level-0 matvec.
   7687786ac7eb -> f51471270a07, colocated_plain 628e98a87dbc -> b9e4ccc87102, porous 25f0ba690c91 -> 7ca6f39d89e7,
   scalar 69ef3c8a947d -> 2b669f85548d, scene_moving 2fdef25e2f91 -> 14fd3b6138f2, staggered_bed 15748848338a ->
   56b52c908927. ctest mg_fp32_vcycle PASS host (94 checks) and CUDA (93). Host battery 232/232; CUDA battery: see the phase-3b handoff.
+
+### WO-D5 — memory: the FP64 V-cycle data on demand (§4.4.7; bitwise)
+
+- With the FP32 V-cycle data built (fp32Build's conditions) and the exact outer, setOpenness builds the weights and
+  level 0's AC only (`kOpFp64Diag`, cutcellBuildFaceOpCell's AC expression) and leaves the non-bottom levels' FP64
+  V-cycle data unallocated; `ensureFp64` allocates and builds them (setOpenness's own kernel and operands, so bitwise
+  the eager build) for every reader: an FP64 V-cycle (`vcycle(0)`), a non-exact level-0 apply, BiCGStab, the
+  decoupled-count test hook. The precision and exact-residual setters release them when they turn the deferral on
+  (flow builds its first operator before `enable_vof` turns the exact outer on). Single-rank `init` allocates level
+  0's x and AC, every level's openness and the whole bottom; the distributed path is unchanged.
+- Kept beyond §4.4.7's list (grep readers): level-0 `x` (solvePCG / solveFCG / solveBiCGStab stage the solution
+  through it; solvePCGResident's non-finite exit writes it), so level 0 nets -16 B/cell (not -24). Level-0 `rhs`
+  is allocated only by a non-A5 reader (BiCGStab).
+- Memory, MG level arrays per fine cell (ctest binary `--memory 256 6`; host = CUDA): 256^3 box, 6 levels: 'fp64'
+  91.8, 'fp32' with the FP64 data (the D3 layout) 119.3 -> D5 71.1 B/cell (-48.2). Case (128x96x64, CUDA 'auto',
+  5 steps, Kokkos allocation meter `gate_proj/kpmem`): device peak 2144.9 -> 2093.0 B/cell, MG live at the peak
+  129.8 -> 77.9 B/cell. (A full-solver 256^3 VoF box does not fit the 16 GB 5080 at ~2.1 kB/cell.)
+- Gates: host 'auto' G-BIT PASS vs `ref/d3_omp` (hashes, np2, 4 dumps); host 'fp32' dumps bitwise vs `ref/d3f32_omp`
+  (the D3 tip forced 'fp32', = the G-D4 dumps); CUDA 'auto' G-BIT PASS vs `ref/d3_cuda`; CUDA 'fp32' dumps bitwise vs
+  the G-D4 dumps. Iterations unchanged (13.06 / 10.00 per step at 1e-8 / 1e-10). ctest mg_fp32_vcycle +7 D5 checks
+  (allocation pattern; fp32 -> fp64 at run time bitwise to 'fp64' throughout; back to 'fp32' releases, bitwise to
+  the first FP32 solve; exact off after a deferred build bitwise to the eager build): host 101, CUDA 100 PASS.

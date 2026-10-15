@@ -538,24 +538,37 @@ inline void restrictAvgZeroX(CCField coarse, CCField coarseX, CCConst fine, C3 c
 }
 // D (doc/vof_projection_cost_design.md §4.4.2): the FP32 V-cycle's face weights
 // WX = fl32(t_x), t_x = ox * gfx (POSITIVE; likewise y, z) over [0, ext), from the operands of
-// cutcellBuildFaceOpCell. With `fp64` the same kernel also writes the FP64 face form with that
-// cell body, unchanged (setOpenness's build); without it only the weights (the precision setter's
-// rebuild from the stored openness). Returns 1 when a face weight t of the box violates
-// t == 0 || 1e-30 <= t <= 1e30 (the face-range check, §4.4.1 (5)), else 0. One max reduction.
+// cutcellBuildFaceOpCell. `fp64` selects what the same kernel also writes of the FP64 operator:
+// kOpFp64Full = the face form with that cell body, unchanged (setOpenness's build);
+// kOpFp64Diag = AC alone, by cutcellBuildFaceOpCell's identical expression over the same box (the
+// level-0 build while the FP64 V-cycle data are deferred, §4.4.7: AC stays the fluid predicate);
+// kOpFp64None = only the weights (the precision setter's rebuild; a deferred coarse level).
+// Returns 1 when a face weight t of the box violates t == 0 || 1e-30 <= t <= 1e30 (the face-range
+// check, §4.4.1 (5)), else 0. One max reduction.
+enum : int { kOpFp64None = 0, kOpFp64Diag = 1, kOpFp64Full = 2 };
 template <class OpV, class WV>
 inline int buildCutcellOpFaceFp32(OpV AC, OpV AFX, OpV AFY, OpV AFZ, WV WX, WV WY, WV WZ,
                                   CCConst ox, CCConst oy, CCConst oz, C3 e, int gb, double gfx,
-                                  double gfy, double gfz, bool fp64) {
+                                  double gfy, double gfz, int fp64) {
   int bad = 0;
   ccReduce3(
       "peclet::flow::cc_build_op", C3{0, 0, 0}, C3{e.x, e.y, e.z},
       KOKKOS_LAMBDA(int lx, int ly, int lz, int& acc) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
-        if (fp64) {
+        if (fp64 != kOpFp64None) {
           const bool diag =
               lx >= gb && lx < e.x - gb && ly >= gb && ly < e.y - gb && lz >= gb && lz < e.z - gb;
-          cutcellBuildFaceOpCell(AC, AFX, AFY, AFZ, ox, oy, oz, i, sx, sy, sz, gfx, gfy, gfz, diag);
+          if (fp64 == kOpFp64Full)
+            cutcellBuildFaceOpCell(AC, AFX, AFY, AFZ, ox, oy, oz, i, sx, sy, sz, gfx, gfy, gfz,
+                                   diag);
+          else if (diag) {  // cutcellBuildFaceOpCell's AC, the identical expression
+            const double tw = ox(i) * gfx, ts = oy(i) * gfy, tb = oz(i) * gfz;
+            const double te = ox(i + sx) * gfx;
+            const double tn = oy(i + sy) * gfy;
+            const double tt = oz(i + sz) * gfz;
+            AC(i) = te + tw + tn + ts + tt + tb;
+          }
         }
         const double tw = ox(i) * gfx;
         const double ts = oy(i) * gfy;
@@ -1158,6 +1171,7 @@ class CutcellMG {
   void init(int nx, int ny, int nz, int nLevels) {
     lv_.clear();
     opBuilt_ = false;  // D: no operator (and no FP32 weights) on the new hierarchy yet
+    fp64Stale_ = false;
     amg_.reset();
     eigWarm_ = false;  // D3: the kept power-iteration vectors belong to the old hierarchy
     gnxF_ = nx;
@@ -1188,21 +1202,25 @@ class CutcellMG {
           next.z = inner.z / 2;
       }
       v.ratio = ratio;
-      v.x = CCField("mg_x", v.n);
-      v.rhs = CCField("mg_rhs", v.n);
-      v.res = CCField("mg_res", v.n);
+      // D5 (doc/vof_projection_cost_design.md §4.4.7): here only what every precision reads --
+      // every level's openness, level 0's AC (the fluid predicate, nFluid) and x (the drivers'
+      // staging of the solution: solvePCG, solveFCG, solveBiCGStab). The FP64 V-cycle data
+      // (allocFp64) come with the first operator build that needs them; the bottom keeps all.
+      if (L == 0) {
+        v.x = CCField("mg_x", v.n);
+        v.AC = FPV("mg_A", v.n);
+      }
       v.ox = CCField("mg_ox", v.n);
       v.oy = CCField("mg_oy", v.n);
       v.oz = CCField("mg_oz", v.n);
-      for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
-        *p = FPV("mg_A", v.n);
       lv_.push_back(v);
       if (next.x == inner.x && next.y == inner.y && next.z == inner.z)
         break;  // nothing coarsens
       inner = next;
       cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
     }
-    buildBottomStore();  // the direct bottom's storage (single rank, every backend)
+    allocFp64(lv_.back());  // the bottom level is whole in every precision
+    buildBottomStore();     // the direct bottom's storage (single rank, every backend)
     if (mgDebugLevel()) {
       printf("[mg] init %dx%dx%d single-rank -> %d levels (requested %d)\n", nx, ny, nz,
              (int)lv_.size(), nLevels);
@@ -1834,11 +1852,18 @@ class CutcellMG {
         f);  // periodic fine-level openness ghosts (the operator reads the + neighbour face);
              // idempotent when the caller already filled them, required when it passed inner-only.
     applyBoundaryOpenness(
-        f);            // re-impose non-periodic wall/inflow faces the periodic fill clobbered
+        f);  // re-impose non-periodic wall/inflow faces the periodic fill clobbered
+    // D5 (§4.4.7): with the FP32 V-cycle data built and an exact outer, the non-bottom levels'
+    // FP64 V-cycle data are not built here (level 0 keeps AC); ensureFp64 builds them for the
+    // first reader that needs them.
+    const bool defer = fp64Deferrable();
+    fp64Stale_ = defer;
+    if (!defer)
+      allocFp64(f);
     if (fp32Build(0))  // D: the FP32 weights in the same kernel (§4.4.2)
       f.wOk = buildCutcellOpFaceFp32(f.AC, f.AFX, f.AFY, f.AFZ, f.WX, f.WY, f.WZ, CCConst(f.ox),
                                      CCConst(f.oy), CCConst(f.oz), f.ext, G, idx2, idy2, idz2,
-                                     true) == 0;
+                                     defer ? kOpFp64Diag : kOpFp64Full) == 0;
     else
       buildCutcellOpFace(f.AC, f.AFX, f.AFY, f.AFZ, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
                          f.ext, G, idx2, idy2, idz2);
@@ -1886,15 +1911,22 @@ class CutcellMG {
       // so they come out bit-identical to the owning rank's inner rows — the redundant ring
       // re-smoothing of the CA sweep reads them. Inner rows are computed from the same operands
       // as the g-box build (identical). g=1 levels keep the inner-only build.
+      const bool deferC = defer && L + 1 < (int)lv_.size();  // D5: never the bottom
+      if (!deferC)
+        allocFp64(c);
       if (fp32Build(L))  // D: the FP32 weights in the same kernel (§4.4.2)
-        c.wOk =
-            buildCutcellOpFaceFp32(c.AC, c.AFX, c.AFY, c.AFZ, c.WX, c.WY, c.WZ, CCConst(c.ox),
-                                   CCConst(c.oy), CCConst(c.oz), c.ext, c.g == 2 ? c.g - 1 : c.g,
-                                   idx2 * sx, idy2 * sy, idz2 * sz, true) == 0;
+        c.wOk = buildCutcellOpFaceFp32(c.AC, c.AFX, c.AFY, c.AFZ, c.WX, c.WY, c.WZ, CCConst(c.ox),
+                                       CCConst(c.oy), CCConst(c.oz), c.ext,
+                                       c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy, idz2 * sz,
+                                       deferC ? kOpFp64None : kOpFp64Full) == 0;
       else
         buildCutcellOpFace(c.AC, c.AFX, c.AFY, c.AFZ, CCConst(c.ox), CCConst(c.oy), CCConst(c.oz),
                            c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy, idz2 * sz);
-      noteFluidCells(c);
+      if (deferC) {  // no AC on a deferred level: its count comes with ensureFp64
+        c.nFluid = -1;
+        c.allFluid = false;
+      } else
+        noteFluidCells(c);
 #ifdef PECLET_FLOW_MPI
       if (c.tele) {
         teleGather(c, c.ox, c.tele->ox);
@@ -2156,6 +2188,8 @@ class CutcellMG {
   // v^T y into slot k in ONE lane pass over the inner cells, with dotTo's mask, operand order and
   // lane order: bitwise to matvecOverlap(l0, y, v) + dotTo(l0, v, y, k). hostKrylovFusion() only.
   void matvecDotTo(Level& l0, CCField y, CCField v, int k) {
+    if (!exactResidual_)
+      ensureFp64();  // D5 (§4.4.7): the band apply reads level 0's AFX, AFY, AFZ
     const C3 e = l0.ext, n = l0.inner;
     const int g = G;
     CCField yy = y;
@@ -2636,6 +2670,7 @@ class CutcellMG {
   ) {
     solveFailed_ = false;                       // ISSUES sweep item 6: per-solve breakdown flag
     OverlayScope overlay(overlaySolve_, true);  // A3: the gp overlay keeps today's fills
+    ensureFp64();  // D5 (§4.4.7): the band apply and level 0's rhs below
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -2986,6 +3021,7 @@ class CutcellMG {
             std::string("set_pressure_vcycle_precision('fp32'): not eligible here: ") +
             (why ? why : fp32VcycleIneligible(false)));
       }
+      ensureFp64();  // D5 (§4.4.7): its data, if the last build deferred them
     }
     if (mgDebugLevel() >= 3) {
       const auto t0 = std::chrono::steady_clock::now();
@@ -3158,6 +3194,75 @@ class CutcellMG {
     }
     return true;
   }
+  // D5 (doc/vof_projection_cost_design.md §4.4.7): a level's FP64 V-cycle data -- x, rhs, res
+  // and the face form AC, AFX, AFY, AFZ -- allocated (zero) where not yet allocated at the level's
+  // size. Level 0's x and AC come from init (every precision reads them); level 0's x and rhs are
+  // rebound to the caller's vectors while an A5 V-cycle runs (then they have the size).
+  void allocFp64(Level& v) {
+    const auto need = [&v](const auto& f) { return f.extent(0) != v.n; };
+    if (need(v.x))
+      v.x = CCField("mg_x", v.n);
+    if (need(v.rhs))
+      v.rhs = CCField("mg_rhs", v.n);
+    if (need(v.res))
+      v.res = CCField("mg_res", v.n);
+    for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
+      if (need(*p))
+        *p = FPV("mg_A", v.n);
+  }
+  // D5: may an operator build leave out the non-bottom levels' FP64 V-cycle data? When the FP32
+  // V-cycle data are built (fp32Build's conditions) and the outer operator is exact (the level-0
+  // apply reads the openness, not AFX): then only an ineligible solve's FP64 V-cycle, a non-exact
+  // level-0 apply or BiCGStab reads them, and ensureFp64 builds them for that reader.
+  bool fp64Deferrable() const {
+    return fp32Mode() && !distributed_ && !hasOutflow_ && exactResidual_ && lv_.size() >= 2;
+  }
+  // D5: before any reader of the non-bottom FP64 V-cycle data. Allocates what is missing, and
+  // when the last operator build deferred them builds them from the stored level openness with
+  // the build setOpenness would have used (same kernel, same operands: bitwise the eager data).
+  // Once allocated they stay (an alternating FP32 / FP64 workload does not re-allocate per step).
+  void ensureFp64() {
+    for (std::size_t L = 0; L + 1 < lv_.size(); ++L)
+      allocFp64(lv_[L]);
+    if (!fp64Stale_)
+      return;
+    fp64Stale_ = false;
+    for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
+      Level& lv = lv_[L];
+      const double sx = 1.0 / (double)(lv.cfac.x * lv.cfac.x),
+                   sy = 1.0 / (double)(lv.cfac.y * lv.cfac.y),
+                   sz = 1.0 / (double)(lv.cfac.z * lv.cfac.z);
+      if (fp32Build(L))
+        lv.wOk = buildCutcellOpFaceFp32(lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.WX, lv.WY, lv.WZ,
+                                        CCConst(lv.ox), CCConst(lv.oy), CCConst(lv.oz), lv.ext,
+                                        lv.g, gfx_ * sx, gfy_ * sy, gfz_ * sz, kOpFp64Full) == 0;
+      else
+        buildCutcellOpFace(lv.AC, lv.AFX, lv.AFY, lv.AFZ, CCConst(lv.ox), CCConst(lv.oy),
+                           CCConst(lv.oz), lv.ext, lv.g, gfx_ * sx, gfy_ * sy, gfz_ * sz);
+      noteFluidCells(lv);
+    }
+  }
+  // D5: release of the non-bottom levels' FP64 V-cycle data when a setter (the V-cycle precision,
+  // the exact residual) turns the deferral on (level 0 keeps x and AC; ensureFp64 rebuilds the
+  // rest on demand). The flow solver builds its first operator before enable_vof turns the exact
+  // outer on, so without this the eagerly built data would stay allocated.
+  void releaseFp64() {
+    for (std::size_t L = 0; L + 1 < lv_.size(); ++L) {
+      Level& v = lv_[L];
+      v.rhs = CCField();
+      v.res = CCField();
+      v.AFX = FPV();
+      v.AFY = FPV();
+      v.AFZ = FPV();
+      if (L > 0) {
+        v.x = CCField();
+        v.AC = FPV();
+        v.nFluid = -1;
+        v.allFluid = false;
+      }
+    }
+    fp64Stale_ = opBuilt_;
+  }
   // The FP32 weights of every carrying level from the STORED level openness (the setter's
   // rebuild; setOpenness builds them in its own kernel). Same operands as setOpenness: level L's
   // metric is gf * (1 / cfac^2), which is gf itself on level 0.
@@ -3173,7 +3278,7 @@ class CutcellMG {
                    sz = 1.0 / (double)(lv.cfac.z * lv.cfac.z);
       lv.wOk = buildCutcellOpFaceFp32(lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.WX, lv.WY, lv.WZ,
                                       CCConst(lv.ox), CCConst(lv.oy), CCConst(lv.oz), lv.ext, lv.g,
-                                      gfx_ * sx, gfy_ * sy, gfz_ * sz, false) == 0;
+                                      gfx_ * sx, gfy_ * sy, gfz_ * sz, kOpFp64None) == 0;
     }
 #ifndef NDEBUG
     checkFp32DecoupledSets();
@@ -3322,7 +3427,10 @@ class CutcellMG {
   // OverlayScope does for the star and ghost-projection drivers.
   void debugSetOverlaySolve(bool on) { overlaySolve_ = on; }
   void setVcyclePrecision(int mode) {
+    const bool was = fp64Deferrable();
     vprec_ = mode;
+    if (!was && fp64Deferrable())
+      releaseFp64();     // D5 (§4.4.7)
     buildFp32Weights();  // takes effect at once (§4.4.6)
   }
   int vcyclePrecision() const { return vprec_; }
@@ -3331,6 +3439,7 @@ class CutcellMG {
   // The decoupled cells of a carrying level, counted two ways: FP32 (all six weights 0, D_i == 0)
   // and FP64 (AC < 1e-30). The face-range check makes the sets equal (§4.4.1 (5)).
   void fp32DecoupledCounts(int L, long& n32, long& n64) {
+    ensureFp64();  // D5: reads AC (test hook)
     const Level& lv = lv_[L];
     const C3 e = lv.ext;
     const int g = lv.g;
@@ -3353,6 +3462,8 @@ class CutcellMG {
   }
 #ifndef NDEBUG
   void checkFp32DecoupledSets() {
+    if (fp64Stale_)
+      return;  // D5: the FP64 AC of a deferred level is not built (the test hook ensures it)
     for (int L = 0; L < (int)lv_.size(); ++L)
       if (lv_[L].wOk) {
         long n32 = 0, n64 = 0;
@@ -4163,6 +4274,8 @@ class CutcellMG {
   // blocking path.
   void matvecOverlap(Level& l0, CCField y, CCField v) {
     const bool ex = exactResidual_;  // P1: exact double flux-form apply instead of the bands
+    if (!ex)
+      ensureFp64();  // D5 (§4.4.7): the band apply reads level 0's AFX, AFY, AFZ
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       const C3 lo{G + 1, G + 1, G + 1};
@@ -5007,6 +5120,9 @@ class CutcellMG {
   // the operator of the current hierarchy.
   int vprec_ = kVcycleAuto;
   bool opBuilt_ = false;
+  // D5 (§4.4.7): the non-bottom levels' FP64 V-cycle data do not hold the current operator (the
+  // last build deferred them, or the setter released them); ensureFp64 rebuilds them.
+  bool fp64Stale_ = false;
   bool lastVcycleFp32_ = false;
   bool healthTrace_ = false;       // §4.4.5 test hook (setHealthTrace)
   std::vector<double> healthLog_;  // the last single-rank PCG / FCG solve's health ratios
@@ -5089,7 +5205,12 @@ class CutcellMG {
   void setStrictPressure(bool on) { strictPressure_ = on; }
   bool strictPressure() const { return strictPressure_; }
   /// The exact double flux-form level-0 apply in the residual and the Krylov matvec.
-  void setExactResidual(bool on) { exactResidual_ = on; }
+  void setExactResidual(bool on) {
+    const bool was = fp64Deferrable();
+    exactResidual_ = on;
+    if (!was && fp64Deferrable())
+      releaseFp64();  // D5 (§4.4.7): the exact outer leaves level 0's AFX unread
+  }
   bool exactResidual() const { return exactResidual_; }
   // WO-R2 item 1: the next setOpenness receives a variable-density COEFFICIENT field, so the
   // Dirichlet (outflow) domain-face rows must carry the caller's coefficient rather than the
