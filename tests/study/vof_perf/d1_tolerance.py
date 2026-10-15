@@ -23,7 +23,7 @@ Usage:
     PYTHONPATH=<flow build> OMP_NUM_THREADS=8 OMP_PROC_BIND=false \\
         python tests/study/vof_perf/d1_tolerance.py --out DIR [--cases static,hysing,column]
             [--rtols 1e-10,1e-9,1e-8,1e-7,1e-6] [--column-steps 2000] [--ckpt PATH] [--case-dir DIR]
-            [--vcycle-precision auto|fp64|fp32]   (the column's V-cycle precision, §4 of
+            [--vcycle-precision fp64|fp32]   (the column's V-cycle precision, §4 of
                                                  doc/vof_projection_cost_design.md)
 """
 import json

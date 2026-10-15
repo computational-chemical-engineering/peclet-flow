@@ -736,27 +736,28 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "set_pressure_vcycle_precision",
           [](D& diag, const std::string& mode) {
-            if (mode == "auto")
-              diag.s->setPressureVcyclePrecision(0);
-            else if (mode == "fp64")
+            if (mode == "fp64")
               diag.s->setPressureVcyclePrecision(1);
             else if (mode == "fp32")
               diag.s->setPressureVcyclePrecision(2);
             else
-              throw std::runtime_error("set_pressure_vcycle_precision: 'auto' | 'fp64' | 'fp32'");
+              throw std::runtime_error("set_pressure_vcycle_precision: 'fp64' | 'fp32'");
           },
           nb::arg("mode"),
-          "Precision of the V-cycle that preconditions the single-rank pressure PCG / FCG. 'auto'"
-          " (DEFAULT): FP32 where eligible on a GPU backend, else FP64 (host backends: FP64, the "
-          "host gain is below 12 %). 'fp64': the double V-cycle. 'fp32': FP32 face weights (the "
-          "diagonal derived, never stored), FP32 iterates and flux-form arithmetic on every level"
-          " above the bottom, the input scaled by an exact power of two; the Krylov matvec, dots,"
-          " mean projection and stop test stay FP64 -- raises at the solve, naming the failed "
-          "condition, where not eligible (multi-rank, an outflow face, an overlay solve, a "
-          "non-bottom level with an odd inner dimension, a float outer operator, a face weight "
-          "outside [1e-30, 1e30], the mean-removal scope 'all', a driver other than PCG / FCG). "
-          "Takes effect at once. Outside the CG drivers' rated contrast (density ratio above ~1e3"
-          " with walls) both precisions may cap; FP32 may cap earlier. "
+          "Precision of the V-cycle that preconditions the single-rank pressure PCG / FCG. 'fp64' "
+          "(DEFAULT): today's V-cycle. 'fp32': FP32 face weights (the diagonal derived, never "
+          "stored), FP32 iterates and flux-form arithmetic on every level above the bottom, the "
+          "input scaled by an exact power of two; the Krylov matvec, dots, mean projection and "
+          "stop test stay FP64 -- raises at the solve, naming the failed condition, where not "
+          "eligible (multi-rank, an outflow face, an overlay solve, a non-bottom level with an "
+          "odd inner dimension, a float outer operator, a face weight outside [1e-30, 1e30], the "
+          "mean-removal scope 'all', a driver other than PCG / FCG). Takes effect at once. FP32 "
+          "is opt-in, not the default: it runs on a single rank only, so as a default it would "
+          "break the bit-exactness of a serial run with a distributed np=1 run, and its weight "
+          "rounding is not scale-invariant; it can also cap where 'fp64' converges (no FP64 "
+          "restart on a cap yet). It saves ~19 % of the projection on a GPU (bubble column, "
+          "RTX 5080), ~11 % on a CPU. Outside the CG drivers' rated contrast (density ratio "
+          "above ~1e3 with walls) both precisions may cap; FP32 may cap earlier. "
           "doc/vof_projection_cost_design.md §4.")
       .def(
           "pressure_vcycle_precision",

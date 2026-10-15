@@ -1443,3 +1443,15 @@ now carries the PCG loop's level-0 matvec.
   CUDA 12.28 (+0.02) -> 9.96 (+0.01) ms, 0.811, step 23.08 -> 20.87 ms, load 7.4-8.3; host 1x8 68.67 (+8.87) ->
   61.23 (+10.79) ms, 0.892, load 3.4-4.5; 1x24 54.63 (+9.36) -> 48.29 (+5.75) ms, 0.884, load 4.5-8.3 (host > 0.88:
   'auto' stays FP64 there, as ruled). Iterations 10.0 = 10.0 per step at 1e-8.
+
+### Landing (2026-10-16) — USER ruling 2026-10-15: the defaults do not change
+
+- Ruling (gate_proj/DECISIONS_PROJ.log): the FP32 V-cycle stays opt-in ('fp64' default) and E stays opt-in ('zero'
+  default, E1 not promoted). Reason: single-rank-only fast paths as defaults break flow's serial <-> np=1
+  bit-exactness (CUDA battery at 37f8f5f: 8 np1 tests + units_scale_invariance). Revisit only with an FP64
+  restart-on-cap and a distributed FP32 V-cycle / E.
+- Step 1: `git revert 37f8f5f` (the D default). The setter's 'auto' value is REMOVED: after the revert it meant
+  "FP32 where eligible, else FP64" on every backend (not 'fp64'), and redefining it as 'fp64' would be an alias
+  (NAMING.md: nothing is aliased); it never shipped. Modes: 'fp64' (default) | 'fp32' (raises where ineligible).
+  ctest (f) now checks the default ('fp64', no FP32 data built) and that 'fp32' raises on the outflow / odd cases.
+  Host: G-BIT PASS vs `ref/r_omp`; 'fp32' dumps 4/4 bitwise vs `ref/d3f32_omp`; mg_fp32_vcycle 101 PASS.

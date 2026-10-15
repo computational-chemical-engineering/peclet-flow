@@ -21,8 +21,9 @@
 ///   (d) eligibility is false (and names the condition) on an outflow, an overlay, an odd-dimension
 ///       and a single-level configuration and on a face weight below 1e-30 (the distributed case
 ///       is checked in the MPI ctest cutcellmg_aniso_mpi);
-///   (f) on the ineligible outflow and odd-dimension configurations a PCG solve with 'auto' is
-///       bitwise (x, iterations) to 'fp64' and reports FP64;
+///   (f) the default is 'fp64' on every backend (FP32 opt-in, USER ruling 2026-10-15) and builds
+///       no FP32 data; on the ineligible outflow and odd-dimension configurations a PCG solve
+///       with 'fp32' raises, naming the condition;
 ///   (a) the FP32 residual of x = c * 1, b = 0 is exactly 0 for c in {1, -3.7, 1e5, 2^-60};
 ///   (e) host: one FP32 smoother colour pass and the FP32 residual equal a scalar plain-float
 ///       reference of §4.4.3 bitwise (device: within 1e-5 relative -- the device contracts FMAs);
@@ -44,6 +45,7 @@
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -649,32 +651,31 @@ void eligibilityChecks() {
           std::string("eligible 16^3 + overlay: (d) ") + (why ? why : "(eligible!)"));
     mg.debugSetOverlaySolve(false);
   }
-  {  // WO-D3 commit 2: 'auto' (the default) = FP32 on device backends only; host 'auto' is FP64,
-     // bitwise to 'fp64', and builds no FP32 data
+  // (f) the default is 'fp64' on every backend (FP32 opt-in, USER ruling 2026-10-15): no FP32 data
+  // built; 'fp32' on the ineligible solvable configurations raises at the solve, naming why
+  {
     Problem ok = makeProblem("eligible", 16, 16, 16, 3, bcPer, ones, uni);
     CutcellMG dflt;
-    check(dflt.vcyclePrecision() == CutcellMG::kVcycleAuto, "the default mode is 'auto'");
-    const Solve a = solve(ok, CutcellMG::kVcycleFp64), b = solve(ok, CutcellMG::kVcycleAuto);
-    const bool bits = a.x.size() == b.x.size() &&
-                      std::memcmp(a.x.data(), b.x.data(), a.x.size() * sizeof(double)) == 0;
-    check(CutcellMG::kHostMemory ? (!b.fp32 && bits && a.it == b.it) : b.fp32,
-          std::string("eligible 16^3: 'auto' ") + (CutcellMG::kHostMemory
-                                                       ? "on host == 'fp64' bitwise, FP64 reported"
-                                                       : "on device runs the FP32 V-cycle"));
-    if (CutcellMG::kHostMemory) {
-      CutcellMG mg;
-      setUp(mg, ok, CutcellMG::kVcycleAuto);
-      check(mg.level(0).WX.extent(0) == 0, "eligible 16^3: host 'auto' builds no FP32 data");
-    }
+    check(dflt.vcyclePrecision() == CutcellMG::kVcycleFp64, "(f) the default mode is 'fp64'");
+    dflt.init(ok.nx, ok.ny, ok.nz, ok.levels);
+    dflt.setBoundaryConditions(ok.bc);
+    dflt.setOpenness(CCConst(toDevice(ok.ox, "ox")), CCConst(toDevice(ok.oy, "oy")),
+                     CCConst(toDevice(ok.oz, "oz")), 1.0, 1.0, 1.0);
+    bool none = true;
+    for (int L = 0; L < dflt.nLevels(); ++L)
+      none = none && dflt.level(L).WX.extent(0) == 0;
+    const Solve a = solveOn(dflt, ok);
+    check(none && !a.fp32, "eligible 16^3: (f) the default builds no FP32 data, FP64 reported");
   }
-  // (f) 'auto' on the ineligible solvable configurations is bitwise to 'fp64'
   for (const Problem* P : {&out, &odd}) {
-    const Solve a = solve(*P, CutcellMG::kVcycleFp64), b = solve(*P, CutcellMG::kVcycleAuto);
-    const bool bits = a.x.size() == b.x.size() &&
-                      std::memcmp(a.x.data(), b.x.data(), a.x.size() * sizeof(double)) == 0;
-    check(bits && a.it == b.it && !a.fp32 && !b.fp32,
-          P->name + ": (f) 'auto' == 'fp64' bitwise, it " + std::to_string(a.it) + " / " +
-              std::to_string(b.it) + ", FP64 reported");
+    std::string what;
+    try {
+      solve(*P, CutcellMG::kVcycleFp32);
+    } catch (const std::runtime_error& e) {
+      what = e.what();
+    }
+    check(what.find("not eligible here") != std::string::npos,
+          P->name + ": (f) 'fp32' raises at the solve: " + (what.empty() ? "(no raise!)" : what));
   }
 }
 

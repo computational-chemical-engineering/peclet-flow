@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
     // G-D1(d) (doc/vof_projection_cost_design.md §13): the FP32 V-cycle is never eligible on a
     // distributed hierarchy, and no FP32 data is built there, whatever the mode.
     if (size > 1) {
-      mg.setVcyclePrecision(CutcellMG::kVcycleAuto);
+      mg.setVcyclePrecision(CutcellMG::kVcycleFp32);
       const char* why = mg.fp32VcycleIneligible(true);
       if (!why || std::string(why).find("distributed") == std::string::npos ||
           mg.level(0).WX.extent(0) != 0) {

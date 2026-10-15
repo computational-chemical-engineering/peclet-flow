@@ -3172,11 +3172,14 @@ class CutcellMG {
     return fusedWrapReads() && lv.inner.x % 2 == 0 && lv.inner.y % 2 == 0 && lv.inner.z % 2 == 0;
   }
   // --- D: the FP32 V-cycle preconditioner (doc/vof_projection_cost_design.md §4) -------------
-  // The V-cycle precision mode (§4.4.6): 'auto' = FP32 where fp32VcycleIneligible() is null, else
-  // FP64; 'fp64'; 'fp32' = FP32 or a raise naming the failed condition.
-  enum : int { kVcycleAuto = 0, kVcycleFp64 = 1, kVcycleFp32 = 2 };
+  // The V-cycle precision mode (§4.4.6): 'fp64' (the default); 'fp32' = FP32 or a raise naming the
+  // failed condition. Opt-in by USER ruling 2026-10-15: the FP32 V-cycle is single-rank only, so a
+  // default FP32 would break the serial <-> np=1 bit-exactness (no 'auto': it would be an alias of
+  // 'fp64').
+  enum : int { kVcycleFp64 = 1, kVcycleFp32 = 2 };
+  bool fp32Mode() const { return vprec_ == kVcycleFp32; }
   // Does level L carry the FP32 data (§4.4.2)? Single rank, no outflow face, a non-bottom level,
-  // and the mode is not 'fp64'. Allocates the level's six FP32 arrays (zero) on first use; a level
+  // and the mode is 'fp32'. Allocates the level's six FP32 arrays (zero) on first use; a level
   // that does not carry them is marked stale (wOk = false).
   bool fp32Build(int L) {
     Level& lv = lv_[L];
@@ -3284,22 +3287,14 @@ class CutcellMG {
     checkFp32DecoupledSets();
 #endif
   }
-  // §4.4.6, Q-P1 (WO-D3 commit 2): does the mode ask for the FP32 V-cycle on this backend? 'fp32'
-  // always; 'auto' on device backends only -- the host projection gains < 12 % (A/B 0.954 at 1x8,
-  // 0.896 at 1x24 against the 0.88 gate; CUDA 0.815), so host 'auto' is today's FP64 V-cycle and
-  // builds no FP32 data.
-  bool fp32Mode() const { return vprec_ == kVcycleFp32 || (vprec_ == kVcycleAuto && !kHostMemory); }
   // §4.4.1, §4.4.6: does this solve run the FP32 V-cycle? Evaluated once per solve by
   // solvePCGResident and solveFCG; 'fp32' raises naming the failed condition where ineligible.
   bool fp32VcycleSolve() {
     if (!fp32Mode())
       return false;
-    if (const char* why = fp32VcycleIneligible(true)) {
-      if (vprec_ == kVcycleFp32)
-        throw std::runtime_error(
-            std::string("set_pressure_vcycle_precision('fp32'): not eligible here: ") + why);
-      return false;
-    }
+    if (const char* why = fp32VcycleIneligible(true))
+      throw std::runtime_error(
+          std::string("set_pressure_vcycle_precision('fp32'): not eligible here: ") + why);
     return true;
   }
   // §4.4.5 health instrument: |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| per iteration of the
@@ -3427,6 +3422,8 @@ class CutcellMG {
   // OverlayScope does for the star and ghost-projection drivers.
   void debugSetOverlaySolve(bool on) { overlaySolve_ = on; }
   void setVcyclePrecision(int mode) {
+    if (mode != kVcycleFp64 && mode != kVcycleFp32)
+      throw std::invalid_argument("CutcellMG::setVcyclePrecision: kVcycleFp64 | kVcycleFp32");
     const bool was = fp64Deferrable();
     vprec_ = mode;
     if (!was && fp64Deferrable())
@@ -5115,10 +5112,9 @@ class CutcellMG {
   // P1 of the defect-correction campaign — the exact (matrix-free, double, flux-form) level-0
   // operator apply in the residual and the Krylov matvec. See mac_cutcell.hpp.
   bool exactResidual_ = false;
-  // D (§4.4.6): the V-cycle precision mode (kVcycleAuto / kVcycleFp64 / kVcycleFp32); 'auto' since
-  // WO-D3's promotion (FP32 on eligible device solves, fp32Mode). opBuilt_: setOpenness has built
-  // the operator of the current hierarchy.
-  int vprec_ = kVcycleAuto;
+  // D (§4.4.6): the V-cycle precision mode (kVcycleFp64 = the default / kVcycleFp32, opt-in).
+  // opBuilt_: setOpenness has built the operator of the current hierarchy.
+  int vprec_ = kVcycleFp64;
   bool opBuilt_ = false;
   // D5 (§4.4.7): the non-bottom levels' FP64 V-cycle data do not hold the current operator (the
   // last build deferred them, or the setter released them); ensureFp64 rebuilds them.
