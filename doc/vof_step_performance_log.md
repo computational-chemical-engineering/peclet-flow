@@ -1455,3 +1455,13 @@ now carries the PCG loop's level-0 matvec.
   (NAMING.md: nothing is aliased); it never shipped. Modes: 'fp64' (default) | 'fp32' (raises where ineligible).
   ctest (f) now checks the default ('fp64', no FP32 data built) and that 'fp32' raises on the outflow / odd cases.
   Host: G-BIT PASS vs `ref/r_omp`; 'fp32' dumps 4/4 bitwise vs `ref/d3f32_omp`; mg_fp32_vcycle 101 PASS.
+- Step 2 (review findings 4, 5; bitwise). (5) `fp32Build` now also requires `fp32Carriable()` -- every
+  build-time eligibility condition (single rank, no outflow, >= 2 levels, even non-bottom inner dimensions, a double
+  outer operator, mean-removal scope 'fine'); 'fp64' builds no FP32 data and runs no range check. The face-range
+  check is an `atomic_max` into a per-level device flag (`wBad_`, zeroed asynchronously) in a `ccForRows3` build
+  kernel instead of a host `Max<int>` reduction; `fp32WeightsOk(L)` reads all levels back once, at the first
+  eligibility check after a build. The scope and exact-residual setters rebuild / release through
+  `fp32Reconfigure`. (4) ctest: `|B32 r - B64 r| / |B64 r| <= 1e-6` is a check (column 5.17e-8, cyl 5.79e-8, pack
+  6.53e-8, slab 8.02e-8 host); new walled slab (32^3, heavy below at 1e3, walls +-z): FP64 FCG converges (52 its,
+  required) and G-D3 (a)-(e) pass (fp32 52 its, health 0.439 = 0.439); FP64 PCG does NOT converge on it (true
+  residual 172 at 1e3, 0.085 at 1e2 after 200 its), so PCG keeps (a)-(e) n/a there and runs (b).

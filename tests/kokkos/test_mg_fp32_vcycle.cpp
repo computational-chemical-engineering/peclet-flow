@@ -144,6 +144,17 @@ Problem cylProblem() {
   return makeProblem("cyl", 32, 32, 32, 4, bc, open, rho);
 }
 
+// Review finding 4: a WALLED stratified problem, so that the G-D3 checks (a)-(e) run against walls
+// (the column is periodic in z; cyl and pack cap in FP64): a sharp heavy-below slab, density
+// ratio 1e3, walls at +-z. FP64 FCG converges here (52 iterations) and is required to; FP64 PCG
+// does not (true residual 172 after 200 iterations at 1e3, 0.085 at 1e2: the V-cycle is not an
+// SPD preconditioner against a stratified wall), so for PCG (a)-(e) are n/a and (b) runs.
+Problem slabProblem() {
+  const int bc[6] = {0, 0, 0, 0, 1, 1};
+  auto rho = [](double, double, double z) { return z < 16.0 ? 1e3 : 1.0; };
+  return makeProblem("slab", 32, 32, 32, 4, bc, [](double, double, double) { return 1.0; }, rho);
+}
+
 Problem packProblem() {
   const int bc[6] = {0, 0, 0, 0, 1, 1};
   std::vector<double> C;
@@ -273,7 +284,7 @@ void dataChecks(const Problem& P) {
       h32 += h.Dsum(i) == 0.0f ? 1 : 0;
       h64 += h.AC[i] < 1e-30 ? 1 : 0;
     });
-    check(lv.wOk && sign && worst <= 0x1p-24,
+    check(mg.fp32WeightsOk(L) && sign && worst <= 0x1p-24,
           std::string(tag) + ": (c) max|w/t - 1| = " + num(worst) + ", w >= 0");
     check(n32 == n64 && h32 == n32 && h64 == n64, std::string(tag) + ": (c) decoupled sets " +
                                                       std::to_string(n32) +
@@ -311,7 +322,7 @@ void dataChecks(const Problem& P) {
     std::vector<float> w = toHost(lv.WX), wy = toHost(lv.WY), wz = toHost(lv.WZ);
     w.insert(w.end(), wy.begin(), wy.end());
     w.insert(w.end(), wz.begin(), wz.end());
-    same = same && lv.wOk && w.size() == fused[L].size() &&
+    same = same && mg.fp32WeightsOk(L) && w.size() == fused[L].size() &&
            std::memcmp(w.data(), fused[L].data(), w.size() * sizeof(float)) == 0;
   }
   check(same, P.name + ": the setter's rebuild == the fused build, bitwise");
@@ -320,7 +331,7 @@ void dataChecks(const Problem& P) {
   setUp(m64, P, CutcellMG::kVcycleFp64);
   bool none = true;
   for (int L = 0; L < m64.nLevels(); ++L)
-    none = none && m64.level(L).WX.extent(0) == 0 && !m64.level(L).wOk;
+    none = none && m64.level(L).WX.extent(0) == 0 && !m64.fp32WeightsOk(L);
   check(none, P.name + ": 'fp64' allocates no FP32 data");
 }
 
@@ -491,8 +502,8 @@ void preconditionerChecks(const Problem& P, bool nonlinearity) {
   const std::vector<double> z64 = toHost(z);
   const double d = norm([&](long i) { return (long double)z1.first[i] - z64[i]; }) /
                    norm([&](long i) { return (long double)z64[i]; });
-  std::printf("  %-72s %s\n", (P.name + ": |B32 r - B64 r| / |B64 r| = " + num(d)).c_str(),
-              "(info)");
+  // review finding 4: the guard against vcycleFp32Impl drifting from vcycleImpl (5-7e-8 measured)
+  check(d <= 1e-6, P.name + ": |B32 r - B64 r| / |B64 r| = " + num(d) + " <= 1e-6");
 }
 
 // A PCG solve of P from x = 0 on a fresh hierarchy; mode as given.
@@ -578,7 +589,7 @@ KrylovRun krylov(const Problem& P, int mode, int driver, double rtol, int maxit)
   return out;
 }
 
-void solverChecks(const Problem& P) {
+void solverChecks(const Problem& P, bool fcgMustConverge = false) {
   for (int driver : {0, 1}) {
     const std::string tag = P.name + (driver == 0 ? " PCG" : " FCG");
     const KrylovRun a64 = krylov(P, CutcellMG::kVcycleFp64, driver, 1e-8, 200),
@@ -587,6 +598,9 @@ void solverChecks(const Problem& P) {
     // (a), (c), (d) compare against an FP64 solve that converged for real (cyl / pack at 1e4 cap
     // or diverge in FP64 too: the coarsening limit of CLAUDE.md "Pressure solve")
     const bool valid = a64.it < 200 && a64.trueRel <= 1.5e-8;
+    if (fcgMustConverge && driver == 1)
+      check(valid, tag + ": fp64 converges (it " + std::to_string(a64.it) + ", true " +
+                       num(a64.trueRel) + "), so (a)-(e) run here");
     if (!valid) {
       std::printf("  %-72s (info)\n",
                   (tag + ": fp64 does not converge (it " + std::to_string(a64.it) + ", true " +
@@ -636,6 +650,15 @@ void eligibilityChecks() {
     const char* why = mg.fp32VcycleIneligible(true);
     check(why && std::string(why).find(c.want) != std::string::npos,
           c.P->name + ": (d) ineligible: " + (why ? why : "(eligible!)"));
+    // review finding 5: 'fp32' builds FP32 data only where the configuration can be eligible
+    // (the face-range case can: its weights are built, the check fails)
+    bool none = true;
+    for (int L = 0; L < mg.nLevels(); ++L)
+      none = none && mg.level(L).WX.extent(0) == 0;
+    const bool can = c.P == &tiny;
+    check(none != can, c.P->name + (can ? ": FP32 data built (the range check decides)"
+                                        : ": no FP32 data built on a configuration that cannot "
+                                          "be eligible"));
   }
   {  // the overlay (test hook) and a non-Krylov caller, on an otherwise eligible problem
     Problem ok = makeProblem("eligible", 16, 16, 16, 3, bcPer, ones, uni);
@@ -650,6 +673,15 @@ void eligibilityChecks() {
     check(why && std::string(why).find("overlay") != std::string::npos,
           std::string("eligible 16^3 + overlay: (d) ") + (why ? why : "(eligible!)"));
     mg.debugSetOverlaySolve(false);
+    // the mean-removal scope is a build-time condition: 'all' marks the weights stale, 'fine'
+    // rebuilds them from the stored openness at once
+    mg.setMeanRemovalScope(true);
+    why = mg.fp32VcycleIneligible(true);
+    check(why && std::string(why).find("mean-removal") != std::string::npos,
+          std::string("eligible 16^3, scope 'all': (d) ") + (why ? why : "(eligible!)"));
+    mg.setMeanRemovalScope(false);
+    check(mg.fp32VcycleIneligible(true) == nullptr && mg.fp32WeightsOk(0),
+          "eligible 16^3, scope back to 'fine': eligible, weights rebuilt");
   }
   // (f) the default is 'fp64' on every backend (FP32 opt-in, USER ruling 2026-10-15): no FP32 data
   // built; 'fp32' on the ineligible solvable configurations raises at the solve, naming why
@@ -802,6 +834,11 @@ int main(int argc, char** argv) {
       kernelChecks(P);
       preconditionerChecks(P, P.name == "column");
       solverChecks(P);
+    }
+    {
+      const Problem S = slabProblem();
+      preconditionerChecks(S, false);
+      solverChecks(S, /*fcgMustConverge=*/true);
     }
     eligibilityChecks();
     memoryChecks();

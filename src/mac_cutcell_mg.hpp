@@ -543,17 +543,17 @@ inline void restrictAvgZeroX(CCField coarse, CCField coarseX, CCConst fine, C3 c
 // kOpFp64Diag = AC alone, by cutcellBuildFaceOpCell's identical expression over the same box (the
 // level-0 build while the FP64 V-cycle data are deferred, §4.4.7: AC stays the fluid predicate);
 // kOpFp64None = only the weights (the precision setter's rebuild; a deferred coarse level).
-// Returns 1 when a face weight t of the box violates t == 0 || 1e-30 <= t <= 1e30 (the face-range
-// check, §4.4.1 (5)), else 0. One max reduction.
+// A face weight t of the box that violates t == 0 || 1e-30 <= t <= 1e30 (the face-range check,
+// §4.4.1 (5)) sets the device flag *bad to 1 (the caller zeroed it); no host reduction, so the
+// build does not block (CutcellMG reads the flags once, at the next solve's eligibility check).
 enum : int { kOpFp64None = 0, kOpFp64Diag = 1, kOpFp64Full = 2 };
 template <class OpV, class WV>
-inline int buildCutcellOpFaceFp32(OpV AC, OpV AFX, OpV AFY, OpV AFZ, WV WX, WV WY, WV WZ,
-                                  CCConst ox, CCConst oy, CCConst oz, C3 e, int gb, double gfx,
-                                  double gfy, double gfz, int fp64) {
-  int bad = 0;
-  ccReduce3(
+inline void buildCutcellOpFaceFp32(OpV AC, OpV AFX, OpV AFY, OpV AFZ, WV WX, WV WY, WV WZ,
+                                   CCConst ox, CCConst oy, CCConst oz, C3 e, int gb, double gfx,
+                                   double gfy, double gfz, int fp64, int* bad) {
+  ccForRows3(
       "peclet::flow::cc_build_op", C3{0, 0, 0}, C3{e.x, e.y, e.z},
-      KOKKOS_LAMBDA(int lx, int ly, int lz, int& acc) {
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
         const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
         if (fp64 != kOpFp64None) {
@@ -580,10 +580,8 @@ inline int buildCutcellOpFaceFp32(OpV AC, OpV AFX, OpV AFY, OpV AFZ, WV WX, WV W
         const bool oks = ts == 0.0 || (ts >= 1e-30 && ts <= 1e30);
         const bool okb = tb == 0.0 || (tb >= 1e-30 && tb <= 1e30);
         if (!(okw && oks && okb))
-          acc = 1;
-      },
-      Kokkos::Max<int>(bad));
-  return bad > 0 ? 1 : 0;  // the identity of Max<int> is INT_MIN: no violating face leaves it
+          Kokkos::atomic_max(bad, 1);
+      });
 }
 inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, int gc, C3 finner,
                        C3 ratio) {
@@ -1032,8 +1030,8 @@ class CutcellMG {
     // D (doc/vof_projection_cost_design.md §4.4.2; single rank, non-bottom levels, built only while
     // the V-cycle precision is not 'fp64'): the FP32 face weights w_f = fl32(t_f) > 0 -- no
     // diagonal in any precision, D_i is summed from the six weights -- and the FP32 iterates.
-    // wOk: this level's weights are built from the current openness and passed the face-range
-    // check (§4.4.1 (5)).
+    // wOk: this level's weights are built from the current openness (whether they passed the
+    // face-range check, §4.4.1 (5), is CutcellMG::fp32WeightsOk: a device flag).
     Kokkos::View<VReal*, CCMem> WX, WY, WZ, xf, rhsf, resf;
     bool wOk = false;
 #ifdef PECLET_FLOW_MPI
@@ -1860,11 +1858,12 @@ class CutcellMG {
     fp64Stale_ = defer;
     if (!defer)
       allocFp64(f);
-    if (fp32Build(0))  // D: the FP32 weights in the same kernel (§4.4.2)
-      f.wOk = buildCutcellOpFaceFp32(f.AC, f.AFX, f.AFY, f.AFZ, f.WX, f.WY, f.WZ, CCConst(f.ox),
-                                     CCConst(f.oy), CCConst(f.oz), f.ext, G, idx2, idy2, idz2,
-                                     defer ? kOpFp64Diag : kOpFp64Full) == 0;
-    else
+    if (fp32Build(0)) {  // D: the FP32 weights in the same kernel (§4.4.2)
+      buildCutcellOpFaceFp32(f.AC, f.AFX, f.AFY, f.AFZ, f.WX, f.WY, f.WZ, CCConst(f.ox),
+                             CCConst(f.oy), CCConst(f.oz), f.ext, G, idx2, idy2, idz2,
+                             defer ? kOpFp64Diag : kOpFp64Full, fp32RangeFlag(0));
+      f.wOk = true;
+    } else
       buildCutcellOpFace(f.AC, f.AFX, f.AFY, f.AFZ, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
                          f.ext, G, idx2, idy2, idz2);
     noteFluidCells(f);
@@ -1914,12 +1913,13 @@ class CutcellMG {
       const bool deferC = defer && L + 1 < (int)lv_.size();  // D5: never the bottom
       if (!deferC)
         allocFp64(c);
-      if (fp32Build(L))  // D: the FP32 weights in the same kernel (§4.4.2)
-        c.wOk = buildCutcellOpFaceFp32(c.AC, c.AFX, c.AFY, c.AFZ, c.WX, c.WY, c.WZ, CCConst(c.ox),
-                                       CCConst(c.oy), CCConst(c.oz), c.ext,
-                                       c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy, idz2 * sz,
-                                       deferC ? kOpFp64None : kOpFp64Full) == 0;
-      else
+      if (fp32Build(L)) {  // D: the FP32 weights in the same kernel (§4.4.2)
+        buildCutcellOpFaceFp32(c.AC, c.AFX, c.AFY, c.AFZ, c.WX, c.WY, c.WZ, CCConst(c.ox),
+                               CCConst(c.oy), CCConst(c.oz), c.ext, c.g == 2 ? c.g - 1 : c.g,
+                               idx2 * sx, idy2 * sy, idz2 * sz, deferC ? kOpFp64None : kOpFp64Full,
+                               fp32RangeFlag(L));
+        c.wOk = true;
+      } else
         buildCutcellOpFace(c.AC, c.AFX, c.AFY, c.AFZ, CCConst(c.ox), CCConst(c.oy), CCConst(c.oz),
                            c.ext, c.g == 2 ? c.g - 1 : c.g, idx2 * sx, idy2 * sy, idz2 * sz);
       if (deferC) {  // no AC on a deferred level: its count comes with ensureFp64
@@ -3178,12 +3178,29 @@ class CutcellMG {
   // 'fp64').
   enum : int { kVcycleFp64 = 1, kVcycleFp32 = 2 };
   bool fp32Mode() const { return vprec_ == kVcycleFp32; }
-  // Does level L carry the FP32 data (§4.4.2)? Single rank, no outflow face, a non-bottom level,
-  // and the mode is 'fp32'. Allocates the level's six FP32 arrays (zero) on first use; a level
-  // that does not carry them is marked stale (wOk = false).
+  // Can this configuration be eligible (§4.4.1), as far as the operator build knows? Every
+  // condition of fp32VcycleIneligible that does not depend on the solve (the driver, an overlay)
+  // or on the weights themselves: single rank, no outflow face, >= 2 levels, even inner dimensions
+  // on every non-bottom level, a double outer operator, the mean-removal scope 'fine'.
+  bool fp32Carriable() const {
+    if (distributed_ || hasOutflow_ || lv_.size() < 2 || meanRemovalAll_)
+      return false;
+    if (!(exactResidual_ || std::is_same_v<MReal, double>))
+      return false;
+    for (std::size_t L = 0; L + 1 < lv_.size(); ++L) {
+      const C3 in = lv_[L].inner;
+      if (in.x % 2 != 0 || in.y % 2 != 0 || in.z % 2 != 0)
+        return false;
+    }
+    return true;
+  }
+  // Does level L carry the FP32 data (§4.4.2)? The mode is 'fp32', the configuration can be
+  // eligible (fp32Carriable) and L is a non-bottom level -- so 'fp64' builds no FP32 data and runs
+  // no face-range check. Allocates the level's six FP32 arrays (zero) on first use; a level that
+  // does not carry them is marked stale (wOk = false).
   bool fp32Build(int L) {
     Level& lv = lv_[L];
-    if (!fp32Mode() || distributed_ || hasOutflow_ || L + 1 >= (int)lv_.size()) {
+    if (!fp32Mode() || L + 1 >= (int)lv_.size() || !fp32Carriable()) {
       lv.wOk = false;
       return false;
     }
@@ -3217,8 +3234,39 @@ class CutcellMG {
   // V-cycle data are built (fp32Build's conditions) and the outer operator is exact (the level-0
   // apply reads the openness, not AFX): then only an ineligible solve's FP64 V-cycle, a non-exact
   // level-0 apply or BiCGStab reads them, and ensureFp64 builds them for that reader.
-  bool fp64Deferrable() const {
-    return fp32Mode() && !distributed_ && !hasOutflow_ && exactResidual_ && lv_.size() >= 2;
+  bool fp64Deferrable() const { return fp32Mode() && exactResidual_ && fp32Carriable(); }
+  // Finding 5 of the C0/D/G review: the face-range check of each carrying level reduces into a
+  // device flag (wBad_(L)), not a host scalar, so an operator build never blocks; the flags are
+  // read back once (one copy for all levels) by the first eligibility check after a build.
+  // fp32RangeFlag(L): zero level L's flag (asynchronously, on the build's execution space) and
+  // return it for the build kernel.
+  int* fp32RangeFlag(int L) {
+    if (wBad_.extent(0) != lv_.size()) {
+      wBad_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_wbad", lv_.size());
+      wBadHost_ = Kokkos::create_mirror_view(wBad_);
+    }
+    Kokkos::deep_copy(CCExec(), Kokkos::subview(wBad_, L), 0);
+    wBadStale_ = true;
+    return wBad_.data() + L;
+  }
+  // Level L's FP32 weights are built from the current openness and passed the face-range check.
+  bool fp32WeightsOk(int L) const {
+    if (!lv_[L].wOk)
+      return false;
+    if (wBadStale_) {
+      Kokkos::deep_copy(wBadHost_, wBad_);  // the one read-back (fences the builds)
+      wBadStale_ = false;
+    }
+    return wBadHost_(L) == 0;
+  }
+  // A setter changed an input of fp32Carriable or fp64Deferrable (was*: their values before):
+  // release the FP64 V-cycle data if the deferral turned on (D5), rebuild the FP32 weights from
+  // the stored openness if carriability changed (a level that no longer carries is marked stale).
+  void fp32Reconfigure(bool wasCarriable, bool wasDeferrable) {
+    if (!wasDeferrable && fp64Deferrable())
+      releaseFp64();
+    if (wasCarriable != fp32Carriable())
+      buildFp32Weights();
   }
   // D5: before any reader of the non-bottom FP64 V-cycle data. Allocates what is missing, and
   // when the last operator build deferred them builds them from the stored level openness with
@@ -3235,11 +3283,12 @@ class CutcellMG {
       const double sx = 1.0 / (double)(lv.cfac.x * lv.cfac.x),
                    sy = 1.0 / (double)(lv.cfac.y * lv.cfac.y),
                    sz = 1.0 / (double)(lv.cfac.z * lv.cfac.z);
-      if (fp32Build(L))
-        lv.wOk = buildCutcellOpFaceFp32(lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.WX, lv.WY, lv.WZ,
-                                        CCConst(lv.ox), CCConst(lv.oy), CCConst(lv.oz), lv.ext,
-                                        lv.g, gfx_ * sx, gfy_ * sy, gfz_ * sz, kOpFp64Full) == 0;
-      else
+      if (fp32Build(L)) {
+        buildCutcellOpFaceFp32(lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.WX, lv.WY, lv.WZ, CCConst(lv.ox),
+                               CCConst(lv.oy), CCConst(lv.oz), lv.ext, lv.g, gfx_ * sx, gfy_ * sy,
+                               gfz_ * sz, kOpFp64Full, fp32RangeFlag(L));
+        lv.wOk = true;
+      } else
         buildCutcellOpFace(lv.AC, lv.AFX, lv.AFY, lv.AFZ, CCConst(lv.ox), CCConst(lv.oy),
                            CCConst(lv.oz), lv.ext, lv.g, gfx_ * sx, gfy_ * sy, gfz_ * sz);
       noteFluidCells(lv);
@@ -3279,9 +3328,10 @@ class CutcellMG {
       const double sx = 1.0 / (double)(lv.cfac.x * lv.cfac.x),
                    sy = 1.0 / (double)(lv.cfac.y * lv.cfac.y),
                    sz = 1.0 / (double)(lv.cfac.z * lv.cfac.z);
-      lv.wOk = buildCutcellOpFaceFp32(lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.WX, lv.WY, lv.WZ,
-                                      CCConst(lv.ox), CCConst(lv.oy), CCConst(lv.oz), lv.ext, lv.g,
-                                      gfx_ * sx, gfy_ * sy, gfz_ * sz, kOpFp64None) == 0;
+      buildCutcellOpFaceFp32(lv.AC, lv.AFX, lv.AFY, lv.AFZ, lv.WX, lv.WY, lv.WZ, CCConst(lv.ox),
+                             CCConst(lv.oy), CCConst(lv.oz), lv.ext, lv.g, gfx_ * sx, gfy_ * sy,
+                             gfz_ * sz, kOpFp64None, fp32RangeFlag(L));
+      lv.wOk = true;
     }
 #ifndef NDEBUG
     checkFp32DecoupledSets();
@@ -3462,7 +3512,7 @@ class CutcellMG {
     if (fp64Stale_)
       return;  // D5: the FP64 AC of a deferred level is not built (the test hook ensures it)
     for (int L = 0; L < (int)lv_.size(); ++L)
-      if (lv_[L].wOk) {
+      if (fp32WeightsOk(L)) {
         long n32 = 0, n64 = 0;
         fp32DecoupledCounts(L, n32, n64);
         assert(n32 == n64 && "D: the FP32 decoupled set must equal the FP64 AC < 1e-30 set");
@@ -3492,8 +3542,8 @@ class CutcellMG {
     // legacy every-level scope (set_pressure_mean_removal('all')) keeps the FP64 V-cycle.
     if (meanRemovalAll_)
       return "the mean-removal scope is 'all' (the FP32 V-cycle removes the mean at level 0 only)";
-    for (std::size_t L = 0; L + 1 < lv_.size(); ++L)
-      if (!lv_[L].wOk)
+    for (int L = 0; L + 1 < (int)lv_.size(); ++L)
+      if (!fp32WeightsOk(L))
         return "a face weight is outside {0} or [1e-30, 1e30] (or the FP32 weights are not built)";
     return nullptr;
   }
@@ -4960,7 +5010,11 @@ class CutcellMG {
   // and drops the interior-level ones: A maps mean-free vectors to mean-free vectors, so the Krylov
   // space never sees the dropped components (they lie in the nullspace and are removed from the
   // final x). Validated by iteration-count parity; not bit-identical to "all".
-  void setMeanRemovalScope(bool all) { meanRemovalAll_ = all; }
+  void setMeanRemovalScope(bool all) {
+    const bool carry = fp32Carriable(), defer = fp64Deferrable();
+    meanRemovalAll_ = all;
+    fp32Reconfigure(carry, defer);  // D: the scope is an eligibility condition (§4.2 P8)
+  }
 
   // Accumulated wall time / call count of the global reductions (every dot product, residual max
   // and mean-removal funnels through allreduce()). This is THE latency-bound term of the
@@ -5116,6 +5170,10 @@ class CutcellMG {
   // opBuilt_: setOpenness has built the operator of the current hierarchy.
   int vprec_ = kVcycleFp64;
   bool opBuilt_ = false;
+  // Finding 5: the per-level face-range flags of the FP32 weights (device) and their read-back.
+  Kokkos::View<int*, CCMem> wBad_;
+  mutable typename Kokkos::View<int*, CCMem>::host_mirror_type wBadHost_;
+  mutable bool wBadStale_ = false;
   // D5 (§4.4.7): the non-bottom levels' FP64 V-cycle data do not hold the current operator (the
   // last build deferred them, or the setter released them); ensureFp64 rebuilds them.
   bool fp64Stale_ = false;
@@ -5202,10 +5260,9 @@ class CutcellMG {
   bool strictPressure() const { return strictPressure_; }
   /// The exact double flux-form level-0 apply in the residual and the Krylov matvec.
   void setExactResidual(bool on) {
-    const bool was = fp64Deferrable();
+    const bool carry = fp32Carriable(), defer = fp64Deferrable();
     exactResidual_ = on;
-    if (!was && fp64Deferrable())
-      releaseFp64();  // D5 (§4.4.7): the exact outer leaves level 0's AFX unread
+    fp32Reconfigure(carry, defer);  // D5 (§4.4.7): the exact outer leaves level 0's AFX unread
   }
   bool exactResidual() const { return exactResidual_; }
   // WO-R2 item 1: the next setOpenness receives a variable-density COEFFICIENT field, so the
