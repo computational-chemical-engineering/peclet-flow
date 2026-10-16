@@ -1547,3 +1547,21 @@ Unset (every caller but `solveBalancedForceSystem`) `rref` is `r0`: bitwise.
   host 8940590f6ae7, OMP 1 d234ba65950a, CUDA b2b5f6188bba). G-BIT host + CUDA PASS, 'fp32' and 'auto' dumps
   bitwise, mg_fp32_vcycle 124 PASS, targeted ctests 23/23 on host and CUDA. Scripts: `gate_proj/closegate.sh`,
   `closeauto.sh`, `closefix.sh`; evidence `gate_proj/land/close/`.
+
+### S-3 on genoa (Snellius job 28122155, 2026-10-16): flow 446adf9 vs fedadb2, core 2398dc7
+
+One exclusive genoa node (EPYC 9654), bubble column from ckpt_t43, rtol 1e-8, single rank, 'direct' bottom, defaults
+(FP32 V-cycle and E opt-in, so off), 100 timed steps, base/new interleaved, two rounds. Includes design G (curvature).
+- 1x24 contiguous: 81.71 / 82.08 -> 62.41 / 62.69 ms/step (-19.3 ms, -23.6 %); spread over 12 CCDs: 74.58 / 75.75 ->
+  57.86 / 56.64 ms/step (-17.9 ms). Pressure iterations 10.05 = 10.05.
+- Kernel profile 1x24 (20-step difference): launches/step 937 -> 853, kernel time 79.6 -> 59.2 ms/step; cc_smooth
+  13.37 -> 8.01 ms (S + factor/pencil work), mg_bottom_factor 1.60 -> 1.13.
+- **C0 verdict: KEEP, gain proven on genoa.** Krylov reduction family per step: base mgmeanr + mgdot + mgmeans
+  3.75 + 3.32 + 1.75 = 8.82 ms -> new mgmeans_dot + mgmeans_max + mgmeanr + mgmeans 1.03 + 0.72 + 0.23 + 0.17 = 2.16 ms
+  (-6.7 ms). Per launch: base mgdot 174 us + mgmeans 79 us -> fused mgmeans_dot 103 us (0.41x); mgmeanr 174 us ->
+  mgmeans_max 72 us (0.41x). Meets the <= 0.5x per-launch gate that the workstation (bandwidth-bound) missed.
+- F4: S-3 does not isolate t_L. With the workstation t_L 3.5-4 us, 853 launches x 4 us = 3.4 ms < 5 ms, so by the §10
+  rule F4 stays deferred (step minus kernel time is 4.0 ms/step, an upper bound including Python).
+- Against the design's model (-17.5 ms host, projection package): measured -19.3 ms 1x24 for projection + G together;
+  D (-6.5 model) and E are not in it (opt-in, USER 2026-10-15). TBF reference (S-1): 45.5-46.0 ms/step.
+Results: Snellius `/projects/0/prjs1022/peclet/bubble-cpu/s3/results/s3b/` (summary.txt, kp_{base,new}/).
