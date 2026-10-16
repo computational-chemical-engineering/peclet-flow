@@ -26,7 +26,7 @@ Usage:
     --bottom-solver ENGINE  diagnostics.set_pressure_bottom_solver(ENGINE): auto | direct |
                 algebraic (§13: the A/B of the two bottom engines on one build)
     --fcg       flexible CG pressure (set_pressure_fcg, cap 800) at --rtol
-    --vcycle-precision MODE  diagnostics.set_pressure_vcycle_precision(MODE): fp64 | fp32
+    --vcycle-precision MODE  diagnostics.set_pressure_vcycle_precision(MODE): auto | fp64 | fp32
                 (doc/vof_projection_cost_design.md §4: the FP32 V-cycle A/B on one build)
     --initial-guess MODE  diagnostics.set_pressure_initial_guess(MODE, --guess-history H):
                 auto | zero | projected, H = 1 | 2 (default 2) (the same note, §5)

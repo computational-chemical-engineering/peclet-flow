@@ -736,12 +736,14 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "set_pressure_vcycle_precision",
           [](D& diag, const std::string& mode) {
-            if (mode == "fp64")
+            if (mode == "auto")
+              diag.s->setPressureVcyclePrecision(0);
+            else if (mode == "fp64")
               diag.s->setPressureVcyclePrecision(1);
             else if (mode == "fp32")
               diag.s->setPressureVcyclePrecision(2);
             else
-              throw std::runtime_error("set_pressure_vcycle_precision: 'fp64' | 'fp32'");
+              throw std::runtime_error("set_pressure_vcycle_precision: 'auto' | 'fp64' | 'fp32'");
           },
           nb::arg("mode"),
           "Precision of the V-cycle that preconditions the single-rank pressure PCG / FCG. 'fp64' "
@@ -751,13 +753,14 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "stop test stay FP64 -- raises at the solve, naming the failed condition, where not "
           "eligible (multi-rank, an outflow face, an overlay solve, a non-bottom level with an "
           "odd inner dimension, a float outer operator, a face weight outside [1e-30, 1e30], the "
-          "mean-removal scope 'all', a driver other than PCG / FCG). Takes effect at once. FP32 "
-          "is opt-in, not the default: it runs on a single rank only, so as a default it would "
-          "break the bit-exactness of a serial run with a distributed np=1 run, and its weight "
-          "rounding is not scale-invariant; it can also cap where 'fp64' converges (no FP64 "
-          "restart on a cap yet). It saves ~19 % of the projection on a GPU (bubble column, "
-          "RTX 5080), ~11 % on a CPU. Outside the CG drivers' rated contrast (density ratio "
-          "above ~1e3 with walls) both precisions may cap; FP32 may cap earlier. "
+          "mean-removal scope 'all', a driver other than PCG / FCG). 'auto': 'fp32' where eligible, "
+          "else 'fp64', on every backend. Takes effect at once. 'fp32' and 'auto' are opt-in, not"
+          " the default (decided 2026-10-15): the FP32 V-cycle runs on a single rank only, so as "
+          "a default it would break the bit-exactness of a serial run with a distributed np=1 "
+          "run; its weight rounding is not scale-invariant, and it can cap where 'fp64' "
+          "converges (no FP64 restart on a cap yet). It saves ~19 % of the projection on a GPU "
+          "(bubble column, RTX 5080), ~11 % on a CPU. Outside the CG drivers' rated contrast "
+          "(density ratio above ~1e3 with walls) both precisions may cap; FP32 may cap earlier. "
           "doc/vof_projection_cost_design.md §4.")
       .def(
           "set_pressure_initial_guess",
@@ -783,7 +786,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "max|P b|, so the solve is never looser than the cold one. Raises at the solve, naming "
           "the failed condition, where not eligible (the Chebyshev driver, the ghost projection, "
           "set_pressure_warmstart(True), multi-rank). 'auto': 'projected' where eligible, else "
-          "'zero'. The history restarts empty (a cold solve, then one increment, then two) after "
+          "'zero', on every backend. 'projected' and 'auto' are opt-in, not the default (decided "
+          "2026-10-15): the projected guess runs on a single rank only, so as a default it would "
+          "break the bit-exactness of a serial run with a distributed np=1 run. The history "
+          "restarts empty (a cold solve, then one increment, then two) after "
           "this call, a geometry change (set_solid, set_pressure_geometry, init_mpi, "
           "redistribute), a state write (set_field of u/v/w/p/phi, set_state, set_velocity), a "
           "driver change, and a failed or capped solve. RESTARTS: no history is checkpointed, so"

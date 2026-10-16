@@ -515,8 +515,9 @@ class Solver {
   void setPressureBottomSolver(int engine);
   // Precision of the pressure V-cycle preconditioner (doc/vof_projection_cost_design.md §4.4.6):
   // 1 "fp64" (DEFAULT), 2 "fp32" (opt-in, single-rank; raises at the solve, naming the failed
-  // condition, where CutcellMG::fp32VcycleIneligible does not hold). Live: the FP32
-  // weights are rebuilt from the stored level openness at once.
+  // condition, where CutcellMG::fp32VcycleIneligible does not hold), 0 "auto" (opt-in; FP32 where
+  // eligible, else FP64, on every backend). Live: the FP32 weights are rebuilt from the stored
+  // level openness at once.
   void setPressureVcyclePrecision(int mode);
   // The precision the last pressure solve's V-cycles used: true = FP32.
   bool pressureVcycleFp32() const;
@@ -684,9 +685,10 @@ class Solver {
   // steady march -> a more converged phi per fixed solver budget) instead of zeroing the initial
   // guess.
   void setPressureWarmstart(bool on);
-  // Initial guess of the projection solve (doc/vof_projection_cost_design.md §5.3): 0 "auto"
-  // (projected where eligible), 1 "zero" (DEFAULT), 2 "projected" (raises at the solve, naming
-  // the failed condition, where ineligible); history 1 or 2 increments. Resets the history.
+  // Initial guess of the projection solve (doc/vof_projection_cost_design.md §5.3): 1 "zero"
+  // (DEFAULT), 2 "projected" (opt-in, single-rank; raises at the solve, naming the failed
+  // condition, where ineligible), 0 "auto" (opt-in; projected where eligible, else zero); history
+  // 1 or 2 increments. Resets the history.
   void setPressureInitialGuess(int mode, int history);
   // Why the projected guess cannot run on this solver's next projection, or nullptr.
   const char* projectedGuessIneligible() const;

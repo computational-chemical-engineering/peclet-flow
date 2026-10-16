@@ -23,7 +23,10 @@
 ///       is checked in the MPI ctest cutcellmg_aniso_mpi);
 ///   (f) the default is 'fp64' on every backend (FP32 opt-in, USER ruling 2026-10-15) and builds
 ///       no FP32 data; on the ineligible outflow and odd-dimension configurations a PCG solve
-///       with 'fp32' raises, naming the condition;
+///       with 'fp32' raises, naming the condition; 'auto' (opt-in) is bitwise (x, iterations,
+///       reported precision) to 'fp32' on an eligible configuration and to 'fp64' on the outflow,
+///       odd-dimension and face-range ones (the last also with the exact outer, i.e. through the
+///       D5 deferral: FP32 data built, the FP64 data rebuilt on demand);
 ///   (a) the FP32 residual of x = c * 1, b = 0 is exactly 0 for c in {1, -3.7, 1e5, 2^-60};
 ///   (e) host: one FP32 smoother colour pass and the FP32 residual equal a scalar plain-float
 ///       reference of §4.4.3 bitwise (device: within 1e-5 relative -- the device contracts FMAs);
@@ -542,6 +545,18 @@ Solve solve(const Problem& P, int mode) {
   setUp(mg, P, mode);
   return solveOn(mg, P);
 }
+bool sameSolve(const Solve& a, const Solve& b) {
+  return a.it == b.it && a.fp32 == b.fp32 && a.x.size() == b.x.size() &&
+         std::memcmp(a.x.data(), b.x.data(), a.x.size() * sizeof(double)) == 0;
+}
+void setUpExact(CutcellMG& mg, const Problem& P, int mode, bool exact) {
+  mg.init(P.nx, P.ny, P.nz, P.levels);
+  mg.setBoundaryConditions(P.bc);
+  mg.setExactResidual(exact);
+  mg.setVcyclePrecision(mode);
+  mg.setOpenness(CCConst(toDevice(P.ox, "ox")), CCConst(toDevice(P.oy, "oy")),
+                 CCConst(toDevice(P.oz, "oz")), 1.0, 1.0, 1.0);
+}
 
 // One single-rank solve for G-D3 (driver 0 = PCG, 1 = FCG): iterations, failure, the FP32 flag,
 // the exit's true relative residual max|P(b - A x)| / max|P b|, and the health ratios.
@@ -698,6 +713,26 @@ void eligibilityChecks() {
       none = none && dflt.level(L).WX.extent(0) == 0;
     const Solve a = solveOn(dflt, ok);
     check(none && !a.fp32, "eligible 16^3: (f) the default builds no FP32 data, FP64 reported");
+    const Solve f = solve(ok, CutcellMG::kVcycleFp32), b = solve(ok, CutcellMG::kVcycleAuto);
+    check(f.fp32 && sameSolve(f, b), "eligible 16^3: (f) 'auto' == 'fp32' bitwise, it " +
+                                         std::to_string(f.it) + " / " + std::to_string(b.it) +
+                                         ", FP32 reported");
+  }
+  // (f) 'auto' where ineligible is bitwise to 'fp64' (no raise)
+  for (const Problem* P : {&out, &odd, &tiny}) {
+    const Solve a = solve(*P, CutcellMG::kVcycleFp64), b = solve(*P, CutcellMG::kVcycleAuto);
+    check(!a.fp32 && sameSolve(a, b), P->name + ": (f) 'auto' == 'fp64' bitwise, it " +
+                                          std::to_string(a.it) + " / " + std::to_string(b.it) +
+                                          ", FP64 reported");
+  }
+  {  // ... also through the D5 deferral (exact outer: the FP64 V-cycle data rebuilt on demand)
+    CutcellMG a, b;
+    setUpExact(a, tiny, CutcellMG::kVcycleFp64, true);
+    setUpExact(b, tiny, CutcellMG::kVcycleAuto, true);
+    const Solve sa = solveOn(a, tiny), sb = solveOn(b, tiny);
+    check(!sa.fp32 && sameSolve(sa, sb),
+          "tiny-face, exact outer: (f) 'auto' == 'fp64' bitwise, it " + std::to_string(sa.it) +
+              " / " + std::to_string(sb.it) + ", FP64 reported");
   }
   for (const Problem* P : {&out, &odd}) {
     std::string what;
@@ -714,14 +749,6 @@ void eligibilityChecks() {
 // WO-D5 (§4.4.7): with the FP32 V-cycle and an exact outer the non-bottom levels' FP64 V-cycle
 // data are not allocated (level 0 keeps x and AC; the bottom is whole); they are built on demand,
 // bitwise as the eager build, by a run-time switch to 'fp64' and by a non-exact apply.
-void setUpExact(CutcellMG& mg, const Problem& P, int mode, bool exact) {
-  mg.init(P.nx, P.ny, P.nz, P.levels);
-  mg.setBoundaryConditions(P.bc);
-  mg.setExactResidual(exact);
-  mg.setVcyclePrecision(mode);
-  mg.setOpenness(CCConst(toDevice(P.ox, "ox")), CCConst(toDevice(P.oy, "oy")),
-                 CCConst(toDevice(P.oz, "oz")), 1.0, 1.0, 1.0);
-}
 // The FP64 V-cycle data are absent exactly as §4.4.7 lists (true) or all present (false; level
 // 0's rhs only with l0rhs: the A5 V-cycle runs on the caller's vectors and never allocates it)?
 bool fp64Deferred(CutcellMG& mg, bool deferred, bool l0rhs = true) {
@@ -752,10 +779,6 @@ double mgBytesPerCell(CutcellMG& mg) {
                         v.rhsf.extent(0) + v.resf.extent(0));
   }
   return b / (double)mg.level(0).n;
-}
-bool sameSolve(const Solve& a, const Solve& b) {
-  return a.it == b.it && a.fp32 == b.fp32 && a.x.size() == b.x.size() &&
-         std::memcmp(a.x.data(), b.x.data(), a.x.size() * sizeof(double)) == 0;
 }
 void memoryChecks() {
   const Problem P = columnProblem();

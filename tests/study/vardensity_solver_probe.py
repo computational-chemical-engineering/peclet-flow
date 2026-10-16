@@ -514,7 +514,7 @@ def main():
                          "default = the shipped 'auto'")
     ap.add_argument("--vcycle-precision", default=None,
                     help="diagnostics.set_pressure_vcycle_precision(MODE) after the driver "
-                         "(fp64 | fp32; doc/vof_projection_cost_design.md §4, G-D3)")
+                         "(auto | fp64 | fp32; doc/vof_projection_cost_design.md §4, G-D3)")
     ap.add_argument("--levels", type=int, default=None,
                     help="pressure MG depth (default floor(log2 N) - 1)")
     args = ap.parse_args()
