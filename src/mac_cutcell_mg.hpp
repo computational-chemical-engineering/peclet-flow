@@ -2342,6 +2342,8 @@ class CutcellMG {
   void matvecGuessDots(Level& l0, CCField y, CCField v, CCField w, CCField r, int kvy, int kvr,
                        int kwy) {
     static_assert(ND == 2 || ND == 3, "matvecGuessDots: two or three dots");
+    if (!exactResidual_)
+      ensureFp64();  // D5 (§4.4.7): the band apply reads level 0's AFX, AFY, AFZ (as matvecDotTo)
     const C3 e = l0.ext, n = l0.inner;
     const int g = G;
     CCField yy = y;
@@ -2468,7 +2470,8 @@ class CutcellMG {
       CCField xx = x, rr = r;
       CCConst vv1 = v1, a1 = av1, a2 = av2;
       FPV ac = l0.AC;
-      const bool all = hostAllFluid(l0), two = hist == 2;
+      // c2 == 0 (history 1, or the Cholesky / non-finite fallback): never read v2 (0 * NaN = NaN)
+      const bool all = hostAllFluid(l0), two = hist == 2 && c2 != 0.0;
       ccFor3(
           "peclet::flow::mg_guess_x", C3{0, 0, 0}, C3{e.x, e.y, e.z},
           KOKKOS_LAMBDA(int ix, int iy, int iz) {
@@ -2594,8 +2597,11 @@ class CutcellMG {
       ExitDot& d;
       ~ExitDotScope() { d = ExitDot{}; }
     } exitDotScope{exitDot_};
-    // D (§4.4.5): the FP32 V-cycle on an eligible solve; it takes e = ilogb(max|r|) of the vector
-    // it preconditions (r0 before the loop, the packet's rn inside it) and forms r^T z in its exit
+    // D (§4.4.5): the FP32 V-cycle on an eligible solve; it takes e = ilogb(rn) inside the loop
+    // (the packet's rn = max|r|) and e = ilogb(r0) on entry -- under E r0 is the stop reference
+    // max|P b|, the only value the host holds, not max|r| of the guess residual: inert by the scale
+    // covariance B(2^k r) = 2^k B(r) (G-D2 (a)) away from the FP32 range edges. It forms r^T z in
+    // its exit.
     const bool f32 = fp32VcycleSolve();
     lastVcycleFp32_ = f32;
     const bool health = trace || healthTrace_;
@@ -2778,7 +2784,8 @@ class CutcellMG {
       if (star)
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
-    // D (§4.4.5): the FP32 V-cycle on an eligible solve, e = ilogb(max|r|); FCG keeps its own dots
+    // D (§4.4.5): the FP32 V-cycle on an eligible solve, e = ilogb(max|r|) (on entry ilogb(r0): the
+    // stop reference under E, see solvePCGResident); FCG keeps its own dots
     const bool f32 = fp32VcycleSolve();
     lastVcycleFp32_ = f32;
     healthLog_.clear();

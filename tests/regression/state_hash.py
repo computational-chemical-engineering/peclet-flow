@@ -12,7 +12,8 @@ correction), the two branches that read the projected face field as the advectin
 only ones the four scheme cases above miss (they are Stokes: set_advection(False)) -- an
 inflow/wall/outflow channel with advection, a VoF droplet under surface tension, Boussinesq
 scalar transport, the porous (volume-averaged) continuity with implicit drag, an analytic scene
-with a moving instance (set_instance_motion + set_instance_transform + rebuild_geometry), and the
+with a moving instance (set_instance_motion + set_instance_transform + rebuild_geometry), the
+collocated variable-rho balanced-force projection under the single-rank MG-PCG, and the
 distributed step at np = 2 (flow.mpi_block + init_mpi). Each prints one line: the case, the
 SHA-256 over the per-field hashes, and the first 12 hex digits of each field's hash (get_u/v/w/p,
 plus get_vof and the scalar where present), taken over the contiguous float64 bytes.
@@ -31,7 +32,7 @@ import peclet.flow as pf
 
 CASES = ("staggered_bed", "colocated_ghost", "colocated_gauge_exact", "colocated_plain",
          "colocated_embed", "colocated_advect", "colocated_advect_bc", "channel", "vof_droplet",
-         "scalar", "porous", "scene_moving")
+         "scalar", "porous", "scene_moving", "colocated_bfp")
 
 
 def sha(a):
@@ -174,6 +175,27 @@ def case_vof_droplet():
     s.set_property_model("rho", "linear", "C", [1.0, 0.0])
     s.set_surface_tension(1.0)
     s.set_dt(0.25 * s.capillary_dt())
+    for _ in range(5):
+        s.step()
+    return s
+
+
+def case_colocated_bfp():
+    """Collocated variable-rho (V8) VoF drop at ratio 1000 under a constant curvature (an exact
+    equilibrium), the balanced-force projection ON (its V8 default) and the single-rank MG-PCG: the
+    one path where the resident PCG stops on the caller's stop reference (WO-X1, setStopReference)."""
+    n, R = 16, 4.0
+    s = pf.SolverColocated(n, n, n)
+    s.set_rho(1000.0); s.set_mu(0.1); s.set_dt(1.0)
+    s.set_pressure_geometry(np.asfortranarray(np.full((n, n, n), 10.0)))
+    s.enable_vof()
+    s.set_vof(sphere_fractions((n, n, n), R, (n / 2 + 0.13, n / 2 + 0.27, n / 2 + 0.11)))
+    s.set_property_model("rho", "linear", "C", [1.0, 999.0])
+    s.set_surface_tension(1.0)
+    s.diagnostics.set_vof_kappa_constant(1.0 / R)
+    s.set_dt(0.5 * s.capillary_dt())
+    s.set_balanced_force_projection(True)
+    s.set_pressure_pcg(True, 500, 1e-10)
     for _ in range(5):
         s.step()
     return s

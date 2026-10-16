@@ -317,6 +317,15 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(balanced_force_restart PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # The projected initial guess of the projection solve (opt-in E, doc/vof_projection_cost_design.md
+  # §5.3): the cold first step and the step after a state write are bitwise 'zero', every guessed
+  # solve meets the stop bound (G-E2), x0 = 0 on solids, the Chebyshev driver raises.
+  add_test(NAME projected_guess
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_projected_guess.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(projected_guess PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The hydro force/torque getters (reaction AND traction) are unit-covariant: one periodic sphere,
   # translating and spinning, in cell units and two physical systems gives the same dimensionless
   # drag, torque and traction/reaction ratio. The traction once converted twice under a physical

@@ -41,6 +41,10 @@
 ///       fp64 converges: rulings 2026-10-15, design §13 G-D3, §15 R-4); (e) the health ratio
 ///       |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| (setHealthTrace): fp32's per-solve median <= 1.1x
 ///       fp64's (ruling 2026-10-15: the absolute 1e-2 is unattainable by fp64 itself, §13 G-D3).
+/// D5 (§4.4.7): the deferred FP64 V-cycle data are built on demand, bitwise the eager build, by a
+/// run-time switch to 'fp64', a non-exact apply and (review E0/X1 finding 1) a projected-guess
+/// solve (E, §5.3) whose fused guess matvec is the first reader after the exact outer is turned
+/// off.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -515,7 +519,7 @@ struct Solve {
   bool fp32 = false;
   std::vector<double> x;
 };
-Solve solveOn(CutcellMG& mg, const Problem& P) {
+std::vector<double> rhsOf(const Problem& P) {
   const C3 e = P.ext();
   const std::size_t n = (std::size_t)e.x * e.y * e.z;
   std::vector<double> hb(n, 0.0);
@@ -533,9 +537,30 @@ Solve solveOn(CutcellMG& mg, const Problem& P) {
     for (int y = 0; y < P.ny; ++y)
       for (int x = 0; x < P.nx; ++x)
         hb[P.idx(x, y, z)] -= sum / (double)cnt;
+  return hb;
+}
+Solve solveOn(CutcellMG& mg, const Problem& P) {
+  const std::vector<double> hb = rhsOf(P);
+  const std::size_t n = hb.size();
   CCField b = toDevice(hb, "b"), x("x", n), r("r", n), p("p", n), z("z", n), Ap("Ap", n);
   Solve out;
   out.it = mg.solvePCG(b, x, r, p, z, Ap, 200, 1e-8, 2, 2, 12);
+  out.fp32 = mg.lastVcycleFp32();
+  out.x = toHost(x);
+  return out;
+}
+// A PCG solve of P from the projected guess (E, §5.3) on the span of v1 and v2 (history 2: the
+// solve's x holds v2 = phi^{n-1} on entry, as projectSolve hands it over).
+Solve solveGuessOn(CutcellMG& mg, const Problem& P, const std::vector<double>& v1,
+                   const std::vector<double>& v2) {
+  const std::vector<double> hb = rhsOf(P);
+  const std::size_t n = hb.size();
+  CCField b = toDevice(hb, "b"), x = toDevice(v2, "x"), r("r", n), p("p", n), z("z", n),
+          Ap("Ap", n);
+  mg.setProjectedGuess(toDevice(v1, "v1"), 2);
+  Solve out;
+  out.it = mg.solvePCG(b, x, r, p, z, Ap, 200, 1e-8, 2, 2, 12);
+  mg.clearProjectedGuess();
   out.fp32 = mg.lastVcycleFp32();
   out.x = toHost(x);
   return out;
@@ -820,6 +845,23 @@ void memoryChecks() {
   const Solve l = solveOn(lazy, P);
   check(sameSolve(l, e) && fp64Deferred(lazy, false),
         "D5 column: exact off after a deferred build == the eager build, bitwise");
+  // review E0/X1 finding 1: the same switch, then a projected-guess solve FIRST -- its fused host
+  // guess matvec (matvecGuessDots) is the first reader of level 0's band and must build it
+  std::vector<double> v1 = e.x, v2 = e.x;
+  for (std::size_t i = 0; i < v2.size(); ++i) {
+    v1[i] = 0.97 * v1[i] + 1e-3 * std::cos(0.23 * (double)i);
+    v2[i] = 0.9 * v2[i] + 1e-3 * std::sin(0.37 * (double)i);
+  }
+  CutcellMG eagerG, lazyG;
+  setUpExact(eagerG, P, CutcellMG::kVcycleFp32, false);
+  setUpExact(lazyG, P, CutcellMG::kVcycleFp32, true);
+  lazyG.setExactResidual(false);
+  const Solve ge = solveGuessOn(eagerG, P, v1, v2), gl = solveGuessOn(lazyG, P, v1, v2);
+  check(sameSolve(gl, ge) && ge.it < e.it,
+        "D5 x E column: exact off after a deferred build, projected guess == the eager build, "
+        "bitwise, it " +
+            std::to_string(gl.it) + " / " + std::to_string(ge.it) + " (cold " +
+            std::to_string(e.it) + ")");
 }
 
 // WO-D5 memory report (not a check; `test_mg_fp32_vcycle --memory N L`): the MG level arrays in
