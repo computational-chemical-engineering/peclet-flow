@@ -1,5 +1,24 @@
 # VoF projection and momentum cost (D + C, E, F, H): design note
 
+> **Outcome (2026-10-16).** Landed on flow main (60126ec..9cff2a0; 2a59131 the opt-in `'auto'` of
+> `set_pressure_vcycle_precision`; 191bba3 the E0/X1 review fixes and gates — ctest
+> `projected_guess`, state_hash `colocated_bfp`): H, C0–C4, S, F-1/F-2/F-2b, D0–D3, D5, X1, E0. **Defaults
+> unchanged (USER ruling 2026-10-15):** the FP32 V-cycle (D) and the projected guess (E) are opt-in —
+> `'fp64'` / `'zero'` by default; `'fp32'` / `'projected'` force the fast path (raise where
+> ineligible); `'auto'` on both setters = the fast path where eligible, else the default, on every
+> backend. Both are single-rank only, so as defaults they break flow's serial ↔ np=1 bit-exactness
+> (CUDA battery at the reverted D default 37f8f5f: 8 np1 tests + `units_scale_invariance`); E1 was not
+> promoted (saving 0.83–0.87 iterations/step; G-NUM-P 3's per-step 2× fails, max 4.08). **Flip
+> conditions for D and E defaults:** an FP64 restart on a cap or breakdown (review finding 3,
+> `bubble_column_perf/gate_proj/REVIEW_C0_D_G.md`: under `'auto'` a GPU solve can cap where FP64
+> converged — walled slab 1e3/1e4, 123–135 its → cap — visible only in the iteration count) **and**
+> a distributed FP32 V-cycle / E. **Premise corrected:** the 2026-10-15 ruling "no contrast bound in
+> eligibility (it would exclude the bubble column)" (§13 G-D3(a), §15 R-4) rests on a false premise —
+> the bubble column's density ratio is **50** (ρ_g/ρ_l = 0.02), so a bound in (50, 1e3) would keep it
+> eligible; moot while FP32 is opt-in, and the review prefers the restart-on-cap to a contrast metric.
+> C0's per-launch timing gate was not met on the workstation (bandwidth-bound at 24 threads); the
+> genoa S-3 run decides C0 and F4. Numbers: `doc/vof_step_performance_log.md` (2026-10-09 onward).
+
 **Status:** DESIGN, 2026-10-08. Brief: `doc/vof_projection_cost_brief.md`. Code read at flow main
 `afbc8b6` (= `f19ac4b` for every file this note touches). Parent design:
 `doc/vof_step_performance_design.md` (cited as "perf §N"); this note **supersedes perf §10 E1 and
@@ -284,7 +303,11 @@ colours, bottom 12; colour parity `parityOg`):
    on every other inner cell `xf(i) = 0`. σ = 2⁻ᵉ with
    `e = ilogb(rn)`, rn = max|r| of the vector being preconditioned (the host already holds it: r0
    before the loop, the packet's rn inside it). Multiplying by a power of two is exact. rn = 0 or
-   non-finite never reaches the preconditioner (today's guards).
+   non-finite never reaches the preconditioner (today's guards). **As built (2026-10-16, review
+   E0/X1 finding 8):** under E the entry exponent is ilogb of the stop reference max|P b| — the
+   only value the host holds before the loop — not max|r| of the guess residual; inside the loop it
+   is the packet's rn. Inert by the scale covariance B(2^k r) = 2^k B(r) (G-D2 (a)) unless the
+   scaled r reaches the FP32 denormal range (the headroom shrinks by max|r|/rref).
 2. Remaining pre-smooth colour passes, residual, restriction, recursion, prolongation,
    post-smooth: as today on every non-bottom level, with the FP32 bodies on `xf, rhsf, resf, W*`.
    Restriction FP32→FP32 (the 8-child sum times `0.125f`) zeroes the coarse `xf`; prolongation
@@ -714,7 +737,8 @@ build:
     (a) and (d) are scoped to the configurations where fp64 converges in every solve (ruling
     2026-10-15, R-4): outside the CG drivers' rated contrast (the walled hydro slab at 1e3/1e4,
     where fp64's sym(M) is already indefinite and fp64 caps too) both precisions may cap and fp32
-    may cap earlier — accepted, no contrast bound in eligibility (it would exclude the bubble column);
+    may cap earlier — accepted, no contrast bound in eligibility (it would exclude the bubble column
+    [premise false: the column is ratio 50; see Outcome]);
 (b) attainable floor (rtol 1e-14, cap 300): `floor_fp32 ≤ 2 × floor_fp64`;
 (c) at exit, the freshly recomputed `max|P(b − Ax)|/max|Pb| ≤ 1.5·rtol`;
 (d) no capped solve where fp64 converges; `pressure_solve_failed()` never set;
@@ -826,7 +850,7 @@ WO except C0, whose host order change applies at every np (np-tests at their tol
   already indefinite there (dense tool) and FP64 caps later itself (div O(1)). On the 53 probe
   configurations where FP64 converges in every solve, FP32 costs +2 iterations of 12664. FCG fails the
   same items, so WO-D4c is not taken. No contrast bound in eligibility (it would exclude the bubble
-  column); the limit is stated in the `set_pressure_vcycle_precision` docstring.
+  column [premise false: the column is ratio 50; see Outcome]); the limit is stated in the `set_pressure_vcycle_precision` docstring.
 - **R-5.** H-2a may be impossible (aliasing of the coefficient fields); it is then dropped (−0.4).
 
 ---

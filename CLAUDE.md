@@ -231,6 +231,19 @@ you want). Detail and numbers for every bullet: ref §6.
   degraded** on a high-contrast bed (`../docs/SCALING_ISSUES.md` #1). Ctest `no_float_operator_casts`
   fails on a new `(float)` cast outside `// PRECISION-EXEMPT: <reason>`; `GpOverlay`'s two exempt
   casts are a real cross-repo gap (core's `gpFillRow` is float-hardcoded), not dead code.
+- **Projection fast paths are OPT-IN; the defaults stay `'fp64'` / `'zero'` (USER 2026-10-15).**
+  `diagnostics.set_pressure_vcycle_precision('fp64'|'fp32'|'auto')`: an FP32 V-cycle preconditioner
+  below the exact FP64 PCG/FCG (face weights, derived diagonal, flux form; projection −19 % on the
+  RTX 5080, −11 % on host, bubble column). `diagnostics.set_pressure_initial_guess('zero'|'projected'|
+  'auto')`: the A-norm projected guess (−0.83…−0.87 PCG iterations/step). The forced value raises
+  where ineligible; `'auto'` = the fast path where eligible, else the default, on every backend. Both
+  are single-rank only — as defaults they break the serial ↔ np=1 bit-exactness (8 np1 ctests +
+  `units_scale_invariance` failed on CUDA) — and FP32 can cap where FP64 converges (walled slab
+  ≥ 1e3), visible only in `last_pressure_iterations()`. **Do not flip either default** without an
+  FP64 restart-on-cap and a distributed FP32 V-cycle / E (`doc/vof_projection_cost_design.md`
+  Outcome, register). Host CutcellMG sums use 4 x-lanes (`ccReduce3Lanes`, C0: host pressure
+  results moved once, ≤ 6.5e-14 relative); the fused host Krylov reductions (C1–C4) are
+  single-rank host only.
 - `set_pressure_bottom("auto")` (default) agglomerates the coarsest level into a global operator solved
   exactly when it exceeds `set_pressure_bottom_extent` (4) cells on an axis; porous and variable-ρ
   rebuild it every step — avoid `auto` with a badly-factored grid there. Engines: host GraphAMG, or on

@@ -1530,3 +1530,20 @@ Unset (every caller but `solveBalancedForceSystem`) `rref` is `r0`: bitwise.
   300 steps, history 2 / 1) parked until a distributed E exists; G-NUM-P 3 is n/a under the 'zero' default.
   Host: G-BIT PASS vs `ref/r_omp`; 'fp32' 4/4 bitwise vs `ref/d3f32_omp`; 'projected' (history 2, --flux device)
   4/4 bitwise vs the E0 evidence `e0/ev_omp`.
+
+### Close (2026-10-16) — 'auto' restored as an opt-in value; E0/X1 review fixes (BRIEF_CLOSE + addendum)
+
+- 2a59131: `set_pressure_vcycle_precision('auto')` back as OPT-IN = FP32 where eligible, else FP64, on every
+  backend (the symmetric value of `set_pressure_initial_guess('auto')`); default 'fp64'. Gates: host G-BIT PASS vs
+  `ref/r_omp`, CUDA vs `ref/r_cuda`; 'fp32' dumps 4/4 + 2/2 bitwise; 'auto' on the bubble column bitwise to the
+  'fp32' dumps (2/2 host, 2/2 CUDA); ctest (f) 'auto' == 'fp32' on the eligible 16^3 and == 'fp64' on outflow, odd,
+  face-range (also through the D5 deferral): mg_fp32_vcycle 123 PASS host and CUDA.
+- 191bba3 (`gate_proj/REVIEW_E0_X1.md` findings 1-3, 8): `matvecGuessDots` builds deferred FP64 data
+  (`ensureFp64` before a band apply; without it the new "D5 x E" check segfaults, rc 139); the c2 = 0 fallback no
+  longer reads v2; comments on the FP32 entry exponent under E (= ilogb of rref). New gates: ctest `projected_guess`
+  (cylinder 16^3, PCG/FCG: G-E3 bitwise, G-E2 max resid/rref 9.87e-9 / 7.95e-9 over 11 guessed solves, x0 = 0 on
+  solids, iterations 84 -> 64 / 82 -> 64 over 12 steps, Chebyshev raises); "D5 x E" in mg_fp32_vcycle (9 = 9 its,
+  cold 18); state_hash `colocated_bfp` (BFP iterations/step 500/24/9/12/10 at fedadb2 -> 500/16/4/5/4; hash OMP 8
+  host 8940590f6ae7, OMP 1 d234ba65950a, CUDA b2b5f6188bba). G-BIT host + CUDA PASS, 'fp32' and 'auto' dumps
+  bitwise, mg_fp32_vcycle 124 PASS, targeted ctests 23/23 on host and CUDA. Scripts: `gate_proj/closegate.sh`,
+  `closeauto.sh`, `closefix.sh`; evidence `gate_proj/land/close/`.
