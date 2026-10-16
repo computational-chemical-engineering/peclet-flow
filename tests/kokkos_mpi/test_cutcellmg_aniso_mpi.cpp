@@ -23,6 +23,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <exception>
 #include <Kokkos_Core.hpp>
 #include <utility>
 #include <vector>
@@ -154,20 +156,9 @@ int main(int argc, char** argv) {
     auto hx = setupAndSolve(mg, l0.ext, l0.og, nx, ny, nz, /*collective=*/true, &it);
     const std::vector<C3> tab = mg.levelRatios();
 
-    // G-D1(d) (doc/vof_projection_cost_design.md §13): the FP32 V-cycle is not eligible on a
-    // distributed hierarchy yet. Since WO-D1 of doc/vof_projection_distributed_design.md (§5.1)
-    // the FP32 data ARE built there under 'fp32' (inert until WO-D2a enables the distributed
-    // V-cycle): level 0 carries its weights.
-    if (size > 1) {
-      mg.setVcyclePrecision(CutcellMG::kVcycleFp32);
-      const char* why = mg.fp32VcycleIneligible(true);
-      if (!why || std::string(why).find("distributed") == std::string::npos ||
-          mg.level(0).WX.extent(0) != mg.level(0).n) {
-        ++fail;
-        std::fprintf(stderr, "[rank %d] FP32 V-cycle eligible on a distributed hierarchy\n", rank);
-      }
-      mg.setVcyclePrecision(CutcellMG::kVcycleFp64);
-    }
+    // G-D1(d) of doc/vof_projection_cost_design.md §13 asserted "not eligible distributed"; since
+    // WO-D2a of doc/vof_projection_distributed_design.md the distributed FP32 V-cycle runs: the
+    // forced-'fp32' arm is checked against the single-rank 'fp32' solve after statement 2 below.
 
     // 1. the level table is the same on every rank (a pure function of replicated data).
     {
@@ -280,6 +271,67 @@ int main(int argc, char** argv) {
     if (it >= 500 || refIt >= 500) {
       ++fail;
       std::fprintf(stderr, "[rank %d] pass 1 CAPPED (%d / %d iters)\n", rank, it, refIt);
+    }
+
+    // ---- the forced-'fp32' arm (doc/vof_projection_distributed_design.md §8 G-DD1 (d), WO-D2a) --
+    // pass 1's hierarchy under the FP32 V-cycle against the single-rank 'fp32' solve: np = 1
+    // memcmp-equal with equal iterations, np > 1 at pass 1's tolerance and iteration window.
+    {
+      CutcellMG r32;
+      r32.setMetric(hp);
+      r32.init(nx, ny, nz, NLEV);
+      r32.setVcyclePrecision(CutcellMG::kVcycleFp32);
+      CutcellMG m32;
+      m32.setMetric(hp);
+      m32.setTelescope(true);
+      m32.setTelescopeMinExtent(0);
+      m32.initMpi(nx, ny, nz, NLEV, MPI_COMM_WORLD);
+      m32.setVcyclePrecision(CutcellMG::kVcycleFp32);
+      int r32It = 0, it32 = 0;
+      bool threw = false;
+      HostVec h32, hx32;
+      try {
+        h32 = setupAndSolve(r32, re, ro, nx, ny, nz, /*collective=*/false, &r32It);
+        hx32 = setupAndSolve(m32, m32.level(0).ext, m32.level(0).og, nx, ny, nz,
+                             /*collective=*/true, &it32);
+      } catch (const std::exception& ex) {
+        threw = true;
+        std::fprintf(stderr, "[rank %d] fp32 arm threw: %s\n", rank, ex.what());
+      }
+      if (threw || !r32.lastVcycleFp32() || !m32.lastVcycleFp32()) {
+        ++fail;
+        std::fprintf(stderr, "[rank %d] fp32 arm: the FP32 V-cycle did not run\n", rank);
+      } else {
+        const C3 e = m32.level(0).ext, og = m32.level(0).og;
+        double d = 0.0;
+        long bits = 0;
+        for (int z = G; z < e.z - G; ++z)
+          for (int y = G; y < e.y - G; ++y)
+            for (int x = G; x < e.x - G; ++x) {
+              const double a = hx32((long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
+              const double rr = h32((long)(x - G + og.x + G) + (long)(y - G + og.y + G) * re.x +
+                                    (long)(z - G + og.z + G) * (long)re.x * re.y);
+              const double dd = std::fabs(a - rr);
+              if (!(dd <= d))
+                d = dd;
+              if (std::memcmp(&a, &rr, sizeof(double)) != 0)
+                ++bits;
+            }
+        const double tol = (size == 1) ? 0.0 : 1e-6 * xref;
+        const bool ok = size == 1 ? (bits == 0 && it32 == r32It)
+                                  : (d <= tol && std::abs(it32 - r32It) <= 2 && it32 < 500);
+        if (!ok) {
+          ++fail;
+          std::fprintf(stderr,
+                       "[rank %d] fp32 arm: max|dist - single| = %.3e (%ld cells differ), %d iters "
+                       "vs single-rank %d\n",
+                       rank, d, bits, it32, r32It);
+        } else if (rank == 0)
+          std::printf(
+              "  fp32 arm: %d iters (single-rank 'fp32' %d), max|dist - single| = %.3e "
+              "(np=%d%s)\n",
+              it32, r32It, d, size, size == 1 ? ", MEMCMP-EQUAL" : "");
+      }
     }
 
     // ---- PASS 2: a FORCED telescope at level 1 on the deferred hierarchy -----------------------

@@ -13,12 +13,31 @@
 ///   configuration is carriable, and the solve stays ineligible (WO-D1 is inert: the distributed
 ///   eligibility comes with WO-D2a);
 ///   an 'fp64' build creates no FP32 halo and no FP32 arrays.
+///
+/// WO-D2a (§5.4-5.7, gates G-DD1, G-DD2 (a)-(e), (g) and G-R (h) of §8), the distributed FP32
+/// V-cycle on the host-scalar PCG / FCG, against a single-rank reference every rank solves itself
+/// (column, cyl, pack, a walled slab at 1e2, box64; rtol 1e-10, cap 200):
+///   G-DD1 (np 1): one FP32 V-cycle z memcmp-equal on the inner cells; forced 'fp32' (and on a
+///         device 'auto') PCG and FCG: x memcmp-equal, iterations equal;
+///   G-DD2 (np > 1): (a) max|x_np - x_1| <= 1e-8 and iterations within max(1, 5 %) wherever the
+///         single-rank solve converges (a configuration converging in neither mode is n/a); (b) one
+///         V-cycle z within 1e-11 relative (cyl, box64, equal depth); (c) 'fp32' iterations <=
+///         'fp64' + max(1, 5 %) where 'fp64' converges (every np); (d) np 2, where 'fp64'
+///         converges: the attainable floor (rtol 1e-14, cap 300), fp32 <= 2 x fp64; (e) CA on == CA
+///         off bitwise (cyl, box64, 30 iterations); (g) np 2: two runs bitwise (30 iterations);
+///   G-R (h) (column): (a) 'auto' + kind 1 at 3 and (b) kind 2 at 2 restart to the 'fp64' cold
+///   solve (on a
+///         device; host 'auto' is 'fp64', the fault inert), (c) forced 'fp32' never restarts;
+///         vcycleRestarts() equal on every rank; np 1 memcmp-equal to the single-rank restart.
+/// A hierarchy that telescopes is ineligible until WO-D2b (reported, not solved).
 #include <mpi.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <Kokkos_Core.hpp>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -41,7 +60,9 @@ void check(bool ok, const std::string& what) {
 }
 
 // This rank's block of the global openness (inner faces; setOpenness fills the ghosts).
-void setUpDist(CutcellMG& mg, const Problem& P, int mode) {
+void setUpDist(CutcellMG& mg, const Problem& P, int mode, int ca = kCaBoth) {
+  mg.setBoundaryConditions(P.bc);  // before initMpi (the per-level ghost width reads it)
+  mg.setCommAvoiding(ca);
   mg.initMpi(P.nx, P.ny, P.nz, P.levels, MPI_COMM_WORLD);
   mg.setVcyclePrecision(mode);
   const CutcellMG::Level& l0 = mg.level(0);
@@ -116,8 +137,9 @@ void problemChecks(const Problem& P) {
     mg.setVcyclePrecision(CutcellMG::kVcycleFp32);
     ringChecks(mg, tag + " setter rebuild");
     const char* why = mg.fp32VcycleIneligible(true);
-    check(why != nullptr && std::string(why).find("distributed") != std::string::npos,
-          tag + ": still ineligible (WO-D1 inert): " + (why ? why : "(eligible!)"));
+    check(why == nullptr || std::string(why).find("telescopes") != std::string::npos,
+          tag + ": eligible distributed (WO-D2a; telescoped: until WO-D2b): " +
+              (why ? why : "eligible"));
   }
   {
     CutcellMG mg;
@@ -130,6 +152,361 @@ void problemChecks(const Problem& P) {
   }
 }
 
+// ---- WO-D2a ------------------------------------------------------------------------------------
+const bool kAutoFp32 = !CutcellMG::kHostMemory;  // WO-A: 'auto' is FP32 on device backends only
+constexpr int kMaxit = 200;
+constexpr double kRtol = 1e-10;
+
+// Level 0's inner cell (x, y, z) (local, ghosts included) -> the global (single-rank) index.
+long globalIndex(const Problem& P, const CutcellMG::Level& l0, int x, int y, int z) {
+  return P.idx(x - l0.g + l0.og.x, y - l0.g + l0.og.y, z - l0.g + l0.og.z);
+}
+template <class F>
+void forInner(const CutcellMG::Level& l0, F f) {
+  const C3 e = l0.ext;
+  const int g = l0.g;
+  for (int z = g; z < e.z - g; ++z)
+    for (int y = g; y < e.y - g; ++y)
+      for (int x = g; x < e.x - g; ++x)
+        f(x, y, z, (long)x + (long)y * e.x + (long)z * (long)e.x * e.y);
+}
+// This rank's block of a global (single-rank-indexed) field, ghosts 0.
+std::vector<double> sliceOf(const Problem& P, const CutcellMG::Level& l0,
+                            const std::vector<double>& global) {
+  std::vector<double> v(l0.n, 0.0);
+  forInner(l0, [&](int x, int y, int z, long li) { v[li] = global[globalIndex(P, l0, x, y, z)]; });
+  return v;
+}
+// Over this rank's inner cells: max|a - ref| (NaN-propagating) and the memcmp-unequal count; both
+// reduced over the ranks.
+struct Diff {
+  double maxAbs = 0.0, refMax = 0.0;
+  long bits = 0;
+};
+Diff diffInner(const Problem& P, const CutcellMG::Level& l0, const std::vector<double>& a,
+               const std::vector<double>& ref) {
+  Diff d;
+  forInner(l0, [&](int x, int y, int z, long li) {
+    const double r = ref[globalIndex(P, l0, x, y, z)];
+    const double v = std::fabs(a[li] - r);
+    if (!(v <= d.maxAbs))
+      d.maxAbs = v;
+    d.refMax = std::max(d.refMax, std::fabs(r));
+    if (std::memcmp(&a[li], &r, sizeof(double)) != 0)
+      ++d.bits;
+  });
+  double m[2] = {d.maxAbs, d.refMax}, gm[2];
+  MPI_Allreduce(m, gm, 2, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+  long gb = 0;
+  MPI_Allreduce(&d.bits, &gb, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+  return Diff{gm[0], gm[1], gb};
+}
+std::string num(double v) {
+  char b[32];
+  std::snprintf(b, sizeof(b), "%.3e", v);
+  return b;
+}
+
+struct Run {
+  int it = -1, restarts = 0, discarded = -1;
+  bool failed = false, fp32 = false, threw = false;
+  std::vector<double> x;  // the full level-0 array (single rank: the global array)
+  bool converged() const { return !threw && !failed && it < kMaxit; }
+};
+std::string itStr(const Run& r) {
+  return r.threw
+             ? std::string("threw")
+             : std::to_string(r.it) + (r.failed ? " failed" : "") + (r.fp32 ? " fp32" : " fp64");
+}
+// One solve of P on `mg` (driver 0 = PCG, 1 = FCG) from x = 0 with the fault armed for it.
+Run solveOn(CutcellMG& mg, const std::vector<double>& hb, int driver, int kind = 0, int at = 0,
+            int maxit = kMaxit, double rtol = kRtol) {
+  const std::size_t n = hb.size();
+  CCField b = toDevice(hb, "b"), x("x", n), r("r", n), p("p", n), z("z", n), zp("zp", n),
+          Ap("Ap", n);
+  mg.debugSetFp32Fault(kind, at);
+  Run out;
+  try {
+    out.it = driver == 0 ? mg.solvePCG(b, x, r, p, z, Ap, maxit, rtol, 2, 2, 12)
+                         : mg.solveFCG(b, x, r, p, z, zp, Ap, maxit, rtol, 2, 2, 12);
+  } catch (const std::runtime_error&) {
+    out.threw = true;
+  }
+  mg.debugSetFp32Fault(0, 0);
+  out.failed = mg.lastSolveFailed();
+  out.fp32 = mg.lastVcycleFp32();
+  out.restarts = mg.vcycleRestarts();
+  out.discarded = mg.lastDiscardedIters();
+  out.x = toHost(x);
+  return out;
+}
+// The single-rank reference, solved on rank 0 and broadcast (the ranks share one GPU on a device
+// backend: a redundant reference per rank would multiply the test's cost by np).
+Run single(const Problem& P, int mode, int driver, int kind = 0, int at = 0) {
+  Run r;
+  if (rank == 0) {
+    CutcellMG mg;
+    setUp(mg, P, mode);
+    r = solveOn(mg, rhsOf(P), driver, kind, at);
+  }
+  int v[6] = {r.it, r.restarts, r.discarded, r.failed, r.fp32, r.threw};
+  MPI_Bcast(v, 6, MPI_INT, 0, MPI_COMM_WORLD);
+  long n = (long)r.x.size();
+  MPI_Bcast(&n, 1, MPI_LONG, 0, MPI_COMM_WORLD);
+  r.x.resize((std::size_t)n);
+  MPI_Bcast(r.x.data(), (int)n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  r.it = v[0];
+  r.restarts = v[1];
+  r.discarded = v[2];
+  r.failed = v[3] != 0;
+  r.fp32 = v[4] != 0;
+  r.threw = v[5] != 0;
+  return r;
+}
+Run dist(const Problem& P, int mode, int driver, int kind = 0, int at = 0, int ca = kCaBoth,
+         int maxit = kMaxit, double rtol = kRtol) {
+  CutcellMG mg;
+  setUpDist(mg, P, mode, ca);
+  return solveOn(mg, sliceOf(P, mg.level(0), rhsOf(P)), driver, kind, at, maxit, rtol);
+}
+// The level 0 of a distributed setup of P (for the index maps of a dist() result).
+struct DistLevel0 {
+  CutcellMG mg;
+  explicit DistLevel0(const Problem& P, int ca = kCaBoth) {
+    setUpDist(mg, P, CutcellMG::kVcycleFp64, ca);
+  }
+  const CutcellMG::Level& l0() { return mg.level(0); }
+};
+bool sameRun(const Run& a, const Run& b) {
+  return a.x.size() == b.x.size() &&
+         std::memcmp(a.x.data(), b.x.data(), a.x.size() * sizeof(double)) == 0 && a.it == b.it;
+}
+// Every rank's flag set (MPI_LAND of a local bool).
+bool allRanks(bool v) {
+  int a = v ? 1 : 0, g = 0;
+  MPI_Allreduce(&a, &g, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+  return g == 1;
+}
+
+// One FP32 V-cycle z = B r of the mean-free r (distributed or single rank, as `mg` is set up).
+std::vector<double> oneVcycle(CutcellMG& mg, const std::vector<double>& hr) {
+  CutcellMG::Level& l0 = mg.level(0);
+  const std::size_t n = l0.n;
+  {  // the driver's smoothing schedule (2, 2, 12): a zero-iteration solve sets it
+    CCField s0("s0", n), s1("s1", n), s2("s2", n), s3("s3", n), s4("s4", n), s5("s5", n);
+    mg.solvePCG(s0, s1, s2, s3, s4, s5, 0, 1e-8, 2, 2, 12);
+  }
+  CCField r = toDevice(hr, "r"), z("z", n);
+  mg.removeMean(l0, r);
+  mg.precondVcycleFp32(z, r, std::ilogb(mg.maxabs(l0, r)), -1, CCField());
+  return toHost(z);
+}
+
+// The true residual max|P(b - A x)| / max|P b| of a distributed solution (the attainable floor).
+double trueResidual(CutcellMG& mg, const std::vector<double>& hb, const std::vector<double>& hx) {
+  CutcellMG::Level& l0 = mg.level(0);
+  CCField b = toDevice(hb, "b"), x = toDevice(hx, "x"), Ap("Ap", l0.n);
+  mg.removeMean(l0, b);
+  const double bn = mg.maxabs(l0, b);
+  mg.matvecOverlap(l0, Ap, x);
+  mg.axpy(b, -1.0, Ap);
+  mg.removeMean(l0, b);
+  return mg.maxabs(l0, b) / bn;
+}
+
+int within(int ref) {  // max(1, 5 %) of an iteration count
+  return std::max(1, (int)std::ceil(0.05 * ref));
+}
+
+void d2aChecks(const Problem& P) {
+  const std::string tag = P.name + " np" + std::to_string(size);
+  DistLevel0 D(P);
+  const CutcellMG::Level& l0 = D.l0();
+  {
+    CutcellMG probe;
+    setUpDist(probe, P, CutcellMG::kVcycleFp32);
+    const char* why = probe.fp32VcycleIneligible(true);
+    if (why != nullptr) {
+      check(std::string(why).find("telescopes") != std::string::npos,
+            tag + ": ineligible only because it telescopes (WO-D2b): " + why);
+      return;
+    }
+    if (rank == 0)
+      std::printf("  %s: %d levels, fp32Last %d, eligible\n", tag.c_str(), probe.nLevels(),
+                  probe.fp32Last());
+  }
+  const char* dn[2] = {"PCG", "FCG"};
+  std::vector<int> modes{CutcellMG::kVcycleFp32, CutcellMG::kVcycleFp64};
+  if (kAutoFp32)
+    modes.push_back(CutcellMG::kVcycleAuto);
+  auto mname = [](int m) {
+    return m == CutcellMG::kVcycleFp32 ? "fp32" : (m == CutcellMG::kVcycleFp64 ? "fp64" : "auto");
+  };
+  bool fp64Converges[2] = {false, false};  // at this np, per driver: (d) runs there
+  for (int driver : {0, 1}) {
+    Run ref[3], got[3];
+    for (std::size_t k = 0; k < modes.size(); ++k)
+      ref[k] = single(P, modes[k], driver);
+    // np > 1: (a) needs the configurations the single-rank solve converges on, (c) those 'fp64'
+    // converges on; a configuration where neither converges (ratio 1e4: cyl, pack, box64 PCG) is
+    // n/a at np > 1 and is not solved (the np = 1 memcmp of G-DD1 covers it)
+    const bool run = size == 1 || ref[0].converged() || ref[1].converged();
+    if (!run) {
+      if (rank == 0)
+        std::printf("  %-100s n/a\n", (tag + " " + dn[driver] +
+                                       ": G-DD2 (a), (c) single rank converges in neither mode (" +
+                                       itStr(ref[0]) + ", " + itStr(ref[1]) + ")")
+                                          .c_str());
+      continue;
+    }
+    for (std::size_t k = 0; k < modes.size(); ++k)
+      got[k] = dist(P, modes[k], driver);
+    fp64Converges[driver] = got[1].converged();
+    for (std::size_t k = 0; k < modes.size(); ++k) {
+      const std::string t = tag + " " + dn[driver] + " '" + mname(modes[k]) + "'";
+      const Diff d = diffInner(P, l0, got[k].x, ref[k].x);
+      const bool itEq = allRanks(got[k].it == ref[k].it);
+      if (modes[k] == CutcellMG::kVcycleFp64)
+        continue;  // the FP64 classes are the existing gates; here only the iteration reference
+      if (!got[k].fp32 && !(modes[k] == CutcellMG::kVcycleAuto && got[k].restarts > 0)) {
+        check(false, t + ": did not run the FP32 V-cycle (" + itStr(got[k]) + ")");
+        continue;
+      }
+      if (size == 1) {  // G-DD1 (b), (c)
+        check(d.bits == 0 && itEq && got[k].failed == ref[k].failed,
+              t + ": G-DD1 x memcmp == single rank (" + std::to_string(d.bits) +
+                  " cells differ), iterations " + itStr(got[k]) + " / " + itStr(ref[k]));
+      } else if (ref[k].converged()) {  // G-DD2 (a)
+        const bool itOk = std::abs(got[k].it - ref[k].it) <= within(ref[k].it);
+        check(d.maxAbs <= 1e-8 && allRanks(itOk),
+              t + ": G-DD2 (a) max|x - x1| " + num(d.maxAbs) + " (max|x| " + num(d.refMax) +
+                  "), iterations " + itStr(got[k]) + " vs " + itStr(ref[k]));
+      } else if (rank == 0) {
+        std::printf("  %-100s n/a\n", (t + ": G-DD2 (a) single rank does not converge (" +
+                                       itStr(ref[k]) + "), np " + itStr(got[k]))
+                                          .c_str());
+      }
+    }
+    // G-DD2 (c): 'fp32' vs 'fp64' at this np where 'fp64' converges
+    if (got[1].converged())
+      check(got[0].it <= got[1].it + within(got[1].it),
+            tag + " " + dn[driver] + ": G-DD2 (c) 'fp32' " + itStr(got[0]) + " <= 'fp64' " +
+                itStr(got[1]) + " + max(1, 5 %)");
+    else if (rank == 0)
+      std::printf("  %-100s n/a\n",
+                  (tag + " " + dn[driver] + ": G-DD2 (c) 'fp64' does not converge (" +
+                   itStr(got[1]) + "), 'fp32' " + itStr(got[0]))
+                      .c_str());
+  }
+  // G-DD1 (a) / G-DD2 (b): one V-cycle
+  const bool vcycleCase = P.name == "cyl" || P.name == "box64";
+  if (size == 1 || vcycleCase) {
+    CutcellMG ms, md;
+    setUp(ms, P, CutcellMG::kVcycleFp32);
+    setUpDist(md, P, CutcellMG::kVcycleFp32);
+    const bool sameDepth = ms.nLevels() == md.nLevels();
+    const std::vector<double> rhs = rhsOf(P);
+    const std::vector<double> zs = oneVcycle(ms, rhs);
+    const std::vector<double> zd = oneVcycle(md, sliceOf(P, md.level(0), rhs));
+    const Diff d = diffInner(P, md.level(0), zd, zs);
+    if (size == 1)
+      check(d.bits == 0, tag + ": G-DD1 (a) one FP32 V-cycle z memcmp == single rank (" +
+                             std::to_string(d.bits) + " cells differ)");
+    else if (sameDepth)
+      check(d.maxAbs <= 1e-11 * d.refMax,
+            tag + ": G-DD2 (b) one FP32 V-cycle max|dz|/max|z| " + num(d.maxAbs / d.refMax));
+    else if (rank == 0)
+      std::printf("  %s: G-DD2 (b) n/a (depth %d vs single rank %d)\n", tag.c_str(), md.nLevels(),
+                  ms.nLevels());
+  }
+  // G-DD2 (d): the attainable floor at np 2, where 'fp64' converges
+  if (size == 2)
+    for (int driver : {0, 1}) {
+      if (!fp64Converges[driver])
+        continue;
+      double fl[2];
+      int its[2];
+      for (int k = 0; k < 2; ++k) {
+        CutcellMG mg;
+        setUpDist(mg, P, k == 0 ? CutcellMG::kVcycleFp32 : CutcellMG::kVcycleFp64);
+        const std::vector<double> hb = sliceOf(P, mg.level(0), rhsOf(P));
+        const Run r = solveOn(mg, hb, driver, 0, 0, 300, 1e-14);
+        its[k] = r.it;
+        fl[k] = trueResidual(mg, hb, r.x);
+      }
+      check(fl[0] <= 2.0 * fl[1], tag + " " + dn[driver] + ": G-DD2 (d) floor fp32 " + num(fl[0]) +
+                                      " (" + std::to_string(its[0]) + " it) <= 2 x fp64 " +
+                                      num(fl[1]) + " (" + std::to_string(its[1]) + " it)");
+    }
+  // G-DD2 (e): CA on == CA off, bitwise (periodic problems; CA needs no domain BC)
+  if (size > 1 && vcycleCase) {
+    // level 0 is g = 1 either way (CA widens the coarse levels only): the same layout
+    // (30 iterations: bitwise equality needs no convergence)
+    const Run on = dist(P, CutcellMG::kVcycleFp32, 0, 0, 0, kCaBoth, 30);
+    const Run off = dist(P, CutcellMG::kVcycleFp32, 0, 0, 0, 0, 30);
+    check(allRanks(sameRun(on, off)),
+          tag + ": G-DD2 (e) CA on == CA off bitwise (" + itStr(on) + " / " + itStr(off) + ")");
+  }
+  // G-DD2 (g): two runs at np 2, bitwise
+  if (size == 2) {
+    const Run a = dist(P, CutcellMG::kVcycleFp32, 0, 0, 0, kCaBoth, 30),
+              b = dist(P, CutcellMG::kVcycleFp32, 0, 0, 0, kCaBoth, 30);
+    check(allRanks(sameRun(a, b)), tag + ": G-DD2 (g) two runs bitwise (" + itStr(a) + ")");
+  }
+}
+
+// G-R (h): the restart on the distributed driver.
+void restartChecks(const Problem& P) {
+  const std::string tag = P.name + " np" + std::to_string(size);
+  {
+    CutcellMG probe;
+    setUpDist(probe, P, CutcellMG::kVcycleFp32);
+    if (probe.fp32VcycleIneligible(true) != nullptr)
+      return;  // reported by d2aChecks
+  }
+  for (int driver : {0, 1}) {
+    const std::string t = tag + (driver == 0 ? " PCG" : " FCG");
+    const Run ref64 = dist(P, CutcellMG::kVcycleFp64, driver);
+    auto restartedIsFp64 = [&](const Run& a) {
+      return allRanks(sameRun(a, ref64) && a.failed == ref64.failed && !a.fp32 && a.restarts == 1 &&
+                      !a.threw);
+    };
+    auto restartsAgree = [&](const Run& a) {
+      int mn = 0, mx = 0;
+      MPI_Allreduce(&a.restarts, &mn, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+      MPI_Allreduce(&a.restarts, &mx, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+      return mn == mx;
+    };
+    if (!kAutoFp32) {
+      const Run a = dist(P, CutcellMG::kVcycleAuto, driver, 1, 3);
+      check(allRanks(sameRun(a, ref64) && !a.fp32 && a.restarts == 0),
+            t + ": G-R (h) host 'auto' == 'fp64', the fault inert, no restart (" + itStr(a) + ")");
+    } else {
+      const Run a = dist(P, CutcellMG::kVcycleAuto, driver, 1, 3);
+      check(restartedIsFp64(a) && restartsAgree(a),
+            t + ": G-R (h)(a) kind 1 at 3 -> restart == fp64 cold (" + itStr(a) + ", discarded " +
+                std::to_string(a.discarded) + ")");
+      const Run b = dist(P, CutcellMG::kVcycleAuto, driver, 2, 2);
+      check(restartedIsFp64(b) && b.discarded == 2 && restartsAgree(b),
+            t + ": G-R (h)(b) kind 2 at 2 -> restart == fp64 cold, discarded " +
+                std::to_string(b.discarded));
+      if (size == 1) {
+        const Run sa = single(P, CutcellMG::kVcycleAuto, driver, 1, 3);
+        DistLevel0 D(P);
+        const Diff d = diffInner(P, D.l0(), a.x, sa.x);
+        check(d.bits == 0 && a.it == sa.it && a.restarts == sa.restarts,
+              t + ": G-R (h) np 1 restart memcmp == the single-rank restart (" +
+                  std::to_string(d.bits) + " cells differ)");
+      }
+    }
+    const Run c1 = dist(P, CutcellMG::kVcycleFp32, driver, 1, 3);
+    const Run c2 = dist(P, CutcellMG::kVcycleFp32, driver, 2, 2);
+    check(allRanks(c1.restarts == 0 && c1.failed && c1.fp32 && c2.restarts == 0 && c2.it == 2 &&
+                   c2.fp32),
+          t + ": G-R (h)(c) forced 'fp32': no restart; kind 1 " + itStr(c1) + ", kind 2 " +
+              itStr(c2));
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -142,6 +519,10 @@ int main(int argc, char** argv) {
                 size);
   for (const Problem& P : {cylProblem(), boxProblem()})
     problemChecks(P);
+  for (const Problem& P :
+       {columnProblem(), cylProblem(), packProblem(), slabProblem(1e2), boxProblem()})
+    d2aChecks(P);
+  restartChecks(columnProblem());
   if (rank == 0)
     std::printf("%s (%d failure%s)\n", fails ? "FAIL" : "PASS", fails, fails == 1 ? "" : "s");
   Kokkos::finalize();

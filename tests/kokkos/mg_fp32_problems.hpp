@@ -110,10 +110,13 @@ inline Problem cylProblem() {
 // ratio 1e3, walls at +-z. FP64 FCG converges here (52 iterations) and is required to; FP64 PCG
 // does not (true residual 172 after 200 iterations at 1e3, 0.085 at 1e2: the V-cycle is not an
 // SPD preconditioner against a stratified wall), so for PCG (a)-(e) are n/a and (b) runs.
-inline Problem slabProblem() {
+// `ratio` other than 1e3: the distributed design's walled slab at 1e2 (G-DD1), named "slab<ratio>".
+inline Problem slabProblem(double ratio = 1e3) {
   const int bc[6] = {0, 0, 0, 0, 1, 1};
-  auto rho = [](double, double, double z) { return z < 16.0 ? 1e3 : 1.0; };
-  return makeProblem("slab", 32, 32, 32, 4, bc, [](double, double, double) { return 1.0; }, rho);
+  auto rho = [ratio](double, double, double z) { return z < 16.0 ? ratio : 1.0; };
+  const std::string name =
+      ratio == 1e3 ? "slab" : "slab1e" + std::to_string((int)std::lround(std::log10(ratio)));
+  return makeProblem(name, 32, 32, 32, 4, bc, [](double, double, double) { return 1.0; }, rho);
 }
 
 inline Problem packProblem() {

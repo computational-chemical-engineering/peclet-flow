@@ -2050,7 +2050,6 @@ class CutcellMG {
                               nnStar);
     solveFailed_ = false;         // ISSUES sweep item 6: per-solve breakdown flag
     lastSolveConverged_ = false;  // R (§4): per attempt
-    attemptMaxit_ = maxit;
     OverlayScope overlay(overlaySolve_, star != nullptr);
     pre_ = pre;
     post_ = post;
@@ -2068,6 +2067,25 @@ class CutcellMG {
     axpy(r, -1.0, Ap);
     removeMean(l0, r);  // compatibility: project rhs/residual onto the range
     const double r0 = maxabs(l0, r);
+    // D-dist (doc/vof_projection_distributed_design.md §5.7): the FP32 V-cycle on an eligible
+    // solve (a global decision: fp32VcycleIneligible reads global data only). It takes
+    // e = ilogb(max|r|) from the GLOBAL max the host already holds (r0, then the stop test's rn)
+    // and forms the local r^T z in its exit pass; the driver allreduces it (the Allreduce dot()
+    // spends). z is zeroed once (§5.5: the exit writes inner cells only, so the never-exchanged
+    // wall ghosts of z and p stay 0).
+    const bool f32 = fp32VcycleSolve();
+    lastVcycleFp32_ = f32;
+    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
+    if (f32 && fp32FaultKind_ == 2)
+      maxit = std::min(maxit, fp32FaultAt_);
+    attemptMaxit_ = maxit;
+    auto rzFp32 = [&](int k) {  // the exit pass's local r^T z (slot k), summed over the ranks
+#ifdef PECLET_FLOW_MPI
+      return allreduce(readSlot(k), MPI_SUM_, l0.comm);
+#else
+      return allreduce(readSlot(k), MPI_SUM_);
+#endif
+    };
     // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
     // stop reference is set (setStopReference; only the balanced-force projection sets it).
     // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
@@ -2091,9 +2109,17 @@ class CutcellMG {
     // produced NaN/Inf (should not happen — the guards fail safe rather than poisoning x with a
     // NaN alpha/beta and letting the projection silently corrupt every field downstream).
     if (r0 > 0.0 && std::isfinite(r0)) {
-      precond(z, r);
-      Kokkos::deep_copy(CCExec(), p, z);
-      double rz = dot(l0, r, z);
+      double rz = 0.0;
+      if (f32) {  // §5.7
+        Kokkos::deep_copy(CCExec(), z, 0.0);
+        precondVcycleFp32(z, r, std::ilogb(r0), kRz, CCField());
+        Kokkos::deep_copy(CCExec(), p, z);
+        rz = rzFp32(kRz);
+      } else {
+        precond(z, r);
+        Kokkos::deep_copy(CCExec(), p, z);
+        rz = dot(l0, r, z);
+      }
       if (!std::isfinite(rz)) {
         // ISSUES sweep item 6: this is a FAILED solve, not a converged one. It used to print to
         // stdout, zero the correction and return 0 iterations, so a caller's rule-3b "no capped
@@ -2134,8 +2160,15 @@ class CutcellMG {
           ++it;
           break;
         }
-        precond(z, r);
-        const double rznew = dot(l0, r, z), beta = rznew / rz;
+        double rznew = 0.0;
+        if (f32) {  // §5.7
+          precondVcycleFp32(z, r, std::ilogb(rn), kRzNew, CCField());
+          rznew = rzFp32(kRzNew);
+        } else {
+          precond(z, r);
+          rznew = dot(l0, r, z);
+        }
+        const double beta = rznew / rz;
         if (!std::isfinite(rznew)) {
           solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
           break;                // preconditioner breakdown: keep the last finite iterate
@@ -2933,6 +2966,8 @@ class CutcellMG {
     ++dbgSolve_;
     lastSolveConverged_ = r0 == 0.0;  // R (§4): the loop is skipped on a zero residual
     if (r0 > 0.0 && std::isfinite(r0)) {
+      if (f32 && distributed_)  // D-dist §5.5: the exit writes inner z only; wall ghosts stay 0
+        Kokkos::deep_copy(CCExec(), z, 0.0);
       precond(z, r, r0);
       Kokkos::deep_copy(CCExec(), p, z);
       double rz = dot(l0, r, z);
@@ -3771,7 +3806,12 @@ class CutcellMG {
     // 1. entry: rhsf = fl32(2^-e r); the first pre-smooth colour pass from x = 0 (colour 0)
     entryFp32(l0.xf, l0.rhsf, CCConst(rr), VConst(l0.WX), VConst(l0.WY), VConst(l0.WZ),
               std::ldexp(1.0, -e), l0.ext, parityOg(l0), l0.g, /*color=*/0, pre_ > 0);
-    vcycleFp32Impl(0, /*sym=*/true);  // 2., 3.
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      vcycleFp32Dist(0, /*sym=*/true);  // D-dist (doc/vof_projection_distributed_design.md §5.4)
+    else
+#endif
+      vcycleFp32Impl(0, /*sym=*/true);  // 2., 3.
     double s = std::ldexp(1.0, e);
     if (fp32FaultKind_ == 1 && ++fp32FaultCount_ == fp32FaultAt_)
       s = std::numeric_limits<double>::quiet_NaN();  // R test hook (debugSetFp32Fault)
@@ -3818,6 +3858,93 @@ class CutcellMG {
     }
     smoothFp32(lv, post_, /*reverse=*/sym, false);
   }
+#ifdef PECLET_FLOW_MPI
+  // D-dist (doc/vof_projection_distributed_design.md §5.4, mirror rule §2): the distributed branch
+  // of vcycleImpl / smooth transcribed op for op on the FP32 data -- each FP64 box kernel replaced
+  // by its FP32 launch form (the single-rank FP32 cell bodies), each lv.dev exchange by lv.devf on
+  // the FP32 field, every zeroing, fill, Neumann ghost and overlap split at its position. No
+  // outflow face (eligibility), so applyOutflowGhost on an FP32 field has no counterpart. Levels
+  // 0 .. fp32Last_ (WO-D2a: the last non-bottom level; telescoped hierarchies are ineligible).
+  void vcycleFp32Dist(int L, bool sym) {
+    Level& lv = lv_[L];
+    smoothFp32Dist(lv, pre_, false, /*skipFirst=*/L == 0 && pre_ > 0);
+    residualFp32Dist(lv);
+    Level& cs = lv_[L + 1];
+    if (L == fp32Last_) {  // the bottom interface (L + 2 == lv_.size()): FP64 below, unchanged
+      restrictFp32ToDZeroX(cs.rhs, cs.x, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
+                           lv.ratio);
+      Kokkos::deep_copy(CCExec(), cs.x, 0.0);
+      vcycle(L + 1, sym);
+      fill(cs, cs.x);
+      applyOutflowGhost(cs, cs.x, cs.g);
+      applyNeumannGhost(cs, cs.x, cs.g);
+      prolongFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+    } else {
+      restrictFp32ZeroX(cs.rhsf, cs.xf, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
+                        lv.ratio);
+      Kokkos::deep_copy(CCExec(), cs.xf, 0.0f);
+      vcycleFp32Dist(L + 1, sym);
+      fill(cs, cs.xf);  // the level's GridHalo<float>
+      applyNeumannGhost(cs, cs.xf, cs.g);
+      prolongFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+    }
+    smoothFp32Dist(lv, post_, /*reverse=*/sym, false);
+  }
+  // smooth()'s distributed branches on the FP32 data: the communication-avoiding pair on a g = 2
+  // level (never level 0, so never skipFirst), else the per-colour exchange overlapped with the
+  // interior sweep. skipFirst: the level-0 entry already did the first colour.
+  void smoothFp32Dist(Level& lv, int sweeps, bool reverse, bool skipFirst) {
+    const C3 og = parityOg(lv);
+    const int g = lv.g;
+    const C3 e = lv.ext;
+    const C3 lo{g + 1, g + 1, g + 1};
+    const C3 hi{e.x - g - 1, e.y - g - 1, e.z - g - 1};
+    const C3 none{0, 0, 0};
+    auto box = [&](int color, C3 a, C3 b, C3 exLo, C3 exHi) {
+      cutcellSmoothColorFp32Box(lv.xf, VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY), VConst(lv.WZ),
+                                e, og, color, a, b, exLo, exHi);
+    };
+    if (caSmooth(lv)) {
+      const C3 rlo{g - 1, g - 1, g - 1};
+      const C3 rhi{e.x - g + 1, e.y - g + 1, e.z - g + 1};
+      lv.devf->exchange(lv.rhsf);  // ring rhs (owner's inner values), fixed over the sweeps
+      for (int k = 0; k < sweeps; ++k) {
+        const int c0 = reverse ? 1 : 0, c1 = 1 - c0;
+        lv.devf->exchangeBegin(lv.xf);
+        box(c0, lo, hi, none, none);
+        lv.devf->exchangeEnd(lv.xf);
+        box(c0, rlo, rhi, lo, hi);
+        box(c1, C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, none, none);
+      }
+      return;
+    }
+    for (int k = 0; k < sweeps; ++k)
+      for (int s = 0; s < 2; ++s) {
+        if (skipFirst) {
+          skipFirst = false;
+          continue;
+        }
+        const int color = reverse ? (1 - s) : s;
+        lv.devf->exchangeBegin(lv.xf);
+        box(color, lo, hi, none, none);
+        lv.devf->exchangeEnd(lv.xf);
+        box(color, C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, lo, hi);
+      }
+  }
+  // vcycleImpl's distributed residual on the FP32 data: the exchange overlapped with the interior.
+  void residualFp32Dist(Level& lv) {
+    const int g = lv.g;
+    const C3 e = lv.ext;
+    const C3 lo{g + 1, g + 1, g + 1};
+    const C3 hi{e.x - g - 1, e.y - g - 1, e.z - g - 1};
+    lv.devf->exchangeBegin(lv.xf);
+    residualFp32Box(lv.resf, VConst(lv.xf), VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
+                    VConst(lv.WZ), e, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
+    lv.devf->exchangeEnd(lv.xf);
+    residualFp32Box(lv.resf, VConst(lv.xf), VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
+                    VConst(lv.WZ), e, C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, lo, hi);
+  }
+#endif
   // §4.4.4 item 4, the level-0 EXIT (replaces removeMean(l0, z) and the r^T z dot): the fluid
   // mean m of (double)xf (C0's lane order on a host backend), then one pass z = s ((double)xf - m)
   // on fluid cells and z = s (double)xf on the other inner cells (s = 2^e), accumulating r^T z over
@@ -3854,6 +3981,22 @@ class CutcellMG {
             }
           },
           Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {  // D-dist §5.5 (nFluid = -1 here: the joint {sum, count} above ran)
+      double sum = readSlot(kMsum);
+      long lcnt = 0;
+      Kokkos::deep_copy(lcnt, kcnt_);
+      double dcnt = (double)lcnt;
+      allreduceSum2(sum, dcnt, l0.comm);  // the one Allreduce removeMean spends
+      const long gcnt = (long)dcnt;
+      Kokkos::parallel_for(  // the global values back into the same slots (async, no fence)
+          "peclet::flow::mgmeanr_f32_global", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1),
+          KOKKOS_LAMBDA(int) {
+            ks(kMsum) = sum;
+            kc() = gcnt;
+          });
+    }
+#endif
     const bool copyP = p.extent(0) != 0;
     auto body = KOKKOS_LAMBDA(int x, int y, int zc, double& acc) {
       const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
@@ -3953,8 +4096,10 @@ class CutcellMG {
   const char* fp32VcycleIneligible(bool krylov) const {
     if (!krylov)
       return "the V-cycle is not the preconditioner of the single-rank PCG or FCG driver";
+#ifdef PECLET_FLOW_MPI
     if (distributed_)
-      return "the solve is distributed (multi-rank)";
+      return fp32VcycleIneligibleDist();
+#endif
     if (hasOutflow_)
       return "an outflow face is present";
     if (overlaySolve_)
@@ -3975,6 +4120,38 @@ class CutcellMG {
         return "a face weight is outside {0} or [1e-30, 1e30] (or the FP32 weights are not built)";
     return nullptr;
   }
+#ifdef PECLET_FLOW_MPI
+  // D-dist (doc/vof_projection_distributed_design.md §5.2): the distributed conditions, every one
+  // from global data (flags allreduced, global inner dimensions), so every rank takes the same
+  // branch. At np = 1 each equals its single-rank counterpart (global = local dimensions, no
+  // telescope), so 'auto' picks the single-rank precision. Collective (fp32WeightsOk).
+  const char* fp32VcycleIneligibleDist() const {
+    if (hasOutflow_)
+      return "an outflow face is present";
+    if (overlaySolve_)
+      return "the solve carries an overlay (star couplings / ghost projection)";
+    if (fp32Last_ < 0)
+      return "the hierarchy has a single level";
+    for (int L = 0; L <= fp32Last_; ++L) {
+      const C3 gi = lv_[L].gdim;  // the level's global inner dimensions (globalInner)
+      if (gi.x % 2 != 0 || gi.y % 2 != 0 || gi.z % 2 != 0)
+        return "a level the FP32 V-cycle runs on has an odd global inner dimension";
+    }
+    if (!(exactResidual_ || std::is_same_v<MReal, double>))
+      return "the outer operator is float (MReal = float without the exact residual)";
+    if (meanRemovalAll_)
+      return "the mean-removal scope is 'all' (the FP32 V-cycle removes the mean at level 0 only)";
+    bool ok = true;
+    for (int L = 0; L <= fp32Last_; ++L)
+      ok = fp32WeightsOk(L) && ok;  // every level evaluated: the first call is collective
+    if (!ok)
+      return "a face weight is outside {0} or [1e-30, 1e30] (or the FP32 weights are not built)";
+    for (const Level& lv : lv_)  // WO-D2a only: the telescope transition comes with WO-D2b
+      if (lv.tele)
+        return "the hierarchy telescopes (WO-D2b)";
+    return nullptr;
+  }
+#endif
   // Marks a solve that carries an overlay (star couplings / the ghost-projection BiCGStab) for its
   // whole duration, every exit path included.
   struct OverlayScope {

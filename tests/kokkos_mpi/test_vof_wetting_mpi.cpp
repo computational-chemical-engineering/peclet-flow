@@ -29,6 +29,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <Kokkos_Core.hpp>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -270,6 +272,70 @@ int main(int argc, char** argv) {
         if (!(solid == 0.0) || !(std::fabs(drift) <= 1e-9)) {
           std::printf("  [coupled np=%d] FAIL — solid sum %.3e drift %.3e\n", size, solid, drift);
           fail = 1;
+        }
+      }
+    }
+
+    // ---- 3. the forced-'fp32' arm (doc/vof_projection_distributed_design.md §8 G-DD1 (d)) -----
+    // The coupled run of 2. with the FP32 V-cycle preconditioner (WO-D2a: distributed), against
+    // the single-rank 'fp32' run: np = 1 memcmp-equal (tol 0), np > 1 at 2.'s tolerance.
+    {
+      const int steps = 25;
+      IbmSolver sd(lnx, lny, lnz);
+      sd.initMpi(dec, MPI_COMM_WORLD);
+      setup(sd, ox, oy, oz, lnx, lny, lnz, true);
+      sd.setPressureVcyclePrecision(peclet::flow::CutcellMG::kVcycleFp32);
+      long maxIt = 0;
+      int ran32 = 1;
+      bool tele = false;  // WO-D2a: a telescoped hierarchy is ineligible until WO-D2b (global)
+      try {
+        for (int i = 0; i < steps; ++i) {
+          sd.step();
+          maxIt = std::max(maxIt, sd.lastPressureIterations());
+          ran32 = ran32 && sd.pressureVcycleFp32();
+        }
+      } catch (const std::runtime_error& ex) {
+        if (std::string(ex.what()).find("telescopes (WO-D2b)") == std::string::npos)
+          throw;
+        tele = true;
+      }
+      if (tele) {
+        if (rank == 0)
+          std::printf("  [fp32 np=%d] the hierarchy telescopes: ineligible until WO-D2b\n", size);
+      } else {
+        const auto gc = gatherGlobal(sd.getVof(), ox, oy, oz, lnx, lny, lnz, rank, size);
+        std::vector<double> gu[3];
+        for (int c = 0; c < 3; ++c)
+          gu[c] = gatherGlobal(sd.getVelocity(c), ox, oy, oz, lnx, lny, lnz, rank, size);
+        const auto gp = gatherGlobal(sd.getPressure(), ox, oy, oz, lnx, lny, lnz, rank, size);
+        int ran32All = 0;
+        MPI_Allreduce(&ran32, &ran32All, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+        if (rank == 0) {
+          IbmSolver ref(NX, NY, NZ);
+          setup(ref, 0, 0, 0, NX, NY, NZ, true);
+          ref.setPressureVcyclePrecision(peclet::flow::CutcellMG::kVcycleFp32);
+          long refIt = 0;
+          for (int i = 0; i < steps; ++i) {
+            ref.step();
+            refIt = std::max(refIt, ref.lastPressureIterations());
+          }
+          double du = 0;
+          for (int c = 0; c < 3; ++c)
+            du = std::fmax(du, maxAbsDiff(gu[c], ref.getVelocity(c)));
+          const double dc = maxAbsDiff(gc, ref.getVof());
+          const double dp = maxAbsDiff(gp, ref.getPressure());
+          const double tol = size == 1 ? 0.0 : 1e-9;
+          std::printf(
+              "  [fp32 np=%d] colour %.3e  velocity %.3e  pressure %.3e  pressure iters max %ld "
+              "(single rank %ld)%s\n",
+              size, dc, du, dp, maxIt, refIt, ran32All ? "" : "  -- the FP32 V-cycle did NOT run");
+          if (!ran32All || !(dc <= tol) || !(du <= tol) || (size == 1 && !(dp == 0.0)) ||
+              (size == 1 && maxIt != refIt)) {
+            std::printf(
+                "  [fp32 np=%d] FAIL — colour %.3e velocity %.3e pressure %.3e above tol %.1e\n",
+                size, dc, du, dp, tol);
+            fail = 1;
+          }
         }
       }
     }
