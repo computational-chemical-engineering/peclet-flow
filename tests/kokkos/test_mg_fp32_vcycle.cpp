@@ -24,7 +24,9 @@
 ///   (f) the default is 'fp64' on every backend (FP32 opt-in, USER ruling 2026-10-15) and builds
 ///       no FP32 data; on the ineligible outflow and odd-dimension configurations a PCG solve
 ///       with 'fp32' raises, naming the condition; 'auto' (opt-in) is bitwise (x, iterations,
-///       reported precision) to 'fp32' on an eligible configuration and to 'fp64' on the outflow,
+///       reported precision) to 'fp32' on an eligible configuration (to 'fp64' on a host backend:
+///       'auto' is FP32 on device backends only, doc/vof_projection_distributed_design.md WO-A)
+///       and to 'fp64' on the outflow,
 ///       odd-dimension and face-range ones (the last also with the exact outer, i.e. through the
 ///       D5 deferral: FP32 data built, the FP64 data rebuilt on demand);
 ///   (a) the FP32 residual of x = c * 1, b = 0 is exactly 0 for c in {1, -3.7, 1e5, 2^-60};
@@ -588,9 +590,15 @@ void eligibilityChecks() {
     const Solve a = solveOn(dflt, ok);
     check(none && !a.fp32, "eligible 16^3: (f) the default builds no FP32 data, FP64 reported");
     const Solve f = solve(ok, CutcellMG::kVcycleFp32), b = solve(ok, CutcellMG::kVcycleAuto);
-    check(f.fp32 && sameSolve(f, b), "eligible 16^3: (f) 'auto' == 'fp32' bitwise, it " +
-                                         std::to_string(f.it) + " / " + std::to_string(b.it) +
-                                         ", FP32 reported");
+    if (CutcellMG::kHostMemory)  // WO-A: 'auto' is FP32 on device backends only
+      check(f.fp32 && !b.fp32 && sameSolve(a, b),
+            "eligible 16^3: (f) host 'auto' == 'fp64' bitwise, it " + std::to_string(a.it) + " / " +
+                std::to_string(b.it) + ", FP64 reported ('fp32' runs: it " + std::to_string(f.it) +
+                ")");
+    else
+      check(f.fp32 && sameSolve(f, b), "eligible 16^3: (f) 'auto' == 'fp32' bitwise, it " +
+                                           std::to_string(f.it) + " / " + std::to_string(b.it) +
+                                           ", FP32 reported");
   }
   // (f) 'auto' where ineligible is bitwise to 'fp64' (no raise)
   for (const Problem* P : {&out, &odd, &tiny}) {

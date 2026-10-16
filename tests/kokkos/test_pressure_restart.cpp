@@ -45,8 +45,9 @@ void check(bool ok, const std::string& what) {
     ++fails;
 }
 
-// Does 'auto' run the FP32 V-cycle on this backend? (Every eligible backend until WO-A.)
-const bool kAutoFp32 = true;
+// Does 'auto' run the FP32 V-cycle on this backend? WO-A: on device backends only (host 'auto' is
+// 'fp64', so there the fault is inert and nothing restarts).
+const bool kAutoFp32 = !CutcellMG::kHostMemory;
 
 struct Run {
   int it = -1, restarts = 0, discarded = -1;

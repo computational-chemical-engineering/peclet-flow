@@ -516,7 +516,8 @@ class Solver {
   // Precision of the pressure V-cycle preconditioner (doc/vof_projection_cost_design.md §4.4.6):
   // 1 "fp64" (DEFAULT), 2 "fp32" (opt-in, single-rank; raises at the solve, naming the failed
   // condition, where CutcellMG::fp32VcycleIneligible does not hold), 0 "auto" (opt-in; FP32 where
-  // eligible, else FP64, on every backend). Live: the FP32 weights are rebuilt from the stored
+  // eligible, else FP64, on a device backend; FP64 on a host backend, WO-A of
+  // doc/vof_projection_distributed_design.md). Live: the FP32 weights are rebuilt from the stored
   // level openness at once.
   void setPressureVcyclePrecision(int mode);
   // The precision the last pressure solve's V-cycles used: true = FP32.

@@ -3510,15 +3510,18 @@ class CutcellMG {
   }
   // --- D: the FP32 V-cycle preconditioner (doc/vof_projection_cost_design.md §4) -------------
   // The V-cycle precision mode (§4.4.6): 'fp64' (the default); 'fp32' = FP32 or a raise naming the
-  // failed condition; 'auto' = FP32 where fp32VcycleIneligible() is null, else FP64, on every
-  // backend. FP32 ('fp32' and 'auto') is opt-in by USER ruling 2026-10-15: it is single-rank only,
-  // so as a default it would break the serial <-> np=1 bit-exactness.
+  // failed condition; 'auto' = FP32 where fp32VcycleIneligible() is null, else FP64, on a device
+  // backend; 'fp64' on a host backend (doc/vof_projection_distributed_design.md WO-A). FP32 ('fp32'
+  // and 'auto') is opt-in by USER ruling 2026-10-15: it is single-rank only, so as a default it
+  // would break the serial <-> np=1 bit-exactness.
   enum : int { kVcycleAuto = 0, kVcycleFp64 = 1, kVcycleFp32 = 2 };
   // R (doc/vof_projection_distributed_design.md §4): the precision the mode resolves to now.
   // 'auto' latched to FP64 by a restart (fp32Latched_) is 'fp64' until setVcyclePrecision re-arms
-  // it, so the FP32 build, the D5 deferral and the eligibility all follow the latch.
+  // it, so the FP32 build, the D5 deferral and the eligibility all follow the latch. WO-A: 'auto'
+  // is FP32-where-eligible on DEVICE backends only; on a host backend it is 'fp64' (the host gain,
+  // 0.92-0.95 of the projection, is short of the 0.88 rule). Forced 'fp32' runs on every backend.
   int effectiveVprec() const {
-    return (vprec_ == kVcycleAuto && fp32Latched_) ? (int)kVcycleFp64 : vprec_;
+    return (vprec_ == kVcycleAuto && (fp32Latched_ || kHostMemory)) ? (int)kVcycleFp64 : vprec_;
   }
   bool fp32Mode() const { return effectiveVprec() != kVcycleFp64; }
   // Can this configuration be eligible (§4.4.1), as far as the operator build knows? Every
