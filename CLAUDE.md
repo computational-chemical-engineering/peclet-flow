@@ -55,14 +55,14 @@ single-rank module byte-identical). Another backend = another prefix and another
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 234 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 237 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-234 registered / **231 with `-LE bench`** (counted 2026-10-08 on `66e82e6`): 59 from `tests/kokkos`
-(`bench_rbgs`, `vof_timing`, `bench_scalar_cutcell` carry `bench` — instruments, not gates), 136
-from `tests/kokkos_mpi` (45 cases at np = 1, 2, 4 + one np = 8 rung), and 39 Python ctests on the
+237 registered / **233 with `-LE bench`** (counted 2026-10-16 on `5b025b2`): 61 from `tests/kokkos`
+(`bench_rbgs`, `vof_timing`, `bench_scalar_cutcell`, `bench_bottom_factor` carry `bench` — instruments,
+not gates), 136 from `tests/kokkos_mpi` (45 cases at np = 1, 2, 4 + one np = 8 rung), and 40 Python ctests on the
 module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_operator_casts`,
 `iteration_order`, and 24 `scalar_cutcell_*` gates; the six `_g6_*` take 20–35 min each).
 

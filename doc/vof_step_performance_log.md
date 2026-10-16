@@ -1565,3 +1565,18 @@ One exclusive genoa node (EPYC 9654), bubble column from ckpt_t43, rtol 1e-8, si
 - Against the design's model (-17.5 ms host, projection package): measured -19.3 ms 1x24 for projection + G together;
   D (-6.5 model) and E are not in it (opt-in, USER 2026-10-15). TBF reference (S-1): 45.5-46.0 ms/step.
 Results: Snellius `/projects/0/prjs1022/peclet/bubble-cpu/s3/results/s3b/` (summary.txt, kp_{base,new}/).
+
+### G-E2 at rtol 1e-10 (2026-10-16; `gate_proj/REVIEW_E0_X1.md` finding 9): holds, Cholesky threshold kept
+
+Concern: the history-2 Cholesky threshold `d > 1e-10 G22` admits |c| up to ~1e5, a recurrence-vs-true residual gap
+~rtol/5 at rtol 1e-10. Measured on flow 5b025b2 host (OpenMP 8 threads, load ~9), 'projected' traced
+(`PECLET_FLOW_MG_DEBUG=2`), true final max|P(b - A x)| / rref over every solve (guessed and cold), gate 1.0 rtol:
+- bubble column, ckpt_t43, 50 steps, PCG, `--flux device`: h1 max 9.889e-11 (0.989 rtol), h2 9.872e-11 (0.987);
+  iterations max 13 (cap 800), mean 12.15 / 12.16; max|c| 0.99 / 1.20.
+- `projected_guess` cylinder (16^3, levels 3), 50 steps: PCG h1 7.192e-11, h2 9.271e-11; FCG h1 9.979e-11,
+  h2 9.884e-11; iterations max 9 (cap 400); max|c| 0.99 (h1) / 2.01 (h2).
+- Every solve meets its stop; history-2 fallbacks (c2 = 0) 0; x0 on solids 0. |c| stays O(1), so the 1e-10
+  threshold is never near binding here: no code change (the tighten-to-1e-6 branch not taken). Scripts and summary:
+  `gate_proj/e2check/` (e2gate.sh, e2parse.py, cyl.py, summary.txt).
+- flow CLAUDE.md test counts brought up to date: 237 registered / 233 `-LE bench` (61 kokkos incl. 4 bench, 136
+  kokkos_mpi, 40 python); added since 66e82e6: `projected_guess`, `mg_fp32_vcycle`, `bench_bottom_factor` (bench).
