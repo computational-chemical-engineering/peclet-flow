@@ -75,6 +75,17 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
   endforeach()
 endforeach()
 
+# doc/vof_projection_distributed_design.md §5 (WO-D1 onwards): the distributed FP32 V-cycle --
+# its data and FP32 ghost exchange (G-K2); shares the FP32 test problems with tests/kokkos.
+add_executable(test_mg_fp32_vcycle_mpi test_mg_fp32_vcycle_mpi.cpp)
+target_include_directories(test_mg_fp32_vcycle_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_mg_fp32_vcycle_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+foreach(np 1 2 4 8)
+  add_test(NAME mg_fp32_vcycle_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mg_fp32_vcycle_mpi>)
+endforeach()
+
 # DIAGNOSTIC PROBE (no ctest): the lockstep np vs single-rank colour curve of the packing case.
 add_executable(probe_vof_packing EXCLUDE_FROM_ALL probe_vof_packing.cpp)
 target_include_directories(probe_vof_packing PRIVATE

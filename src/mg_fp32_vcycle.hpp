@@ -238,4 +238,91 @@ inline void prolongFp32FromD(VField fine, CCConst coarse, C3 fext, C3 cext, int 
       });
 }
 
+// --- Distributed launch forms (doc/vof_projection_distributed_design.md §5.3, WO-D1) -----------
+// The distributed FP32 V-cycle's box kernels: the launch forms of the FP64 box kernels
+// (cutcellSmoothColorBoxFace, residualCutcellBoxFace) around the single-rank FP32 cell bodies,
+// reading the neighbours at plain offsets i +- 1, i +- sy, i +- sz (the ghosts hold what the
+// in-kernel wrap reads: gate G-K1). Cells in [lo, hi) minus the skip box [exLo, exHi).
+
+// One red-black colour pass of the FP32 smoother over a box (cutcellSmoothColorBoxFace's forms:
+// host pencils, device MDRange; its parity expression).
+inline void cutcellSmoothColorFp32Box(VField x, VConst b, VConst WX, VConst WY, VConst WZ, C3 e,
+                                      C3 og, int color, C3 lo, C3 hi, C3 exLo, C3 exHi) {
+  if (hi.x <= lo.x || hi.y <= lo.y || hi.z <= lo.z)
+    return;
+  CCExec space;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    const int nyi = hi.y - lo.y, nzi = hi.z - lo.z;
+    const long cells = (long)nyi * nzi * (hi.x - lo.x);
+    auto pencil = KOKKOS_LAMBDA(long t) {
+      const int ly = lo.y + (int)(t % nyi), lz = lo.z + (int)(t / nyi);
+      const bool yzSkip = ly >= exLo.y && ly < exHi.y && lz >= exLo.z && lz < exHi.z;
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+      for (int lx = lo.x + ((P ^ (lo.x & 1)) & 1); lx < hi.x; lx += 2) {
+        if (yzSkip && lx >= exLo.x && lx < exHi.x)
+          continue;  // inside the skip box (already swept by the interior pass)
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        fp32SmoothCell(x, b, WX, WY, WZ, i, sx, sy, sz, i + sx, i - sx, i + sy, i - sy, i + sz,
+                       i - sz);
+      }
+    };
+    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      for (long t = 0; t < (long)nyi * nzi; ++t)
+        pencil(t);
+      return;
+    }
+    Kokkos::parallel_for("peclet::flow::cc_smooth_box_f32",
+                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+    return;
+  }
+  using MD = MDRange3<CCExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::cc_smooth_box_f32", MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}),
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= exLo.x && lx < exHi.x && ly >= exLo.y && ly < exHi.y && lz >= exLo.z &&
+            lz < exHi.z)
+          return;  // inside the skip box (already swept by the interior pass)
+        if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+          return;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        fp32SmoothCell(x, b, WX, WY, WZ, i, sx, sy, sz, i + sx, i - sx, i + sy, i - sy, i + sz,
+                       i - sz);
+      });
+}
+// The FP32 residual r = b - W x over a box (residualCutcellBoxFace's form).
+inline void residualFp32Box(VField r, VConst x, VConst b, VConst WX, VConst WY, VConst WZ, C3 e,
+                            C3 lo, C3 hi, C3 exLo, C3 exHi) {
+  if (hi.x <= lo.x || hi.y <= lo.y || hi.z <= lo.z)
+    return;
+  ccFor3(
+      "peclet::flow::cc_residual_box_f32", lo, hi, KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        if (lx >= exLo.x && lx < exHi.x && ly >= exLo.y && ly < exHi.y && lz >= exLo.z &&
+            lz < exHi.z)
+          return;  // inside the skip box (already done by the interior pass)
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        fp32ResidualCell(r, x, b, WX, WY, WZ, i, sx, sy, sz, i + sx, i - sx, i + sy, i - sy, i + sz,
+                         i - sz);
+      });
+}
+// The telescope transition's conversions (§5.4, WO-D2b1): d = (double)f over the full extent ...
+inline void fp32ToDouble(CCField d, VConst f, C3 e) {
+  const long n = (long)e.x * e.y * (long)e.z;
+  Kokkos::parallel_for(
+      "peclet::flow::f32_to_f64", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
+      KOKKOS_LAMBDA(long i) { d(i) = (double)f(i); });
+}
+// ... and f = fl32((double)f + d) on the inner cells (prolongFp32FromD's rounding, §4.4.4 item 3).
+inline void fp32AddDouble(VField f, CCConst d, C3 e, int g) {
+  ccFor3(
+      "peclet::flow::f32_add_f64", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+      KOKKOS_LAMBDA(int lx, int ly, int lz) {
+        const long i = (long)lx + (long)ly * e.x + (long)lz * (long)e.x * e.y;
+        // PRECISION-EXEMPT: FP32 V-cycle preconditioner (doc/vof_projection_distributed_design.md)
+        f(i) = (VReal)((double)f(i) + d(i));
+      });
+}
+
 }  // namespace peclet::flow

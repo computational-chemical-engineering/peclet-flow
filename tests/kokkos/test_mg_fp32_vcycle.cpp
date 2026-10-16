@@ -43,6 +43,10 @@
 ///       fp64 converges: rulings 2026-10-15, design §13 G-D3, §15 R-4); (e) the health ratio
 ///       |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| (setHealthTrace): fp32's per-solve median <= 1.1x
 ///       fp64's (ruling 2026-10-15: the absolute 1e-2 is unattainable by fp64 itself, §13 G-D3).
+/// G-K1 (doc/vof_projection_distributed_design.md §8): the distributed launch forms of the FP32
+/// smoother and residual (box kernels, plain offsets, ghosts filled by fillWrap) are bitwise the
+/// in-kernel wrap kernels on every non-bottom level of column, cyl, pack and a 64^3 periodic box,
+/// and an interior + shell split equals one full-box pass.
 /// D5 (§4.4.7): the deferred FP64 V-cycle data are built on demand, bitwise the eager build, by a
 /// run-time switch to 'fp64', a non-exact apply and (review E0/X1 finding 1) a projected-guess
 /// solve (E, §5.3) whose fused guess matvec is the first reader after the exact outer is turned
@@ -743,6 +747,77 @@ void memoryReport(int n, int levels) {
   }
 }
 
+// G-K1 (doc/vof_projection_distributed_design.md §8, WO-D1): on every non-bottom level, with the
+// ghosts filled by fillWrap, one box pass (plain offsets, the distributed launch form) equals the
+// in-kernel wrap pass on the inner cells, bitwise -- the smoother (each colour) and the residual --
+// and the interior + shell split equals one full-box pass.
+void boxKernelChecks(const Problem& P) {
+  CutcellMG mg;
+  setUp(mg, P, CutcellMG::kVcycleFp32);
+  std::mt19937 gen(11);
+  std::uniform_real_distribution<double> uni(-1.0, 1.0);
+  for (int L = 0; L + 1 < mg.nLevels(); ++L) {
+    CutcellMG::Level& lv = mg.level(L);
+    const C3 e = lv.ext, og = CutcellMG::parityOg(lv);
+    const int g = lv.g;
+    const std::size_t n = lv.n;
+    std::vector<float> hx(n, 0.0f), hb(n, 0.0f);
+    for (int z = g; z < e.z - g; ++z)
+      for (int y = g; y < e.y - g; ++y)
+        for (int x = g; x < e.x - g; ++x) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          hx[i] = static_cast<float>(uni(gen));
+          hb[i] = static_cast<float>(uni(gen));
+        }
+    auto up = [&](const std::vector<float>& h, const char* name) {
+      VField f(name, n);
+      auto m = Kokkos::create_mirror_view(f);
+      for (std::size_t i = 0; i < n; ++i)
+        m(i) = h[i];
+      Kokkos::deep_copy(f, m);
+      return f;
+    };
+    VField b = up(hb, "b");
+    const VConst W[3] = {VConst(lv.WX), VConst(lv.WY), VConst(lv.WZ)};
+    const C3 lo{g, g, g}, hi{e.x - g, e.y - g, e.z - g};
+    const C3 ilo{g + 1, g + 1, g + 1}, ihi{e.x - g - 1, e.y - g - 1, e.z - g - 1};
+    const C3 none{0, 0, 0};
+    auto innerSame = [&](VField a, VField c) {
+      const auto ha = toHost(a), hc = toHost(c);
+      long bad = 0;
+      for (int z = g; z < e.z - g; ++z)
+        for (int y = g; y < e.y - g; ++y)
+          for (int x = g; x < e.x - g; ++x) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            bad += std::memcmp(&ha[i], &hc[i], sizeof(float)) != 0;
+          }
+      return bad;
+    };
+    long bad = 0;
+    for (int color : {0, 1}) {
+      VField xw = up(hx, "xw"), xb = up(hx, "xb"), xs = up(hx, "xs");
+      mg.fillWrap(lv, xb);
+      mg.fillWrap(lv, xs);
+      cutcellSmoothColorFp32Wrap(xw, VConst(b), W[0], W[1], W[2], e, lv.inner, og, g, color);
+      cutcellSmoothColorFp32Box(xb, VConst(b), W[0], W[1], W[2], e, og, color, lo, hi, none, none);
+      cutcellSmoothColorFp32Box(xs, VConst(b), W[0], W[1], W[2], e, og, color, ilo, ihi, none,
+                                none);
+      cutcellSmoothColorFp32Box(xs, VConst(b), W[0], W[1], W[2], e, og, color, lo, hi, ilo, ihi);
+      bad += innerSame(xw, xb) + innerSame(xb, xs);
+    }
+    VField x = up(hx, "x"), rw("rw", n), rb("rb", n), rs("rs", n);
+    residualFp32Wrap(rw, VConst(x), VConst(b), W[0], W[1], W[2], e, lv.inner, g);
+    mg.fillWrap(lv, x);
+    residualFp32Box(rb, VConst(x), VConst(b), W[0], W[1], W[2], e, lo, hi, none, none);
+    residualFp32Box(rs, VConst(x), VConst(b), W[0], W[1], W[2], e, ilo, ihi, none, none);
+    residualFp32Box(rs, VConst(x), VConst(b), W[0], W[1], W[2], e, lo, hi, ilo, ihi);
+    bad += innerSame(rw, rb) + innerSame(rb, rs);
+    check(bad == 0, P.name + " L" + std::to_string(L) +
+                        ": G-K1 box == wrap (smoother both colours, residual), split == full (" +
+                        std::to_string(bad) + " cells differ)");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -751,6 +826,8 @@ int main(int argc, char** argv) {
     memoryReport(std::atoi(argv[2]), std::atoi(argv[3]));
   } else {
     std::printf("mg_fp32_vcycle (doc/vof_projection_cost_design.md §4, G-D1)\n");
+    for (const Problem& P : {columnProblem(), cylProblem(), packProblem(), boxProblem()})
+      boxKernelChecks(P);  // G-K1 (doc/vof_projection_distributed_design.md §8, WO-D1)
     for (const Problem& P : {columnProblem(), cylProblem(), packProblem()}) {
       dataChecks(P);
       kernelChecks(P);

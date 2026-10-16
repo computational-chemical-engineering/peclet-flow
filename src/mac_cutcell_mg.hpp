@@ -1039,6 +1039,9 @@ class CutcellMG {
 #ifdef PECLET_FLOW_MPI
     std::shared_ptr<GridHaloTopology<3>> halo;  // per-level topology (decomposed)
     std::shared_ptr<GridHalo<double>> dev;      // per-level ghost exchange
+    // D-dist (doc/vof_projection_distributed_design.md §5.1): the FP32 iterates' ghost exchange on
+    // the same topology, created by fp32Build on a level that carries the FP32 data (null else).
+    std::shared_ptr<GridHalo<VReal>> devf;
     // This level's communicator: comm_ above the first telescope point, the roots-only
     // sub-communicator below it. Every collective a LEVEL performs (removeMean's Allreduce, the
     // bottom's gather) must use this, not comm_ — see Telescope.
@@ -1221,6 +1224,7 @@ class CutcellMG {
     }
     allocFp64(lv_.back());  // the bottom level is whole in every precision
     buildBottomStore();     // the direct bottom's storage (single rank, every backend)
+    computeFp32Last();
     if (mgDebugLevel()) {
       printf("[mg] init %dx%dx%d single-rank -> %d levels (requested %d)\n", nx, ny, nz,
              (int)lv_.size(), nLevels);
@@ -1623,6 +1627,7 @@ class CutcellMG {
       // order).
       curDec = curDec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
     }
+    computeFp32Last();  // D-dist (§5.2): after the hierarchy, before any operator build
     if (mgDebugLevel() && rank == 0) {
       printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %d)%s\n", gnx, gny, gnz, size,
              (int)lv_.size(), nLevels, telescope_ ? "  [telescope ON]" : "");
@@ -1647,6 +1652,21 @@ class CutcellMG {
   }
 #endif
   int nLevels() const { return (int)lv_.size(); }
+  // D-dist (doc/vof_projection_distributed_design.md §5.2): the last level the FP32 V-cycle runs
+  // on. Single rank the last non-bottom level; distributed the first telescope point if any level
+  // telescopes (every rank holds the levels up to it), else the last non-bottom level. -1: none.
+  int fp32Last() const { return fp32Last_; }
+  void computeFp32Last() {
+    fp32Last_ = (int)lv_.size() - 2;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      for (int L = 0; L < (int)lv_.size(); ++L)
+        if (lv_[L].tele) {
+          fp32Last_ = L;
+          break;
+        }
+#endif
+  }
   Level& level(int L) { return lv_[L]; }
 
   // per-face domain BC types {-x,+x,-y,+y,-z,+z}: 0=periodic, 1/2/4=Neumann (wall/inflow/
@@ -3529,6 +3549,20 @@ class CutcellMG {
   // or on the weights themselves: single rank, no outflow face, >= 2 levels, even inner dimensions
   // on every non-bottom level, a double outer operator, the mean-removal scope 'fine'.
   bool fp32Carriable() const {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {  // D-dist (§5.2): the levels 0 .. fp32Last_, even GLOBAL inner dimensions
+      if (hasOutflow_ || fp32Last_ < 0 || meanRemovalAll_)
+        return false;
+      if (!(exactResidual_ || std::is_same_v<MReal, double>))
+        return false;
+      for (int L = 0; L <= fp32Last_; ++L) {
+        const C3 gi = lv_[L].gdim;  // the level's global inner dimensions (globalInner, §5.2)
+        if (gi.x % 2 != 0 || gi.y % 2 != 0 || gi.z % 2 != 0)
+          return false;
+      }
+      return true;
+    }
+#endif
     if (distributed_ || hasOutflow_ || lv_.size() < 2 || meanRemovalAll_)
       return false;
     if (!(exactResidual_ || std::is_same_v<MReal, double>))
@@ -3546,7 +3580,9 @@ class CutcellMG {
   // that does not carry them is marked stale (wOk = false).
   bool fp32Build(int L) {
     Level& lv = lv_[L];
-    if (!fp32Mode() || L + 1 >= (int)lv_.size() || !fp32Carriable()) {
+    // distributed (§5.2): the levels 0 .. fp32Last_ carry (FP64 below the first telescope point)
+    const bool beyond = distributed_ ? L > fp32Last_ : L + 1 >= (int)lv_.size();
+    if (!fp32Mode() || beyond || !fp32Carriable()) {
       lv.wOk = false;
       return false;
     }
@@ -3558,6 +3594,15 @@ class CutcellMG {
       lv.rhsf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_rhsf", lv.n);
       lv.resf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_resf", lv.n);
     }
+#ifdef PECLET_FLOW_MPI
+    // §5.1: the FP32 ghost exchange on the level's existing topology (same g, same neighbours).
+    // Created inside the collective operator build on a global decision.
+    if (distributed_ && !lv.devf) {
+      lv.devf = std::make_shared<GridHalo<VReal>>();
+      lv.devf->init(*lv.halo);
+      lv.devf->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(lv.g) + " f32");
+    }
+#endif
     return true;
   }
   // D5 (doc/vof_projection_cost_design.md §4.4.7): a level's FP64 V-cycle data -- x, rhs, res
@@ -3580,7 +3625,9 @@ class CutcellMG {
   // V-cycle data are built (fp32Build's conditions) and the outer operator is exact (the level-0
   // apply reads the openness, not AFX): then only an ineligible solve's FP64 V-cycle, a non-exact
   // level-0 apply or BiCGStab reads them, and ensureFp64 builds them for that reader.
-  bool fp64Deferrable() const { return fp32Mode() && exactResidual_ && fp32Carriable(); }
+  bool fp64Deferrable() const {
+    return fp32Mode() && exactResidual_ && fp32Carriable() && !distributed_;  // §5.2: not D5 dist
+  }
   // Finding 5 of the C0/D/G review: the face-range check of each carrying level reduces into a
   // device flag (wBad_(L)), not a host scalar, so an operator build never blocks; the flags are
   // read back once (one copy for all levels) by the first eligibility check after a build.
@@ -3597,6 +3644,17 @@ class CutcellMG {
   }
   // Level L's FP32 weights are built from the current openness and passed the face-range check.
   bool fp32WeightsOk(int L) const {
+#ifdef PECLET_FLOW_MPI
+    // §5.2: distributed, the read-back is followed by an Allreduce(MAX) of the flags of the
+    // carrying levels 0 .. fp32Last_ (every rank holds those, so the count agrees) -- collective,
+    // before any per-level return (+1 Allreduce per operator build).
+    if (distributed_ && wBadStale_) {
+      Kokkos::deep_copy(wBadHost_, wBad_);
+      wBadStale_ = false;
+      if (fp32Last_ >= 0)
+        MPI_Allreduce(MPI_IN_PLACE, wBadHost_.data(), fp32Last_ + 1, MPI_INT, MPI_MAX, comm_);
+    }
+#endif
     if (!lv_[L].wOk)
       return false;
     if (wBadStale_) {
@@ -4754,6 +4812,18 @@ class CutcellMG {
     }
     fillWrap(lv, f);
   }
+  // D-dist (doc/vof_projection_distributed_design.md §5.3): the ghost fill of an FP32 level field.
+  // Distributed: the level's GridHalo<float> (cross-rank + periodic, as fill() for a CCField);
+  // single rank: the periodic wrap copy (the FP32 levels are even, so the one-shot wrap holds).
+  void fill(Level& lv, VField f) {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      lv.devf->exchange(f);
+      return;
+    }
+#endif
+    fillWrap(lv, f);
+  }
   // The single-rank periodic fill in ONE launch over the ghost shell: every ghost cell takes the
   // value of the inner cell its three coordinates wrap to. That is exactly what the three
   // sequential `fillAxis` passes (x, then y, then z, each over the full transverse extent, ghosts
@@ -5561,6 +5631,7 @@ class CutcellMG {
   bool opBuilt_ = false;
   // Finding 5: the per-level face-range flags of the FP32 weights (device) and their read-back.
   Kokkos::View<int*, CCMem> wBad_;
+  int fp32Last_ = -1;  // D-dist (§5.2): computeFp32Last, whenever lv_ is built
   mutable typename Kokkos::View<int*, CCMem>::host_mirror_type wBadHost_;
   mutable bool wBadStale_ = false;
   // D5 (§4.4.7): the non-bottom levels' FP64 V-cycle data do not hold the current operator (the

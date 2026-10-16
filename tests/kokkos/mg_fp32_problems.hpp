@@ -141,6 +141,17 @@ inline Problem packProblem() {
   return makeProblem("pack", 64, 64, 64, 5, bc, open, rho);
 }
 
+// A 64^3 periodic box with a sharp heavy sphere at ratio 1e4 (the distributed design's G-K1 /
+// G-K2 box, doc/vof_projection_distributed_design.md §8).
+inline Problem boxProblem() {
+  const int bc[6] = {0, 0, 0, 0, 0, 0};
+  auto rho = [](double x, double y, double z) {
+    const double dx = x - 20, dy = y - 36, dz = z - 28;
+    return dx * dx + dy * dy + dz * dz < 100.0 ? 1e4 : 1.0;
+  };
+  return makeProblem("box64", 64, 64, 64, 5, bc, [](double, double, double) { return 1.0; }, rho);
+}
+
 inline void setUp(CutcellMG& mg, const Problem& P, int mode) {
   mg.init(P.nx, P.ny, P.nz, P.levels);
   mg.setBoundaryConditions(P.bc);

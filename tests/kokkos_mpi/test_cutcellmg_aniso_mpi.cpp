@@ -154,13 +154,15 @@ int main(int argc, char** argv) {
     auto hx = setupAndSolve(mg, l0.ext, l0.og, nx, ny, nz, /*collective=*/true, &it);
     const std::vector<C3> tab = mg.levelRatios();
 
-    // G-D1(d) (doc/vof_projection_cost_design.md §13): the FP32 V-cycle is never eligible on a
-    // distributed hierarchy, and no FP32 data is built there, whatever the mode.
+    // G-D1(d) (doc/vof_projection_cost_design.md §13): the FP32 V-cycle is not eligible on a
+    // distributed hierarchy yet. Since WO-D1 of doc/vof_projection_distributed_design.md (§5.1)
+    // the FP32 data ARE built there under 'fp32' (inert until WO-D2a enables the distributed
+    // V-cycle): level 0 carries its weights.
     if (size > 1) {
       mg.setVcyclePrecision(CutcellMG::kVcycleFp32);
       const char* why = mg.fp32VcycleIneligible(true);
       if (!why || std::string(why).find("distributed") == std::string::npos ||
-          mg.level(0).WX.extent(0) != 0) {
+          mg.level(0).WX.extent(0) != mg.level(0).n) {
         ++fail;
         std::fprintf(stderr, "[rank %d] FP32 V-cycle eligible on a distributed hierarchy\n", rank);
       }
