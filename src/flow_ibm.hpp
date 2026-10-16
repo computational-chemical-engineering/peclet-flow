@@ -521,6 +521,12 @@ class Solver {
   void setPressureVcyclePrecision(int mode);
   // The precision the last pressure solve's V-cycles used: true = FP32.
   bool pressureVcycleFp32() const;
+  // C++ test hooks of the FP64 restart (doc/vof_projection_distributed_design.md §4, gate G-R (g));
+  // no Python binding: CutcellMG::debugSetFp32Fault, the restart count, the projected-guess
+  // history count.
+  void debugSetPressureFp32Fault(int kind, int at);
+  int pressureVcycleRestarts() const;
+  int pressureGuessCount() const;
 
   // Coarse-level telescoping of the pressure multigrid (mac_cutcell_mg.hpp Telescope): when a
   // per-rank block turns odd, merge ORB siblings onto fewer ranks and keep coarsening instead of

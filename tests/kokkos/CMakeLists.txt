@@ -413,6 +413,14 @@ target_include_directories(test_mg_fp32_vcycle PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(test_mg_fp32_vcycle PRIVATE Kokkos::kokkos)
 add_test(NAME mg_fp32_vcycle COMMAND test_mg_fp32_vcycle)
 set_tests_properties(mg_fp32_vcycle PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
+# doc/vof_projection_distributed_design.md §4 (WO-R): the FP64 restart of a non-converged FP32
+# attempt under 'auto' (G-R (a)-(g)).
+add_executable(test_pressure_restart test_pressure_restart.cpp)
+target_include_directories(test_pressure_restart PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_pressure_restart PRIVATE Kokkos::kokkos)
+add_test(NAME pressure_restart COMMAND test_pressure_restart)
+set_tests_properties(pressure_restart PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
 # The factor launch's timing probe (§14 H-1): min / median ms per team size, bitwise check across
 # them. An instrument, not a gate: LABELS bench (excluded by `ctest -LE bench`).
 add_executable(bench_bottom_factor bench_bottom_factor.cpp)

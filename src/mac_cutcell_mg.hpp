@@ -14,9 +14,11 @@
 #ifndef PECLET_FLOW_MAC_CUTCELL_MG_HPP
 #define PECLET_FLOW_MAC_CUTCELL_MG_HPP
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <limits>
@@ -1965,10 +1967,70 @@ class CutcellMG {
   int solvePCG(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                double rtol, int pre, int post, int bottom, const StarOverlay* star = nullptr,
                int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
+    return solveWithRestart(x, maxit, [&](int m) {
+      return solvePCGAttempt(b, x, r, p, z, Ap, m, rtol, pre, post, bottom, star, nStar, nnStar);
+    });
+  }
+  // R (doc/vof_projection_distributed_design.md §4): the restart wrapper of the public PCG / FCG.
+  // Under 'auto', an attempt that ran the FP32 V-cycle and did not meet its stop test (a cap, a
+  // non-finite breakdown, a degenerate direction) is re-solved COLD with the FP64 V-cycle -- x = 0,
+  // a fresh maxit, the caller's stop reference, no projected guess: bitwise the 'fp64' cold solve
+  // of the same b -- and 'auto' latches FP64 for the rest of the run (setVcyclePrecision re-arms).
+  // Forced 'fp32' is never restarted (the measurement mode). No second restart. The decision reads
+  // only the attempt's count, lastSolveConverged_, lastVcycleFp32_ and vprec_ -- allreduced scalars
+  // and global mode state -- so every rank takes it alike.
+  template <class Attempt>
+  int solveWithRestart(CCField x, int maxit, Attempt&& attempt) {
+    const int it = attempt(maxit);
+    if (!(vprec_ == kVcycleAuto && lastVcycleFp32_ && !lastSolveConverged_ && attemptMaxit_ > 0))
+      return it;
+    const char* why = solveFailed_          ? "non-finite at iteration"
+                      : it >= attemptMaxit_ ? "capped after"
+                                            : "degenerate direction at";
+    lastDiscardedIters_ = it;
+    ++vcycleRestarts_;
+    const bool wasCarriable = fp32Carriable(), wasDeferrable = fp64Deferrable();
+    fp32Latched_ = true;  // as a mode change: FP64 data come with the first FP64 V-cycle
+    fp32Reconfigure(wasCarriable, wasDeferrable);
+    Kokkos::deep_copy(CCExec(), x, 0.0);  // full extent, ghosts included
+    struct ColdScope {  // the restart attempt is cold: no projected guess, x0 = +0 (H-2c)
+      CutcellMG& m;
+      CCField v1;
+      int hist;
+      bool zero;
+      ~ColdScope() {
+        m.guessV1_ = v1;
+        m.guessHist_ = hist;
+        m.zeroGuess_ = zero;
+      }
+    } cold{*this, guessV1_, guessHist_, zeroGuess_};
+    guessV1_ = CCField();
+    guessHist_ = 0;
+    zeroGuess_ = true;
+    const int it2 = attempt(maxit);
+    int rank = 0;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      MPI_Comm_rank(comm_, &rank);
+#endif
+    if (rank == 0)
+      std::fprintf(stderr,
+                   "peclet::flow CutcellMG: the FP32 V-cycle did not converge this solve (%s %d); "
+                   "re-solved with the FP64 V-cycle in %d iterations; 'auto' stays FP64 for the "
+                   "rest of the run (set_pressure_vcycle_precision re-arms)\n",
+                   why, it, it2);
+    return it2;
+  }
+  // One MG-PCG attempt (R, §4: solvePCG's body before the restart wrapper).
+  int solvePCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
+                      double rtol, int pre, int post, int bottom, const StarOverlay* star,
+                      int nStar, C3 nnStar) {
     if (!distributed_)  // A6: the single-rank driver keeps its Krylov scalars on the device
       return solvePCGResident(b, x, r, p, z, Ap, maxit, rtol, pre, post, bottom, star, nStar,
                               nnStar);
-    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    solveFailed_ = false;         // ISSUES sweep item 6: per-solve breakdown flag
+    lastSolveConverged_ = false;  // R (§4): per attempt
+    attemptMaxit_ = maxit;
     OverlayScope overlay(overlaySolve_, star != nullptr);
     pre_ = pre;
     post_ = post;
@@ -2004,6 +2066,7 @@ class CutcellMG {
       printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
              pre, post, bottom);
     ++dbgSolve_;
+    lastSolveConverged_ = r0 == 0.0;  // R (§4): the loop is skipped on a zero residual
     // Breakdown guards: a non-finite recurrence scalar means the preconditioner or operator
     // produced NaN/Inf (should not happen — the guards fail safe rather than poisoning x with a
     // NaN alpha/beta and letting the projection silently corrupt every field downstream).
@@ -2023,7 +2086,7 @@ class CutcellMG {
             maxit, maxit);
         Kokkos::deep_copy(CCExec(), x, 0.0);
         Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_)
+        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
           throw std::runtime_error(
               "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
               "(set_pressure_strict)");
@@ -2047,6 +2110,7 @@ class CutcellMG {
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
+          lastSolveConverged_ = true;
           ++it;
           break;
         }
@@ -2541,7 +2605,8 @@ class CutcellMG {
   int solvePCGResident(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                        double rtol, int pre, int post, int bottom, const StarOverlay* star,
                        int nStar, C3 nnStar) {
-    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    solveFailed_ = false;         // ISSUES sweep item 6: per-solve breakdown flag
+    lastSolveConverged_ = false;  // R (§4): per attempt
     OverlayScope overlay(overlaySolve_, star != nullptr);
     pre_ = pre;
     post_ = post;
@@ -2604,6 +2669,10 @@ class CutcellMG {
     // its exit.
     const bool f32 = fp32VcycleSolve();
     lastVcycleFp32_ = f32;
+    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
+    if (f32 && fp32FaultKind_ == 2)
+      maxit = std::min(maxit, fp32FaultAt_);
+    attemptMaxit_ = maxit;
     const bool health = trace || healthTrace_;
     healthLog_.clear();
     int eNext = 0;
@@ -2620,6 +2689,7 @@ class CutcellMG {
       exitDot_ = ExitDot{};
       return done;
     };
+    lastSolveConverged_ = r0 == 0.0;  // R (§4): the loop is skipped on a zero residual
     if (r0 > 0.0 && std::isfinite(r0)) {
       const bool copyFused = kHostMemory && fusedWrapSmooth(l0) && lv_.size() > 1;
       eNext = std::ilogb(r0);
@@ -2636,7 +2706,7 @@ class CutcellMG {
             maxit, maxit);
         Kokkos::deep_copy(CCExec(), x, 0.0);
         Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_)
+        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
           throw std::runtime_error(
               "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
               "(set_pressure_strict)");
@@ -2703,6 +2773,7 @@ class CutcellMG {
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
+          lastSolveConverged_ = true;
           ++it;
           exited = true;
           break;
@@ -2772,7 +2843,17 @@ class CutcellMG {
   int solveFCG(CCField b, CCField x, CCField r, CCField p, CCField z, CCField zp, CCField Ap,
                int maxit, double rtol, int pre, int post, int bottom,
                const StarOverlay* star = nullptr, int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
-    solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    return solveWithRestart(x, maxit, [&](int m) {
+      return solveFCGAttempt(b, x, r, p, z, zp, Ap, m, rtol, pre, post, bottom, star, nStar,
+                             nnStar);
+    });
+  }
+  // One flexible-CG attempt (R, §4: solveFCG's body before the restart wrapper).
+  int solveFCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField zp, CCField Ap,
+                      int maxit, double rtol, int pre, int post, int bottom,
+                      const StarOverlay* star, int nStar, C3 nnStar) {
+    solveFailed_ = false;         // ISSUES sweep item 6: per-solve breakdown flag
+    lastSolveConverged_ = false;  // R (§4): per attempt
     OverlayScope overlay(overlaySolve_, star != nullptr);
     pre_ = pre;
     post_ = post;
@@ -2788,6 +2869,10 @@ class CutcellMG {
     // stop reference under E, see solvePCGResident); FCG keeps its own dots
     const bool f32 = fp32VcycleSolve();
     lastVcycleFp32_ = f32;
+    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
+    if (f32 && fp32FaultKind_ == 2)
+      maxit = std::min(maxit, fp32FaultAt_);
+    attemptMaxit_ = maxit;
     healthLog_.clear();
     auto precond = [&](CCField zz, CCField rr, double rn) {
       if (f32)
@@ -2826,6 +2911,7 @@ class CutcellMG {
       printf("[mg] fcg solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0,
              rtol, pre, post, bottom);
     ++dbgSolve_;
+    lastSolveConverged_ = r0 == 0.0;  // R (§4): the loop is skipped on a zero residual
     if (r0 > 0.0 && std::isfinite(r0)) {
       precond(z, r, r0);
       Kokkos::deep_copy(CCExec(), p, z);
@@ -2838,7 +2924,7 @@ class CutcellMG {
             maxit, maxit);
         Kokkos::deep_copy(CCExec(), x, 0.0);
         Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_)
+        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
           throw std::runtime_error(
               "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z "
               "(set_pressure_strict)");
@@ -2862,6 +2948,7 @@ class CutcellMG {
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
+          lastSolveConverged_ = true;
           ++it;
           break;
         }
@@ -3427,7 +3514,13 @@ class CutcellMG {
   // backend. FP32 ('fp32' and 'auto') is opt-in by USER ruling 2026-10-15: it is single-rank only,
   // so as a default it would break the serial <-> np=1 bit-exactness.
   enum : int { kVcycleAuto = 0, kVcycleFp64 = 1, kVcycleFp32 = 2 };
-  bool fp32Mode() const { return vprec_ != kVcycleFp64; }
+  // R (doc/vof_projection_distributed_design.md §4): the precision the mode resolves to now.
+  // 'auto' latched to FP64 by a restart (fp32Latched_) is 'fp64' until setVcyclePrecision re-arms
+  // it, so the FP32 build, the D5 deferral and the eligibility all follow the latch.
+  int effectiveVprec() const {
+    return (vprec_ == kVcycleAuto && fp32Latched_) ? (int)kVcycleFp64 : vprec_;
+  }
+  bool fp32Mode() const { return effectiveVprec() != kVcycleFp64; }
   // Can this configuration be eligible (§4.4.1), as far as the operator build knows? Every
   // condition of fp32VcycleIneligible that does not depend on the solve (the driver, an overlay)
   // or on the weights themselves: single rank, no outflow face, >= 2 levels, even inner dimensions
@@ -3617,8 +3710,11 @@ class CutcellMG {
     // 1. entry: rhsf = fl32(2^-e r); the first pre-smooth colour pass from x = 0 (colour 0)
     entryFp32(l0.xf, l0.rhsf, CCConst(rr), VConst(l0.WX), VConst(l0.WY), VConst(l0.WZ),
               std::ldexp(1.0, -e), l0.ext, parityOg(l0), l0.g, /*color=*/0, pre_ > 0);
-    vcycleFp32Impl(0, /*sym=*/true);                 // 2., 3.
-    exitFp32(l0, zz, rr, std::ldexp(1.0, e), k, p);  // 4.
+    vcycleFp32Impl(0, /*sym=*/true);  // 2., 3.
+    double s = std::ldexp(1.0, e);
+    if (fp32FaultKind_ == 1 && ++fp32FaultCount_ == fp32FaultAt_)
+      s = std::numeric_limits<double>::quiet_NaN();  // R test hook (debugSetFp32Fault)
+    exitFp32(l0, zz, rr, s, k, p);                   // 4.
   }
   // The red-black sweeps of smooth() on the FP32 data (wrap reads; every non-bottom level is
   // fusedWrapSmooth by eligibility). skipFirst: the entry pass already did the first colour.
@@ -3729,6 +3825,7 @@ class CutcellMG {
     if (mode != kVcycleAuto && mode != kVcycleFp64 && mode != kVcycleFp32)
       throw std::invalid_argument(
           "CutcellMG::setVcyclePrecision: kVcycleAuto | kVcycleFp64 | kVcycleFp32");
+    fp32Latched_ = false;  // R (§4): any call re-arms 'auto'
     const bool was = fp64Deferrable();
     vprec_ = mode;
     if (!was && fp64Deferrable())
@@ -3738,6 +3835,21 @@ class CutcellMG {
   int vcyclePrecision() const { return vprec_; }
   // The precision the last solve's V-cycles used (§4.4.6): true = FP32.
   bool lastVcycleFp32() const { return lastVcycleFp32_; }
+  // R (doc/vof_projection_distributed_design.md §4), C++ only: the number of FP64 restarts, the
+  // discarded iterations of the last restarted FP32 attempt, whether the last attempt converged.
+  int vcycleRestarts() const { return vcycleRestarts_; }
+  int lastDiscardedIters() const { return lastDiscardedIters_; }
+  bool lastSolveConverged() const { return lastSolveConverged_; }
+  // R test hook (C++ only, no Python, no env): kind 1 = on the at-th FP32 V-cycle of an attempt
+  // the exit scale is NaN (z and r^T z non-finite on every rank); kind 2 = an FP32 attempt runs
+  // with maxit = min(maxit, at); kind 0 = off. Inert unless the V-cycle is FP32.
+  void debugSetFp32Fault(int kind, int at) {
+    fp32FaultKind_ = kind;
+    fp32FaultAt_ = at;
+  }
+  // R (§4): a failed attempt of this solve will be restarted, so a breakdown does not throw under
+  // set_pressure_strict (the FP64 restart attempt honours strict as any FP64 solve).
+  bool restartArmed() const { return vprec_ == kVcycleAuto && lastVcycleFp32_; }
   // The decoupled cells of a carrying level, counted two ways: FP32 (all six weights 0, D_i == 0)
   // and FP64 (AC < 1e-30). The face-range check makes the sets equal (§4.4.1 (5)).
   void fp32DecoupledCounts(int L, long& n32, long& n64) {
@@ -5452,6 +5564,19 @@ class CutcellMG {
   // last build deferred them, or the setter released them); ensureFp64 rebuilds them.
   bool fp64Stale_ = false;
   bool lastVcycleFp32_ = false;
+  // R (doc/vof_projection_distributed_design.md §4): the FP64 restart of a non-converged FP32
+  // attempt under 'auto'. fp32Latched_: a restart latched 'auto' to FP64 (mode state, like vprec_:
+  // it survives init, initMpi and geometry rebuilds; setVcyclePrecision clears it).
+  // lastSolveConverged_: the last attempt met its stop test or started with r0 == 0.
+  // attemptMaxit_: the iteration limit the last attempt ran with (the kind-2 fault lowers it).
+  bool fp32Latched_ = false;
+  bool lastSolveConverged_ = false;
+  int attemptMaxit_ = 0;
+  int vcycleRestarts_ = 0;
+  int lastDiscardedIters_ = 0;
+  // debugSetFp32Fault (test hook): kind 0 off, 1 NaN exit scale on the at-th FP32 V-cycle of an
+  // attempt, 2 an FP32 attempt runs at most `at` iterations; fp32FaultCount_ counts the V-cycles.
+  int fp32FaultKind_ = 0, fp32FaultAt_ = 0, fp32FaultCount_ = 0;
   bool healthTrace_ = false;       // §4.4.5 test hook (setHealthTrace)
   std::vector<double> healthLog_;  // the last single-rank PCG / FCG solve's health ratios
   // The `agglomerateBottom()` auto criterion: agglomerate once the coarsest GLOBAL grid exceeds

@@ -534,6 +534,21 @@ bool Solver<Grid>::pressureVcycleFp32() const {
 }
 
 template <class Grid>
+void Solver<Grid>::debugSetPressureFp32Fault(int kind, int at) {
+  mg_.debugSetFp32Fault(kind, at);
+}
+
+template <class Grid>
+int Solver<Grid>::pressureVcycleRestarts() const {
+  return mg_.vcycleRestarts();
+}
+
+template <class Grid>
+int Solver<Grid>::pressureGuessCount() const {
+  return pguessCount_;
+}
+
+template <class Grid>
 void Solver<Grid>::setPressureTelescope(bool on) {
   mg_.setTelescope(on);
 }
