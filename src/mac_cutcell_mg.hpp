@@ -3504,23 +3504,7 @@ class CutcellMG {
     }
 #ifdef PECLET_FLOW_MPI
     if (lv.tele) {
-      // Telescoped transition: the residual goes DOWN at this level's own resolution onto the group
-      // root (the merged block is coarsenable; this rank's block is not), the roots restrict /
-      // recurse / prolong on the sub-communicator, and the correction comes back the same way.
-      Telescope& T = *lv.tele;
-      teleGather(lv, lv.res, T.res);
-      if (T.root()) {
-        Level& cs = lv_[L + 1];
-        restrictAvg(cs.rhs, CCConst(T.res), cs.ext, T.mExt, cs.g, T.g, cs.inner, lv.ratio);
-        Kokkos::deep_copy(CCExec(), cs.x, 0.0);
-        vcycle(L + 1, sym);
-        fill(cs, cs.x);
-        applyOutflowGhost(cs, cs.x, cs.g);
-        applyNeumannGhost(cs, cs.x, cs.g);
-        Kokkos::deep_copy(CCExec(), T.x, 0.0);
-        prolongAdd(T.x, CCConst(cs.x), T.mExt, cs.ext, T.g, cs.g, T.mInner, lv.ratio);
-      }
-      teleScatterAdd(lv, T.x, lv.x);
+      teleTransition(L, sym, lv.res, lv.x);
     } else
 #endif
     {
@@ -3550,6 +3534,31 @@ class CutcellMG {
     if (meanRemovalAll_ || L == 0)
       removeMean(lv, lv.x);
   }
+#ifdef PECLET_FLOW_MPI
+  // Telescoped transition: the residual `src` goes DOWN at this level's own resolution onto the
+  // group root (the merged block is coarsenable; this rank's block is not), the roots restrict /
+  // recurse / prolong on the sub-communicator, and the correction comes back the same way, ADDED
+  // into `target`. vcycleImpl passes (lv.res, lv.x); the distributed FP32 V-cycle (WO-D2b1) its
+  // FP64 copy of the FP32 residual and a zeroed FP64 correction (design
+  // doc/vof_projection_distributed_design.md §5.6).
+  void teleTransition(int L, bool sym, CCField src, CCField target) {
+    Level& lv = lv_[L];
+    Telescope& T = *lv.tele;
+    teleGather(lv, src, T.res);
+    if (T.root()) {
+      Level& cs = lv_[L + 1];
+      restrictAvg(cs.rhs, CCConst(T.res), cs.ext, T.mExt, cs.g, T.g, cs.inner, lv.ratio);
+      Kokkos::deep_copy(CCExec(), cs.x, 0.0);
+      vcycle(L + 1, sym);
+      fill(cs, cs.x);
+      applyOutflowGhost(cs, cs.x, cs.g);
+      applyNeumannGhost(cs, cs.x, cs.g);
+      Kokkos::deep_copy(CCExec(), T.x, 0.0);
+      prolongAdd(T.x, CCConst(cs.x), T.mExt, cs.ext, T.g, cs.g, T.mInner, lv.ratio);
+    }
+    teleScatterAdd(lv, T.x, target);
+  }
+#endif
   // Communication-avoiding smoothing on this level? Needs the width-2 topology (caOk), and the
   // periodic/IBM operator — with domain BCs the ring rows would need post-BC ghost openness the
   // exchange does not deliver, so those keep the per-colour exchange.
