@@ -29,7 +29,11 @@
 ///   solve (on a
 ///         device; host 'auto' is 'fp64', the fault inert), (c) forced 'fp32' never restarts;
 ///         vcycleRestarts() equal on every rank; np 1 memcmp-equal to the single-rank restart.
-/// A hierarchy that telescopes is ineligible until WO-D2b (reported, not solved).
+/// WO-D2b1 (G-DD2 (f)): telescoped hierarchies -- natural (column at 6 levels, np 4 and 8) and
+/// forced (setTelescopeForceLevel(1), column, np 4): fp32Last is the first telescope level, and
+/// (a)-(c) as above -- (b) gated where the telescope point is the last non-bottom level (the
+/// single-rank precision split); above it FP64 runs below the point (§3.2), so z is reported
+/// against the single-rank FP32-vs-FP64 V-cycle difference instead.
 #include <mpi.h>
 
 #include <algorithm>
@@ -60,9 +64,10 @@ void check(bool ok, const std::string& what) {
 }
 
 // This rank's block of the global openness (inner faces; setOpenness fills the ghosts).
-void setUpDist(CutcellMG& mg, const Problem& P, int mode, int ca = kCaBoth) {
+void setUpDist(CutcellMG& mg, const Problem& P, int mode, int ca = kCaBoth, int teleForce = -1) {
   mg.setBoundaryConditions(P.bc);  // before initMpi (the per-level ghost width reads it)
   mg.setCommAvoiding(ca);
+  mg.setTelescopeForceLevel(teleForce);
   mg.initMpi(P.nx, P.ny, P.nz, P.levels, MPI_COMM_WORLD);
   mg.setVcyclePrecision(mode);
   const CutcellMG::Level& l0 = mg.level(0);
@@ -137,9 +142,7 @@ void problemChecks(const Problem& P) {
     mg.setVcyclePrecision(CutcellMG::kVcycleFp32);
     ringChecks(mg, tag + " setter rebuild");
     const char* why = mg.fp32VcycleIneligible(true);
-    check(why == nullptr || std::string(why).find("telescopes") != std::string::npos,
-          tag + ": eligible distributed (WO-D2a; telescoped: until WO-D2b): " +
-              (why ? why : "eligible"));
+    check(why == nullptr, tag + ": eligible distributed (WO-D2): " + (why ? why : "eligible"));
   }
   {
     CutcellMG mg;
@@ -264,9 +267,9 @@ Run single(const Problem& P, int mode, int driver, int kind = 0, int at = 0) {
   return r;
 }
 Run dist(const Problem& P, int mode, int driver, int kind = 0, int at = 0, int ca = kCaBoth,
-         int maxit = kMaxit, double rtol = kRtol) {
+         int maxit = kMaxit, double rtol = kRtol, int teleForce = -1) {
   CutcellMG mg;
-  setUpDist(mg, P, mode, ca);
+  setUpDist(mg, P, mode, ca, teleForce);
   return solveOn(mg, sliceOf(P, mg.level(0), rhsOf(P)), driver, kind, at, maxit, rtol);
 }
 // The level 0 of a distributed setup of P (for the index maps of a dist() result).
@@ -327,8 +330,7 @@ void d2aChecks(const Problem& P) {
     setUpDist(probe, P, CutcellMG::kVcycleFp32);
     const char* why = probe.fp32VcycleIneligible(true);
     if (why != nullptr) {
-      check(std::string(why).find("telescopes") != std::string::npos,
-            tag + ": ineligible only because it telescopes (WO-D2b): " + why);
+      check(false, tag + ": ineligible distributed: " + why);
       return;
     }
     if (rank == 0)
@@ -507,6 +509,130 @@ void restartChecks(const Problem& P) {
               itStr(c2));
   }
 }
+
+// G-DD2 (f) (WO-D2b1): a telescoped hierarchy, natural (teleForce < 0) or forced at teleForce.
+void teleChecks(const Problem& P, int teleForce) {
+  const std::string tag =
+      P.name + (teleForce >= 0 ? " forced-tele L" + std::to_string(teleForce) : " natural-tele") +
+      " np" + std::to_string(size);
+  CutcellMG probe;
+  setUpDist(probe, P, CutcellMG::kVcycleFp32, kCaBoth, teleForce);
+  int tl = -1;
+  for (int L = 0; L < probe.nLevels(); ++L)
+    if (probe.level(L).tele) {
+      tl = L;
+      break;
+    }
+  int tlMin = 0, tlMax = 0;
+  MPI_Allreduce(&tl, &tlMin, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(&tl, &tlMax, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  if (tlMax < 0) {
+    if (rank == 0)
+      std::printf("  %s: does not telescope at this np (n/a)\n", tag.c_str());
+    return;
+  }
+  check(tlMin == tlMax && probe.fp32Last() == tl,
+        tag + ": the first telescope level " + std::to_string(tl) + " is fp32Last (" +
+            std::to_string(probe.fp32Last()) + ") on every rank");
+  const char* why = probe.fp32VcycleIneligible(true);
+  check(why == nullptr, tag + ": eligible: " + (why ? why : "yes"));
+  if (why != nullptr)
+    return;
+  if (rank == 0)
+    std::printf("  %s: %d levels on rank 0, FP32 on 0..%d, FP64 below\n", tag.c_str(),
+                probe.nLevels(), tl);
+  const char* dn[2] = {"PCG", "FCG"};
+  std::vector<int> modes{CutcellMG::kVcycleFp32, CutcellMG::kVcycleFp64};
+  if (kAutoFp32)
+    modes.push_back(CutcellMG::kVcycleAuto);
+  for (int driver : {0, 1}) {
+    Run ref[3], got[3];
+    for (std::size_t k = 0; k < modes.size(); ++k) {
+      ref[k] = single(P, modes[k], driver);
+      got[k] = dist(P, modes[k], driver, 0, 0, kCaBoth, kMaxit, kRtol, teleForce);
+    }
+    for (std::size_t k = 0; k < modes.size(); ++k) {
+      if (modes[k] == CutcellMG::kVcycleFp64)
+        continue;
+      const std::string t =
+          tag + " " + dn[driver] + (modes[k] == CutcellMG::kVcycleFp32 ? " 'fp32'" : " 'auto'");
+      if (!got[k].fp32) {
+        check(false, t + ": did not run the FP32 V-cycle (" + itStr(got[k]) + ")");
+        continue;
+      }
+      const Diff d = diffInner(P, probe.level(0), got[k].x, ref[k].x);
+      if (ref[k].converged()) {
+        const bool itOk = std::abs(got[k].it - ref[k].it) <= within(ref[k].it);
+        check(d.maxAbs <= 1e-8 && allRanks(itOk),
+              t + ": G-DD2 (f)(a) max|x - x1| " + num(d.maxAbs) + " (max|x| " + num(d.refMax) +
+                  "), iterations " + itStr(got[k]) + " vs " + itStr(ref[k]));
+      } else if (rank == 0) {
+        std::printf(
+            "  %-100s n/a\n",
+            (t + ": G-DD2 (f)(a) single rank does not converge (" + itStr(ref[k]) + ")").c_str());
+      }
+    }
+    if (got[1].converged())
+      check(got[0].it <= got[1].it + within(got[1].it),
+            tag + " " + dn[driver] + ": G-DD2 (f)(c) 'fp32' " + itStr(got[0]) + " <= 'fp64' " +
+                itStr(got[1]) + " + max(1, 5 %)");
+    else if (rank == 0)
+      std::printf("  %-100s n/a\n",
+                  (tag + " " + dn[driver] + ": G-DD2 (f)(c) 'fp64' does not converge (" +
+                   itStr(got[1]) + ")")
+                      .c_str());
+  }
+  // (b): one V-cycle against single rank (the telescope keeps the depth). (b)'s premise (§8) is a
+  // V-cycle of the same precision split: where the first telescope point is the last non-bottom
+  // level, the FP64 transition sits where single rank's FP32 -> FP64 bottom interface does and
+  // (b) is gated; above it the distributed V-cycle runs FP64 below the telescope point (§3.2)
+  // where single rank runs FP32, a different preconditioner -- reported against the single-rank
+  // FP32-vs-FP64 V-cycle difference for scale, not gated.
+  CutcellMG ms, md;
+  setUp(ms, P, CutcellMG::kVcycleFp32);
+  setUpDist(md, P, CutcellMG::kVcycleFp32, kCaBoth, teleForce);
+  int depth = md.nLevels(), depthMax = 0;
+  MPI_Allreduce(&depth, &depthMax, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  const std::vector<double> rhs = rhsOf(P);
+  const std::vector<double> zs = oneVcycle(ms, rhs);
+  const std::vector<double> zd = oneVcycle(md, sliceOf(P, md.level(0), rhs));
+  const Diff d = diffInner(P, md.level(0), zd, zs);
+  if (depthMax != ms.nLevels()) {
+    if (rank == 0)
+      std::printf("  %s: G-DD2 (f)(b) n/a (depth %d vs single rank %d)\n", tag.c_str(), depthMax,
+                  ms.nLevels());
+  } else if (tl == ms.nLevels() - 2) {
+    check(d.maxAbs <= 1e-11 * d.refMax,
+          tag + ": G-DD2 (f)(b) one FP32 V-cycle max|dz|/max|z| " + num(d.maxAbs / d.refMax));
+  } else {
+    CutcellMG m64;  // the single-rank FP64 V-cycle of the same r
+    setUp(m64, P, CutcellMG::kVcycleFp64);
+    CutcellMG::Level& l0 = m64.level(0);
+    {
+      CCField s0("s0", l0.n), s1("s1", l0.n), s2("s2", l0.n), s3("s3", l0.n), s4("s4", l0.n),
+          s5("s5", l0.n);
+      m64.solvePCG(s0, s1, s2, s3, s4, s5, 0, 1e-8, 2, 2, 12);
+    }
+    CCField r = toDevice(rhs, "r"), z("z", l0.n);
+    m64.removeMean(l0, r);
+    m64.precondVcycle(z, r);
+    const std::vector<double> z64 = toHost(z);
+    double dm = 0.0, zm = 0.0;
+    for (int zc = 1; zc <= P.nz; ++zc)
+      for (int y = 1; y <= P.ny; ++y)
+        for (int x = 1; x <= P.nx; ++x) {
+          const long i = P.idx(x - 1, y - 1, zc - 1);
+          dm = std::max(dm, std::fabs(z64[i] - zs[i]));
+          zm = std::max(zm, std::fabs(zs[i]));
+        }
+    if (rank == 0)
+      std::printf(
+          "  %s: G-DD2 (f)(b) info: FP64 below L%d (single rank FP32 to L%d): "
+          "max|dz|/max|z| %s vs single rank (single-rank fp32 vs fp64 V-cycle %s)\n",
+          tag.c_str(), tl, ms.nLevels() - 2, num(d.maxAbs / d.refMax).c_str(),
+          num(dm / zm).c_str());
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -523,6 +649,14 @@ int main(int argc, char** argv) {
        {columnProblem(), cylProblem(), packProblem(), slabProblem(1e2), boxProblem()})
     d2aChecks(P);
   restartChecks(columnProblem());
+  if (size == 4 || size == 8) {  // G-DD2 (f) (WO-D2b1)
+    Problem c6 = columnProblem();
+    c6.levels = 6;
+    c6.name = "column6";
+    teleChecks(c6, -1);
+  }
+  if (size == 4)
+    teleChecks(columnProblem(), 1);
   if (rank == 0)
     std::printf("%s (%d failure%s)\n", fails ? "FAIL" : "PASS", fails, fails == 1 ? "" : "s");
   Kokkos::finalize();

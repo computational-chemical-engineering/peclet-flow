@@ -1042,6 +1042,9 @@ class CutcellMG {
     // D-dist (doc/vof_projection_distributed_design.md §5.1): the FP32 iterates' ghost exchange on
     // the same topology, created by fp32Build on a level that carries the FP32 data (null else).
     std::shared_ptr<GridHalo<VReal>> devf;
+    // D-dist (§5.1, WO-D2b1): on the FP32 level that telescopes (fp32Last_), the FP64 correction
+    // the telescope transition scatter-adds into (level extent; empty elsewhere).
+    CCField tcorr;
     // This level's communicator: comm_ above the first telescope point, the roots-only
     // sub-communicator below it. Every collective a LEVEL performs (removeMean's Allreduce, the
     // bottom's gather) must use this, not comm_ — see Telescope.
@@ -3646,6 +3649,8 @@ class CutcellMG {
       lv.devf->init(*lv.halo);
       lv.devf->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(lv.g) + " f32");
     }
+    if (distributed_ && lv.tele && L == fp32Last_ && lv.tcorr.extent(0) != lv.n)
+      lv.tcorr = CCField("peclet::flow::mg_tcorr", lv.n);  // §5.1 (WO-D2b1)
 #endif
     return true;
   }
@@ -3873,13 +3878,19 @@ class CutcellMG {
   // by its FP32 launch form (the single-rank FP32 cell bodies), each lv.dev exchange by lv.devf on
   // the FP32 field, every zeroing, fill, Neumann ghost and overlap split at its position. No
   // outflow face (eligibility), so applyOutflowGhost on an FP32 field has no counterpart. Levels
-  // 0 .. fp32Last_ (WO-D2a: the last non-bottom level; telescoped hierarchies are ineligible).
+  // 0 .. fp32Last_: the last non-bottom level, or the first telescope point, whose transition
+  // runs in FP64 (fp32ToDouble of the residual, teleTransition into tcorr, fp32AddDouble).
   void vcycleFp32Dist(int L, bool sym) {
     Level& lv = lv_[L];
     smoothFp32Dist(lv, pre_, false, /*skipFirst=*/L == 0 && pre_ > 0);
     residualFp32Dist(lv);
-    Level& cs = lv_[L + 1];
-    if (L == fp32Last_) {  // the bottom interface (L + 2 == lv_.size()): FP64 below, unchanged
+    if (lv.tele) {  // L == fp32Last_ (WO-D2b1): FP64 from the first telescope point down
+      fp32ToDouble(lv.res, VConst(lv.resf), lv.ext);
+      Kokkos::deep_copy(CCExec(), lv.tcorr, 0.0);
+      teleTransition(L, sym, lv.res, lv.tcorr);  // §5.6 (a rank idling below holds no L + 1)
+      fp32AddDouble(lv.xf, CCConst(lv.tcorr), lv.ext, lv.g);
+    } else if (L == fp32Last_) {  // the bottom interface (L + 2 == lv_.size()): FP64 below
+      Level& cs = lv_[L + 1];
       restrictFp32ToDZeroX(cs.rhs, cs.x, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
                            lv.ratio);
       Kokkos::deep_copy(CCExec(), cs.x, 0.0);
@@ -3889,6 +3900,7 @@ class CutcellMG {
       applyNeumannGhost(cs, cs.x, cs.g);
       prolongFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
     } else {
+      Level& cs = lv_[L + 1];
       restrictFp32ZeroX(cs.rhsf, cs.xf, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
                         lv.ratio);
       Kokkos::deep_copy(CCExec(), cs.xf, 0.0f);
@@ -4155,9 +4167,6 @@ class CutcellMG {
       ok = fp32WeightsOk(L) && ok;  // every level evaluated: the first call is collective
     if (!ok)
       return "a face weight is outside {0} or [1e-30, 1e30] (or the FP32 weights are not built)";
-    for (const Level& lv : lv_)  // WO-D2a only: the telescope transition comes with WO-D2b
-      if (lv.tele)
-        return "the hierarchy telescopes (WO-D2b)";
     return nullptr;
   }
 #endif

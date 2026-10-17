@@ -29,8 +29,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <Kokkos_Core.hpp>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -277,8 +275,9 @@ int main(int argc, char** argv) {
     }
 
     // ---- 3. the forced-'fp32' arm (doc/vof_projection_distributed_design.md §8 G-DD1 (d)) -----
-    // The coupled run of 2. with the FP32 V-cycle preconditioner (WO-D2a: distributed), against
-    // the single-rank 'fp32' run: np = 1 memcmp-equal (tol 0), np > 1 at 2.'s tolerance.
+    // The coupled run of 2. with the FP32 V-cycle preconditioner (WO-D2a/b: distributed; np 4
+    // telescopes), against the single-rank 'fp32' run: np = 1 memcmp-equal (tol 0), np > 1 at
+    // 2.'s tolerance.
     {
       const int steps = 25;
       IbmSolver sd(lnx, lny, lnz);
@@ -287,22 +286,12 @@ int main(int argc, char** argv) {
       sd.setPressureVcyclePrecision(peclet::flow::CutcellMG::kVcycleFp32);
       long maxIt = 0;
       int ran32 = 1;
-      bool tele = false;  // WO-D2a: a telescoped hierarchy is ineligible until WO-D2b (global)
-      try {
-        for (int i = 0; i < steps; ++i) {
-          sd.step();
-          maxIt = std::max(maxIt, sd.lastPressureIterations());
-          ran32 = ran32 && sd.pressureVcycleFp32();
-        }
-      } catch (const std::runtime_error& ex) {
-        if (std::string(ex.what()).find("telescopes (WO-D2b)") == std::string::npos)
-          throw;
-        tele = true;
+      for (int i = 0; i < steps; ++i) {
+        sd.step();
+        maxIt = std::max(maxIt, sd.lastPressureIterations());
+        ran32 = ran32 && sd.pressureVcycleFp32();
       }
-      if (tele) {
-        if (rank == 0)
-          std::printf("  [fp32 np=%d] the hierarchy telescopes: ineligible until WO-D2b\n", size);
-      } else {
+      {
         const auto gc = gatherGlobal(sd.getVof(), ox, oy, oz, lnx, lny, lnz, rank, size);
         std::vector<double> gu[3];
         for (int c = 0; c < 3; ++c)
