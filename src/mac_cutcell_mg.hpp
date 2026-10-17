@@ -3742,8 +3742,12 @@ class CutcellMG {
     if (distributed_ && wBadStale_) {
       Kokkos::deep_copy(wBadHost_, wBad_);
       wBadStale_ = false;
-      if (fp32Last_ >= 0)
+      if (fp32Last_ >= 0) {
+        if (wBad_.extent(0) < (std::size_t)(fp32Last_ + 1))
+          throw std::logic_error(
+              "CutcellMG::fp32WeightsOk: the range flags do not cover levels 0 .. fp32Last_");
         MPI_Allreduce(MPI_IN_PLACE, wBadHost_.data(), fp32Last_ + 1, MPI_INT, MPI_MAX, comm_);
+      }
     }
 #endif
     if (!lv_[L].wOk)
@@ -4024,31 +4028,37 @@ class CutcellMG {
     const long cnt0 = l0.nFluid;
     auto ks = ks_;
     auto kc = kcnt_;
-    if (counted)
-      ccReduce3Lanes(
-          "peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
-          KOKKOS_LAMBDA(int x, int y, int zc, double& a) {
-            const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
-            if (all || ac(i) > 1e-30f)
-              a += (double)xf(i);
-          },
-          Kokkos::Sum<double, CCMem>(slot(kMsum)));
-    else
-      ccReduce3Lanes(
-          "peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
-          KOKKOS_LAMBDA(int x, int y, int zc, double& a, long& c) {
-            const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
-            if (ac(i) > 1e-30f) {
-              a += (double)xf(i);
-              c += 1;
-            }
-          },
-          Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
+    // the joint {sum, count} body (no precomputed count)
+    auto joint = KOKKOS_LAMBDA(int x, int y, int zc, double& a, long& c) {
+      const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+      if (ac(i) > 1e-30f) {
+        a += (double)xf(i);
+        c += 1;
+      }
+    };
+    if (!distributed_) {
+      if (counted)
+        ccReduce3Lanes(
+            "peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+            KOKKOS_LAMBDA(int x, int y, int zc, double& a) {
+              const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+              if (all || ac(i) > 1e-30f)
+                a += (double)xf(i);
+            },
+            Kokkos::Sum<double, CCMem>(slot(kMsum)));
+      else
+        ccReduce3Lanes("peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+                       joint, Kokkos::Sum<double, CCMem>(slot(kMsum)),
+                       Kokkos::Sum<long, CCMem>(kcnt_));
+    } else {
 #ifdef PECLET_FLOW_MPI
-    if (distributed_) {  // D-dist §5.5 (nFluid = -1 here: the joint {sum, count} above ran)
-      double sum = readSlot(kMsum);
+      // D-dist §5.5 (nFluid = -1 here, so the joint body): the {sum, count} pair reduced straight
+      // into host scalars -- ONE device->host sync, as the FP64 distributed removeMean (the same
+      // reduction as into the device slots, only the result's location differs)
+      double sum = 0.0;
       long lcnt = 0;
-      Kokkos::deep_copy(lcnt, kcnt_);
+      ccReduce3Lanes("peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, joint,
+                     sum, lcnt);
       double dcnt = (double)lcnt;
       allreduceSum2(sum, dcnt, l0.comm);  // the one Allreduce removeMean spends
       const long gcnt = (long)dcnt;
@@ -4058,8 +4068,8 @@ class CutcellMG {
             ks(kMsum) = sum;
             kc() = gcnt;
           });
-    }
 #endif
+    }
     const bool copyP = p.extent(0) != 0;
     auto body = KOKKOS_LAMBDA(int x, int y, int zc, double& acc) {
       const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
