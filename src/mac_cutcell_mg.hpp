@@ -3905,7 +3905,7 @@ class CutcellMG {
                         lv.ratio);
       Kokkos::deep_copy(CCExec(), cs.xf, 0.0f);
       vcycleFp32Dist(L + 1, sym);
-      fill(cs, cs.xf);  // the level's GridHalo<float>
+      fill(cs, cs.xf);  // the level's FP32 ghost exchange (devf)
       applyNeumannGhost(cs, cs.xf, cs.g);
       prolongFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
     }
