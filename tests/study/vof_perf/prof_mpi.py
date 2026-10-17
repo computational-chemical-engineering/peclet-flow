@@ -14,13 +14,21 @@ Usage:
     PYTHONPATH=<PECLET_FLOW_MPI build> OMP_NUM_THREADS=2 OMP_PROC_BIND=false \\
         mpirun -np P --bind-to none python tests/study/vof_perf/prof_mpi.py N [--pcg|--fcg]
             [--rtol R] [--vcycle-precision auto|fp64|fp32] [--initial-guess MODE]
-            [--warm W] [--dump out.npz] [--ckpt PATH] [--case-dir DIR]
+            [--warm W] [--dump out.npz] [--ckpt PATH] [--case-dir DIR] [--tile TX[,TZ]]
+
+    --tile  periodic replication of the checkpoint TX times along x and TZ times along z (both
+            periodic; the -y/+y walls are kept): global grid (TX NX, NY, TZ NZ), u/v/w/p tiled, each
+            VoF block marker copied once per tile with its box shifted by whole periods (a weak-
+            scaling column at constant cells per rank; default 1,1 = the checkpoint itself)
 
     --dump  rank 0 saves the GATHERED u, v, w, p, C, the timed steps' dt, pressure iterations
             (iters), max_open_divergence_projected() (div) and projection ms (proj_ms, the max
             over ranks of diagnostics.last_step_timers()['projection'])
 Prints one line on rank 0: np, block, ms/step, projection ms/step (mean and min), iterations, the
-precision the last solve used. An 'auto' FP64 restart prints its own warning line on rank 0's
+precision the last solve used; then one machine-readable `RESULT key=value ...` line with the same
+numbers, the global grid and the requested --vcycle-precision. Rank 0 writes `[prof_mpi] timed steps
+begin` to stderr before the first timed step, so restarts in the timed window are the warning lines
+after it. An 'auto' FP64 restart prints its own warning line on rank 0's
 stderr (no Python counter exists, design Q-4).
 """
 import os
@@ -52,9 +60,24 @@ DUMP = arg("--dump", None)
 comm = MPI.COMM_WORLD
 rank, size = comm.Get_rank(), comm.Get_size()
 S = case.CELLS_PER_D
-NX, NY, NZ = case.NX, case.NY, case.NZ
+_tile = [int(x) for x in arg("--tile", "1,1").split(",")]
+TX, TZ = _tile[0], (_tile[1] if len(_tile) > 1 else 1)
+NX, NY, NZ = TX * case.NX, case.NY, TZ * case.NZ
 
 step, t, blocks, vel, pres, series = rp.load_ckpt(CKPT)
+if TX * TZ > 1:
+    vel = [np.asfortranarray(np.tile(a, (TX, 1, TZ))) for a in vel]
+    pres = np.asfortranarray(np.tile(pres, (TX, 1, TZ)))
+    tiled = []
+    for box, col in blocks:  # box = (lo_x, lo_y, lo_z, hi_x, hi_y, hi_z), x/z unwrapped
+        sx = -(box[0] // case.NX) * case.NX  # whole original periods: lo_x into [0, NX)
+        sz = -(box[2] // case.NZ) * case.NZ
+        for i in range(TX):
+            for k in range(TZ):
+                ox, oz = sx + i * case.NX, sz + k * case.NZ
+                tiled.append(([box[0] + ox, box[1], box[2] + oz, box[3] + ox, box[4], box[5] + oz],
+                              col))
+    blocks = tiled
 org, siz = pf.mpi_block(NX, NY, NZ)
 sl = tuple(slice(o, o + n) for o, n in zip(org, siz))
 s = pf.Solver(*siz)
@@ -114,6 +137,8 @@ def one(timed):
 for _ in range(WARM):
     one(False)
 comm.Barrier()
+if rank == 0:
+    print("[prof_mpi] timed steps begin", file=sys.stderr, flush=True)
 w0 = time.perf_counter()
 for _ in range(N):
     one(True)
@@ -142,6 +167,10 @@ if rank == 0:
           f"min {pm.min():.2f} ms/step | pressure iters mean {np.mean(iters):.2f} min "
           f"{min(iters)} max {max(iters)} | last precision {prec} | load "
           f"{os.getloadavg()[0]:.1f}", flush=True)
+    print(f"RESULT np={size} grid={NX}x{NY}x{NZ} block={'x'.join(map(str, siz))} "
+          f"mode={arg('--vcycle-precision', 'default')} precision={prec} steps={N} "
+          f"proj_ms={pm.mean():.4f} proj_min_ms={pm.min():.4f} iters={np.mean(iters):.3f} "
+          f"step_ms={1000 * np.mean(steps):.4f} wall_ms={1000 * wall / N:.4f}", flush=True)
     if DUMP:
         np.savez(DUMP, **fields, dts=np.array(dts), iters=np.array(iters, dtype=np.int64),
                  div=np.array(divs), proj_ms=pm)
