@@ -1,5 +1,13 @@
 # Distributed FP32 V-cycle (D), distributed projected guess (E), FP64 restart: design note
 
+> **Landed (2026-10-17), defaults unchanged:** WO-R 99dd50b, WO-A 85b66fb, WO-D1 acf495a, WO-D2a 87cdd62,
+> WO-D2b0 5baf24b, WO-D2b1 afa062b, WO-E a7d3e9e, WO-G 471b03b, review fixes e4f75df (review:
+> `bubble_column_perf/gate_dist/REVIEW.md`, WO-F GO, no blockers). Gate numbers: `doc/vof_step_performance_log.md`.
+> **WO-F (the flip) waits on S-4** (Snellius H100, one rank per GPU, np 1/2/4/8): the workstation's np 2
+> G-DD4 (two ranks on one GPU, latency-bound) passed at 1.019 vs 1.02 and cannot show the np > 1 gain.
+> **Open issue (pre-existing, not this package):** the staggered cut-cell cylinder Stokes case is not
+> bitwise serial ↔ np = 1 even under `'zero'` (step 1: du 1.0e-17, dp 4.6e-11, at 0cc1a3a).
+
 > **Outcome (design, 2026-10-16).** Three pieces, then one isolated default flip.
 > **R — restart.** Under `'auto'`, a PCG/FCG solve whose FP32-preconditioned attempt does not meet
 > its stop test (cap, non-finite breakdown, degenerate direction) is **re-solved cold with the FP64

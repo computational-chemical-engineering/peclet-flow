@@ -55,14 +55,14 @@ single-rank module byte-identical). Another backend = another prefix and another
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 237 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 245 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-237 registered / **233 with `-LE bench`** (counted 2026-10-16 on `5b025b2`): 61 from `tests/kokkos`
+245 registered / **241 with `-LE bench`** (counted 2026-10-17 on `e4f75df`): 62 from `tests/kokkos`
 (`bench_rbgs`, `vof_timing`, `bench_scalar_cutcell`, `bench_bottom_factor` carry `bench` — instruments,
-not gates), 136 from `tests/kokkos_mpi` (45 cases at np = 1, 2, 4 + one np = 8 rung), and 40 Python ctests on the
+not gates), 143 from `tests/kokkos_mpi` (47 cases at np = 1, 2, 4 + two np = 8 rungs), and 40 Python ctests on the
 module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_operator_casts`,
 `iteration_order`, and 24 `scalar_cutcell_*` gates; the six `_g6_*` take 20–35 min each).
 
@@ -236,12 +236,14 @@ you want). Detail and numbers for every bullet: ref §6.
   below the exact FP64 PCG/FCG (face weights, derived diagonal, flux form; projection −19 % on the
   RTX 5080, −11 % on host, bubble column). `diagnostics.set_pressure_initial_guess('zero'|'projected'|
   'auto')`: the A-norm projected guess (−0.83…−0.87 PCG iterations/step). The forced value raises
-  where ineligible; `'auto'` = the fast path where eligible, else the default, on every backend. Both
-  are single-rank only — as defaults they break the serial ↔ np=1 bit-exactness (8 np1 ctests +
-  `units_scale_invariance` failed on CUDA) — and FP32 can cap where FP64 converges (walled slab
-  ≥ 1e3), visible only in `last_pressure_iterations()`. **Do not flip either default** without an
-  FP64 restart-on-cap and a distributed FP32 V-cycle / E (`doc/vof_projection_cost_design.md`
-  Outcome, register). Host CutcellMG sums use 4 x-lanes (`ccReduce3Lanes`, C0: host pressure
+  where ineligible. Since 2026-10-17 (`doc/vof_projection_distributed_design.md`) both run
+  **distributed** too (np = 1 memcmp-equal to single rank; FP32 down to the first telescope point,
+  FP64 below), and `'auto'` for the V-cycle = FP32 where eligible **on device backends only** (host
+  `'auto'` ≡ `'fp64'`) **with an FP64 restart**: an FP32 attempt that misses its stop test (cap,
+  non-finite, pAp breakdown) is re-solved cold in FP64 (bitwise the `'fp64'` solve) and FP64 is
+  latched for the run until the setter is called again; forced `'fp32'` never restarts. The D default
+  flip (to `'auto'`) waits on the S-4 one-rank-per-GPU measurement; E's default stays `'zero'` (E1
+  failed its own gate). `'auto'` at np > 1 keeps FP64 + FP32 level data (≈ +30 % MG memory). Host CutcellMG sums use 4 x-lanes (`ccReduce3Lanes`, C0: host pressure
   results moved once, ≤ 6.5e-14 relative); the fused host Krylov reductions (C1–C4) are
   single-rank host only.
 - `set_pressure_bottom("auto")` (default) agglomerates the coarsest level into a global operator solved
