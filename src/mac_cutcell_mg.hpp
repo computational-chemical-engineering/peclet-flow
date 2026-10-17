@@ -268,6 +268,21 @@ inline void residualCutcellBoxFace(CCField r, CCConst x, CCConst b, FPC AC, FPC 
                                    FPC AFZ, C3 e, C3 rlo, C3 rhi, C3 slo, C3 shi) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    // H-7 (doc/vof_step_performance_design.md §14.3): shell-only shell launch, skip-test-free
+    // interior launch (ccBoxShellRuns). Same cells, same body.
+    auto run = [=](int ly, int lz, int x0, int x1) {
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      PECLET_FLOW_OMP_SIMD
+      for (int lx = x0; lx < x1; ++lx) {
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                                i - sy, i + sz, i - sz);
+      }
+    };
+    ccBoxShellRuns("peclet::flow::cc_residual_box", rlo, rhi, slo, shi, run);
+    return;
+  }
   ccFor3(
       "peclet::flow::cc_residual_box", rlo, rhi, KOKKOS_LAMBDA(int lx, int ly, int lz) {
         if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)

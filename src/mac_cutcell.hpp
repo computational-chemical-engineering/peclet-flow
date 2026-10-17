@@ -355,6 +355,79 @@ inline void ccForRows3(const char* name, C3 lo, C3 hi, F f) {
   ccdetail::ccRows3<false>(name, lo, hi, f);
 }
 
+// H-7 (doc/vof_step_performance_design.md §14.3): the HOST launch of a distributed box pass, the
+// box [rlo, rhi) minus the skip box [slo, shi). `run(ly, lz, x0, x1)` processes the cells
+// x0 <= lx < x1 of row (ly, lz). The skip box is clipped to the box (the per-cell test it replaces
+// selects exactly the clipped cells). With an empty skip box (the interior launch) every row of the
+// box is one run [rlo.x, rhi.x), with no skip test. Otherwise only the shell is visited: the two
+// z-slabs (every row), then the two y-slabs inside them, then the two x-runs of the remaining rows
+// -- the same cells as the per-cell skip test over every row of the box. One launch either way,
+// serial below kHostSerialCellCutoff cells VISITED. A body that ccFor3's contract admits (cells
+// independent within the launch: elementwise, or one colour of a red-black pass) gives the same
+// bits in any visiting order. Host backends only; on a device backend this is a no-op (the callers
+// keep their MDRange device branch).
+template <class Run>
+inline void ccBoxShellRuns(const char* name, C3 rlo, C3 rhi, C3 slo, C3 shi, Run run) {
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
+      return;
+    auto clip = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
+    const C3 sl{clip(slo.x, rlo.x, rhi.x), clip(slo.y, rlo.y, rhi.y), clip(slo.z, rlo.z, rhi.z)};
+    const C3 sh{clip(shi.x, rlo.x, rhi.x), clip(shi.y, rlo.y, rhi.y), clip(shi.z, rlo.z, rhi.z)};
+    const bool skip = sl.x < sh.x && sl.y < sh.y && sl.z < sh.z;
+    const int nx = rhi.x - rlo.x, ny = rhi.y - rlo.y, nz = rhi.z - rlo.z;
+    CCExec space;
+    if (!skip) {  // the interior launch: whole rows, no skip test
+      const long rows = (long)ny * nz;
+      auto row = [=](long t) { run(rlo.y + (int)(t % ny), rlo.z + (int)(t / ny), rlo.x, rhi.x); };
+      if (hostRunSerial(rows * nx)) {
+        for (long t = 0; t < rows; ++t)
+          row(t);
+        return;
+      }
+      Kokkos::parallel_for(name, Kokkos::RangePolicy<CCExec>(space, 0, rows), row);
+      return;
+    }
+    const int nzLo = sl.z - rlo.z, nzHi = rhi.z - sh.z, nzS = sh.z - sl.z;
+    const int nyLo = sl.y - rlo.y, nyHi = rhi.y - sh.y, nyS = sh.y - sl.y;
+    const int nxLo = sl.x - rlo.x, nxHi = rhi.x - sh.x;
+    const long nA = (long)(nzLo + nzHi) * ny;                 // z-slab rows (whole)
+    const long nB = (long)nzS * (nyLo + nyHi);                // y-slab rows (whole)
+    const long nC = (nxLo + nxHi > 0) ? (long)nzS * nyS : 0;  // rows with two x-runs
+    const long tasks = nA + nB + nC;
+    const long cells = (nA + nB) * nx + nC * (nxLo + nxHi);
+    if (tasks == 0)
+      return;
+    auto task = [=](long t) {
+      if (t < nA) {
+        const int zz = (int)(t / ny);
+        run(rlo.y + (int)(t % ny), zz < nzLo ? rlo.z + zz : sh.z + (zz - nzLo), rlo.x, rhi.x);
+        return;
+      }
+      t -= nA;
+      if (t < nB) {
+        const int nyb = nyLo + nyHi, yy = (int)(t % nyb);
+        run(yy < nyLo ? rlo.y + yy : sh.y + (yy - nyLo), sl.z + (int)(t / nyb), rlo.x, rhi.x);
+        return;
+      }
+      t -= nB;
+      const int ly = sl.y + (int)(t % nyS), lz = sl.z + (int)(t / nyS);
+      if (nxLo > 0)
+        run(ly, lz, rlo.x, sl.x);
+      if (nxHi > 0)
+        run(ly, lz, sh.x, rhi.x);
+    };
+    if (hostRunSerial(cells)) {
+      for (long t = 0; t < tasks; ++t)
+        task(t);
+      return;
+    }
+    Kokkos::parallel_for(name, Kokkos::RangePolicy<CCExec>(space, 0, tasks), task);
+  } else {
+    (void)name, (void)rlo, (void)rhi, (void)slo, (void)shi, (void)run;
+  }
+}
+
 // Reduction sibling of ccFor3. On a host backend it is the PENCIL reduction of B2
 // (doc/vof_step_performance_design.md §5.8, a recorded order): a RangePolicy over the (y, z) rows
 // of the box -- the same static row partition as ccFor3 -- each thread reducing its rows in (y, z)

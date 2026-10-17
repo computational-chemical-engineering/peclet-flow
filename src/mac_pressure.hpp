@@ -227,28 +227,20 @@ inline void cutcellSmoothColorBoxFace(CCField phi, CCConst b, OpV AC, OpV AFX, O
     return;
   CCExec space;
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
-    const int nyi = rhi.y - rlo.y, nzi = rhi.z - rlo.z;
-    const long cells = (long)nyi * nzi * (rhi.x - rlo.x);
-    auto pencil = KOKKOS_LAMBDA(long t) {
-      const int ly = rlo.y + (int)(t % nyi), lz = rlo.z + (int)(t / nyi);
-      const bool yzSkip = ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z;
+    // H-7 (§14.3): the shell launch visits only the shell, the interior launch (empty skip box)
+    // whole rows with no skip test; each x-run takes the colour's parity at its own start, `omp
+    // simd` (same-colour cells are independent, ccFor3's contract). Same cells, same body.
+    auto run = [=](int ly, int lz, int x0, int x1) {
       const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
       const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
-      for (int lx = rlo.x + ((P ^ (rlo.x & 1)) & 1); lx < rhi.x; lx += 2) {
-        if (yzSkip && lx >= slo.x && lx < shi.x)
-          continue;  // inside the skip box (already swept by the interior pass)
+      PECLET_FLOW_OMP_SIMD
+      for (int lx = x0 + ((P ^ (x0 & 1)) & 1); lx < x1; lx += 2) {
         const long i = (long)lx + (long)ly * sy + (long)lz * sz;
         cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
                               i - sy, i + sz, i - sz);
       }
     };
-    if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
-      for (long t = 0; t < (long)nyi * nzi; ++t)
-        pencil(t);
-      return;
-    }
-    Kokkos::parallel_for("peclet::flow::cc_smooth_box",
-                         Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+    ccBoxShellRuns("peclet::flow::cc_smooth_box", rlo, rhi, slo, shi, run);
     return;
   }
   using MD = MDRange3<CCExec>;
@@ -283,6 +275,20 @@ inline void applyCutcellOpBoxFace(CCField y, CCConst x, OpV AC, OpV AFX, OpV AFY
                                   C3 rlo, C3 rhi, C3 slo, C3 shi) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
+  if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+    // H-7 (§14.3): shell-only shell launch, skip-test-free interior launch (ccBoxShellRuns).
+    auto run = [=](int ly, int lz, int x0, int x1) {
+      const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+      PECLET_FLOW_OMP_SIMD
+      for (int lx = x0; lx < x1; ++lx) {
+        const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+        y(i) = cutcellApplyFaceCell(x, AC, AFX, AFY, AFZ, i, sx, sy, sz, i + sx, i - sx, i + sy,
+                                    i - sy, i + sz, i - sz);
+      }
+    };
+    ccBoxShellRuns("peclet::flow::cc_apply_box", rlo, rhi, slo, shi, run);
+    return;
+  }
   ccFor3(
       "peclet::flow::cc_apply_box", C3{rlo.x, rlo.y, rlo.z}, C3{rhi.x, rhi.y, rhi.z},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {
