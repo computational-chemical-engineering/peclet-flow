@@ -734,15 +734,14 @@ void Solver<Grid>::setPressureInitialGuess(int mode, int history) {
 template <class Grid>
 const char* Solver<Grid>::projectedGuessIneligible() const {
   // §5.3 eligibility: a Krylov driver (PCG or FCG), the legacy warm start off, no ghost
-  // projection, single rank (v1). The balanced-force solve never takes it (its own call path).
+  // projection; any np (distributed since doc/vof_projection_distributed_design.md §6). The
+  // balanced-force solve never takes it (its own call path).
   if (useChebyshev_)
     return "the Chebyshev driver (not a Krylov driver; set_pressure_pcg or set_pressure_fcg)";
   if (ghostProjection_)
     return "the ghost projection (its BiCGStab driver)";
   if (pwarm_)
     return "set_pressure_warmstart(True)";
-  if (distributed_)
-    return "a multi-rank solver (single rank only)";
   return nullptr;
 }
 

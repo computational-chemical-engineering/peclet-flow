@@ -2065,11 +2065,25 @@ class CutcellMG {
         starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
     };
     auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
-    matvec(Ap, x);                                                          // r = b - A x
-    Kokkos::deep_copy(CCExec(), r, b);
-    axpy(r, -1.0, Ap);
-    removeMean(l0, r);  // compatibility: project rhs/residual onto the range
-    const double r0 = maxabs(l0, r);
+    // E-dist (doc/vof_projection_distributed_design.md §6 item 3): solvePCGResident's guess branch,
+    // unfused (distributed); with a projected guess r0 below is rref = max|P b|, the zero-guess
+    // residual. The guess trace is collective (every rank runs it, rank 0 prints).
+    const bool guessOn = guessV1_.extent(0) > 0;
+    const bool traceGuess = guessOn && mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
+    double r0 = 0.0, r0w = 0.0;
+    if (guessOn && guessHist_ > 0) {
+      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar, /*fused=*/false,
+                          traceGuess ? &r0w : nullptr);
+    } else {
+      matvec(Ap, x);  // r = b - A x
+      Kokkos::deep_copy(CCExec(), r, b);
+      axpy(r, -1.0, Ap);
+      removeMean(l0, r);  // compatibility: project rhs/residual onto the range
+      r0 = maxabs(l0, r);
+      r0w = r0;
+    }
+    if (traceGuess)
+      guessTraceSave(x);
     // D-dist (doc/vof_projection_distributed_design.md §5.7): the FP32 V-cycle on an eligible
     // solve (a global decision: fp32VcycleIneligible reads global data only). It takes
     // e = ilogb(max|r|) from the GLOBAL max the host already holds (r0, then the stop test's rn)
@@ -2183,6 +2197,8 @@ class CutcellMG {
     Kokkos::deep_copy(CCExec(), l0.x, x);
     removeMean(l0, l0.x);
     Kokkos::deep_copy(CCExec(), x, l0.x);
+    if (traceGuess)
+      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
@@ -2513,7 +2529,9 @@ class CutcellMG {
           Kokkos::Sum<double, CCMem>(slot(kwy)));
     }
   }
-  // §5.3 step 3, the guess of ONE single-rank PCG / FCG solve (guessHist_ > 0): r = P b,
+  // §5.3 step 3, the guess of ONE PCG / FCG solve (guessHist_ > 0; distributed: the packet's five
+  // sums allreduced with MPI_SUM, then rref with MPI_MAX, doc/vof_projection_distributed_design.md
+  // §6 item 2): r = P b,
   // rref = max|r|; A v1 -> av1 with G11 = v1^T A v1, g1 = v1^T r; with hist 2 (v2 = x = phi^{n-1})
   // A v2 -> av2 with G22, G12 = v1^T A v2, g2 = v2^T r; ONE host packet read; the 2x2 Galerkin
   // system by Cholesky in double; then x = c1 v1 + c2 v2 on the fluid cells (0 elsewhere, ghosts
@@ -2555,6 +2573,17 @@ class CutcellMG {
     }
     Kokkos::deep_copy(
         kgp_, Kokkos::subview(ks_, std::make_pair((int)kGRref, (int)kGRref + kGuessPacket)));
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {  // E-dist (§6 item 2): the local partials -> global; every rank gets one c
+      const auto t0 = std::chrono::steady_clock::now();
+      const MPI_Comm c = l0.comm == nullptr_comm() ? comm_ : l0.comm;
+      MPI_Allreduce(MPI_IN_PLACE, kgp_.data() + 1, kGuessPacket - 1, MPI_DOUBLE, MPI_SUM, c);
+      MPI_Allreduce(MPI_IN_PLACE, kgp_.data(), 1, MPI_DOUBLE, MPI_MAX, c);
+      allreduceTime_ +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      allreduceCount_ += 2;
+    }
+#endif
     const double rref = kgp_(0), G11 = kgp_(1), G12 = kgp_(2), G22 = kgp_(3), g1 = kgp_(4),
                  g2 = kgp_(5);
     double c1 = 0.0, c2 = 0.0;
@@ -2610,7 +2639,8 @@ class CutcellMG {
       *r0w = maxabs(l0, r);
     return rref;
   }
-  // The E trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the solves the PCG trace covers):
+  // The E trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the solves the PCG trace covers;
+  // distributed it is collective and rank 0 prints):
   // G-E1 ||x - x0||_A <= ||x||_A, G-E2 the freshly recomputed max|P(b - A x)| / rref, G-E4 the
   // number of non-fluid inner cells with x0 != 0. Trace buffers only; the solve is untouched.
   void guessTraceSave(CCField x) {
@@ -2651,6 +2681,15 @@ class CutcellMG {
           },
           bad);
     }
+    int rank = 0;  // E-dist (§6 item 2): collective (dot, maxabs, the matvec, this count); rank 0
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      bad = (long)allreduce((double)bad, MPI_SUM_, l0.comm);
+      MPI_Comm_rank(comm_, &rank);
+    }
+#endif
+    if (rank != 0)
+      return;
     printf(
         "[mg] guess solve %d: hist %d c1 %.17g c2 %.17g rref %.6e r0w %.6e iters %d "
         "eA %.6e xA %.6e eA/xA %.6e resid/rref %.6e x0_nonfluid_nonzero %ld\n",
@@ -2942,12 +2981,15 @@ class CutcellMG {
       MPI_Comm_rank(comm_, &dbgRank);
 #endif
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && dbgRank == 0;
-    // E (§5.3): with a projected guess r0 is rref = max|P b| (see solvePCGResident)
+    // E (§5.3): with a projected guess r0 is rref = max|P b| (see solvePCGResident). The guess
+    // trace is collective (E-dist §6 item 2: every rank runs it, rank 0 prints), so it does not
+    // take `trace`'s rank-0 restriction; single rank the two coincide.
     const bool guessOn = guessV1_.extent(0) > 0;
+    const bool traceGuess = guessOn && mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
     double r0 = 0.0, r0w = 0.0;
     if (guessOn && guessHist_ > 0) {
       r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
-                          hostKrylovFusion() && star == nullptr, trace ? &r0w : nullptr);
+                          hostKrylovFusion() && star == nullptr, traceGuess ? &r0w : nullptr);
     } else {
       matvec(Ap, x);  // r = b - A x
       Kokkos::deep_copy(CCExec(), r, b);
@@ -2956,7 +2998,7 @@ class CutcellMG {
       r0 = maxabs(l0, r);
       r0w = r0;
     }
-    if (trace && guessOn)
+    if (traceGuess)
       guessTraceSave(x);
     // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
     // stop reference is set (setStopReference; only the balanced-force projection sets it).
@@ -3036,7 +3078,7 @@ class CutcellMG {
     Kokkos::deep_copy(CCExec(), l0.x, x);
     removeMean(l0, l0.x);
     Kokkos::deep_copy(CCExec(), x, l0.x);
-    if (trace && guessOn)
+    if (traceGuess)
       guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
@@ -5403,14 +5445,13 @@ class CutcellMG {
   // H-2c (§8): the caller guarantees the initial iterate of the next single-rank PCG solves is
   // +0 everywhere (projectSolve's cold path), so the solve skips A x0. Set around ONE solve.
   void setZeroInitialGuess(bool on) { zeroGuess_ = on; }
-  // E (doc/vof_projection_cost_design.md §5.3): the caller (projectSolve, single rank, PCG or
-  // FCG) asks the NEXT solve to start from the A-norm projection of its solution onto
+  // E (doc/vof_projection_cost_design.md §5.3; distributed since
+  // doc/vof_projection_distributed_design.md §6): the caller (projectSolve, PCG or FCG, any np)
+  // asks the NEXT solve to start from the A-norm projection of its solution onto
   // span{v1} (hist 1) or span{v1, x} (hist 2; the solve's x holds phi^{n-1} and is overwritten
   // by the guess), and to stop relative to the zero-guess residual max|P b|. hist 0 = none (the
   // cold solve, untouched). Set around ONE solve; clearProjectedGuess() restores the default.
   void setProjectedGuess(CCField v1, int hist) {
-    if (distributed_ && hist > 0)
-      throw std::logic_error("CutcellMG::setProjectedGuess: single rank only (§5.3)");
     guessV1_ = v1;
     guessHist_ = hist;
   }

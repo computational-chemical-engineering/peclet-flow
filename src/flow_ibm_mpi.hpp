@@ -44,6 +44,7 @@ void Solver<Grid>::initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, 
         "partition in force when it runs, so a geometry built first gives every rank an "
         "independent, block-periodic pressure solve (a wrong answer at np > 1, with no error)");
   pcInDomain_ = CCField();  // WO-P3g: which ghosts carry a row depends on the decomposition
+  pguessCount_ = 0;  // E-dist (doc/vof_projection_distributed_design.md §6 item 4): a new partition
   distributed_ = true;
   comm_ = comm;
   const auto& gs = dec.globalSize();

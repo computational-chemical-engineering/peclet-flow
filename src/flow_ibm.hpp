@@ -693,7 +693,7 @@ class Solver {
   // guess.
   void setPressureWarmstart(bool on);
   // Initial guess of the projection solve (doc/vof_projection_cost_design.md §5.3): 1 "zero"
-  // (DEFAULT), 2 "projected" (opt-in, single-rank; raises at the solve, naming the failed
+  // (DEFAULT), 2 "projected" (opt-in, any np; raises at the solve, naming the failed
   // condition, where ineligible), 0 "auto" (opt-in; projected where eligible, else zero); history
   // 1 or 2 increments. Resets the history.
   void setPressureInitialGuess(int mode, int history);

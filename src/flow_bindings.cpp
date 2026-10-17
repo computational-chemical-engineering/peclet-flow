@@ -786,24 +786,25 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             diag.s->setPressureInitialGuess(m, history);
           },
           nb::arg("mode"), nb::arg("history") = 2,
-          "Initial guess of the single-rank pressure PCG / FCG solve of the projection. 'zero' "
+          "Initial guess of the pressure PCG / FCG solve of the projection (single rank and "
+          "distributed). 'zero' "
           "(DEFAULT): x0 = 0. 'projected': the A-norm projection of the solution onto the span of "
           "the last `history` (1 or 2) projection solutions, x0 = c1 phi^n + c2 phi^(n-1) with "
           "the 2x2 Galerkin system of the current operator (never worse than x0 = 0 in the A-norm;"
           " 0 on non-fluid cells), and the stop stays relative to the ZERO-guess residual "
           "max|P b|, so the solve is never looser than the cold one. Raises at the solve, naming "
           "the failed condition, where not eligible (the Chebyshev driver, the ghost projection, "
-          "set_pressure_warmstart(True), multi-rank). 'auto': 'projected' where eligible, else "
-          "'zero', on every backend. 'projected' and 'auto' are opt-in, not the default (decided "
-          "2026-10-15): the projected guess runs on a single rank only, so as a default it would "
-          "break the bit-exactness of a serial run with a distributed np=1 run. The history "
+          "set_pressure_warmstart(True)). 'auto': 'projected' where eligible, else 'zero', on every "
+          "backend. 'projected' and 'auto' are opt-in, not the default (decided 2026-10-15). "
+          "Distributed, the Gram system is allreduced, so every rank takes the same guess; an "
+          "np=1 run is bitwise the single-rank run. The history "
           "restarts empty (a cold solve, then one increment, then two) after "
           "this call, a geometry change (set_solid, set_pressure_geometry, init_mpi, "
-          "redistribute), a state write (set_field of u/v/w/p/phi, set_state, set_velocity), a "
+          "redistribute / rebalance_by_weights), a state write (set_field of u/v/w/p/phi, set_state, set_velocity), a "
           "driver change, and a failed or capped solve. RESTARTS: no history is checkpointed, so"
           " a run restarted from saved fields takes those two cold-history steps and agrees with "
           "the uninterrupted run to the solver tolerance, not bitwise. "
-          "doc/vof_projection_cost_design.md §5.")
+          "doc/vof_projection_cost_design.md §5, doc/vof_projection_distributed_design.md §6.")
       .def(
           "pressure_vcycle_precision",
           [](D& diag) { return std::string(diag.s->pressureVcycleFp32() ? "fp32" : "fp64"); },
