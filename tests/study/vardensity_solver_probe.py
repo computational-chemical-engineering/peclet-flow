@@ -76,12 +76,25 @@ Run:
     ... --pack                 add the `data/packing_ring.vti` sub-sweep (N=64)
     ... --trace                print the PCG residual history of one stalling configuration
     ... --geoms box,cyl        restrict the sweep
+    ... --per-solve            run every configuration under 'fp64', 'fp32' and 'auto' and print
+                               the PER-SOLVE (d) table (doc/vof_projection_distributed_design.md §9
+                               F-4): every solve where 'fp64' converges must converge under 'auto';
+                               every FP64 restart of 'auto' is listed (step, discarded iterations)
+                               and must sit where forced 'fp32' capped or broke down
+
+FP64 restarts ('auto', doc/vof_projection_distributed_design.md §4) are read per step from the
+solver's one-line stderr warning (no Python counter exists, Q-4): each record carries `restarts`
+(step, reason, discarded and FP64 iterations), `vprec_steps` (the precision each step's last
+attempt used) and `p1_sha` (SHA-256 of p after step 1, for G-R (i)).
 """
 import argparse
+import hashlib
 import json
 import os
 import platform
+import re
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -107,6 +120,31 @@ EDGES = ("smooth", "sharp")
 DRIVERS = ("cheb", "pcg", "fcg")
 DRIVERS_DEFAULT = ("cheb", "pcg")   # WO-B's battery; `fcg` (WO-C) is opt-in via --drivers
 CASES = ("hydro", "lid", "per")
+
+
+# The 'auto' FP64 restart's one stderr line (mac_cutcell_mg.hpp solveWithRestart).
+RESTART_RE = re.compile(r"the FP32 V-cycle did not converge this solve \((capped after|non-finite at "
+                        r"iteration|degenerate direction at) (\d+)\); re-solved with the FP64 "
+                        r"V-cycle in (\d+) iterations")
+
+
+def step_capturing_stderr(s):
+    """s.step() with the C-level stderr (fd 2) captured; returns the text and re-emits it."""
+    sys.stderr.flush()
+    saved = os.dup(2)
+    with tempfile.TemporaryFile(mode="w+b") as tmp:
+        os.dup2(tmp.fileno(), 2)
+        try:
+            s.step()
+        finally:
+            os.dup2(saved, 2)
+            os.close(saved)
+        tmp.seek(0)
+        text = tmp.read().decode(errors="replace")
+    if text:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+    return text
 
 
 # --------------------------------------------------------------------------- geometry (sdf[x,y,z], <0 solid)
@@ -265,9 +303,15 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
         s.diagnostics.set_pressure_vcycle_precision(vprec)
 
     iters, divs, t_step, t_proj, failed = [], [], [], [], []
+    restarts, vprec_steps, p1_sha = [], [], None
     t_wall0 = time.perf_counter()
-    for _ in range(STEPS):
-        s.step()
+    for k in range(STEPS):
+        for m in RESTART_RE.finditer(step_capturing_stderr(s)):
+            restarts.append({"step": k + 1, "reason": m.group(1), "discarded": int(m.group(2)),
+                             "fp64_iters": int(m.group(3))})
+        vprec_steps.append(s.diagnostics.pressure_vcycle_precision())
+        if k == 0:
+            p1_sha = hashlib.sha256(np.ascontiguousarray(s.get_p()).tobytes()).hexdigest()
         iters.append(int(s.diagnostics.last_pressure_iterations()))
         failed.append(bool(s.diagnostics.pressure_solve_failed()))
         tm = s.diagnostics.last_step_timers()
@@ -300,7 +344,8 @@ def run_one(geom, shape, edge, ratio, driver, case, N, quiet=True, bottom=None, 
         t_proj_min=float(np.min(t_proj)), t_proj_total=float(np.sum(t_proj)),
         umax=umax,
         vprec=vprec or "default", vprec_used=s.diagnostics.pressure_vcycle_precision(),
-        failed_steps=int(sum(failed)),
+        failed_steps=int(sum(failed)), failed=failed,
+        restarts=restarts, vprec_steps=vprec_steps, p1_sha=p1_sha,
     )
     if not quiet:
         print(f"  {geom:5s} {shape:4s} {edge:6s} r={ratio:<7.0e} {driver:4s} {case:6s} "
@@ -487,6 +532,59 @@ def trace_pcg(geom, shape, edge, ratio, case, N):
     os.environ.pop("PECLET_FLOW_MG_DEBUG", None)
 
 
+def _conv(r, i):  # step i + 1 of record r met its stop test: below the cap and not failed
+    return r["iters"][i] < r["maxit"] and not r["failed"][i]
+
+
+def _nconv(r):
+    return sum(_conv(r, i) for i in range(len(r["iters"])))
+
+
+def per_solve_table(records):
+    """F-4 (doc/vof_projection_distributed_design.md §9; review finding 3): per configuration and
+    per SOLVE, 'auto' against 'fp64' and forced 'fp32' on the same build. A violation is a step
+    where 'fp64' converged (< cap, not failed) and 'auto''s final attempt did not. A restart is
+    legitimate where forced 'fp32' -- bitwise 'auto' up to that step -- capped or broke down at the
+    same step with the same iteration count. Returns (markdown, n_violations, n_restarts,
+    n_restarts_not_legit, n_configurations)."""
+    key = lambda r: (r["geom"], r["shape"], r["edge"], r["ratio"], r["driver"], r["case"])
+    idx = {}
+    for r in records:
+        idx.setdefault(key(r), {})[r["vprec"]] = r
+    out = [("| geom | shape | ratio | driver | case | fp64 conv | fp32 conv | auto conv | "
+            "violations | restarts (step: discarded, reason -> fp64 its) | at fp32 cap/brk | "
+            "p1 auto==fp64 |"), "|" + "---|" * 12]
+    nv = nr = nbad = ncfg = 0
+    for k in sorted(idx, key=lambda k: (GEOM_ORDER.index(k[0]), SHAPE_ORDER.index(k[1]), k[2],
+                                        k[3], k[4], CASES.index(k[5]))):
+        d = idx[k]
+        if not all(m in d for m in ("fp64", "fp32", "auto")):
+            continue
+        ncfg += 1
+        f64, f32, au = d["fp64"], d["fp32"], d["auto"]
+        viol = [i + 1 for i in range(len(f64["iters"])) if _conv(f64, i) and not _conv(au, i)]
+        legit = []
+        for rs in au["restarts"]:
+            i = rs["step"] - 1
+            cap_or_brk = f32["iters"][i] >= f32["maxit"] or f32["failed"][i] or \
+                rs["reason"] == "degenerate direction at"
+            legit.append(cap_or_brk and f32["iters"][i] == rs["discarded"])
+        nv += len(viol)
+        nr += len(au["restarts"])
+        nbad += legit.count(False)
+        p1 = ("yes" if au["p1_sha"] == f64["p1_sha"] else "no") if any(
+            rs["step"] == 1 for rs in au["restarts"]) else "-"
+        rst = "; ".join(f"{rs['step']}: {rs['discarded']}, {rs['reason'].split()[0]} -> "
+                        f"{rs['fp64_iters']}" for rs in au["restarts"]) or "-"
+        out.append("| " + " | ".join([
+            k[0], k[1], f"{k[3]:.0e}", k[4], k[5], f"{_nconv(f64)}/{len(f64['iters'])}",
+            f"{_nconv(f32)}/{len(f32['iters'])}", f"{_nconv(au)}/{len(au['iters'])}",
+            (",".join(map(str, viol)) if viol else "0"), rst,
+            ("all" if all(legit) else f"**{legit.count(False)} not**") if legit else "-",
+            p1]) + " |")
+    return "\n".join(out), nv, nr, nbad, ncfg
+
+
 # --------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
@@ -515,6 +613,10 @@ def main():
     ap.add_argument("--vcycle-precision", default=None,
                     help="diagnostics.set_pressure_vcycle_precision(MODE) after the driver "
                          "(auto | fp64 | fp32; doc/vof_projection_cost_design.md §4, G-D3)")
+    ap.add_argument("--per-solve", action="store_true",
+                    help="run each configuration under 'fp64', 'fp32' and 'auto' and print the "
+                         "per-solve (d) table (doc/vof_projection_distributed_design.md §9 F-4); "
+                         "overrides --vcycle-precision")
     ap.add_argument("--levels", type=int, default=None,
                     help="pressure MG depth (default floor(log2 N) - 1)")
     args = ap.parse_args()
@@ -548,11 +650,13 @@ def main():
     print(f"{len(plan)} configurations x {STEPS} steps", flush=True)
     records = []
     t0 = time.perf_counter()
+    precisions = ("fp64", "fp32", "auto") if args.per_solve else (args.vcycle_precision,)
     for i, (g, sh, e, ra, d, ca, n) in enumerate(plan):
-        print(f"[{i+1}/{len(plan)}]", end=" ", flush=True)
-        records.append(run_one(g, sh, e, ra, d, ca, n, quiet=False,
-                               bottom=args.bottom, levels=args.levels,
-                               vprec=args.vcycle_precision))
+        for vp in precisions:
+            print(f"[{i+1}/{len(plan)}]" + (f" {vp:4s}" if args.per_solve else ""), end=" ",
+                  flush=True)
+            records.append(run_one(g, sh, e, ra, d, ca, n, quiet=False,
+                                   bottom=args.bottom, levels=args.levels, vprec=vp))
     wall = time.perf_counter() - t0
 
     overhead = None
@@ -560,9 +664,16 @@ def main():
         overhead = [cheb_overhead(g, args.n)
                     for g in args.overhead_geoms.split(",") if g]
 
-    md = markdown(records)
-    print("\n" + md)
-    print(summarize(records))
+    if args.per_solve:  # the per-precision tables would interleave three runs per cell
+        md, nv, nr, nbad, ncfg = per_solve_table(records)
+        md += (f"\n\nPER-SOLVE (d): {ncfg} configurations x {STEPS} steps; violations {nv} (a "
+               f"solve 'fp64' converged and 'auto' did not); restarts {nr}, {nbad} not at a "
+               f"forced-'fp32' cap/breakdown -> F-4 {'PASS' if nv == 0 and nbad == 0 else 'MISS'}")
+        print("\n" + md)
+    else:
+        md = markdown(records)
+        print("\n" + md)
+        print(summarize(records))
     print(f"\ntotal wall {wall:.1f} s")
 
     meta = dict(tag=args.tag, steps=STEPS, maxit=MAXIT, rtol=RTOL, mu=MU, dt=DT,

@@ -1580,3 +1580,75 @@ Concern: the history-2 Cholesky threshold `d > 1e-10 G22` admits |c| up to ~1e5,
   `gate_proj/e2check/` (e2gate.sh, e2parse.py, cyl.py, summary.txt).
 - flow CLAUDE.md test counts brought up to date: 237 registered / 233 `-LE bench` (61 kokkos incl. 4 bench, 136
   kokkos_mpi, 40 python); added since 66e82e6: `projected_guess`, `mg_fp32_vcycle`, `bench_bottom_factor` (bench).
+
+### Distributed D/E package: WO-E and the WO-G gate campaign (2026-10-17; `doc/vof_projection_distributed_design.md`)
+
+Branch `projdist` (R 99dd50b, A 85b66fb, D1 acf495a, D2a 87cdd62, D2b0 5baf24b, D2b1 afa062b, 0cc1a3a, **E a7d3e9e**);
+workstation (RTX 5080, host-openmp znver3), scripts `~/Codes/bubble_column_perf/gate_dist/`. WO-G changes no solver
+source: `'auto'` is forced by `set_pressure_vcycle_precision('auto')` (the default stays `'fp64'` until WO-F).
+
+**WO-E (distributed projected guess).** G-BIT PASS host + CUDA (hashes + np2 identical, 50-step dumps bitwise;
+`'fp32'`/`'auto'` dumps bitwise to d3f32_omp / gd4_cuda). Single-rank `'projected'` bitwise to a build of the
+unmodified tree (0cc1a3a): prof.py 50 steps, PCG + FCG, rtol 1e-8 / 1e-10, 4/4 host and 4/4 CUDA. New ctest
+`projected_guess_mpi` (np 1, 2, 4), host + CUDA:
+- G-ED1: VoF var-ρ case np 1 memcmp-equal to single rank, iterations equal (PCG h1 87, h2 84, FCG h2 81 per 10 steps).
+  The staggered cut-cell cylinder (Stokes) is NOT serial ↔ np 1 bitwise even under `'zero'` — pre-existing at 0cc1a3a
+  (step 1 du 1.0e-17, dp 4.6e-11, iterations equal; `sdflow_mpi` gates np 1 at 1e-12 for this reason): there the
+  per-step iterations are equal and `'projected'`'s deviation matches `'zero'`'s (p 4.5e-11 vs 5.0e-11).
+- G-ED2 against the np 1 distributed run: cyl du 6.9e-18, dp ≤ 1.4e-17; VoF du ≤ 6.9e-17, dp ≤ 1.1e-16, dC ≤ 4.4e-16
+  (tol 1e-11 relative); iterations per step ≤ `'zero'` + 0 (10-step totals 71–87 vs 80–93).
+- G-ED3 (G-E1..4 at np 2, traced): 54 guessed solves, max ‖x−x0‖_A/‖x‖_A 0.921, max resid/rref 9.83e-11 (≤ 1.5e-10),
+  x0 on non-fluid cells 0; G-E3 bitwise at np 1, 2, 4. G-ED4: a size-preserving `redistribute` resets the history
+  (next step bitwise `'zero'`, then history 1), np 1, 2, 4.
+- Batteries on a7d3e9e: host 241/241 non-bench, CUDA 241/241 (scalar_cutcell_g4 OOM at -j6, passes serially);
+  245 registered (+3 `projected_guess_mpi_np*`).
+
+**G-DD3 (bubble column, distributed, `tests/study/vof_perf/prof_mpi.py`, 50 steps from ckpt_t43, PCG rtol 1e-8;
+fast mode vs `'fp64'` at the same np):**
+
+| backend, mode | np | max rel diff (N50_8 1.477e-8) | iterations (500) | div ratio max | vs np 1 (du / dp / dC) |
+|---|---|---|---|---|---|
+| CUDA `'auto'` | 1 | 6.66e-14 | 500 → 500, step diff 0 | 1.000 | — |
+| CUDA `'auto'` | 2 | 3.63e-14 | 500 → 500 | 1.000 | 8.4e-13 / 4.4e-11 / 3.2e-15 |
+| CUDA `'auto'` | 4 | 2.59e-14 | 500 → 500 | 1.000 | 1.2e-12 / 6.3e-11 / 3.5e-15 |
+| host `'fp32'` | 1 | 3.33e-14 | 500 → 500 | 1.000 | — |
+| host `'fp32'` | 2 | 9.89e-14 | 500 → 500 | 1.000 | 6.0e-13 / 1.4e-11 / 5.0e-15 |
+| host `'fp32'` | 4 | 4.30e-14 | 500 → 500 | 1.000 | 1.1e-12 / 8.6e-12 / 4.1e-15 |
+
+np-class tolerances (vof_*_mpi): du 3.6e-10, dp 5.8e-9 (de-meaned), dC 1e-11 — PASS; the `'fp64'` np-pair control
+reads du 4.3–4.8e-13, dp 3.9e-12–2.4e-11. Zero restarts in every run.
+
+**F-gates measured as they would hold on the flip (`'auto'` forced):**
+- **F-3 PASS:** CUDA 50-step dumps under `'auto'` bitwise to gd4_cuda (2/2), iterations 13.06 / 10.00.
+- **F-4 PASS** (`vardensity_solver_probe.py --per-solve`, CUDA, box + pack × slab, blob × sharp × 1e2–1e4 × PCG, FCG
+  × hydro, lid, per; 66 configurations × 20 steps × fp64/fp32/auto): 0 solves where `'fp64'` converged and `'auto'`
+  did not; converged-solve counts identical across the three in all 66. 13 restarts, all at step 1 of a walled
+  hydro configuration, each where forced `'fp32'` capped (200) or broke down at the same iteration count, one per run
+  (the latch); after every step-1 restart p is bitwise `'fp64'`'s (G-R (i) on CUDA: box slab 1e4 PCG, fp32 capped
+  at 200, `'auto'` restarted once, FP64 attempt 24 iterations, p memcmp-equal). Restarts (config: discarded → FP64):
+  box slab hydro 1e2 PCG 200 → 200, 1e3 FCG 55 (non-finite) → 79, 1e3 PCG 200 → 200, 1e4 FCG 16 (non-finite) → 200,
+  1e4 PCG 200 → 24; pack slab hydro 1e2 PCG 200 → 200, 1e3 FCG 200 → 112, 1e3 PCG 200 → 200, 1e4 FCG 33
+  (non-finite) → 14, 1e4 PCG 200 → 22; pack blob hydro 1e3 PCG, 1e4 FCG, 1e4 PCG 200 → 200. (Where FP64 also
+  caps, the restart costs up to one extra capped solve, once per run: R-4.) Host: `'auto'` = FP64 (WO-A), no restart
+  possible; G-R (i) n/a there.
+- **F-5 PASS:** G-DD3 CUDA np 2, 4 above.
+- **F-6:** G-DD4 below; CUDA single-rank projection `'auto'` / `'fp64'` = 9.93 / 12.29 ms = **0.808** (≤ 0.85,
+  PASS; np 1 distributed 19.86 / 22.54 = 0.881, information); **0 restarts** over the 2000-step CUDA column
+  (prof.py 2000, PCG rtol 1e-8, `'auto'`; iterations mean 10.55, min 9, max 13; 42.4 ms/step).
+
+**G-DD4 (projection ms/step, min of 3 interleaved rounds, bubble column, PCG rtol 1e-8):**
+
+| run | `'fp64'` | fast mode | ratio | gate |
+|---|---|---|---|---|
+| CUDA np 2 (ranks share the GPU), `'auto'` | 161.01 (+0.22) | 164.03 (+0.25) | 1.019 | ≤ 1.02 |
+| host np 4 × 6 threads, forced `'fp32'` | 102.66 (+24.1) | 85.67 (+39.5) | 0.835 | ≤ 1.02 (info) |
+| CUDA single rank (prof.py --timing), `'auto'` | 12.29 | 9.93 | 0.808 | F-6 ≤ 0.85 |
+| CUDA np 1 distributed, `'auto'` | 22.54 | 19.86 | 0.881 | info |
+
+Load 3.7–8.4 during the timings. CUDA np 2 is latency-bound on the shared GPU (161 ms against 22.5 ms at np 1): the
+halved V-cycle bytes do not show, and §5.8's expected 0.85–0.9 is not reached; the ratio sits at the gate
+(repeat below).
+Repeat (3 more rounds, load 3.3–4.5): CUDA np 2 `'fp64'` 161.07 (+0.30), `'auto'` 164.15 (+0.17), ratio **1.019** —
+reproducible: G-DD4 is met (≤ 1.02) with a 0.001 margin and `'auto'` is +3 ms (+1.9 %) slower than `'fp64'` there.
+Instruments: `tests/study/vof_perf/prof_mpi.py` (new), `tests/study/vardensity_solver_probe.py --per-solve` (new);
+gate scripts `gate_dist/{edgate,edump,gdd3,gdd4,gperf,f4,f6r}.sh`, `npcls.py`, `numcmp.py`.
