@@ -4472,7 +4472,26 @@ class CutcellMG {
       for (int j = 0; j < bt.inner.y; ++j)
         for (int i = 0; i < bt.inner.x; ++i)
           gbLocal_.push_back((bt.og.x + i) + (bt.og.y + j) * gi.x + (bt.og.z + k) * gi.x * gi.y);
-    gatherv(gbLocal_, gbGid_, bt.comm);
+    // the per-rank cell counts are fixed per hierarchy: exchanged once here, then cached for the
+    // per-operator openness and per-V-cycle rhs gathers (review note 3)
+    int size = 1;
+    MPI_Comm_size(bt.comm, &size);
+    const int nloc = (int)gbLocal_.size();
+    gbCnt1_.assign(size, 0);
+    MPI_Allgather(&nloc, 1, MPI_INT, gbCnt1_.data(), 1, MPI_INT, bt.comm);
+    gbDsp1_.assign(size, 0);
+    gbCnt3_.assign(size, 0);
+    gbDsp3_.assign(size, 0);
+    int tot = 0;
+    for (int r = 0; r < size; ++r) {
+      gbDsp1_[r] = tot;
+      gbCnt3_[r] = 3 * gbCnt1_[r];
+      gbDsp3_[r] = 3 * tot;
+      tot += gbCnt1_[r];
+    }
+    gbGid_.resize((std::size_t)tot);
+    MPI_Allgatherv(gbLocal_.data(), nloc, MPI_INT, gbGid_.data(), gbCnt1_.data(), gbDsp1_.data(),
+                   MPI_INT, bt.comm);
     gb_ = g;
     gbActive_ = true;
     return true;
@@ -4509,8 +4528,9 @@ class CutcellMG {
           lo.push_back(hoy(p));
           lo.push_back(hoz(p));
         }
-    std::vector<double> go;
-    gatherv(lo, go, bt.comm);
+    std::vector<double> go(3 * gbGid_.size());
+    MPI_Allgatherv(lo.data(), (int)lo.size(), MPI_DOUBLE, go.data(), gbCnt3_.data(), gbDsp3_.data(),
+                   MPI_DOUBLE, bt.comm);  // the counts cached per hierarchy
     Level& gb = gb_;
     auto gox = Kokkos::create_mirror_view(gb.ox);
     auto goy = Kokkos::create_mirror_view(gb.oy);
@@ -4547,8 +4567,9 @@ class CutcellMG {
       for (int j = 0; j < bt.inner.y; ++j)
         for (int i = 0; i < bt.inner.x; ++i)
           lb.push_back(hrhs((long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey));
-    std::vector<double> gbv;
-    gatherv(lb, gbv, bt.comm);
+    std::vector<double> gbv(gbGid_.size());
+    MPI_Allgatherv(lb.data(), (int)lb.size(), MPI_DOUBLE, gbv.data(), gbCnt1_.data(), gbDsp1_.data(),
+                   MPI_DOUBLE, bt.comm);  // the counts cached per hierarchy
     auto grhs = Kokkos::create_mirror_view(gb_.rhs);
     for (std::size_t r = 0; r < gbGid_.size(); ++r)
       grhs(gbIndex(gbGid_[r])) = gbv[r];
@@ -6013,6 +6034,9 @@ class CutcellMG {
   Level gb_;
   bool gbActive_ = false;
   std::vector<int> gbLocal_, gbGid_;
+  // per bottom rank (bt.comm order): inner cell counts and displacements, x1 (gids, rhs) and x3
+  // (the interleaved openness), fixed per hierarchy.
+  std::vector<int> gbCnt1_, gbDsp1_, gbCnt3_, gbDsp3_;
   BottomPlanes dirPlanes_;
   BottomDirect<float> dir_;  // PRECISION-EXEMPT: the FP32 direct factor under an FP64 FCG (§13)
   Kokkos::View<int*, CCMem> dirKc_;
