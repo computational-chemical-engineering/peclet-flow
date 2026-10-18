@@ -1826,3 +1826,42 @@ Verdicts (provisional, load-contaminated):
 L-c's excess is **lateness**, not protocol: lateness 116.5 of the 159.3 µs wait (protocol 29.5 against L-b 17.4),
 fed by the two straddled ranks' kernels (83.1 and 73.8 ms/step against 57–64). The §0 K-ranges are not restated
 from these load-contaminated numbers.
+
+### distcomm WO-K3 — faces-only stencil halo, rank-local wrap axes read in-kernel (2026-10-19; `doc/vof_distributed_host_comm_design.md` §5.2)
+
+Core `5537a28` (on distcomm `460cb56`): `GridHaloTopology::buildTopology(..., Neighborhood nb = Full)`, `Faces`
+keeps the ghosts with exactly one coordinate outside the block. Flow: `Level::sdev`/`sdevf` (faces-only, `per`
+cleared on the level's wrap axes `M_L`: one block on the axis in the replicated decomposition, no outflow face,
+even inner extent; off under an overlay solve), `int wrapMask` on the six box kernels (0 = the old code), the
+stencil exchanges of the non-CA `smooth()`, the residual, `matvecOverlap` and the FP32 twins on `sdev`/`sdevf`;
+`M_L = 7` (np 1): no exchange, one full-range launch per colour. Class a. Scripts `bubble_column_perf/distcomm/k3/`.
+
+| gate | result |
+|---|---|
+| G-BIT-D 1 (state_hash all cases + np 2, 50-step dumps) | host PASS, CUDA PASS (bitwise to base b820652); items 1–4 run against core e9fe344+K3 and again against 5537a28 (with 460cb56): PASS both |
+| G-BIT-D 2 (bubble column 50 steps from ckpt_t43, np 1/2/4/8 × rtol 1e-8/1e-10 × auto/algebraic) | 25/25 dumps bitwise to base, iterations equal; np 1 = single rank (500/500, 653/653 iterations) |
+| G-BIT-D 3/4 (solids np 2/4; outflow/wall/slip bcdist np 1/2/4) | bitwise |
+| `mg_stencil_halo_np{1,2,4}` (hook `dev`/`wrapMask = 0` vs default, 7 cases) | x bitwise, iterations equal; a mutated wrap index fails 7 cases at np 1, 3 at np 2 |
+| G-BIT-D 5 host battery | 98/98 + 148/148 (246 = 243 + 3 new) |
+| G-BIT-D 5 CUDA battery | 98 + 148: 7 non-np GPU-OOM at -j6 pass serially, 146 np passed + 2 skipped by design (`bottom_direct_mpi_np{2,4}`, host-only) |
+| G-HALO (core) + core ctests | CPU 77/77; Kokkos CUDA 99/99 + G-HALO 8/8; Kokkos OpenMP 99/99 + G-HALO 8/8 |
+
+§9 counts (receive partners per stencil exchange, bubble column 128×96×64, walls ±y, 4 levels; probe
+`k3/probe`): np 8 (4×2×1) full halo 5 → stencil 3 on L0–L3 (z wraps rank-locally; ≤ 3 required); np 24 full max 17
+(mean 15) → stencil max 5 (mean 5) (≤ 6 required); ghost cells per rank L0 10824 → 10240 (np 8), 6899 → 6485 (np 24).
+np 1 (`init_mpi`, 3 steps, kp_trace): zero stencil exchanges (all levels `M_L = 7`, asserted in the np 1 ctest);
+launches `cc_smooth_box` 3200 → 1920, `cc_residual_box` 400 → 240, `cc_apply_exact_box` 176 → 88 against base,
+i.e. one launch per colour pass / per residual / per matvec (base: interior + shell where the shell is non-empty).
+G-PERF-D (§7 bench, 300 steps from ckpt_t43, 5 interleaved reps base `ref/mod_base_omp` vs K3 = core 460cb56 +
+K3, so K1 + fence removal + K3 against WO-0's base; **load 23–44, not < 2: provisional**, as WO-0's baseline is):
+
+| layout | base median ms/step | K3 median | ratio | M1 non-kernel ms/step WO-0 → K3 | launches/step | msgs/exch (all exchanges) | wait µs/exch |
+|---|---|---|---|---|---|---|---|
+| L-c 8×3 straddled | 97.3 | 100.9 | 1.036 | 81.64 → 37.08 | 1843 → 1238 | 4.98 → 3.49 | 159.3 → 64.4 |
+| L-d 24×1 | 97.6 | 94.3 | 0.967 | 79.99 → 51.33 | 1192 → 763 | 14.87 → 7.41 | 125.2 → 72.7 |
+| L-e 1×24 init_mpi | 91.3 | 65.7 | 0.720 | 7.10 → 1.88 | 1401 → 916 | — | — |
+
+Exchanges/step stay 377 (K3 changes partners, not exchanges). Package gate L-c non-kernel ≤ 50 % of WO-0's: 45 %
+(met, provisional, K1 + fence + K3 together). L-e ≤ 1.10× L-a: L-a not re-run interleaved (WO-0's 79.4 at load
+54–84). The L-c bench median moving opposite to its M1 non-kernel share is not resolved at this load. Scripts
+`distcomm/k3/gperf.sh`, raw `distcomm/wo0/{k3perf_base,k3perf_k3,k3trace}/`.

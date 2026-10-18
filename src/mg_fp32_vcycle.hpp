@@ -246,11 +246,58 @@ inline void prolongFp32FromD(VField fine, CCConst coarse, C3 fext, C3 cext, int 
 
 // One red-black colour pass of the FP32 smoother over a box (cutcellSmoothColorBoxFace's forms:
 // host pencils, device MDRange; its parity expression).
+// K3 (doc/vof_distributed_host_comm_design.md §5.2): `wrapMask` != 0 reads x across the level's
+// rank-local periodic axes in-kernel (ccMaskNbrs; g = the level's ghost width), the launch forms
+// as below; wrapMask = 0 (the default) is today's code.
 inline void cutcellSmoothColorFp32Box(VField x, VConst b, VConst WX, VConst WY, VConst WZ, C3 e,
-                                      C3 og, int color, C3 lo, C3 hi, C3 exLo, C3 exHi) {
+                                      C3 og, int color, C3 lo, C3 hi, C3 exLo, C3 exHi,
+                                      int wrapMask = 0, int g = 1) {
   if (hi.x <= lo.x || hi.y <= lo.y || hi.z <= lo.z)
     return;
   CCExec space;
+  if (wrapMask != 0) {
+    const C3 n{e.x - 2 * g, e.y - 2 * g, e.z - 2 * g};
+    if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+      const int nyi = hi.y - lo.y, nzi = hi.z - lo.z;
+      const long cells = (long)nyi * nzi * (hi.x - lo.x);
+      auto pencil = KOKKOS_LAMBDA(long t) {
+        const int ly = lo.y + (int)(t % nyi), lz = lo.z + (int)(t / nyi);
+        const bool yzSkip = ly >= exLo.y && ly < exHi.y && lz >= exLo.z && lz < exHi.z;
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+        for (int lx = lo.x + ((P ^ (lo.x & 1)) & 1); lx < hi.x; lx += 2) {
+          if (yzSkip && lx >= exLo.x && lx < exHi.x)
+            continue;  // inside the skip box (already swept by the interior pass)
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const CcNbrs w = ccMaskNbrs(lx, ly, lz, n, g, i, sy, sz, wrapMask);
+          fp32SmoothCell(x, b, WX, WY, WZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym, w.zp, w.zm);
+        }
+      };
+      if (hostRunSerial(cells)) {
+        for (long t = 0; t < (long)nyi * nzi; ++t)
+          pencil(t);
+        return;
+      }
+      Kokkos::parallel_for("peclet::flow::cc_smooth_box_f32",
+                           Kokkos::RangePolicy<CCExec>(space, 0, (long)nyi * nzi), pencil);
+      return;
+    }
+    using MD = MDRange3<CCExec>;
+    Kokkos::parallel_for(
+        "peclet::flow::cc_smooth_box_f32", MD(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}),
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          if (lx >= exLo.x && lx < exHi.x && ly >= exLo.y && ly < exHi.y && lz >= exLo.z &&
+              lz < exHi.z)
+            return;
+          if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+            return;
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const CcNbrs w = ccMaskNbrs(lx, ly, lz, n, g, i, sy, sz, wrapMask);
+          fp32SmoothCell(x, b, WX, WY, WZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym, w.zp, w.zm);
+        });
+    return;
+  }
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     const int nyi = hi.y - lo.y, nzi = hi.z - lo.z;
     const long cells = (long)nyi * nzi * (hi.x - lo.x);
@@ -293,9 +340,23 @@ inline void cutcellSmoothColorFp32Box(VField x, VConst b, VConst WX, VConst WY, 
 }
 // The FP32 residual r = b - W x over a box (residualCutcellBoxFace's form).
 inline void residualFp32Box(VField r, VConst x, VConst b, VConst WX, VConst WY, VConst WZ, C3 e,
-                            C3 lo, C3 hi, C3 exLo, C3 exHi) {
+                            C3 lo, C3 hi, C3 exLo, C3 exHi, int wrapMask = 0, int g = 1) {
   if (hi.x <= lo.x || hi.y <= lo.y || hi.z <= lo.z)
     return;
+  if (wrapMask != 0) {  // K3 (§5.2): see cutcellSmoothColorFp32Box
+    const C3 n{e.x - 2 * g, e.y - 2 * g, e.z - 2 * g};
+    ccFor3(
+        "peclet::flow::cc_residual_box_f32", lo, hi, KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          if (lx >= exLo.x && lx < exHi.x && ly >= exLo.y && ly < exHi.y && lz >= exLo.z &&
+              lz < exHi.z)
+            return;
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const CcNbrs w = ccMaskNbrs(lx, ly, lz, n, g, i, sy, sz, wrapMask);
+          fp32ResidualCell(r, x, b, WX, WY, WZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym, w.zp, w.zm);
+        });
+    return;
+  }
   ccFor3(
       "peclet::flow::cc_residual_box_f32", lo, hi, KOKKOS_LAMBDA(int lx, int ly, int lz) {
         if (lx >= exLo.x && lx < exHi.x && ly >= exLo.y && ly < exHi.y && lz >= exLo.z &&

@@ -220,12 +220,47 @@ inline void cutcellSmoothColorFace(CCField phi, CCConst b, OpV AC, OpV AFX, OpV 
                               i - sy, i + sz, i - sz);
       });
 }
+// K3 (doc/vof_distributed_host_comm_design.md §5.2): `wrapMask` != 0 reads the field operand
+// across the level's rank-local periodic axes in-kernel (ccMaskNbrs; g = the level's ghost width);
+// the coefficients are read as today. wrapMask = 0 (the default) is today's code.
 template <class OpV>
 inline void cutcellSmoothColorBoxFace(CCField phi, CCConst b, OpV AC, OpV AFX, OpV AFY, OpV AFZ,
-                                      C3 e, C3 og, int color, C3 rlo, C3 rhi, C3 slo, C3 shi) {
+                                      C3 e, C3 og, int color, C3 rlo, C3 rhi, C3 slo, C3 shi,
+                                      int wrapMask = 0, int g = 1) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
   CCExec space;
+  if (wrapMask != 0) {
+    const C3 n{e.x - 2 * g, e.y - 2 * g, e.z - 2 * g};
+    if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+      auto run = [=](int ly, int lz, int x0, int x1) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        const int P = (color + og.x + og.y + ly + og.z + lz) & 1;
+        ccMaskRow(ly, lz, x0 + ((P ^ (x0 & 1)) & 1), x1, 2, e, n, g, wrapMask,
+                  [&](long i, long xp, long xm, long yp, long ym, long zp, long zm) {
+                    cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, xp, xm, yp, ym,
+                                          zp, zm);
+                  });
+      };
+      ccBoxShellRuns("peclet::flow::cc_smooth_box", rlo, rhi, slo, shi, run);
+      return;
+    }
+    using MD = MDRange3<CCExec>;
+    Kokkos::parallel_for(
+        "peclet::flow::cc_smooth_box", MD(space, {rlo.x, rlo.y, rlo.z}, {rhi.x, rhi.y, rhi.z}),
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+            return;
+          if (((og.x + lx + og.y + ly + og.z + lz) & 1) != color)
+            return;
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const CcNbrs w = ccMaskNbrs(lx, ly, lz, n, g, i, sy, sz, wrapMask);
+          cutcellSmoothFaceCell(phi, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                                w.zp, w.zm);
+        });
+    return;
+  }
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     // H-7 (§14.3): the shell launch visits only the shell, the interior launch (empty skip box)
     // whole rows with no skip test; each x-run takes the colour's parity at its own start, `omp
@@ -272,9 +307,36 @@ inline void applyCutcellOpFace(CCField y, CCConst x, OpV AC, OpV AFX, OpV AFY, O
 }
 template <class OpV>
 inline void applyCutcellOpBoxFace(CCField y, CCConst x, OpV AC, OpV AFX, OpV AFY, OpV AFZ, C3 e,
-                                  C3 rlo, C3 rhi, C3 slo, C3 shi) {
+                                  C3 rlo, C3 rhi, C3 slo, C3 shi, int wrapMask = 0, int g = 1) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
+  if (wrapMask != 0) {  // K3 (§5.2): see cutcellSmoothColorBoxFace
+    const C3 n{e.x - 2 * g, e.y - 2 * g, e.z - 2 * g};
+    if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+      auto run = [=](int ly, int lz, int x0, int x1) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        ccMaskRow(ly, lz, x0, x1, 1, e, n, g, wrapMask,
+                  [&](long i, long xp, long xm, long yp, long ym, long zp, long zm) {
+                    y(i) = cutcellApplyFaceCell(x, AC, AFX, AFY, AFZ, i, sx, sy, sz, xp, xm, yp, ym,
+                                                zp, zm);
+                  });
+      };
+      ccBoxShellRuns("peclet::flow::cc_apply_box", rlo, rhi, slo, shi, run);
+      return;
+    }
+    ccFor3(
+        "peclet::flow::cc_apply_box", C3{rlo.x, rlo.y, rlo.z}, C3{rhi.x, rhi.y, rhi.z},
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+            return;
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const CcNbrs w = ccMaskNbrs(lx, ly, lz, n, g, i, sy, sz, wrapMask);
+          y(i) = cutcellApplyFaceCell(x, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                                      w.zp, w.zm);
+        });
+    return;
+  }
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     // H-7 (§14.3): shell-only shell launch, skip-test-free interior launch (ccBoxShellRuns).
     auto run = [=](int ly, int lz, int x0, int x1) {
@@ -490,9 +552,36 @@ inline void applyCutcellOpExact(CCField y, CCConst x, CCConst ox, CCConst oy, CC
 // aliasing — so interior-then-shell ordering reproduces the blocking apply exactly.
 inline void applyCutcellOpExactBox(CCField y, CCConst x, CCConst ox, CCConst oy, CCConst oz, C3 e,
                                    C3 rlo, C3 rhi, C3 slo, C3 shi, double gfx, double gfy,
-                                   double gfz) {
+                                   double gfz, int wrapMask = 0, int g = 1) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
+  if (wrapMask != 0) {  // K3 (§5.2): see cutcellSmoothColorBoxFace
+    const C3 n{e.x - 2 * g, e.y - 2 * g, e.z - 2 * g};
+    if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+      auto run = [=](int ly, int lz, int x0, int x1) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        ccMaskRow(ly, lz, x0, x1, 1, e, n, g, wrapMask,
+                  [&](long i, long xp, long xm, long yp, long ym, long zp, long zm) {
+                    y(i) = cutcellApplyExactCell(x, ox, oy, oz, i, sx, sy, sz, xp, xm, yp, ym, zp,
+                                                 zm, gfx, gfy, gfz);
+                  });
+      };
+      ccBoxShellRuns("peclet::flow::cc_apply_exact_box", rlo, rhi, slo, shi, run);
+      return;
+    }
+    ccFor3(
+        "peclet::flow::cc_apply_exact_box", C3{rlo.x, rlo.y, rlo.z}, C3{rhi.x, rhi.y, rhi.z},
+        KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+            return;
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const CcNbrs w = ccMaskNbrs(lx, ly, lz, n, g, i, sy, sz, wrapMask);
+          y(i) = cutcellApplyExactCell(x, ox, oy, oz, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym, w.zp,
+                                       w.zm, gfx, gfy, gfz);
+        });
+    return;
+  }
   ccFor3(
       "peclet::flow::cc_apply_exact_box", C3{rlo.x, rlo.y, rlo.z}, C3{rhi.x, rhi.y, rhi.z},
       KOKKOS_LAMBDA(int lx, int ly, int lz) {

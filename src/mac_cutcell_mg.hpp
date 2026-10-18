@@ -266,9 +266,36 @@ inline void residualCutcellFace(CCField r, CCConst x, CCConst b, FPC AC, FPC AFX
       });
 }
 inline void residualCutcellBoxFace(CCField r, CCConst x, CCConst b, FPC AC, FPC AFX, FPC AFY,
-                                   FPC AFZ, C3 e, C3 rlo, C3 rhi, C3 slo, C3 shi) {
+                                   FPC AFZ, C3 e, C3 rlo, C3 rhi, C3 slo, C3 shi, int wrapMask = 0,
+                                   int g = 1) {
   if (rhi.x <= rlo.x || rhi.y <= rlo.y || rhi.z <= rlo.z)
     return;
+  if (wrapMask != 0) {  // K3 (doc/vof_distributed_host_comm_design.md §5.2): in-kernel wrap reads
+    const C3 n{e.x - 2 * g, e.y - 2 * g, e.z - 2 * g};
+    if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
+      auto run = [=](int ly, int lz, int x0, int x1) {
+        const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+        ccMaskRow(ly, lz, x0, x1, 1, e, n, g, wrapMask,
+                  [&](long i, long xp, long xm, long yp, long ym, long zp, long zm) {
+                    cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, xp, xm, yp,
+                                            ym, zp, zm);
+                  });
+      };
+      ccBoxShellRuns("peclet::flow::cc_residual_box", rlo, rhi, slo, shi, run);
+      return;
+    }
+    ccFor3(
+        "peclet::flow::cc_residual_box", rlo, rhi, KOKKOS_LAMBDA(int lx, int ly, int lz) {
+          if (lx >= slo.x && lx < shi.x && ly >= slo.y && ly < shi.y && lz >= slo.z && lz < shi.z)
+            return;
+          const long sx = 1, sy = e.x, sz = (long)e.x * e.y;
+          const long i = (long)lx + (long)ly * sy + (long)lz * sz;
+          const CcNbrs w = ccMaskNbrs(lx, ly, lz, n, g, i, sy, sz, wrapMask);
+          cutcellResidualFaceCell(r, x, b, AC, AFX, AFY, AFZ, i, sx, sy, sz, w.xp, w.xm, w.yp, w.ym,
+                                  w.zp, w.zm);
+        });
+    return;
+  }
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     // H-7 (doc/vof_step_performance_design.md §14.3): shell-only shell launch, skip-test-free
     // interior launch (ccBoxShellRuns). Same cells, same body.
@@ -309,9 +336,7 @@ inline void residualCutcellBoxFace(CCField r, CCConst x, CCConst b, FPC AC, FPC 
 // field being smoothed or applied is wrapped; the coefficients are static over a solve and are read
 // at their ghost indices as before (AFX(i+sx) at the high ghost holds the periodic face, and a wall
 // face's coefficient is 0 there, multiplying the wrapped value exactly as it multiplied the ghost).
-struct CcNbrs {
-  long xp, xm, yp, ym, zp, zm;
-};
+// (CcNbrs lives in mac_cutcell.hpp, beside K3's per-axis ccMaskNbrs.)
 KOKKOS_INLINE_FUNCTION CcNbrs ccWrapNbrs(int lx, int ly, int lz, C3 n, int g, long i, long sy,
                                          long sz) {
   CcNbrs w;
@@ -1065,6 +1090,16 @@ class CutcellMG {
     // D-dist (doc/vof_projection_distributed_design.md §5.1): the FP32 iterates' ghost exchange on
     // the same topology, created by fp32Build on a level that carries the FP32 data (null else).
     std::shared_ptr<GridHalo<VReal>> devf;
+    // K3 (doc/vof_distributed_host_comm_design.md §5.2): the STENCIL halo of the 7-point exchanges
+    // (the non-CA smoother, the residual, the matvec, their FP32 twins): face ghosts only, and no
+    // periodic wrap on the level's wrap axes `wrapAxes` (= M_L, bit a set iff the level is ONE
+    // block along a, no outflow face on a and the inner extent on a is even), which the box
+    // kernels read in-kernel instead. `dev` (full) stays for the prolong / operator / openness
+    // fills and CA smoothing. sdevf: the FP32 iterates' twin, created beside devf.
+    std::shared_ptr<GridHaloTopology<3>> shalo;
+    std::shared_ptr<GridHalo<double>> sdev;
+    std::shared_ptr<GridHalo<VReal>> sdevf;
+    int wrapAxes = 0;
     // D-dist (§5.1, WO-D2b1): on the FP32 level that telescopes (fp32Last_), the FP64 correction
     // the telescope transition scatter-adds into (level extent; empty elsewhere).
     CCField tcorr;
@@ -1503,6 +1538,30 @@ class CutcellMG {
       v.dev->init(*v.halo);
       v.dev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " ranks" +
                       std::to_string(curDec.numBlocks()));
+      // K3 (§5.2): the wrap axes M_L, from the replicated decomposition (every rank agrees), and
+      // the faces-only stencil topology with `per` cleared on them.
+      {
+        std::array<bool, 3> sper = per;
+        v.wrapAxes = 0;
+        for (int a = 0; a < 3; ++a) {
+          bool oneBlock = true;
+          for (std::size_t b = 0; b < dec.sizes().size(); ++b)
+            oneBlock =
+                oneBlock && dec.origins()[b][a] == 0 && dec.sizes()[b][a] == dec.globalSize()[a];
+          const bool outflow = bc_[2 * a] == 3 || bc_[2 * a + 1] == 3;
+          if (oneBlock && !outflow && dec.globalSize()[a] % 2 == 0) {
+            v.wrapAxes |= 1 << a;
+            sper[a] = false;
+          }
+        }
+        v.shalo = std::make_shared<GridHaloTopology<3>>();
+        v.shalo->buildTopology(dec, curRank, v.g, sper, curComm,
+                               peclet::core::halo::Neighborhood::Faces);
+        v.sdev = std::make_shared<GridHalo<double>>();
+        v.sdev->init(*v.shalo);
+        v.sdev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " stencil w" +
+                         std::to_string(v.wrapAxes));
+      }
       const auto& idx = v.halo->indexer();
       const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
       v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]};
@@ -3596,16 +3655,24 @@ class CutcellMG {
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
       const int g = lv.g;
-      const C3 lo{g + 1, g + 1, g + 1};
-      const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
-      lv.dev->exchangeBegin(lv.x);
-      residualCutcellBoxFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
-                             FPC(lv.AFY), FPC(lv.AFZ), lv.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
-      lv.dev->exchangeEnd(lv.x);
-      applyOutflowGhost(lv, lv.x, g);
-      residualCutcellBoxFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
-                             FPC(lv.AFY), FPC(lv.AFZ), lv.ext, C3{g, g, g},
-                             C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
+      const int m = stencilWrap(lv);  // K3 (§5.2), as in smooth()
+      const C3 lo = boxLo(g, m), hi = boxHi(lv.ext, g, m);
+      if (m == 7) {
+        residualCutcellBoxFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
+                               FPC(lv.AFY), FPC(lv.AFZ), lv.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0},
+                               m, g);
+      } else {
+        GridHalo<double>& h = stencilHalo(lv);
+        h.exchangeBegin(lv.x);
+        residualCutcellBoxFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
+                               FPC(lv.AFY), FPC(lv.AFZ), lv.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0},
+                               m, g);
+        h.exchangeEnd(lv.x);
+        applyOutflowGhost(lv, lv.x, g);
+        residualCutcellBoxFace(lv.res, CCConst(lv.x), CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX),
+                               FPC(lv.AFY), FPC(lv.AFZ), lv.ext, C3{g, g, g},
+                               C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi, m, g);
+      }
     } else
 #endif
     {
@@ -3679,6 +3746,30 @@ class CutcellMG {
   // periodic/IBM operator — with domain BCs the ring rows would need post-BC ghost openness the
   // exchange does not deliver, so those keep the per-colour exchange.
   bool caSmooth(const Level& lv) const { return distributed_ && lv.caOk && !hasBC_; }
+  // K3 (doc/vof_distributed_host_comm_design.md §5.2): the overlapped box passes' interior box
+  // [boxLo, boxHi) -- one cell in from the ghosts, except on a wrap axis (bit a of m), which it
+  // spans whole, [g, ext_a - g), so that axis contributes no shell. m = 0: today's box.
+  static C3 boxLo(int g, int m) {
+    return {(m & 1) ? g : g + 1, (m & 2) ? g : g + 1, (m & 4) ? g : g + 1};
+  }
+  static C3 boxHi(C3 e, int g, int m) {
+    return {(m & 1) ? e.x - g : e.x - g - 1, (m & 2) ? e.y - g : e.y - g - 1,
+            (m & 4) ? e.z - g : e.z - g - 1};
+  }
+#ifdef PECLET_FLOW_MPI
+  // K3 (§5.2): a distributed stencil exchange runs on the faces-only `sdev` (`sdevf`) with the
+  // level's wrap axes read in-kernel, except while the solve carries an overlay (condition 4) or
+  // the test hook debugSetStencilHaloOff is set: then the full `dev` (`devf`) and wrapMask = 0,
+  // today's code.
+  bool stencilHaloOn(const Level& lv) const {
+    return lv.sdev && !overlaySolve_ && !stencilHaloOff_;
+  }
+  int stencilWrap(const Level& lv) const { return stencilHaloOn(lv) ? lv.wrapAxes : 0; }
+  GridHalo<double>& stencilHalo(Level& lv) { return stencilHaloOn(lv) ? *lv.sdev : *lv.dev; }
+  GridHalo<VReal>& stencilHaloF(Level& lv) {
+    return stencilHaloOn(lv) && lv.sdevf ? *lv.sdevf : *lv.devf;
+  }
+#endif
   // A3 (§5.4) eligibility of the fused periodic-wrap reads: single rank, no outflow face (whose
   // Dirichlet ghost is not a copy), and no overlay on the current solve (the star /
   // ghost-projection paths keep today's fills). The smoother additionally needs every inner
@@ -3761,6 +3852,11 @@ class CutcellMG {
       lv.devf = std::make_shared<GridHalo<VReal>>();
       lv.devf->init(*lv.halo);
       lv.devf->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(lv.g) + " f32");
+    }
+    if (distributed_ && !lv.sdevf && lv.shalo) {  // K3 (§5.2): the stencil halo's FP32 twin
+      lv.sdevf = std::make_shared<GridHalo<VReal>>();
+      lv.sdevf->init(*lv.shalo);
+      lv.sdevf->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(lv.g) + " f32 stencil");
     }
     if (distributed_ && lv.tele && L == fp32Last_ && lv.tcorr.extent(0) != lv.n)
       lv.tcorr = CCField("peclet::flow::mg_tcorr", lv.n);  // §5.1 (WO-D2b1)
@@ -4061,6 +4157,13 @@ class CutcellMG {
       }
       return;
     }
+    // K3 (§5.2): the stencil halo and the in-kernel wrap, as smooth()'s distributed branch.
+    const int m = stencilWrap(lv);
+    const C3 wlo = boxLo(g, m), whi = boxHi(e, g, m);
+    auto wbox = [&](int color, C3 a, C3 b, C3 exLo, C3 exHi) {
+      cutcellSmoothColorFp32Box(lv.xf, VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY), VConst(lv.WZ),
+                                e, og, color, a, b, exLo, exHi, m, g);
+    };
     for (int k = 0; k < sweeps; ++k)
       for (int s = 0; s < 2; ++s) {
         if (skipFirst) {
@@ -4068,24 +4171,35 @@ class CutcellMG {
           continue;
         }
         const int color = reverse ? (1 - s) : s;
-        lv.devf->exchangeBegin(lv.xf);
-        box(color, lo, hi, none, none);
-        lv.devf->exchangeEnd(lv.xf);
-        box(color, C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, lo, hi);
+        if (m == 7) {
+          wbox(color, wlo, whi, none, none);
+          continue;
+        }
+        GridHalo<VReal>& h = stencilHaloF(lv);
+        h.exchangeBegin(lv.xf);
+        wbox(color, wlo, whi, none, none);
+        h.exchangeEnd(lv.xf);
+        wbox(color, C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, wlo, whi);
       }
   }
   // vcycleImpl's distributed residual on the FP32 data: the exchange overlapped with the interior.
   void residualFp32Dist(Level& lv) {
     const int g = lv.g;
     const C3 e = lv.ext;
-    const C3 lo{g + 1, g + 1, g + 1};
-    const C3 hi{e.x - g - 1, e.y - g - 1, e.z - g - 1};
-    lv.devf->exchangeBegin(lv.xf);
+    const int m = stencilWrap(lv);  // K3 (§5.2), as in residual's distributed branch
+    const C3 lo = boxLo(g, m), hi = boxHi(e, g, m);
+    if (m == 7) {
+      residualFp32Box(lv.resf, VConst(lv.xf), VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
+                      VConst(lv.WZ), e, lo, hi, C3{0, 0, 0}, C3{0, 0, 0}, m, g);
+      return;
+    }
+    GridHalo<VReal>& h = stencilHaloF(lv);
+    h.exchangeBegin(lv.xf);
     residualFp32Box(lv.resf, VConst(lv.xf), VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
-                    VConst(lv.WZ), e, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
-    lv.devf->exchangeEnd(lv.xf);
+                    VConst(lv.WZ), e, lo, hi, C3{0, 0, 0}, C3{0, 0, 0}, m, g);
+    h.exchangeEnd(lv.xf);
     residualFp32Box(lv.resf, VConst(lv.xf), VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
-                    VConst(lv.WZ), e, C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, lo, hi);
+                    VConst(lv.WZ), e, C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, lo, hi, m, g);
   }
 #endif
   // §4.4.4 item 4, the level-0 EXIT (replaces removeMean(l0, z) and the r^T z dot): the fluid
@@ -4186,6 +4300,9 @@ class CutcellMG {
   // Test hook (tests/kokkos/test_mg_fp32_vcycle.cpp): mark / unmark an overlay solve, as
   // OverlayScope does for the star and ghost-projection drivers.
   void debugSetOverlaySolve(bool on) { overlaySolve_ = on; }
+  // K3 test hook (mg_stencil_halo_np*): force the full `dev` halo and wrapMask = 0 on every
+  // stencil exchange (today's code), to compare against the default bitwise.
+  void debugSetStencilHaloOff(bool on) { stencilHaloOff_ = on; }
   void setVcyclePrecision(int mode) {
     if (mode != kVcycleAuto && mode != kVcycleFp64 && mode != kVcycleFp32)
       throw std::invalid_argument(
@@ -4359,18 +4476,27 @@ class CutcellMG {
           // nor the outflow ghost), complete the exchange, then sweep the boundary shell. A
           // color's cells never read same-color cells, so this ordering is bit-identical to the
           // blocking fill-then-full-sweep (validated by the np>1 bit-exact MG tests).
+          // K3 (§5.2): the stencil halo; on the wrap axes the box spans the block whole and
+          // reads the wrap in-kernel; every axis wrapped (np 1): no exchange, one launch.
           const int g = lv.g;
-          const C3 lo{g + 1, g + 1, g + 1};
-          const C3 hi{lv.ext.x - g - 1, lv.ext.y - g - 1, lv.ext.z - g - 1};
-          lv.dev->exchangeBegin(lv.x);
+          const int m = stencilWrap(lv);
+          const C3 lo = boxLo(g, m), hi = boxHi(lv.ext, g, m);
+          if (m == 7) {
+            cutcellSmoothColorBoxFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
+                                      FPC(lv.AFZ), lv.ext, og, color, lo, hi, C3{0, 0, 0},
+                                      C3{0, 0, 0}, m, g);
+            continue;
+          }
+          GridHalo<double>& h = stencilHalo(lv);
+          h.exchangeBegin(lv.x);
           cutcellSmoothColorBoxFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
                                     FPC(lv.AFZ), lv.ext, og, color, lo, hi, C3{0, 0, 0},
-                                    C3{0, 0, 0});
-          lv.dev->exchangeEnd(lv.x);
+                                    C3{0, 0, 0}, m, g);
+          h.exchangeEnd(lv.x);
           applyOutflowGhost(lv, lv.x, g);
           cutcellSmoothColorBoxFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY),
                                     FPC(lv.AFZ), lv.ext, og, color, C3{g, g, g},
-                                    C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi);
+                                    C3{lv.ext.x - g, lv.ext.y - g, lv.ext.z - g}, lo, hi, m, g);
           continue;
         }
 #endif
@@ -5396,25 +5522,26 @@ class CutcellMG {
       ensureFp64();  // D5 (§4.4.7): the band apply reads level 0's AFX, AFY, AFZ
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {
-      const C3 lo{G + 1, G + 1, G + 1};
-      const C3 hi{l0.ext.x - G - 1, l0.ext.y - G - 1, l0.ext.z - G - 1};
-      l0.dev->exchangeBegin(v);
-      if (ex)
-        applyCutcellOpExactBox(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz),
-                               l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0}, gfx_, gfy_, gfz_);
-      else
-        applyCutcellOpBoxFace(y, CCConst(v), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ),
-                              l0.ext, lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
-      l0.dev->exchangeEnd(v);
+      const int m = stencilWrap(l0);  // K3 (§5.2), as in smooth()
+      const C3 lo = boxLo(G, m), hi = boxHi(l0.ext, G, m);
+      auto apply = [&](C3 rlo, C3 rhi, C3 slo, C3 shi) {
+        if (ex)
+          applyCutcellOpExactBox(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz),
+                                 l0.ext, rlo, rhi, slo, shi, gfx_, gfy_, gfz_, m, G);
+        else
+          applyCutcellOpBoxFace(y, CCConst(v), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ),
+                                l0.ext, rlo, rhi, slo, shi, m, G);
+      };
+      if (m == 7) {
+        apply(lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
+        return;
+      }
+      GridHalo<double>& h = stencilHalo(l0);
+      h.exchangeBegin(v);
+      apply(lo, hi, C3{0, 0, 0}, C3{0, 0, 0});
+      h.exchangeEnd(v);
       applyOutflowGhost(l0, v);
-      if (ex)
-        applyCutcellOpExactBox(y, CCConst(v), CCConst(l0.ox), CCConst(l0.oy), CCConst(l0.oz),
-                               l0.ext, C3{G, G, G}, C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G},
-                               lo, hi, gfx_, gfy_, gfz_);
-      else
-        applyCutcellOpBoxFace(y, CCConst(v), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ),
-                              l0.ext, C3{G, G, G}, C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G}, lo,
-                              hi);
+      apply(C3{G, G, G}, C3{l0.ext.x - G, l0.ext.y - G, l0.ext.z - G}, lo, hi);
       return;
     }
 #endif
@@ -6223,6 +6350,7 @@ class CutcellMG {
   // way). setMeanRemovalScope(true) restores the legacy every-level scope.
   bool meanRemovalAll_ = false;
   bool distributed_ = false;
+  bool stencilHaloOff_ = false;            // K3 test hook (debugSetStencilHaloOff)
   bool overlaySolve_ = false;              // A3: the current solve has an overlay (OverlayScope)
   int dbgBrkWhich_ = 0, dbgBrkIter_ = -1;  // setDebugBreakdown (test hook)
   int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)

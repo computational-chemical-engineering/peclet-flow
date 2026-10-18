@@ -428,6 +428,66 @@ inline void ccBoxShellRuns(const char* name, C3 rlo, C3 rhi, C3 slo, C3 shi, Run
   }
 }
 
+// K3 (doc/vof_distributed_host_comm_design.md §5.2): the stencil halo's rank-local periodic axes.
+// On an axis whose bit is set in the wrap mask `m` (1 = x, 2 = y, 4 = z) the level's block is the
+// whole global axis, so the neighbour of a boundary cell across the block face is the inner cell at
+// the opposite face -- the very cell the full (periodic) exchange copies into that ghost (A3's
+// ccWrapNbrs, per axis): for inner coordinate k in [g, g + n_a), minus = (k == g) ? i + (n_a-1) s_a
+// : i - s_a, plus = (k == g + n_a - 1) ? i - (n_a-1) s_a : i + s_a. On every other axis the plain
+// i +- s_a (the ghost). n = the level's inner dims (even on a masked axis: a red-black pass then
+// reads only the other colour across the wrap), g = its ghost width. m = 0: i +- s everywhere.
+struct CcNbrs {
+  long xp, xm, yp, ym, zp, zm;
+};
+KOKKOS_INLINE_FUNCTION CcNbrs ccMaskNbrs(int lx, int ly, int lz, C3 n, int g, long i, long sy,
+                                         long sz, int m) {
+  CcNbrs w;
+  w.xm = ((m & 1) && lx == g) ? i + (long)(n.x - 1) : i - 1;
+  w.xp = ((m & 1) && lx == g + n.x - 1) ? i - (long)(n.x - 1) : i + 1;
+  w.ym = ((m & 2) && ly == g) ? i + (long)(n.y - 1) * sy : i - sy;
+  w.yp = ((m & 2) && ly == g + n.y - 1) ? i - (long)(n.y - 1) * sy : i + sy;
+  w.zm = ((m & 4) && lz == g) ? i + (long)(n.z - 1) * sz : i - sz;
+  w.zp = ((m & 4) && lz == g + n.z - 1) ? i - (long)(n.z - 1) * sz : i + sz;
+  return w;
+}
+// The host row of a masked box pass (ccBoxShellRuns' `run` body): the cells lx = lx0, lx0 + step,
+// ... < x1 of row (ly, lz). The y/z neighbour offsets once per row; with x masked, the row's
+// x-face cells peeled (ccMaskNbrs), the rest at i +- 1 (ccWrapRowPeeled's structure). Same cells,
+// same body, same operands as ccMaskNbrs per cell. `cell(i, xp, xm, yp, ym, zp, zm)`.
+template <class Cell>
+KOKKOS_INLINE_FUNCTION void ccMaskRow(int ly, int lz, int lx0, int x1, int step, C3 e, C3 n, int g,
+                                      int m, const Cell& cell) {
+  if (lx0 >= x1)
+    return;
+  const long sy = e.x, sz = (long)e.x * e.y;
+  const long base = (long)ly * sy + (long)lz * sz;
+  const long dym = ((m & 2) && ly == g) ? (long)(n.y - 1) * sy : -sy;
+  const long dyp = ((m & 2) && ly == g + n.y - 1) ? -(long)(n.y - 1) * sy : sy;
+  const long dzm = ((m & 4) && lz == g) ? (long)(n.z - 1) * sz : -sz;
+  const long dzp = ((m & 4) && lz == g + n.z - 1) ? -(long)(n.z - 1) * sz : sz;
+  auto scalar = [&](int lx) {
+    const long i = (long)lx + base;
+    const CcNbrs w = ccMaskNbrs(lx, ly, lz, n, g, i, sy, sz, m);
+    cell(i, w.xp, w.xm, w.yp, w.ym, w.zp, w.zm);
+  };
+  const int lxLast = g + n.x - 1;
+  int lo = lx0, hi = lx0 + ((x1 - 1 - lx0) / step) * step;  // inclusive
+  if ((m & 1) && lo == g) {
+    scalar(lo);
+    lo += step;
+  }
+  const bool peelLast = (m & 1) && hi == lxLast && hi >= lo;
+  if (peelLast)
+    hi -= step;
+  PECLET_FLOW_OMP_SIMD  // independent cells (ccFor3's contract)
+      for (int lx = lo; lx <= hi; lx += step) {
+    const long i = (long)lx + base;
+    cell(i, i + 1, i - 1, i + dyp, i + dym, i + dzp, i + dzm);
+  }
+  if (peelLast)
+    scalar(lxLast);
+}
+
 // Reduction sibling of ccFor3. On a host backend it is the PENCIL reduction of B2
 // (doc/vof_step_performance_design.md §5.8, a recorded order): a RangePolicy over the (y, z) rows
 // of the box -- the same static row partition as ccFor3 -- each thread reducing its rows in (y, z)
