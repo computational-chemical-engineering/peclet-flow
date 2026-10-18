@@ -4798,6 +4798,11 @@ class CutcellMG {
     k.aug = dirAug_;
     k.tauPiv0 = tauPiv0;
     k.teamAlgorithm = teamAlgorithm ? 1 : 0;
+#ifdef PECLET_FLOW_BOTTOM_PROBE
+    if (bottomProbe_.extent(0) == 0)
+      bottomProbe_ = Kokkos::View<long long*, CCMem>("peclet::flow::mg_bottom_probe", 16);
+    k.probe = bottomProbe_;
+#endif
     const std::size_t scratch = BottomFactorKernel<FR, FPC>::scratchBytes(D.pl.b);
     const int T = directTeam(k, team, probe, scratch, kBottomHostFactorTeam);
     Kokkos::parallel_for(
@@ -6533,6 +6538,11 @@ class CutcellMG {
     return h(1);
   }
   void directPivotTolForTest(double t) { dirPivotTol_ = t; }
+#ifdef PECLET_FLOW_BOTTOM_PROBE
+  // P2 (doc/vof_gpu_coarse_tail_design.md §5.2): the factor's per-phase clock ticks, accumulated
+  // over every factor launch since the View was created (bench_bottom_factor only).
+  Kokkos::View<long long*, CCMem> bottomProbe_;
+#endif
   void directMarkStaleForTest() { facStale_ = true; }
 
  private:

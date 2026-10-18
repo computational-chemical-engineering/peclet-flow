@@ -12,12 +12,18 @@
 /// algorithm (the device one, the host schedule's bitwise oracle) at the same sizes. With a dump
 /// file the first T's storage is written there (raw bytes, Q|Y|e|s|stat), so two builds can be
 /// compared with `cmp`.
+///
+/// This target is compiled with PECLET_FLOW_BOTTOM_PROBE (doc/vof_gpu_coarse_tail_design.md §5.2,
+/// P2): for the team algorithm it also prints the factor's phase split (clock ticks of team rank
+/// 0 between barriers, scaled to the median ms), and at the production team size the time of M
+/// alone (z = M(r), precondition-only) against the production solve (factor current).
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <Kokkos_Core.hpp>
+#include <random>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -104,6 +110,9 @@ int main(int argc, char** argv) {
         for (int w = 0; w < 3; ++w)
           mg.launchDirectFactor(D, Tu, kBottomPivotTol, /*probe=*/false, team);
         Kokkos::fence();
+#ifdef PECLET_FLOW_BOTTOM_PROBE
+        Kokkos::deep_copy(mg.bottomProbe_, 0LL);
+#endif
         std::vector<double> ms;
         for (int r = 0; r < reps; ++r) {
           Kokkos::Timer tm;
@@ -127,7 +136,55 @@ int main(int argc, char** argv) {
         printf("  %s T %3d: factor min %8.3f ms  median %8.3f ms  max %8.3f ms  (%s)\n",
                host ? (team ? "team" : "host") : "team", Tu, ms.front(), ms[ms.size() / 2],
                ms.back(), same);
+#ifdef PECLET_FLOW_BOTTOM_PROBE
+        if (!host || team) {
+          auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mg.bottomProbe_);
+          double tot = 0.0;
+          for (int c = 0; c < 8; ++c)
+            tot += (double)h(c);
+          const char* nm[8] = {"scale+cpl", "assemble", "diag", "panel",
+                               "trailing",  "W",        "Q",    "border"};
+          printf("    phase split (ms of the median):");
+          for (int c = 0; c < 8; ++c)
+            if (h(c) > 0)
+              printf(" %s %.3f", nm[c], tot > 0 ? ms[ms.size() / 2] * (double)h(c) / tot : 0.0);
+          printf("\n");
+        }
+#endif
       }
+    {  // the solve: M alone vs the production FCG solve, production team sizes
+      CutcellMG::Level& bt = mg.level(mg.nLevels() - 1);
+      std::vector<double> hb(bt.n);
+      std::mt19937 rng(11);
+      std::uniform_real_distribution<double> U(-1.0, 1.0);
+      for (auto& v : hb)
+        v = U(rng);
+      CCField r = dev(hb, "r"), z("z", bt.n);
+      BottomDirect<float> D0 = mg.directFactorForTest<float>(0);
+      Kokkos::deep_copy(bt.rhs, r);
+      int it = mg.directSolveForTest();  // refactors (stale) and solves once
+      std::vector<double> mM, mS;
+      for (int rr = 0; rr < reps + 3; ++rr) {
+        Kokkos::Timer tm;
+        mg.directApplyForTest(D0, z, r, 0);
+        const double a = tm.seconds() * 1e3;
+        Kokkos::deep_copy(bt.rhs, r);
+        Kokkos::fence();
+        Kokkos::Timer ts;
+        it = mg.directSolveForTest();
+        const double b = ts.seconds() * 1e3;
+        if (rr >= 3) {
+          mM.push_back(a);
+          mS.push_back(b);
+        }
+      }
+      std::sort(mM.begin(), mM.end());
+      std::sort(mS.begin(), mS.end());
+      printf(
+          "  solve: M alone min %.4f median %.4f ms; FCG solve min %.4f median %.4f ms (%d inner "
+          "iterations)\n",
+          mM.front(), mM[mM.size() / 2], mS.front(), mS[mS.size() / 2], it);
+    }
   }
   Kokkos::finalize();
   return 0;

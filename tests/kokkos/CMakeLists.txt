@@ -427,6 +427,8 @@ add_executable(bench_bottom_factor bench_bottom_factor.cpp)
 target_include_directories(bench_bottom_factor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
                            ${PECLET_CORE_INCLUDE})
 target_link_libraries(bench_bottom_factor PRIVATE Kokkos::kokkos)
+# P2 (doc/vof_gpu_coarse_tail_design.md §5.2): the factor's phase probe, this target only.
+target_compile_definitions(bench_bottom_factor PRIVATE PECLET_FLOW_BOTTOM_PROBE)
 add_test(NAME bench_bottom_factor COMMAND bench_bottom_factor 5)
 set_tests_properties(bench_bottom_factor PROPERTIES LABELS bench ENVIRONMENT
                      "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")

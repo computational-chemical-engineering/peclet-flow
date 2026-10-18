@@ -305,6 +305,25 @@ struct BottomFactorKernel {
   // test hook asks for the team algorithm, its bitwise oracle (ctest `bottom_direct` U8).
   static constexpr bool kHostFactor = std::is_same_v<CCMem, Kokkos::HostSpace>;
   int teamAlgorithm = 0;
+#ifdef PECLET_FLOW_BOTTOM_PROBE
+  // Phase-split probe of the team algorithm (doc/vof_gpu_coarse_tail_design.md §5.2 P2; compiled
+  // only into bench_bottom_factor): team rank 0 adds the clock ticks since the last mark to
+  // probe(cat) at each phase boundary; probe(kProbeLast) holds the last mark. Categories: 0
+  // scaling + couplings, 1 assemble, 2 diagonal tiles, 3 panel, 4 trailing, 5 W, 6 Q, 7 border.
+  static constexpr int kProbeLast = 15;
+  Kokkos::View<long long*, CCMem> probe;
+  KOKKOS_INLINE_FUNCTION void probeMark(const Member& t, int cat) const {
+    if (t.team_rank() == 0) {
+      const long long now = (long long)Kokkos::Impl::clock_tic();
+      if (cat >= 0)
+        probe(cat) += now - probe(kProbeLast);
+      probe(kProbeLast) = now;
+    }
+  }
+#define PECLET_BOTTOM_PROBE_MARK(t, cat) probeMark(t, cat)
+#else
+#define PECLET_BOTTOM_PROBE_MARK(t, cat)
+#endif
 
   // s (§13.4.1): the re-summed diagonal and the scaling, one thread per cell
   KOKKOS_INLINE_FUNCTION void scaling(const Member& t) const {
@@ -380,6 +399,7 @@ struct BottomFactorKernel {
         St(i, j) = a;  // the first diagonal tile
     });
     t.team_barrier();
+    PECLET_BOTTOM_PROBE_MARK(t, 1);
   }
   // Q(k) = Sigma^{-1} (§13.4.3, "Dense SPD inverse"). Returns false (team-uniform) on a pivot
   // that is not > tauPiv (a NaN pivot included). Sigma's lower triangle is read from D.Sg and its
@@ -426,6 +446,7 @@ struct BottomFactorKernel {
         });
         t.team_barrier();
       }
+      PECLET_BOTTOM_PROBE_MARK(t, 2);
       if (D.stat(flag))
         return false;
       if (j1 < b) {
@@ -441,6 +462,7 @@ struct BottomFactorKernel {
           }
         });
         t.team_barrier();
+        PECLET_BOTTOM_PROBE_MARK(t, 3);
         const int nt = b - j1;  // 3. the trailing update, i >= j below the tile
         Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nt * nt), [&](int idx) {
           const int i = j1 + idx / nt, j = j1 + (idx - (idx / nt) * nt);
@@ -455,6 +477,7 @@ struct BottomFactorKernel {
             St(i - j1, j - j1) = v;  // the next diagonal tile
         });
         t.team_barrier();
+        PECLET_BOTTOM_PROBE_MARK(t, 4);
       }
     }
     // W = L^{-1}: W(j, j) = 1 / L(j, j), W(i, j) = -(sum_{m=j}^{i-1} L(i, m) W(m, j)) / L(i, i) in
@@ -506,6 +529,7 @@ struct BottomFactorKernel {
       });
       t.team_barrier();
     }
+    PECLET_BOTTOM_PROBE_MARK(t, 5);
     Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b * b), [&](int idx) {  // Q = W^T W
       const int i = idx / b, j = idx - i * b;
       if (j > i)
@@ -518,6 +542,7 @@ struct BottomFactorKernel {
       D.Q(k, j, i) = acc;
     });
     t.team_barrier();
+    PECLET_BOTTOM_PROBE_MARK(t, 6);
     return true;
   }
   // The border's Y = T^{-1} B by the solve's own substitution, one column c per (c, i) pair:
@@ -551,6 +576,7 @@ struct BottomFactorKernel {
       });
       t.team_barrier();
     }
+    PECLET_BOTTOM_PROBE_MARK(t, 7);
   }
 
   // --- The host schedule (§14 H-1, A(b)) ------------------------------------------------------
@@ -865,8 +891,10 @@ struct BottomFactorKernel {
       for (int a = 0; a < kBottomAttempts; ++a)
         D.stat(2 + a) = 0;
     });
+    PECLET_BOTTOM_PROBE_MARK(t, -1);
     scaling(t);  // (its barrier also publishes the cleared flags)
     couplings(t);
+    PECLET_BOTTOM_PROBE_MARK(t, 0);
     int attempt = 0;
     bool ok = false;
     for (; attempt < kBottomAttempts && !ok; ++attempt) {

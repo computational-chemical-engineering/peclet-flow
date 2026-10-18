@@ -1652,3 +1652,40 @@ Repeat (3 more rounds, load 3.3–4.5): CUDA np 2 `'fp64'` 161.07 (+0.30), `'aut
 reproducible: G-DD4 is met (≤ 1.02) with a 0.001 margin and `'auto'` is +3 ms (+1.9 %) slower than `'fp64'` there.
 Instruments: `tests/study/vof_perf/prof_mpi.py` (new), `tests/study/vardensity_solver_probe.py --per-solve` (new);
 gate scripts `gate_dist/{edgate,edump,gdd3,gdd4,gperf,f4,f6r}.sh`, `npcls.py`, `numcmp.py`.
+
+## 2026-10-18 — GPU coarse tail (design doc/vof_gpu_coarse_tail_design.md): WO-0 measurements
+
+RTX 5080, CUDA 13.4, no other compute process, `b820652` numerics (this WO adds only the bench-only
+factor probe, `PECLET_FLOW_BOTTOM_PROBE`; `bench_bottom_factor` dumps `cmp`-identical to the
+unmodified `b820652` bench on walls-y and periodic). Scripts: `bubble_column_perf/gpu_diag/gate/`.
+
+- **P1 inner FCG iterations per bottom solve** (30 steps from `ckpt_t100`, `PECLET_FLOW_MG_DEBUG=2`):
+  fp64 392 solves (13.1/step), mean 1.010, max 2 (1: 388, 2: 4); auto 392 solves, mean 1.005, max 2
+  (1: 390, 2: 2). One M application per solve in practice (the note's model assumed 2).
+- **P2 factor phase split** (walls-y, P = 12, b = 128, T = 768, median 3.112 ms; ticks of team rank 0
+  scaled to the median): scaling+couplings 0.009, assemble 0.292, diagonal tiles 0.782, panel 0.297,
+  trailing 0.282, W 0.942, Q 0.508 ms. Global-memory phases (assemble, panel, trailing, W, Q) 2.32 ms;
+  the diagonal tiles (scratch, ~1632 barrier phases) 0.78 ms, independent of T (T = 128: 0.753).
+  Periodic (P = 16, b = 96, border; 4.347 ms): assemble 0.223, diag 0.782, panel 0.279, trailing
+  0.172, W 0.847, Q 0.269, border 1.765. Solve (walls-y test problem, 1 inner iteration): M alone
+  (precondition-only launch) median 0.103 ms, the whole FCG launch 0.164 ms (host-timed, incl. launch
+  and fence).
+- **P3 side-instance concurrency** (`partition_space(CCExec(), {1})[0]`, one 256-thread team ≈ 3 ms
+  against 200 16M-element kernels on the default instance): alone 3.015 / 95.120 ms, together
+  95.236 ms (sum 98.135) → PASS, the instances overlap; no non-blocking-stream fallback needed.
+- **P4 sync census** (nsys 30 steps, auto; fp64 the same but 66.9 device syncs): per step
+  cudaStreamSynchronize 133.7, cudaDeviceSynchronize 68.9, cudaMalloc 20.8, sync cudaMemcpy 20.7,
+  cudaFree 2.4. Sites: `mgmeanr` {sum,count} 14.7 × 3 stream syncs; `mgmeanr_f32` 12.7 × 3; the
+  packet read after `mgmax` 12.7 × (2 device syncs + memcpy); `vmg_resid_max` 9 × 3 stream syncs;
+  **11.7 cudaMalloc inside the `mg_bottom_direct` launch** (Kokkos-internal, per launch); momentum
+  `ibm_build_diff_var` scalar copies (6 + 3 + 2 device syncs) and a contiguous copy (3 × 2 + memcpy);
+  `rho_minmax` (updateProperties) 3 reductions + 2 global fences; `vof::wy::cfl_interface` 1 global
+  fence; `vof::block::*` (recentre 2.4 malloc/free, batch_csf_force copy + global fence; block_batch
+  — not this package's file). Full tables `gpu_diag/gate/wo0/p4_{auto,fp64}.txt`.
+- **P5 baseline** (`bench_gpu.py` 3 × 200 steps, warm 50, quiet GPU, min): **fp64 21.85, auto 18.95
+  ms/step** (12.74 PCG iterations/step). nsys auto: kernel sum 17.09, idle 2.89 ms/step, 1163
+  launches.
+- G-PERF targets restated: unchanged from §0 (P2 confirms ≈ 2.3 ms of the factor is in global-memory
+  phases; the diagonal tiles' 0.78 ms is barrier-bound and stays, so F1's expected factor is ≈ 1.0–1.2
+  ms rather than 0.4–0.7: the ≤ 1.2 ms gate is tight). B2's gain is per M application, of which P1
+  shows one per solve.
