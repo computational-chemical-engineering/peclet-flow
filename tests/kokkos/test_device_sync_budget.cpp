@@ -39,13 +39,12 @@ void onBeginFence(const char* name, const uint32_t devid, uint64_t* handle) {
 }
 void onEndFence(uint64_t) {}
 
-// The measured post-S4 budget. Global: 2/step here and on the bubble column (fencebt census): the
-// block container's read #2 (bubble boxes, vof/block_container.hpp), left to the batch_stats/bbox
-// package that edits that hunk. Combined reducers: 12/step here (13 on the bubble column):
-// vmg_resid_max (the velocity MG's stop test), rho_minmax and overlap_census, all outside the MG
-// files; §5.5 asks for 0, which is an open ruling (see the WO-S4 commit) -- until then this pins
-// "no new one".
-constexpr double kGlobalBudget = 2.0;
+// The measured post-S4b budget. Global: 0/step here and on the bubble column (fencebt census): the
+// block container's reads #1 and #2 are instance-scoped since WO-S4b. Combined reducers: 12/step here
+// (13 on the bubble column): vmg_resid_max (the velocity MG's stop test), rho_minmax and
+// overlap_census, all outside the MG files; §5.5 asks for 0, which is an open ruling (see the WO-S4
+// commit) -- until then this pins "no new one".
+constexpr double kGlobalBudget = 0.0;
 constexpr double kCombinedBudget = 12.0;
 }  // namespace
 

@@ -2332,7 +2332,10 @@ class VofBlockSet {
     const double eps = bubbleEps > wispEps ? bubbleEps : wispEps;  // bubbleBox's threshold (§12.2)
     for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch)
       vofBatchBox(batchTable(jobs, j0), eps, pk_, kPk, kPkBox, bTile_);
-    Kokkos::deep_copy(pkHost_, pk_);  // read #2
+    // S4b (doc/vof_gpu_coarse_tail_design.md §5.5): read #2 as read #1 -- instance-scoped copy +
+    // fence (an exec-less deep_copy drains every stream twice); pk_'s producers are all on SExec()
+    Kokkos::deep_copy(SExec(), pkHost_, pk_);  // read #2
+    SExec().fence("vof::block::read2");
     if (ranDebris)
       applyDebrisLedger(mb, csfEnabled && debrisCensus);
     for (std::size_t k = 0; k < nb; ++k) {  // the WO-R ledger (no block installs a mask today)
