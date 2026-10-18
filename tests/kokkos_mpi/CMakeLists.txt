@@ -75,6 +75,20 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
   endforeach()
 endforeach()
 
+# doc/vof_step_performance_design.md §14.3 H-6 (WO-H6 review findings 1, 2 and note 4): the
+# distributed host 'direct' bottom vs 'algebraic' -- iteration identity every step, in place, below
+# a forced telescope and a Repartition stage; an ineligible explicit 'direct' raises on every rank.
+# Host only (SKIP = 77 on a device build); np 1 has no gather to check.
+add_executable(test_bottom_direct_mpi test_bottom_direct_mpi.cpp)
+target_include_directories(test_bottom_direct_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_bottom_direct_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+foreach(np 2 4)
+  add_test(NAME bottom_direct_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_bottom_direct_mpi>)
+  set_tests_properties(bottom_direct_mpi_np${np} PROPERTIES SKIP_RETURN_CODE 77)
+endforeach()
+
 # doc/vof_projection_distributed_design.md §5 (WO-D1 onwards): the distributed FP32 V-cycle --
 # its data and FP32 ghost exchange (G-K2); shares the FP32 test problems with tests/kokkos.
 add_executable(test_mg_fp32_vcycle_mpi test_mg_fp32_vcycle_mpi.cpp)
