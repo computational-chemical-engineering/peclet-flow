@@ -3481,7 +3481,7 @@ class CutcellMG {
             (why ? why : fp32VcycleIneligible(false)));
       }
       requireDirectBottom();  // on EVERY rank, before the V-cycle's first collective
-      ensureFp64();  // D5 (§4.4.7): its data, if the last build deferred them
+      ensureFp64();           // D5 (§4.4.7): its data, if the last build deferred them
     }
     if (mgDebugLevel() >= 3) {
       const auto t0 = std::chrono::steady_clock::now();
@@ -4425,13 +4425,13 @@ class CutcellMG {
         return nullptr;
     }
   }
-  // Review note 1: an explicit 'direct' that is ineligible must raise on EVERY rank -- a rank idling
-  // below a telescope point never reaches the bottom, and its own lv_ ends at the telescope level,
-  // so directBottomIneligible() there reads the wrong level. This is directBottomIneligible() on
-  // rank-uniform inputs: the live replicated settings plus the bottom's global dims and label code
-  // agreed over comm_ once per hierarchy (agreeDirectBottom, at its first operator build). On a
-  // rank holding the bottom the agreed values are its own, so it answers as
-  // directBottomIneligible() does. Single rank: directBottomIneligible() itself.
+  // Review note 1: an explicit 'direct' that is ineligible must raise on EVERY rank -- a rank
+  // idling below a telescope point never reaches the bottom, and its own lv_ ends at the telescope
+  // level, so directBottomIneligible() there reads the wrong level. This is
+  // directBottomIneligible() on rank-uniform inputs: the live replicated settings plus the bottom's
+  // global dims and label code agreed over comm_ once per hierarchy (agreeDirectBottom, at its
+  // first operator build). On a rank holding the bottom the agreed values are its own, so it
+  // answers as directBottomIneligible() does. Single rank: directBottomIneligible() itself.
   const char* directBottomIneligibleAll() const {
     if (!distributed_)
       return directBottomIneligible();
@@ -4664,8 +4664,8 @@ class CutcellMG {
         for (int i = 0; i < bt.inner.x; ++i)
           lb.push_back(hrhs((long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey));
     std::vector<double> gbv(gbGid_.size());
-    MPI_Allgatherv(lb.data(), (int)lb.size(), MPI_DOUBLE, gbv.data(), gbCnt1_.data(), gbDsp1_.data(),
-                   MPI_DOUBLE, bt.comm);  // the counts cached per hierarchy
+    MPI_Allgatherv(lb.data(), (int)lb.size(), MPI_DOUBLE, gbv.data(), gbCnt1_.data(),
+                   gbDsp1_.data(), MPI_DOUBLE, bt.comm);  // the counts cached per hierarchy
     auto grhs = Kokkos::create_mirror_view(gb_.rhs);
     for (std::size_t r = 0; r < gbGid_.size(); ++r)
       grhs(gbIndex(gbGid_[r])) = gbv[r];
