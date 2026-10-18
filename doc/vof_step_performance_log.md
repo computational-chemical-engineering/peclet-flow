@@ -1722,3 +1722,107 @@ All gates on the flip commit:
 - `units_scale_invariance` pins `'fp64'` (R-8); CUDA after the pin: Poiseuille u 1.8e-16, p 0; spheres u 6.1e-16,
   v 1.8e-15, p 6.6e-15 (tolerance 1e-13). CUDA state hashes old → new: in the a942251 commit message (8 of 14 lines
   move; colocated_ghost, colocated_advect(_bc), channel, vof_droplet, colocated_bfp unchanged).
+
+## 2026-10-18 — distcomm WO-0: attribution (design doc/vof_distributed_host_comm_design.md §6/§7)
+
+**Every number below is load-contaminated** (machine load 30–104 from processes outside the campaign lock;
+§7 asks for < 2). Verdicts are **provisional**. Base module = flow b820652 + core 2398dc7 (host OpenMP + MPI,
+znver3). Transport: OpenMPI 5.0.7, pml **ob1**, btl sm (eager 4096 B, max_send 32768, CMA single copy).
+Tools and raw logs: `bubble_column_perf/distcomm/{tools,wo0}/`.
+
+Baseline (§7 `bench` protocol: 300 steps from `ckpt_t43`, 5 interleaved reps; its 10.19 in every layout).
+Per-run step medians are given because the run means carry multi-second preemption steps.
+
+| layout | median ms/step (5 reps) | median of per-run step medians | best per-run step median | load before |
+|---|---|---|---|---|
+| L-a 1×24 single | 79.4 | 76.8 | 70.9 | 57–80 |
+| L-b 8×3 aligned | 93.2 | 91.8 | 84.7 | 55–71 |
+| L-c 8×3 straddled-2 | 155.2 | 143.4 | 107.0 | 55–73 |
+| L-d 24×1 | 157.2 | 166.4 | 100.9 | 55–71 |
+| L-e 1×24 `init_mpi` | 143.5 | 132.6 | 91.0 | 56–84 |
+| D811 8×1×1 (dims patch; block 16×96×64) | 116.8 | 116.2 | 87.1 | 58–72 |
+| D412 4×1×2 (dims patch; block 32×96×32) | 99.7 | 97.5 | 83.2 | 54–62 |
+
+M1 attribution (30 steps, 2 skipped; `kp_trace.so` + `pmpi_trace.so`, `trace_attr.py --proj diverg_open correct_var`;
+load 30–35). Sanity (np 2, 5 steps): trace step 242.86 ms = run's own 242.87; whole-run kernel sum 2.493 s against
+`kp_kernel_timer` 2.479 s (separate run, 0.6 %). ms/step, mean over ranks [max]:
+
+| layout | step | kernel | MPI | dcopy+fence | gap | non-kernel | MPI in proj / outside | launches/step | kernel per rank max−mean |
+|---|---|---|---|---|---|---|---|---|---|
+| L-a | 66.7 | 64.44 | 0 | 0.27 | 2.00 | 2.27 | — | 855 | — |
+| L-b | 77.2 | 53.83 | 16.07 | 1.84 | 5.44 | 23.34 [24.87] | 10.19 / 5.88 | 1843 | 2.41 |
+| L-c | 146.7 | 65.01 | 73.08 | 2.15 | 6.40 | 81.64 [89.55] | 51.13 / 21.96 | 1843 | 18.07 (r1 83.1, r2 73.8, others 57–64) |
+| L-d | 128.8 | 48.85 | 67.64 | 2.27 | 10.08 | 79.99 [93.11] | 43.65 / 23.99 | 1192 | 17.13 (every third rank 57–66, others 36–48) |
+| L-e | 94.6 | 87.46 | 0.05 | 0.79 | 6.27 | 7.10 | 0.04 / 0.01 | 1401 | — |
+
+Exchanges (M1 (d), base, µs per exchange, mean over all exchanges of all ranks):
+
+| layout | exchanges/step | msgs/exch (send = recv) | wait | lateness (post) | protocol (note) | wait ms/step |
+|---|---|---|---|---|---|---|
+| L-b | 377 | 4.98 | 33.60 | 15.14 | 17.38 | 12.67 |
+| L-c | 377 | 4.98 | 159.28 | 116.54 | 29.47 | 60.05 |
+| L-d | 377 | 14.87 | 125.24 | 99.75 | 23.05 | 47.22 |
+
+MPI by call (ms/step): L-b Waitall 12.67, Allreduce 1.93, Isend 0.86; L-c 60.05 / 11.20 / 0.91; L-d 47.22 / 16.82 /
+2.16. Largest gap pair everywhere: an explicit `Kokkos::fence()` → the next launch (L-b 2.33 ms/step, 359/step,
+6.5 µs; L-d 5.11, 14.7 µs; L-e 3.95, 6.1 µs), then fence → `deep_copy mg_x` (0.6–1.55 ms/step, 20–30/step,
+30–60 µs). Allocations: 18.1/step at 8×3 (4.64 MB, all `vof::block::buf`), 13.5/step at 24×1 (1.56 MB), 0.8/step
+single rank; View init kernels ≤ 0.03 ms/step; malloc+free of 18 × 258 kB against reuse 0.002 ms/step.
+
+M2 `bench_grid_halo` (core-distcomm 751ed6a/61f9f5b; block 0 per level, ghost 1; median µs per exchange, b2b;
+`prot` = mean b2b protocol). Base = core main headers (Isend); K1-wip = core-distcomm through e9fe344 (tag 0 →
+persistent, tag 1 → Isend; both with K1(a)/(b)). The base L-b run (load 72) was preempted throughout (≥ 20 ms per
+exchange) and is not usable.
+
+| layout | level (send bytes) | base med / prot | base + eager 64 k med / prot | K1-wip persistent med / prot | K1-wip Isend med / prot |
+|---|---|---|---|---|---|
+| L-b | L0 (86592) | — | 47.8 / 6.7 | 51.9 / 22.2 | 58.9 / 21.4 |
+| L-b | L1 (22848) | — | 19.9 / 3.6 | 25.1 / 13.4 | 34.7 / 13.4 |
+| L-b | L2 (6336) | — | — | 7.0 / 3.1 | 7.7 / 3.3 |
+| L-b | L3 (1920) | — | — | 5.1 / 2.4 | 4.8 / 2.7 |
+| L-c | L0 | 93.7 / 27.1 | — | 78.0 / 19.0 | 85.9 / 20.4 |
+| L-c | L1 | 40.2 / 20.9 | 36.9 / 4.0 | 33.8 / 11.7 | 38.4 / 10.5 |
+| L-c | L2 | 19.6 / 7.6 | 19.4 / 2.7 | 7.0 / 3.1 | 7.5 / 3.1 |
+| L-c | L3 | 13.4 / 1.6 | 13.5 / 1.2 | 5.2 / 2.5 | 4.9 / 1.4 |
+| L-d | L0 (49280) | 54.4 / 25.9 | 41.1 / 6.3 | 59.9 / 23.8 | 78.5 / 31.8 |
+| L-d | L1 (13440) | 21.1 / 8.3 | 17.5 / 2.2 | 28.1 / 40.6 | 25.9 / 2.8 |
+| L-d | L2 (3968) | 11.7 / 4.0 | 12.8 / 1.5 | 14.4 / 4.9 | 10.7 / 1.5 |
+| L-d | L3 (1344) | 9.2 / 1.4 | 10.1 / −0.1 | 13.3 / 6.3 | 10.2 / −0.4 |
+
+("—": that run was preempted, ≥ 20 ms per exchange.) The begin → D µs interior → end sweep does not lower the
+median at any level (L-c base L0 93.7 / 93.2 / 93.0 / 91.1 / 91.1 at D = 0/20/50/100): the transfer progresses
+only inside MPI calls.
+
+M3 launch cost (µs per launch, `tools/launch_cost`, load 53–57, best of 2 unpreempted reps):
+
+| T | empty RangePolicy(1) | 1-cell MDRange | reduce(1) |
+|---|---|---|---|
+| 1 | 0.58 | 0.67 | 0.67 |
+| 3 one CCD {0,1,2} | 1.19 | 1.30 | 1.36 |
+| 3 straddled {4,5,6} | 1.92 | 2.06 | 2.17 |
+| 24 | 4.8–8.6 | 11.1–11.2 | 12.7–25.2 |
+
+`kHaloSerialCopy` (K1(b)) crossover: indexed gather of n doubles, calling thread against `parallel_for`:
+
+| T | n = 2048 serial / parallel µs | n = 4096 | first n where parallel wins |
+|---|---|---|---|
+| 1 | 1.40 / 2.19 | 3.23 / 4.40 | none ≤ 16384 |
+| 3 one CCD | 1.44 / 1.88 | 3.25 / 2.39 | 4096 |
+| 3 straddled | 1.40 / 3.35 | 3.09 / 3.80 | 8192 |
+| 24 | 1.46 / preempted (ms) | 3.36 / preempted | not measurable today; from the launch cost 4.8–8.6 µs ≈ 8192–16384 |
+
+Verdicts (provisional, load-contaminated):
+
+| criterion | number | verdict |
+|---|---|---|
+| §7: L-c non-kernel ≥ 1.5× L-b | 81.64 / 23.34 = 3.50× | met |
+| §7: L-c wait/exchange ≥ 1.5× L-b | 159.28 / 33.60 = 4.74× | met |
+| §7: L-d non-kernel ≥ 15 ms | 79.99 ms | met → reproduction accepted |
+| §6: protocol ≥ 10 µs/exch after K1/K3 → K5 | K1-wip persistent, weighted by the L-b exchange mix (104/103/103/13 at L0–L3): L-b 12.5, L-c 10.9; L-d ≈ 22 (L1 row preempted); L0 alone 19–24 | K5 trigger met after K1 (provisional; K3 not yet in, and at L0 the "protocol" includes the 87 kB copy) |
+| §6: gaps ≥ 50 % of unattributed at M3 launch cost | launches × cost / (gap + dcopy + fence): L-b 2.19/7.28 = 30 %, L-c 2.53/8.55 = 30 %, L-d 0.69/12.35 = 6 %, L-e 6.7–12.0/7.06 ≥ 95 % | not met at np > 1 (the gaps are host code after an explicit fence, not launches); met at L-e |
+| §6: outside-projection MPI ≥ 4 ms → Q-6 | L-b 5.88, L-c 21.96, L-d 23.99 ms/step | met → report (velocity-MG Allreduce, VoF exchanges) |
+| §6: allocations ≥ 1 ms/step → K7 | 18.1 allocs, 4.64 MB/step; ≤ 0.03 ms/step measured | not met, no K7 |
+
+L-c's excess is **lateness**, not protocol: lateness 116.5 of the 159.3 µs wait (protocol 29.5 against L-b 17.4),
+fed by the two straddled ranks' kernels (83.1 and 73.8 ms/step against 57–64). The §0 K-ranges are not restated
+from these load-contaminated numbers.
