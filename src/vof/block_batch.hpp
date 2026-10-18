@@ -990,18 +990,43 @@ inline void vofBatchDebrisLost(const VofBlockTable& T, LField sA0, LField eA0, S
       });
 }
 
+// ---- the tiled job reductions (device): bubble boxes --------------------------------------------
+
+/// Inner cells per tile of the tiled device reductions (`vofBatchBox`): job k's
+/// inner region, in its x-fastest flat order, is cut into `vofTiles(J)` tiles of this many cells,
+/// one team each, so a launch fills the device however few jobs it carries. Each tile's partial
+/// lands in a scratch array; the per-job combine then runs over the job's tiles in tile order. The
+/// result depends on this tile size (fixed here), never on the league, the number of jobs or the
+/// chunking.
+inline constexpr long kVofTile = 512;
+
+inline long vofTiles(const VofBlockJob& J) {
+  return (vofJobInner(J) + kVofTile - 1) / kVofTile;
+}
+
+/// Grow-only scratch of the tiled reductions: at least `len` doubles.
+inline void vofEnsureTileScratch(SField& tile, long len) {
+  if (static_cast<long>(tile.extent(0)) < len)
+    tile = SField(Kokkos::view_alloc(Kokkos::WithoutInitializing, "vof::block::batch_tile"), len);
+}
+
 // ---- stage 5: the bubble boxes (`VofBlockSet::bubbleBox`) ------------------------------------
 
-/// One team per job: the tight box of `|C| > eps` over the inner region, in the block's LOCAL inner
-/// frame (`bubbleBox`'s six Min/Max reductions; order-free). Written as doubles (exact integers)
-/// to `out(stride (base + k) + slot0 + {0..5})` = lo x, y, z, hi x, y, z; an empty block reads
-/// hi < lo (the reducers' identities), exactly as `bubbleBox` tests it.
+/// The tight box of `|C| > eps` over each job's inner region, in the block's LOCAL inner frame
+/// (`bubbleBox`'s six Min/Max reductions; order-free). Written as doubles (exact integers) to
+/// `out(stride (base + k) + slot0 + {0..5})` = lo x, y, z, hi x, y, z; an empty block reads hi < lo
+/// (the reducers' identities), exactly as `bubbleBox` tests it.
+///
+/// Device: one team per tile (`kVofTile`) takes the six extrema of its cells into `tile`, then one
+/// thread per job takes the extrema over the job's tiles. Min/max of integers is order-free, so the
+/// boxes are bitwise those of a team per job.
 ///
 /// Host (H-4c): `TeamPolicy(nj, AUTO)` is one thread per block there. Instead one row-parallel pass
 /// over every job's inner rows: a row takes its six extrema over x, then integer atomic min/max
 /// into the job's slots, which start at the same identities. Order-free, so bitwise.
 template <class Exec = SExec>
-inline void vofBatchBox(const VofBlockTable& T, double eps, SField out, int stride, int slot0) {
+inline void vofBatchBox(const VofBlockTable& T, double eps, SField out, int stride, int slot0,
+                        SField& tile) {
   if constexpr (kVofHostExec<Exec>) {
     int box[6 * kVofBlockBatch];
     for (int k = 0; k < T.nj; ++k)
@@ -1044,15 +1069,22 @@ inline void vofBatchBox(const VofBlockTable& T, double eps, SField out, int stri
     }
     return;
   }
+  VofBlockTable R = T;  // the flat index is the tile
+  const long nt = vofSetOffsets(R, vofTiles);
+  vofEnsureTileScratch(tile, 6 * nt);
+  SField tl = tile;
   using Team = Kokkos::TeamPolicy<SExec>;
   Kokkos::parallel_for(
-      "vof::block::batch_bbox", Team(SExec(), T.nj, Kokkos::AUTO),
+      "vof::block::batch_bbox", Team(SExec(), nt, Kokkos::AUTO),
       KOKKOS_LAMBDA(const typename Team::member_type& tm) {
-        const int k = tm.league_rank();
-        const VofBlockJob& J = T.job[k];
+        const long t = tm.league_rank();
+        const int k = vofJobOf(R.off, t);
+        const VofBlockJob& J = R.job[k];
         const I3 e = J.e, n = J.n;
         const int g = J.g;
         const long region = static_cast<long>(n.x) * n.y * n.z;
+        const long r0 = (t - R.off[k]) * kVofTile;
+        const long r1 = r0 + kVofTile < region ? r0 + kVofTile : region;
         const VofRawField c{J.c};
         int v[6];
         for (int a = 0; a < 6; ++a) {
@@ -1070,16 +1102,33 @@ inline void vofBatchBox(const VofBlockTable& T, double eps, SField out, int stri
               acc = p > acc ? p : acc;
           };
           if (a < 3)
-            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, region), body, Kokkos::Min<int>(r));
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, r0, r1), body, Kokkos::Min<int>(r));
           else
-            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, region), body, Kokkos::Max<int>(r));
+            Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, r0, r1), body, Kokkos::Max<int>(r));
           v[a] = r;
         }
         Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-          const long ob = static_cast<long>(stride) * (T.base + k) + slot0;
           for (int a = 0; a < 6; ++a)
-            out(ob + a) = static_cast<double>(v[a]);
+            tl(6 * t + a) = static_cast<double>(v[a]);
         });
+      });
+  Kokkos::parallel_for(
+      "vof::block::batch_bbox_combine", Kokkos::RangePolicy<SExec>(SExec(), 0, R.nj),
+      KOKKOS_LAMBDA(const long q) {
+        const int k = static_cast<int>(q);
+        double v[6];  // the reducers' identities: an empty job reads hi < lo, as before
+        for (int a = 0; a < 6; ++a)
+          v[a] = static_cast<double>(a < 3 ? Kokkos::reduction_identity<int>::min()
+                                           : Kokkos::reduction_identity<int>::max());
+        for (long t = R.off[k]; t < R.off[k + 1]; ++t)
+          for (int a = 0; a < 6; ++a) {
+            const double w = tl(6 * t + a);
+            if (a < 3 ? w < v[a] : w > v[a])
+              v[a] = w;
+          }
+        const long ob = static_cast<long>(stride) * (R.base + k) + slot0;
+        for (int a = 0; a < 6; ++a)
+          out(ob + a) = v[a];
       });
 }
 

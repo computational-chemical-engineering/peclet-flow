@@ -2325,7 +2325,7 @@ class VofBlockSet {
     ensurePacket(nb);
     const double eps = bubbleEps > wispEps ? bubbleEps : wispEps;  // bubbleBox's threshold (§12.2)
     for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch)
-      vofBatchBox(batchTable(jobs, j0), eps, pk_, kPk, kPkBox);
+      vofBatchBox(batchTable(jobs, j0), eps, pk_, kPk, kPkBox, bTile_);
     Kokkos::deep_copy(pkHost_, pk_);  // read #2
     if (ranDebris)
       applyDebrisLedger(mb, csfEnabled && debrisCensus);
@@ -2385,6 +2385,7 @@ class VofBlockSet {
   LField::host_mirror_type cCntHost_;
   SField pk_;                     ///< the per-job packet of read #2 (`kPk` doubles per block)
   SField::host_mirror_type pkHost_;
+  SField bTile_;  ///< the tiled device reductions' per-tile partials (boxes)
 };
 
 }  // namespace peclet::flow::vof
