@@ -55,14 +55,14 @@ single-rank module byte-identical). Another backend = another prefix and another
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 245 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 247 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-245 registered / **241 with `-LE bench`** (counted 2026-10-17 on `e4f75df`): 62 from `tests/kokkos`
+247 registered / **243 with `-LE bench`** (counted 2026-10-18 on `e3fbede`): 62 from `tests/kokkos`
 (`bench_rbgs`, `vof_timing`, `bench_scalar_cutcell`, `bench_bottom_factor` carry `bench` — instruments,
-not gates), 143 from `tests/kokkos_mpi` (47 cases at np = 1, 2, 4 + two np = 8 rungs), and 40 Python ctests on the
+not gates), 145 from `tests/kokkos_mpi` (47 cases at np = 1, 2, 4 + two np = 8 rungs + `bottom_direct_mpi` at np = 2, 4, host only), and 40 Python ctests on the
 module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_operator_casts`,
 `iteration_order`, and 24 `scalar_cutcell_*` gates; the six `_g6_*` take 20–35 min each).
 
@@ -248,9 +248,14 @@ you want). Detail and numbers for every bullet: ref §6.
   single-rank host only.
 - `set_pressure_bottom("auto")` (default) agglomerates the coarsest level into a global operator solved
   exactly when it exceeds `set_pressure_bottom_extent` (4) cells on an axis; porous and variable-ρ
-  rebuild it every step — avoid `auto` with a badly-factored grid there. Engines: host GraphAMG, or on
-  an eligible single-rank GPU the device bottom (`src/mg_bottom_direct.hpp`, design
-  `doc/vof_step_performance_design.md` §13); A/B with `diagnostics.set_pressure_bottom_solver`.
+  rebuild it every step — avoid `auto` with a badly-factored grid there. Engines: the exact `'direct'`
+  factor (`src/mg_bottom_direct.hpp`, design `doc/vof_step_performance_design.md` §13, H-1, H-6) on
+  host — single-rank, and since 2026-10-18 distributed, redundantly on every rank from the allgathered
+  bottom openness (np 1 bitwise to single-rank; np > 1 within G-NUM-H) — and on an eligible
+  single-rank GPU; GraphAMG (`'algebraic'`) otherwise (outflow, above the size caps, distributed GPU).
+  Known cost edge: at 1 thread per rank with a bottom near the cap, `'algebraic'` is faster (workstation
+  24×1: 113 vs 161 ms/step); `'auto'` does not choose by thread count (results would then depend on
+  `OMP_NUM_THREADS`). A/B with `diagnostics.set_pressure_bottom_solver`.
 - **Depth follows the factors of two, per axis**: an odd dimension never coarsens; under MPI only if
   every rank's block is even. **Telescoping is the default** (`set_pressure_telescope`); the in-place
   requirement on intermediate levels is the top open item at scale

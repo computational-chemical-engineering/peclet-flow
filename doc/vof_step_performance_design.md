@@ -1,5 +1,15 @@
 # VoF step performance: design note
 
+> **H-6 / H-7 landed (2026-10-18, flow branch `distcpu`: dabbfae H-7, 36a3ce6 H-6, review fixes
+> 6350a07..e3fbede; ctest `bottom_direct_mpi`).** Workstation 8×3 62.2 → 53.6 ms/step against 1×24
+> 52.8 (H-6 −7.8, H-7 −0.8 against the model's −3…−5). **WO-H6 acceptance corrected:** `'direct'` at
+> np 1 is bitwise to single-rank; at np > 1 it is G-NUM-H (2.3–3.6e-14, iterations identical every
+> step), not bitwise — np > 1 was already not bitwise to single-rank on the bubble column before H-6
+> (`'algebraic'` 5.9e-14, from upstream state). At 1 thread per rank with a bottom near the cap
+> `'algebraic'` is faster (24×1: 113 vs 161 ms/step); `'auto'` keeps `'direct'` because a
+> thread-count rule would make results depend on `OMP_NUM_THREADS`. Evidence:
+> `bubble_column_perf/dist_cpu/` (DIAG, IMPL, REVIEW, FIX reports).
+
 **Status:** DESIGN, 2026-09-25. Nothing here is implemented yet. Branch `vof-perf` (worktree
 `suite/flow-vof-overlap`). The brief is `doc/vof_step_performance_brief.md`. Numbers marked [brief]
 are measurements quoted from it. Numbers marked [model] are derived below and must be re-measured.
