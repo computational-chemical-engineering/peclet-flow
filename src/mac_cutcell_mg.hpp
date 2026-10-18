@@ -2299,23 +2299,29 @@ class CutcellMG {
   static constexpr double kBrkPAp = 1.0, kBrkRz = 2.0;  // the stop codes (slot kStop)
   Kokkos::View<double*, CCMem> ks_;                     // the scalar slots
   Kokkos::View<long, CCMem> kcnt_;                      // removeMean's fluid-cell count
-  Kokkos::View<double*, Kokkos::HostSpace> kpk_;  // the host packet {pAp, rn, stop, bottomFlag}
-  Kokkos::View<double*, Kokkos::HostSpace> kgp_;  // E's host packet {rref, G11, G12, G22, g1, g2}
+  // S2 (doc/vof_gpu_coarse_tail_design.md §5.4): the host packets and the one-slot read buffer
+  // live in pinned host memory (HostSpace on host builds) and are read by an instance-scoped copy
+  // plus an instance fence -- never an exec-less deep_copy (two global fences + a pageable copy).
+  using PinnedHost = Kokkos::SharedHostPinnedSpace;
+  Kokkos::View<double*, PinnedHost> kpk_;  // the host packet {pAp, rn, stop, bottomFlag}
+  Kokkos::View<double*, PinnedHost> kgp_;  // E's host packet {rref, G11, G12, G22, g1, g2}
+  Kokkos::View<double, PinnedHost> krd_;   // readSlot's buffer
   void ensureScalars() {
     if (ks_.extent(0) == (std::size_t)kNSlots)
       return;
     ks_ = Kokkos::View<double*, CCMem>("peclet::flow::mg_krylov_scalars", kNSlots);
     kcnt_ = Kokkos::View<long, CCMem>("peclet::flow::mg_mean_count");
-    kpk_ = Kokkos::View<double*, Kokkos::HostSpace>("peclet::flow::mg_krylov_packet", kPacket);
-    kgp_ = Kokkos::View<double*, Kokkos::HostSpace>("peclet::flow::mg_guess_packet", kGuessPacket);
+    kpk_ = Kokkos::View<double*, PinnedHost>("peclet::flow::mg_krylov_packet", kPacket);
+    kgp_ = Kokkos::View<double*, PinnedHost>("peclet::flow::mg_guess_packet", kGuessPacket);
+    krd_ = Kokkos::View<double, PinnedHost>("peclet::flow::mg_slot_read");
   }
   Kokkos::View<double, CCMem> slot(int k) const {
     return Kokkos::View<double, CCMem>(ks_.data() + k);
   }
   double readSlot(int k) const {
-    double v = 0.0;
-    Kokkos::deep_copy(v, slot(k));
-    return v;
+    Kokkos::deep_copy(CCExec(), krd_, slot(k));
+    CCExec().fence("peclet::flow::mg_read_slot");
+    return krd_();
   }
   void setSlot(int k, double v) { Kokkos::deep_copy(CCExec(), slot(k), v); }
   // dot / maxabs into a slot: the SAME policy and functor as dot() / maxabs(), result on the
@@ -2629,7 +2635,9 @@ class CutcellMG {
       }
     }
     Kokkos::deep_copy(
-        kgp_, Kokkos::subview(ks_, std::make_pair((int)kGRref, (int)kGRref + kGuessPacket)));
+        CCExec(), kgp_,
+        Kokkos::subview(ks_, std::make_pair((int)kGRref, (int)kGRref + kGuessPacket)));
+    CCExec().fence("peclet::flow::mg_guess_packet");
 #ifdef PECLET_FLOW_MPI
     if (distributed_) {  // E-dist (§6 item 2): the local partials -> global; every rank gets one c
       const auto t0 = std::chrono::steady_clock::now();
@@ -2907,7 +2915,8 @@ class CutcellMG {
           removeMean(l0, r, /*stopGuard=*/true);
           maxabsTo(l0, r, kRn);
         }
-        Kokkos::deep_copy(kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));  // THE read
+        Kokkos::deep_copy(CCExec(), kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));
+        CCExec().fence("peclet::flow::mg_packet");  // THE read
         const double pAp = kpk_(0), rn = kpk_(1), stop = kpk_(2);
         noteBottomFlag(kpk_(3));  // a non-finite scalar in a device bottom solve
         if (stop == kBrkRz) {     // r^T z of the previous iteration was non-finite
@@ -3785,7 +3794,7 @@ class CutcellMG {
   int* fp32RangeFlag(int L) {
     if (wBad_.extent(0) != lv_.size()) {
       wBad_ = Kokkos::View<int*, CCMem>("peclet::flow::mg_wbad", lv_.size());
-      wBadHost_ = Kokkos::create_mirror_view(wBad_);
+      wBadHost_ = Kokkos::View<int*, PinnedHost>("peclet::flow::mg_wbad_host", lv_.size());
     }
     Kokkos::deep_copy(CCExec(), Kokkos::subview(wBad_, L), 0);
     wBadStale_ = true;
@@ -3798,7 +3807,8 @@ class CutcellMG {
     // carrying levels 0 .. fp32Last_ (every rank holds those, so the count agrees) -- collective,
     // before any per-level return (+1 Allreduce per operator build).
     if (distributed_ && wBadStale_) {
-      Kokkos::deep_copy(wBadHost_, wBad_);
+      Kokkos::deep_copy(CCExec(), wBadHost_, wBad_);
+      CCExec().fence("peclet::flow::mg_wbad_read");
       wBadStale_ = false;
       if (fp32Last_ >= 0) {
         if (wBad_.extent(0) < (std::size_t)(fp32Last_ + 1))
@@ -3811,7 +3821,8 @@ class CutcellMG {
     if (!lv_[L].wOk)
       return false;
     if (wBadStale_) {
-      Kokkos::deep_copy(wBadHost_, wBad_);  // the one read-back (fences the builds)
+      Kokkos::deep_copy(CCExec(), wBadHost_, wBad_);  // the one read-back
+      CCExec().fence("peclet::flow::mg_wbad_read");     // (fences the builds: all on CCExec)
       wBadStale_ = false;
     }
     return wBadHost_(L) == 0;
@@ -6085,11 +6096,8 @@ class CutcellMG {
   // The device bottom flags a non-finite scalar on the device; a driver whose host reads do not
   // carry it (all but the single-rank PCG packet) has it folded in here, by one scalar read.
   bool lastSolveFailed() {
-    if (bottomFlagPending_) {
-      double v = 0.0;
-      Kokkos::deep_copy(v, slot(kBottomFlag));
-      noteBottomFlag(v);
-    }
+    if (bottomFlagPending_)
+      noteBottomFlag(readSlot(kBottomFlag));
     return solveFailed_;
   }
   void resetAllreduceCounters() {
@@ -6249,7 +6257,7 @@ class CutcellMG {
   // Finding 5: the per-level face-range flags of the FP32 weights (device) and their read-back.
   Kokkos::View<int*, CCMem> wBad_;
   int fp32Last_ = -1;  // D-dist (§5.2): computeFp32Last, whenever lv_ is built
-  mutable typename Kokkos::View<int*, CCMem>::host_mirror_type wBadHost_;
+  mutable Kokkos::View<int*, Kokkos::SharedHostPinnedSpace> wBadHost_;  // S2: pinned
   mutable bool wBadStale_ = false;
   // D5 (§4.4.7): the non-bottom levels' FP64 V-cycle data do not hold the current operator (the
   // last build deferred them, or the setter released them); ensureFp64 rebuilds them.
