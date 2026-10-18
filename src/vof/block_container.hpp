@@ -2046,7 +2046,7 @@ class VofBlockSet {
     bRead1Host_ = Kokkos::create_mirror_view(bRead1_);
   }
 
-  /// C2 (§5.10): `measure()` for every master block in one launch (`vofBatchStats`), with NO host
+  /// C2 (§5.10): `measure()` for every master block batched (`vofBatchStats`), with NO host
   /// read -- the values stay in the front of read #1's packet and reach the blocks' `st_` at the
   /// next container step's read #1, or at `flushStats()` (statsAll, blocks(), the seeding paths,
   /// assignMasters), whichever comes first; nothing reads them in between. The table fields
@@ -2084,7 +2084,7 @@ class VofBlockSet {
           P.c[k][d] = b.prevCentroid_[d];
         P.valid[k] = b.hasPrev_ ? 1u : 0u;
       }
-      vofBatchStats(T, P, h_, areaEps, dt, bRead1_, 0);
+      vofBatchStats(T, P, h_, areaEps, dt, bRead1_, 0, bTile_);
     }
     statsPend_ = std::move(idx);
   }
@@ -2385,7 +2385,7 @@ class VofBlockSet {
   LField::host_mirror_type cCntHost_;
   SField pk_;                     ///< the per-job packet of read #2 (`kPk` doubles per block)
   SField::host_mirror_type pkHost_;
-  SField bTile_;  ///< the tiled device reductions' per-tile partials (boxes)
+  SField bTile_;  ///< the tiled device reductions' per-tile partials (boxes, statistics)
 };
 
 }  // namespace peclet::flow::vof

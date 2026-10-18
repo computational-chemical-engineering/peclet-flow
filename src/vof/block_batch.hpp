@@ -87,7 +87,7 @@ inline long vofSetOffsets(VofBlockTable& T, F size) {
 inline long vofJobLen(const VofBlockJob& J) {
   return static_cast<long>(J.e.x) * J.e.y * J.e.z;
 }
-inline long vofJobInner(const VofBlockJob& J) {
+KOKKOS_INLINE_FUNCTION long vofJobInner(const VofBlockJob& J) {
   return static_cast<long>(J.n.x) * J.n.y * J.n.z;
 }
 /// The inner region grown by one cell per side: `WyAdvector::reconstructImpl`'s range.
@@ -990,9 +990,9 @@ inline void vofBatchDebrisLost(const VofBlockTable& T, LField sA0, LField eA0, S
       });
 }
 
-// ---- the tiled job reductions (device): bubble boxes --------------------------------------------
+// ---- the tiled job reductions (device): bubble boxes and statistics -----------------------------
 
-/// Inner cells per tile of the tiled device reductions (`vofBatchBox`): job k's
+/// Inner cells per tile of the tiled device reductions (`vofBatchBox`, `vofBatchStats`): job k's
 /// inner region, in its x-fastest flat order, is cut into `vofTiles(J)` tiles of this many cells,
 /// one team each, so a launch fills the device however few jobs it carries. Each tile's partial
 /// lands in a scratch array; the per-job combine then runs over the job's tiles in tile order. The
@@ -1570,95 +1570,255 @@ struct VofStatsPrev {
 /// Doubles per job in the statistics packet: volume, centroid[3], velocity[3], area, moment[6].
 inline constexpr int kVofStats = 14;
 
-/// `VofBlockSet::measure` for every job in one launch, one team per job: the first moments, then
-/// the central second moments and the PLIC interface area (`VofBlockSet::interfaceArea`'s body)
-/// together, each as ONE team reduction over the inner box, with the per-cell expressions of the
-/// per-block reductions verbatim. The summation ORDER is the team reduction's, not the per-block
-/// MDRange's: a recorded change (C2) of these diagnostics, which feed no state. Job k's values land
-/// at `out(off + kVofStats * (T.base + k) + ...)`; the host applies them later (deferred read).
+/// `measure()`'s first-moment terms of inner cell `r` (x-fastest flat index) of job `J`.
+KOKKOS_INLINE_FUNCTION void vofStatsM1Cell(const VofBlockJob& J, long r, double hh, VofSumN<4>& a) {
+  const I3 e = J.e, n = J.n, o = J.o;
+  const int g = J.g;
+  const VofRawField c{J.c};
+  const int x = static_cast<int>(r % n.x) + g;
+  const int y = static_cast<int>((r / n.x) % n.y) + g;
+  const int z = static_cast<int>(r / (static_cast<long>(n.x) * n.y)) + g;
+  const double q = c(L3(x, y, z, e));
+  a.v[0] += q;
+  a.v[1] += q * (x - g + o.x + 0.5) * hh;
+  a.v[2] += q * (y - g + o.y + 0.5) * hh;
+  a.v[3] += q * (z - g + o.z + 0.5) * hh;
+}
+
+/// Flat inner index of inner cell `r` (x-fastest) of job `J`, in its extended block.
+KOKKOS_INLINE_FUNCTION long vofStatsCellIndex(const VofBlockJob& J, long r) {
+  const I3 n = J.n;
+  const int g = J.g;
+  const int x = static_cast<int>(r % n.x) + g;
+  const int y = static_cast<int>((r / n.x) % n.y) + g;
+  const int z = static_cast<int>(r / (static_cast<long>(n.x) * n.y)) + g;
+  return L3(x, y, z, J.e);
+}
+
+/// `interfaceArea`'s cell test: a mixed cell, `aeps < C < 1 - aeps`.
+KOKKOS_INLINE_FUNCTION bool vofStatsMixed(double q, double aeps) {
+  return q > aeps && q < 1.0 - aeps;
+}
+
+/// `measure()`'s central second-moment terms about (cx, cy, cz) of inner cell `r` of job `J`
+/// (`a.v[0..5]`); returns the cell's colour.
+KOKKOS_INLINE_FUNCTION double vofStatsMomentsCell(const VofBlockJob& J, long r, double hh,
+                                                  double cx, double cy, double cz, VofSumN<7>& a) {
+  const I3 e = J.e, n = J.n, o = J.o;
+  const int g = J.g;
+  const VofRawField c{J.c};
+  const int x = static_cast<int>(r % n.x) + g;
+  const int y = static_cast<int>((r / n.x) % n.y) + g;
+  const int z = static_cast<int>(r / (static_cast<long>(n.x) * n.y)) + g;
+  const double q = c(L3(x, y, z, e));
+  const double px = (x - g + o.x + 0.5) * hh - cx, py = (y - g + o.y + 0.5) * hh - cy,
+               pz = (z - g + o.z + 0.5) * hh - cz;
+  a.v[0] += q * px * px;
+  a.v[1] += q * py * py;
+  a.v[2] += q * pz * pz;
+  a.v[3] += q * px * py;
+  a.v[4] += q * px * pz;
+  a.v[5] += q * py * pz;
+  return q;
+}
+
+/// The PLIC interface area of the mixed cell at extended index `i` (colour `q`) of job `J`
+/// (`VofBlockSet::interfaceArea`'s body).
+KOKKOS_INLINE_FUNCTION double vofStatsAreaCell(const VofBlockJob& J, long i, double q) {
+  const long sy = J.e.x, sz = static_cast<long>(J.e.x) * J.e.y;
+  const VofRawField c{J.c};
+  double st[27];
+  for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+      for (int dx = -1; dx <= 1; ++dx)
+        st[vof::plicSt(dx + 1, dy + 1, dz + 1)] = c(i + dx + dy * sy + dz * sz);
+  double m[3];
+  vof::mycNormal(st, m);
+  const double al = vof::plicAlpha(m[0], m[1], m[2], q);
+  double pv[8][3], ctr[3], ar = 0.0;
+  const int nv = vof::plicPolygon(m[0], m[1], m[2], al, pv);
+  vof::polygonAreaCentroid(pv, nv, ctr, ar);
+  return ar;
+}
+
+/// `measure()`'s central second-moment terms about (cx, cy, cz) and the PLIC interface area of
+/// inner cell `r` of job `J`, in one cell body (the host form).
+KOKKOS_INLINE_FUNCTION void vofStatsM2Cell(const VofBlockJob& J, long r, double hh, double aeps,
+                                           double cx, double cy, double cz, VofSumN<7>& a) {
+  const double q = vofStatsMomentsCell(J, r, hh, cx, cy, cz, a);
+  if (!vofStatsMixed(q, aeps))  // interfaceArea: mixed cells only
+    return;
+  a.v[6] += vofStatsAreaCell(J, vofStatsCellIndex(J, r), q);
+}
+
+/// `measure()`'s packet of job k from its sums: volume `v`, centroid `nc`, the second moments and
+/// the area `m2` (unused for an empty marker, `v <= 0`, whose entries but the volume are zero).
+KOKKOS_INLINE_FUNCTION void vofStatsWrite(double* q0, double v, const double nc[3],
+                                          const VofSumN<7>& m2, const VofStatsPrev& P, int k,
+                                          double dt) {
+  q0[0] = v;
+  if (v <= 0.0) {
+    for (int d = 1; d < kVofStats; ++d)
+      q0[d] = 0.0;
+    return;
+  }
+  for (int d = 0; d < 3; ++d) {
+    q0[1 + d] = nc[d];
+    q0[4 + d] = (P.valid[k] && dt > 0.0) ? (nc[d] - P.c[k][d]) / dt : 0.0;
+  }
+  q0[7] = m2.v[6];
+  const double iv = 1.0 / v;
+  for (int d = 0; d < 6; ++d)
+    q0[8 + d] = m2.v[d] * iv;
+}
+
+/// Job k's first moments from its tile partials (`tl(4 t + {0..3})`, tiles `[off[k], off[k + 1])`),
+/// summed in tile order, so every caller gets the same bits.
+KOKKOS_INLINE_FUNCTION void vofStatsCombine1(const long* off, const SField& tl, int k,
+                                             VofSumN<4>& m1) {
+  for (long t = off[k]; t < off[k + 1]; ++t)
+    for (int d = 0; d < 4; ++d)
+      m1.v[d] += tl(4 * t + d);
+}
+
+/// `VofBlockSet::measure` for every job: the first moments, then the central second moments and
+/// the PLIC interface area together, with the per-cell expressions of the per-block reductions
+/// verbatim (`vofStatsM1Cell`, `vofStatsMomentsCell`, `vofStatsAreaCell`). The summation ORDER is
+/// not the per-block MDRange's: a recorded change (C2) of these diagnostics, which feed no state.
+/// Job k's values land at `out(off + kVofStats * (T.base + k) + ...)`; the host applies them later
+/// (deferred read).
+///
+/// Device: three launches over the tiles (`kVofTile`) of every job -- the first-moment partials;
+/// the second-moment + area partials, each team first combining its job's first moments over the
+/// job's tiles in tile order (the area over the tile's mixed cells, listed in ascending order); the
+/// packet, one thread per job, from both combined in tile order. The sums depend on the tile size
+/// and the team reduction, not on the league or the job count: a second order change of the same
+/// diagnostics, recorded with its measured size in the commit that made it.
+///
+/// Host: one team per job, each sum ONE team reduction over the inner box (the C2 form).
 inline void vofBatchStats(const VofBlockTable& T, const VofStatsPrev& P, double hh, double aeps,
-                          double dt, SField out, long off) {
+                          double dt, SField out, long off, SField& tile) {
   using Team = Kokkos::TeamPolicy<SExec>;
+  if constexpr (kVofHostExec<SExec>) {
+    Kokkos::parallel_for(
+        "vof::block::batch_stats", Team(SExec(), T.nj, Kokkos::AUTO),
+        KOKKOS_LAMBDA(const typename Team::member_type& tm) {
+          const int k = tm.league_rank();
+          const VofBlockJob& J = T.job[k];
+          const long region = vofJobInner(J);
+          double* q0 = out.data() + off + static_cast<long>(kVofStats) * (T.base + k);
+          VofSumN<4> m1;
+          Kokkos::parallel_reduce(
+              Kokkos::TeamThreadRange(tm, region),
+              [&](const long r, VofSumN<4>& a) { vofStatsM1Cell(J, r, hh, a); },
+              Kokkos::Sum<VofSumN<4>>(m1));
+          const double v = m1.v[0];
+          VofSumN<7> m2;
+          const double nc[3] = {v > 0.0 ? m1.v[1] / v : 0.0, v > 0.0 ? m1.v[2] / v : 0.0,
+                                v > 0.0 ? m1.v[3] / v : 0.0};
+          if (v > 0.0)
+            Kokkos::parallel_reduce(
+                Kokkos::TeamThreadRange(tm, region),
+                [&](const long r, VofSumN<7>& a) {
+                  vofStatsM2Cell(J, r, hh, aeps, nc[0], nc[1], nc[2], a);
+                },
+                Kokkos::Sum<VofSumN<7>>(m2));
+          Kokkos::single(Kokkos::PerTeam(tm), [&]() { vofStatsWrite(q0, v, nc, m2, P, k, dt); });
+        });
+    return;
+  }
+  VofBlockTable R = T;  // the flat index is the tile
+  const long nt = vofSetOffsets(R, vofTiles);
+  vofEnsureTileScratch(tile, 11 * nt);
+  SField tl = tile;
+  const long t2 = 4 * nt;  // the second-moment partials follow the first-moment ones
   Kokkos::parallel_for(
-      "vof::block::batch_stats", Team(SExec(), T.nj, Kokkos::AUTO),
+      "vof::block::batch_stats_m1", Team(SExec(), nt, Kokkos::AUTO),
       KOKKOS_LAMBDA(const typename Team::member_type& tm) {
-        const int k = tm.league_rank();
-        const VofBlockJob& J = T.job[k];
-        const I3 e = J.e, n = J.n, o = J.o;
-        const int g = J.g;
-        const long sy = e.x, sz = static_cast<long>(e.x) * e.y;
-        const long region = static_cast<long>(n.x) * n.y * n.z;
-        const VofRawField c{J.c};
-        double* q0 = out.data() + off + static_cast<long>(kVofStats) * (T.base + k);
+        const long t = tm.league_rank();
+        const int k = vofJobOf(R.off, t);
+        const VofBlockJob& J = R.job[k];
+        const long region = vofJobInner(J), r0 = (t - R.off[k]) * kVofTile;
+        const long r1 = r0 + kVofTile < region ? r0 + kVofTile : region;
         VofSumN<4> m1;
         Kokkos::parallel_reduce(
-            Kokkos::TeamThreadRange(tm, region),
-            [&](const long r, VofSumN<4>& a) {
-              const int x = static_cast<int>(r % n.x) + g;
-              const int y = static_cast<int>((r / n.x) % n.y) + g;
-              const int z = static_cast<int>(r / (static_cast<long>(n.x) * n.y)) + g;
-              const double q = c(L3(x, y, z, e));
-              a.v[0] += q;
-              a.v[1] += q * (x - g + o.x + 0.5) * hh;
-              a.v[2] += q * (y - g + o.y + 0.5) * hh;
-              a.v[3] += q * (z - g + o.z + 0.5) * hh;
-            },
+            Kokkos::TeamThreadRange(tm, r0, r1),
+            [&](const long r, VofSumN<4>& a) { vofStatsM1Cell(J, r, hh, a); },
             Kokkos::Sum<VofSumN<4>>(m1));
+        Kokkos::single(Kokkos::PerTeam(tm), [&]() {
+          for (int d = 0; d < 4; ++d)
+            tl(4 * t + d) = m1.v[d];
+        });
+      });
+  // The area's cell body is long and only the mixed cells (a few per cent of a box) take it: each
+  // team first lists its tile's mixed cells in team scratch (a team scan, ascending order), then
+  // reduces the area over the dense list, so a warp's lanes all do PLIC work.
+  const auto shm = Kokkos::PerTeam(static_cast<int>(kVofTile * sizeof(int)));
+  Kokkos::parallel_for(
+      "vof::block::batch_stats_m2", Team(SExec(), nt, Kokkos::AUTO).set_scratch_size(0, shm),
+      KOKKOS_LAMBDA(const typename Team::member_type& tm) {
+        const long t = tm.league_rank();
+        const int k = vofJobOf(R.off, t);
+        const VofBlockJob& J = R.job[k];
+        VofSumN<4> m1;
+        vofStatsCombine1(R.off, tl, k, m1);
         const double v = m1.v[0];
-        if (v <= 0.0) {  // measure()'s empty-marker branch: everything but the volume is zero
-          Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-            q0[0] = v;
-            for (int d = 1; d < kVofStats; ++d)
-              q0[d] = 0.0;
-          });
+        if (v <= 0.0)  // the empty marker: no second moments
           return;
-        }
         const double cx = m1.v[1] / v, cy = m1.v[2] / v, cz = m1.v[3] / v;
+        const long region = vofJobInner(J), r0 = (t - R.off[k]) * kVofTile;
+        const long r1 = r0 + kVofTile < region ? r0 + kVofTile : region;
+        const VofRawField c{J.c};
         VofSumN<7> m2;
         Kokkos::parallel_reduce(
-            Kokkos::TeamThreadRange(tm, region),
-            [&](const long r, VofSumN<7>& a) {
-              const int x = static_cast<int>(r % n.x) + g;
-              const int y = static_cast<int>((r / n.x) % n.y) + g;
-              const int z = static_cast<int>(r / (static_cast<long>(n.x) * n.y)) + g;
-              const long i = L3(x, y, z, e);
-              const double q = c(i);
-              const double px = (x - g + o.x + 0.5) * hh - cx, py = (y - g + o.y + 0.5) * hh - cy,
-                           pz = (z - g + o.z + 0.5) * hh - cz;
-              a.v[0] += q * px * px;
-              a.v[1] += q * py * py;
-              a.v[2] += q * pz * pz;
-              a.v[3] += q * px * py;
-              a.v[4] += q * px * pz;
-              a.v[5] += q * py * pz;
-              if (!(q > aeps) || !(q < 1.0 - aeps))  // interfaceArea: mixed cells only
-                return;
-              double st[27];
-              for (int dz = -1; dz <= 1; ++dz)
-                for (int dy = -1; dy <= 1; ++dy)
-                  for (int dx = -1; dx <= 1; ++dx)
-                    st[vof::plicSt(dx + 1, dy + 1, dz + 1)] = c(i + dx + dy * sy + dz * sz);
-              double m[3];
-              vof::mycNormal(st, m);
-              const double al = vof::plicAlpha(m[0], m[1], m[2], q);
-              double pv[8][3], ctr[3], ar = 0.0;
-              const int nv = vof::plicPolygon(m[0], m[1], m[2], al, pv);
-              vof::polygonAreaCentroid(pv, nv, ctr, ar);
-              a.v[6] += ar;
-            },
+            Kokkos::TeamThreadRange(tm, r0, r1),
+            [&](const long r, VofSumN<7>& a) { vofStatsMomentsCell(J, r, hh, cx, cy, cz, a); },
             Kokkos::Sum<VofSumN<7>>(m2));
+        int* list = static_cast<int*>(tm.team_shmem().get_shmem(kVofTile * sizeof(int)));
+        int nm = 0;
+        Kokkos::parallel_scan(
+            Kokkos::TeamThreadRange(tm, r0, r1),
+            [&](const long r, int& u, const bool fin) {
+              if (!vofStatsMixed(c(vofStatsCellIndex(J, r)), aeps))
+                return;
+              if (fin)
+                list[u] = static_cast<int>(r - r0);
+              ++u;
+            },
+            nm);
+        tm.team_barrier();
+        double ar = 0.0;
+        Kokkos::parallel_reduce(
+            Kokkos::TeamThreadRange(tm, nm),
+            [&](const int j, double& s) {
+              const long i = vofStatsCellIndex(J, r0 + list[j]);
+              s += vofStatsAreaCell(J, i, c(i));
+            },
+            ar);
         Kokkos::single(Kokkos::PerTeam(tm), [&]() {
-          const double nc[3] = {cx, cy, cz};
-          q0[0] = v;
-          for (int d = 0; d < 3; ++d) {
-            q0[1 + d] = nc[d];
-            q0[4 + d] = (P.valid[k] && dt > 0.0) ? (nc[d] - P.c[k][d]) / dt : 0.0;
-          }
-          q0[7] = m2.v[6];
-          const double iv = 1.0 / v;
           for (int d = 0; d < 6; ++d)
-            q0[8 + d] = m2.v[d] * iv;
+            tl(t2 + 7 * t + d) = m2.v[d];
+          tl(t2 + 7 * t + 6) = ar;
         });
+      });
+  Kokkos::parallel_for(
+      "vof::block::batch_stats_combine", Kokkos::RangePolicy<SExec>(SExec(), 0, R.nj),
+      KOKKOS_LAMBDA(const long q) {
+        const int k = static_cast<int>(q);
+        VofSumN<4> m1;
+        vofStatsCombine1(R.off, tl, k, m1);
+        const double v = m1.v[0];
+        VofSumN<7> m2;
+        double nc[3] = {0.0, 0.0, 0.0};
+        if (v > 0.0) {
+          for (int d = 0; d < 3; ++d)
+            nc[d] = m1.v[1 + d] / v;
+          for (long t = R.off[k]; t < R.off[k + 1]; ++t)
+            for (int d = 0; d < 7; ++d)
+              m2.v[d] += tl(t2 + 7 * t + d);
+        }
+        vofStatsWrite(out.data() + off + static_cast<long>(kVofStats) * (R.base + k), v, nc, m2, P,
+                      k, dt);
       });
 }
 
