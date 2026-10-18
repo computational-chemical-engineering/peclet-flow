@@ -66,6 +66,15 @@ void Solver<Grid>::step() {
   // Multiphysics: refresh material properties / body forces from the current fields (frozen over
   // the step). No-op (byte-identical) when no closure is registered.
   updateProperties();
+  // X (doc/vof_gpu_coarse_tail_design.md §5.6): the variable-rho operator of this step, and its
+  // bottom factor on a side instance, NOW -- nothing below writes rho, rho1_, the openness bridge
+  // or the MG level-0 coefficients before project(), and nothing reads them but project() (the
+  // audit in the WO-X commit). project() then skips its build (coeffBuiltThisStep_).
+  const bool hoisted = prefactorHoistEligible();
+  if (hoisted) {
+    projectBuildCoefficients();
+    mg_.prefactorBottom();
+  }
   // WO-G: give the per-cell body force the ghost ring its consumer assumes. This is the ONE point
   // in the step that is after BOTH writers (the closures just above; an external CFD-DEM
   // field_view/exchange_field_add deposit, which happens before step()) and before every consumer
@@ -118,7 +127,7 @@ void Solver<Grid>::step() {
   }
   // (B) The balanced-force projection (doc/collocated_varrho_forces.md §4.6.2): once per step,
   // before the Picard loop. Byte-identical (not even a flag read beyond this) when it is off.
-  coeffBuiltThisStep_ = false;
+  coeffBuiltThisStep_ = hoisted;  // X: the reset must not undo the hoist
   if (pWritten_ || pbWritten_) {  // a restart restored the pressure: is Pb its split?
     pbValid_ = pWritten_ && pbWritten_;
     pWritten_ = pbWritten_ = false;
@@ -589,12 +598,20 @@ void Solver<Grid>::buildBalancedFaceForce(int c) {
 }
 
 template <class Grid>
+bool Solver<Grid>::prefactorHoistEligible() const {
+  return varRho_ && !porous_ && outerIters_ == 1 && !balancedForceActive() && !useChebyshev_ &&
+         !ghostProjection_ && mg_.directPrefactorEligible();
+}
+
+template <class Grid>
 void Solver<Grid>::applyBalancedForceProjection() {
   // (scope: checked at the step head, beside vofStepPrecheck)
   // (B1) the variable-rho operator, once for the step (project() then skips its rebuild).
   if (varRho_) {
     projectBuildCoefficients();
     coeffBuiltThisStep_ = true;
+    if (!useChebyshev_ && !ghostProjection_)
+      mg_.prefactorBottom();  // X: the factor on the side instance from the early build
   }
   registerBalancedForceState();  // normally already registered by the setter that enabled it
   if (pb1_.extent(0) != n1_)

@@ -23,6 +23,7 @@
 #include <Kokkos_Core.hpp>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -1900,6 +1901,7 @@ class CutcellMG {
   // rediscretized cut-cell operator on every level from the fine face openness (idx2 = 1/dx^2
   // fine).
   void setOpenness(CCConst ox, CCConst oy, CCConst oz, double idx2, double idy2, double idz2) {
+    joinPrefactor();  // X: nothing writes the bottom operator while the side factor reads it
     Level& f = lv_[0];
     // Retained for the exact (matrix-free) level-0 apply, which re-derives the face coefficient
     // t_f = open_f * gf instead of reading the assembled band. All three call sites pass grid
@@ -3822,7 +3824,7 @@ class CutcellMG {
       return false;
     if (wBadStale_) {
       Kokkos::deep_copy(CCExec(), wBadHost_, wBad_);  // the one read-back
-      CCExec().fence("peclet::flow::mg_wbad_read");     // (fences the builds: all on CCExec)
+      CCExec().fence("peclet::flow::mg_wbad_read");   // (fences the builds: all on CCExec)
       wBadStale_ = false;
     }
     return wBadHost_(L) == 0;
@@ -4548,6 +4550,7 @@ class CutcellMG {
   // kBottomMaxCells cells with ghost width 1; otherwise none and the engine is ineligible.
   // The FCG vectors, the component labels and their scratch, the plane ordering and the factor.
   void buildBottomStore() {
+    joinPrefactor();          // X: dir_ and the bottom level are about to be replaced
     dirAgreedKnown_ = false;  // review note 1: re-agreed at the hierarchy's first operator build
     dirAgreedCode_ = 1;
     facStale_ = true;
@@ -4846,7 +4849,7 @@ class CutcellMG {
   // backend instead of the host schedule. Returns the team size used.
   template <class FR>
   int launchDirectFactor(const BottomDirect<FR>& D, int team, double tauPiv0, bool probe = true,
-                         bool teamAlgorithm = false) {
+                         bool teamAlgorithm = false, const CCExec& exec = CCExec()) {
     const Level& bt = bottomLv();
     BottomFactorKernel<FR, FPC> k;
     k.D = D;
@@ -4867,8 +4870,7 @@ class CutcellMG {
     const int T = directTeam(k, team, probe, scratch, kBottomHostFactorTeam);
     Kokkos::parallel_for(
         "peclet::flow::mg_bottom_factor",
-        Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T).set_scratch_size(0, Kokkos::PerTeam(scratch)),
-        k);
+        Kokkos::TeamPolicy<CCExec>(exec, 1, T).set_scratch_size(0, Kokkos::PerTeam(scratch)), k);
     return T;
   }
   // The FCG kernel with M = the direct factor `D`: the production solve (precondOnly = false) or,
@@ -4888,16 +4890,56 @@ class CutcellMG {
                          Kokkos::TeamPolicy<CCExec>(CCExec(), 1, T), k);
     return T;
   }
+  // X (doc/vof_gpu_coarse_tail_design.md §5.6): the factor on a side execution instance. The
+  // solver builds the variable-rho coefficients right after updateProperties() and calls
+  // prefactorBottom(), which launches the factor of the new operator on `side_` (a second CUDA
+  // stream from partition_space) while the momentum stage runs on the default instance;
+  // joinPrefactor() fences `side_` before anything reads dir_ or writes the bottom operator (the
+  // bottom solve, setOpenness, buildBottomStore, the test hooks, the destructor). Same kernel,
+  // same inputs, same T rule: the factor is bitwise the lazy one. Device single rank only.
+  bool directPrefactorEligible() const {
+    if constexpr (kHostMemory) {
+      return false;
+    } else {
+      return !distributed_ && bottomStore_ && bottomSolver_ != kBottomAlgebraic &&
+             directBottomIneligible() == nullptr;
+    }
+  }
+  void prefactorBottom() {
+    if (!directPrefactorEligible() || !facStale_)
+      return;
+    if constexpr (!kHostMemory) {
+      if (!side_)
+        side_ = Kokkos::Experimental::partition_space(CCExec(), std::vector<int>{1})[0];
+      CCExec().fence("peclet::flow::mg_prefactor_ready");  // the operator build has landed
+      dirFacTeam_ =
+          launchDirectFactor(dir_, dirFacTeam_, dirPivotTol_, /*probe=*/false, false, *side_);
+      facStale_ = false;
+      facPending_ = true;
+    }
+  }
+  bool joinPrefactor() const {
+    if (!facPending_)
+      return false;
+    side_->fence("peclet::flow::mg_prefactor_join");
+    facPending_ = false;
+    return true;
+  }
+  ~CutcellMG() { joinPrefactor(); }
   // The production direct bottom solve: lv.x = A_b^{-1} lv.rhs (component-mean-free) by the FCG
   // preconditioned by the FP32 factor, refactored first if setOpenness changed the operator (a
   // host flag, not a device read).
   void directBottomSolve() {
     const bool first = dirTeam_ == 0;
+    bool factored = joinPrefactor();  // X: the side-instance factor of this operator has landed
     if (gbActive_)
       gatherGlobalBottomRhs();  // §14 H-6: every rank solves the identical global bottom
     if (facStale_) {
       dirFacTeam_ = launchDirectFactor(dir_, dirFacTeam_, dirPivotTol_, /*probe=*/false);
       facStale_ = false;
+      factored = true;
+    }
+    if (factored) {
       if (mgDebugLevel() >= 2 && dbgSolve_ <= mgDebugSolves()) {
         auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dir_.stat);
         printf("[mg]     direct bottom factor: ok %d, restarts %d (team %d)\n", h(0), h(1),
@@ -6220,6 +6262,8 @@ class CutcellMG {
   Kokkos::View<double*, CCMem> dirAug_;
   bool facStale_ = true;
   int dirTeam_ = 0, dirFacTeam_ = 0;
+  std::optional<CCExec> side_;       // X: the factor's side instance (partition_space, lazily)
+  mutable bool facPending_ = false;  // X: a side factor was launched and not yet joined
   double dirPivotTol_ = kBottomPivotTol;
   double stopRef_ = -1.0;                 // see setStopReference
   bool zeroGuess_ = false;                // see setZeroInitialGuess
@@ -6567,6 +6611,7 @@ class CutcellMG {
   template <class FR>
   BottomDirect<FR> directFactorForTest(int team, double tauPiv0 = kBottomPivotTol,
                                        int* Tused = nullptr, bool teamAlgorithm = false) {
+    joinPrefactor();
     BottomDirect<FR> D = BottomDirect<FR>::allocate(dirPlanes_, bottomLv().ext);
     const int T = launchDirectFactor(D, team, tauPiv0, true, teamAlgorithm);
     Kokkos::fence();
@@ -6591,6 +6636,7 @@ class CutcellMG {
   // (clamped to team_size_max), `*Tused` = the size both launches ran with (-1 if they differ);
   // returns the inner iterations. The production team sizes are re-probed at the next solve.
   int directSolveTeamForTest(int team, int* Tused = nullptr) {
+    joinPrefactor();
     const int Tf = launchDirectFactor(dir_, team, dirPivotTol_);
     const int Ts = launchDirectKernel(dir_, false, team, false);
     bottomFlagPending_ = true;
@@ -6605,6 +6651,7 @@ class CutcellMG {
     return it;
   }
   int directRestarts() const {
+    joinPrefactor();
     auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), dir_.stat);
     return h(1);
   }
@@ -6614,7 +6661,10 @@ class CutcellMG {
   // over every factor launch since the View was created (bench_bottom_factor only).
   Kokkos::View<long long*, CCMem> bottomProbe_;
 #endif
-  void directMarkStaleForTest() { facStale_ = true; }
+  void directMarkStaleForTest() {
+    joinPrefactor();
+    facStale_ = true;
+  }
 
  private:
 };

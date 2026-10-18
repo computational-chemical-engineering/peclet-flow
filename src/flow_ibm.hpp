@@ -1862,6 +1862,11 @@ class Solver {
   // Is it on for this step? (the explicit setting, else ON exactly on the V8 path without an
   // inflow/outflow face)
   bool balancedForceActive() const;
+  // X (doc/vof_gpu_coarse_tail_design.md §5.6): build the variable-rho pressure coefficients right
+  // after updateProperties() and factor the device direct bottom on a side instance, hidden behind
+  // the momentum stage. Variable rho, not porous, one outer iteration, no balanced-force stage, a
+  // PCG/FCG driver, and the MG's own eligibility (single-rank device direct bottom).
+  bool prefactorHoistEligible() const;
   bool hasOpenDomainFace() const;  // any inflow (2) / outflow (3) domain face
   // The §4.6.4 refusals. `atStep` adds the checks that are only final once the solver is set up
   // (the cut-cell operator, the collocated density path, an AUTO-selected ghost scheme).
