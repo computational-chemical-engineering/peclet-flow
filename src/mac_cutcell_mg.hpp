@@ -1993,6 +1993,10 @@ class CutcellMG {
     facStale_ = true;
     if (!bottomConnKnown_ && bottomStore_)
       evalBottomComponents();
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && kHostMemory && !dirAgreedKnown_)
+      agreeDirectBottom();  // review note 1: once per hierarchy; setOpenness is collective on comm_
+#endif
     opBuilt_ = true;
 #ifndef NDEBUG
     checkFp32DecoupledSets();
@@ -3476,6 +3480,7 @@ class CutcellMG {
             std::string("set_pressure_vcycle_precision('fp32'): not eligible here: ") +
             (why ? why : fp32VcycleIneligible(false)));
       }
+      requireDirectBottom();  // on EVERY rank, before the V-cycle's first collective
       ensureFp64();  // D5 (§4.4.7): its data, if the last build deferred them
     }
     if (mgDebugLevel() >= 3) {
@@ -3880,6 +3885,7 @@ class CutcellMG {
   // (the A3 wrap paths never read them). Uses the schedule (pre_, post_, bottom_) of the driver.
   void precondVcycleFp32(CCField zz, CCField rr, int e, int k, CCField p) {
     Level& l0 = lv_[0];
+    requireDirectBottom();  // on EVERY rank, before the V-cycle's first collective
     ensureScalars();
     // 1. entry: rhsf = fl32(2^-e r); the first pre-smooth colour pass from x = 0 (colour 0)
     entryFp32(l0.xf, l0.rhsf, CCConst(rr), VConst(l0.WX), VConst(l0.WY), VConst(l0.WZ),
@@ -4345,6 +4351,17 @@ class CutcellMG {
       return true;
     if (lv_.empty())
       return false;
+    // coarsest GLOBAL cell count (the local block does not decide how hard the coarse solve is)
+    long gx = gnxF_, gy = gnyF_, gz = gnzF_;
+    for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
+      gx /= lv_[L].ratio.x;
+      gy /= lv_[L].ratio.y;
+      gz /= lv_[L].ratio.z;
+    }
+    return agglomerateAuto(gx, gy, gz);
+  }
+  // agglomerateBottom's 'auto' (-1) answer for a coarsest GLOBAL grid gx x gy x gz.
+  bool agglomerateAuto(long gx, long gy, long gz) const {
     // Auto engages only for the SINGULAR (periodic / all-Neumann / IBM) operator. On the
     // Dirichlet-anchored (outflow) path the exact bottom measurably LOWERS the outer solve's
     // attainable floor (128x32x32 inflow/outflow channel: flux divergence floor 8e-8 smoothed vs
@@ -4360,13 +4377,6 @@ class CutcellMG {
     // sweeps to damp a wavelength of L cells. A 64x2x2 bottom is only 256 cells yet still 64 across
     // -- measured, that costs 6.0 pressure iterations/step against 4.0 for an exact solve.
     const int thresh = agglomExtent_ > 0 ? agglomExtent_ : 4;
-    // coarsest GLOBAL cell count (the local block does not decide how hard the coarse solve is)
-    long gx = gnxF_, gy = gnyF_, gz = gnzF_;
-    for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
-      gx /= lv_[L].ratio.x;
-      gy /= lv_[L].ratio.y;
-      gz /= lv_[L].ratio.z;
-    }
     return gx > thresh || gy > thresh || gz > thresh;
   }
 
@@ -4388,20 +4398,98 @@ class CutcellMG {
     if (lv_.empty() ||
         (long)lv_.back().gdim.x * lv_.back().gdim.y * lv_.back().gdim.z > kBottomMaxCells)
       return "the bottom level has more than 8192 inner cells";  // GLOBAL (== inner single rank)
-    if (gbActive_ && !dirPlanes_.valid())  // gb_'s labels ran on no operator (buildGlobalBottomOp)
-      return "no axis gives planes of at most 192 cells (the direct factor's cap)";
-    if (!bottomConnKnown_)
-      return "the pressure operator has not been built (no setOpenness since the hierarchy)";
-    if (!bottomConnected_)
-      return "the bottom level has no fluid cell or more than 64 fluid components (B1b)";
-    if (!dirPlanes_.valid())
-      return "no axis gives planes of at most 192 cells (the direct factor's cap)";
-    return nullptr;
+    return bottomLabelWhy(bottomLabelCode());
   }
+  // The conditions only a rank holding the bottom can evaluate (the labels and the planes, fixed
+  // per hierarchy): 0 = met, 1 = no operator yet, 2 = components, 3 = planes.
+  int bottomLabelCode() const {
+    if (gbActive_ && !dirPlanes_.valid())  // gb_'s labels ran on no operator (buildGlobalBottomOp)
+      return 3;
+    if (!bottomConnKnown_)
+      return 1;
+    if (!bottomConnected_)
+      return 2;
+    if (!dirPlanes_.valid())
+      return 3;
+    return 0;
+  }
+  static const char* bottomLabelWhy(int code) {
+    switch (code) {
+      case 1:
+        return "the pressure operator has not been built (no setOpenness since the hierarchy)";
+      case 2:
+        return "the bottom level has no fluid cell or more than 64 fluid components (B1b)";
+      case 3:
+        return "no axis gives planes of at most 192 cells (the direct factor's cap)";
+      default:
+        return nullptr;
+    }
+  }
+  // Review note 1: an explicit 'direct' that is ineligible must raise on EVERY rank -- a rank idling
+  // below a telescope point never reaches the bottom, and its own lv_ ends at the telescope level,
+  // so directBottomIneligible() there reads the wrong level. This is directBottomIneligible() on
+  // rank-uniform inputs: the live replicated settings plus the bottom's global dims and label code
+  // agreed over comm_ once per hierarchy (agreeDirectBottom, at its first operator build). On a
+  // rank holding the bottom the agreed values are its own, so it answers as
+  // directBottomIneligible() does. Single rank: directBottomIneligible() itself.
+  const char* directBottomIneligibleAll() const {
+    if (!distributed_)
+      return directBottomIneligible();
+    if (!kHostMemory)
+      return "the solve is distributed (multi-rank)";
+    if (!removeMean_ || hasOutflow_)
+      return "the operator is not the singular one (an outflow face is present)";
+    if (!dirAgreedKnown_)
+      return bottomLabelWhy(1);
+    const C3 e = dirAgreedExt_, d = dirAgreedGdim_;
+    if (!(agglomMode_ == 1 || (agglomMode_ != 0 && agglomerateAuto(e.x, e.y, e.z))))
+      return "the bottom is not agglomerated (set_pressure_bottom / set_pressure_bottom_extent)";
+    if ((long)d.x * d.y * d.z > kBottomMaxCells)
+      return "the bottom level has more than 8192 inner cells";
+    return bottomLabelWhy(dirAgreedCode_);
+  }
+  void requireDirectBottom() const {
+    if (bottomSolver_ != kBottomDirect)
+      return;
+    if (const char* why = directBottomIneligibleAll())
+      throw std::runtime_error(
+          std::string("set_pressure_bottom_solver('direct'): not eligible here: ") + why);
+  }
+#ifdef PECLET_FLOW_MPI
+  // The agreement directBottomIneligibleAll() reads: MAX over comm_, a rank idling below a
+  // telescope point contributing zeros (every rank holding the bottom holds the same values: the
+  // global dims, and gb_'s labels and planes, which are replicated).
+  void agreeDirectBottom() {
+    int v[7] = {0, 0, 0, 0, 0, 0, 0}, a[7];
+    const Level& bt = lv_.back();
+    if (!bt.tele) {
+      long gx = gnxF_, gy = gnyF_, gz = gnzF_;  // agglomerateBottom()'s coarsest global grid
+      for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
+        gx /= lv_[L].ratio.x;
+        gy /= lv_[L].ratio.y;
+        gz /= lv_[L].ratio.z;
+      }
+      v[0] = bt.gdim.x;
+      v[1] = bt.gdim.y;
+      v[2] = bt.gdim.z;
+      v[3] = (int)gx;
+      v[4] = (int)gy;
+      v[5] = (int)gz;
+      v[6] = gbActive_ ? bottomLabelCode() : 0;  // no gb_: a global condition already fails
+    }
+    MPI_Allreduce(v, a, 7, MPI_INT, MPI_MAX, comm_);
+    dirAgreedGdim_ = C3{a[0], a[1], a[2]};
+    dirAgreedExt_ = C3{a[3], a[4], a[5]};
+    dirAgreedCode_ = a[6];
+    dirAgreedKnown_ = true;
+  }
+#endif
   // The bottom's storage (§13.4.7): single rank (any backend since §14 H-1), a bottom of at most
   // kBottomMaxCells cells with ghost width 1; otherwise none and the engine is ineligible.
   // The FCG vectors, the component labels and their scratch, the plane ordering and the factor.
   void buildBottomStore() {
+    dirAgreedKnown_ = false;  // review note 1: re-agreed at the hierarchy's first operator build
+    dirAgreedCode_ = 1;
     facStale_ = true;
     bottomConnKnown_ = false;
     bottomConnected_ = false;
@@ -6045,6 +6133,11 @@ class CutcellMG {
   // per bottom rank (bt.comm order): inner cell counts and displacements, x1 (gids, rhs) and x3
   // (the interleaved openness), fixed per hierarchy.
   std::vector<int> gbCnt1_, gbDsp1_, gbCnt3_, gbDsp3_;
+  // Review note 1 (directBottomIneligibleAll): the bottom's global dims (gdim; agglomerateBottom's
+  // ratio-derived extent) and label code, agreed over comm_ once per hierarchy.
+  bool dirAgreedKnown_ = false;
+  int dirAgreedCode_ = 1;
+  C3 dirAgreedGdim_{}, dirAgreedExt_{};
   BottomPlanes dirPlanes_;
   BottomDirect<float> dir_;  // PRECISION-EXEMPT: the FP32 direct factor under an FP64 FCG (§13)
   Kokkos::View<int*, CCMem> dirKc_;
