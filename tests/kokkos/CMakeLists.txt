@@ -469,6 +469,16 @@ add_test(NAME units_scalar_scale_invariance COMMAND test_units scalar)
 add_test(NAME units_scalar_sine_decay COMMAND test_units scalarsine)
 add_test(NAME units_phase_change_scale_invariance COMMAND test_units phasechange)
 
+# G-SYNC (doc/vof_gpu_coarse_tail_design.md §5.5, WO-S4): the device step's global-fence and
+# combined-reducer budget, counted by an in-process Kokkos Tools fence callback on a small block-VoF
+# bubble. Device backends only (host: SKIP 77).
+add_executable(test_device_sync_budget test_device_sync_budget.cpp)
+target_include_directories(test_device_sync_budget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${CMAKE_CURRENT_SOURCE_DIR} ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_device_sync_budget PRIVATE Kokkos::kokkos)
+add_test(NAME device_sync_budget COMMAND test_device_sync_budget)
+set_tests_properties(device_sync_budget PROPERTIES SKIP_RETURN_CODE 77)
+
 # G.8: link every target in this directory against the one compiled instantiation. The library is
 # STATIC, so this is inert for the kernel unit tests that never name `Solver` -- the linker pulls no
 # member in -- and it means a test added later gets the fast build without a separate edit here.
@@ -478,3 +488,4 @@ foreach(_t IN LISTS _flow_kernel_test_targets)
     target_link_libraries(${_t} PRIVATE peclet_flow_solver)
   endif()
 endforeach()
+

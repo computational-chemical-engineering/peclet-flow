@@ -581,7 +581,7 @@ void Solver<Grid>::updateVofBlockOverlap() {
         }
       },
       Kokkos::Max<double>(mx), ex, nc);
-  Kokkos::fence();
+  CCExec().fence("peclet::flow::vof_overlap_census");  // S4: instance, not global
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
     double gm = 0.0, ge = 0.0;

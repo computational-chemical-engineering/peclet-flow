@@ -100,7 +100,7 @@ void Solver<Grid>::step() {
   // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the
   // base).
   for (int c = 0; c < 3; ++c)
-    Kokkos::deep_copy(old_[c], C[c].u);
+    Kokkos::deep_copy(CCExec(), old_[c], C[c].u);  // S4: instance-ordered, no global fence
   if (cutcellPressure_ && incremental_) {
     fillGhosts(P_);
     if (hasBc_)
@@ -1388,7 +1388,7 @@ void Solver<Grid>::projectSolve() {
   if (!guess) {
     pguessCount_ = 0;  // the history holds consecutive projected-guess solves only
     if (!pwarm_)
-      Kokkos::deep_copy(phi1_, 0.0);
+      Kokkos::deep_copy(CCExec(), phi1_, 0.0);
     // H-2c: on the cold path phi1_ is +0, and the single-rank PCG skips its A x0 (scoped to this
     // one solve, exception-safe).
     {

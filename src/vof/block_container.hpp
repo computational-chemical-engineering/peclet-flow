@@ -1939,7 +1939,9 @@ class VofBlockSet {
       vofCurvListPasses(T, anyClip, cListI_, cStartI_, cEndI_, cCnt_);  // tiers 1-3, clip, census
       vofCsfForceBatch(T, sigma, wgt[0], wgt[1], wgt[2]);
     }
-    Kokkos::deep_copy(cCntHost_, cCnt_);  // the one read of the curvature stage
+    // the one read of the curvature stage (S4: instance-scoped copy + fence, not global)
+    Kokkos::deep_copy(SExec(), cCntHost_, cCnt_);
+    SExec().fence("vof::block::curv_census_read");
     for (std::size_t k = 0; k < nb; ++k) {
       const long* ct = &cCntHost_(8 * k);
       curvStats_.interfacial += ct[0];

@@ -288,7 +288,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
       }
     }
     moveLocalPieces(moves);  // after every block's zero fill; the pieces are disjoint
-    Kokkos::fence();
+    SExec().fence("vof::block::scatter_local");  // S4: instance, not global
 #ifdef PECLET_FLOW_MPI
     if (size_ > 1) {
       requireComm();
@@ -395,7 +395,7 @@ class VofBlockExchange : public VofBlockExchangeBase {
     }
     if (gatherLocal)
       gatherLocalSum(blocks, nc, loc, blockView, blockBase);
-    Kokkos::fence();
+    SExec().fence("vof::block::gather_local");  // S4: instance, not global
 #ifdef PECLET_FLOW_MPI
     if (size_ > 1) {
       requireComm();

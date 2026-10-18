@@ -890,7 +890,7 @@ class WyAdvector {
           acc = Kokkos::fmax(acc, Kokkos::fabs(w(i - sz)));
         },
         Kokkos::Max<double>(m));
-    Kokkos::fence();
+    SExec().fence("vof::wy::cfl_interface");  // S4: instance, not global
     // Max's identity is -inf; an empty band (a uniform colour field) means no constraint, not an
     // unconstrained step. Clamp so the reported CFL is a number and the cap test is meaningful.
     return Kokkos::fmax(m, 0.0) * dth;

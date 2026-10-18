@@ -1024,8 +1024,8 @@ void Solver<Grid>::rebuildStencils() {
   if (varRho_)
     fillPropGhosts(rhoField_);
   for (int c = 0; c < 3; ++c) {
-    Kokkos::deep_copy(C[c].rscale, 1.0);
-    Kokkos::deep_copy(C[c].inhom, 0.0);
+    Kokkos::deep_copy(CCExec(), C[c].rscale, 1.0);  // S4: instance-ordered fills
+    Kokkos::deep_copy(CCExec(), C[c].inhom, 0.0);
     if (varProps_ || effVarRho())
       ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x,
                            e_.y, e_.z, G, makeFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);

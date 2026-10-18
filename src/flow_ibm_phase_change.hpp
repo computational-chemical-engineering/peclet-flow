@@ -1660,7 +1660,9 @@ void Solver<Grid>::requirePhaseChange(const char* who) const {
 
 template <class Grid>
 double Solver<Grid>::phaseTick() {
-  Kokkos::fence();
+  // S4 (doc/vof_gpu_coarse_tail_design.md §5.5): the step's device work is all on the default
+  // instance, so its fence times it; a global fence would also wait on the side factor (X).
+  CCExec().fence("peclet::flow::phase_tick");
   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
