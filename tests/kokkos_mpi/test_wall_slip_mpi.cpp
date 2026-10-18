@@ -190,10 +190,13 @@ int main(int argc, char** argv) {
       if (rank == 0) {
         IbmSolver ref(NX, NY, NZ);
         configure(ref, lam, 0, NX, NY, NZ);
-        // The distributed solve keeps the host GraphAMG bottom (doc/vof_step_performance_design.md
-        // §13.9 Q-D7); on a GPU the single-rank solver would take the device bottom, so the np = 1
-        // bit-exact gate pins the reference to the engine the distributed path runs.
-        ref.setPressureBottomSolver(2);  // 'algebraic'
+        // The distributed solve runs the 'direct' bottom on a host backend since
+        // doc/vof_step_performance_design.md §14.3 H-6 (the allgathered global bottom) and keeps
+        // GraphAMG on a device (§13.9 Q-D7), where the single-rank solver would take the device
+        // bottom; the np = 1 bit-exact gate pins the reference to the engine the distributed path
+        // runs.
+        ref.setPressureBottomSolver(
+            std::is_same_v<peclet::flow::CCExec::memory_space, Kokkos::HostSpace> ? 0 : 2);
         for (int it = 0; it < STEPS; ++it)
           ref.step();
         double du = 0, umag = 0;

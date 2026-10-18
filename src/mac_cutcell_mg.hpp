@@ -1426,7 +1426,7 @@ class CutcellMG {
     amg_.reset();
     eigWarm_ = false;  // D3: the kept power-iteration vectors belong to the old hierarchy
     distributed_ = true;
-    buildBottomStore();  // single-rank only: none (the distributed path keeps GraphAMG)
+    buildBottomStore();  // reset; the levels do not exist yet (rebuilt after the hierarchy)
     comm_ = comm;
     gnxF_ = gnx;
     gnyF_ = gny;
@@ -1645,7 +1645,8 @@ class CutcellMG {
       // order).
       curDec = curDec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
     }
-    computeFp32Last();  // D-dist (§5.2): after the hierarchy, before any operator build
+    computeFp32Last();   // D-dist (§5.2): after the hierarchy, before any operator build
+    buildBottomStore();  // §14 H-6: the host global bottom gb_ (none on a device backend)
     if (mgDebugLevel() && rank == 0) {
       printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %d)%s\n", gnx, gny, gnz, size,
              (int)lv_.size(), nLevels, telescope_ ? "  [telescope ON]" : "");
@@ -1985,6 +1986,8 @@ class CutcellMG {
     // bottom level is tiny, so the per-step rebuild is negligible next to the V-cycles.
     amg_.reset();
     amgGlobalN_ = 0;
+    if (gbActive_)
+      buildGlobalBottomOp();  // §14 H-6: the global bottom's operator from the gathered openness
     // §13: the direct factor is rebuilt at the next direct bottom solve; the components
     // (condition 6) are labelled once per hierarchy, here at its first operator build.
     facStale_ = true;
@@ -4376,15 +4379,15 @@ class CutcellMG {
   // (evalBottomComponents, at the first setOpenness after init) and cached -- the rho / eps / drag
   // rescaling of the per-step setOpenness never closes a face, so it cannot change the answer.
   const char* directBottomIneligible() const {
-    if (distributed_)
+    if (distributed_ && !kHostMemory)  // §14 H-6: the device keeps it (CUDA-aware MPI unresolved)
       return "the solve is distributed (multi-rank)";
     if (!removeMean_ || hasOutflow_)
       return "the operator is not the singular one (an outflow face is present)";
     if (!agglomerateBottom())
       return "the bottom is not agglomerated (set_pressure_bottom / set_pressure_bottom_extent)";
     if (lv_.empty() ||
-        (long)lv_.back().inner.x * lv_.back().inner.y * lv_.back().inner.z > kBottomMaxCells)
-      return "the bottom level has more than 8192 inner cells";
+        (long)lv_.back().gdim.x * lv_.back().gdim.y * lv_.back().gdim.z > kBottomMaxCells)
+      return "the bottom level has more than 8192 inner cells";  // GLOBAL (== inner single rank)
     if (!bottomConnKnown_)
       return "the pressure operator has not been built (no setOpenness since the hierarchy)";
     if (!bottomConnected_)
@@ -4402,9 +4405,12 @@ class CutcellMG {
     bottomConnected_ = false;
     bottomStore_ = false;
     dirPlanes_ = BottomPlanes{};
-    if (distributed_ || lv_.empty())
+    gbActive_ = false;
+    if (lv_.empty())
       return;
-    const Level& bt = lv_.back();
+    if (distributed_ && !(kHostMemory && buildGlobalBottomLevel()))
+      return;  // §14 H-6: distributed, the store lives on the host global bottom gb_ only
+    const Level& bt = bottomLv();
     if (bt.g != 1 || (long)bt.inner.x * bt.inner.y * bt.inner.z > kBottomMaxCells)
       return;
     bottomStore_ = true;
@@ -4423,6 +4429,148 @@ class CutcellMG {
     dirTeam_ = 0;
     dirFacTeam_ = 0;
   }
+  // The level the direct bottom runs on: lv_.back() single rank, the global bottom gb_ under
+  // §14 H-6 (distributed host).
+  Level& bottomLv() { return gbActive_ ? gb_ : lv_.back(); }
+  const Level& bottomLv() const { return gbActive_ ? gb_ : lv_.back(); }
+  // §14 H-6 (doc/vof_step_performance_design.md §14.3): the distributed host 'direct' bottom runs
+  // REDUNDANTLY on every rank that holds the bottom level, on gb_: a private, single-rank-shaped
+  // copy of the GLOBAL bottom (g = 1, og = 0, gdim = inner) assembled from the allgathered inner
+  // openness by the single-rank fill, boundary openness and operator build, so it equals the
+  // single-rank bottom bitwise whenever the gathered openness does (the np-gates' hierarchy
+  // property, which GraphAMG's gather relies on too). Returns false -- no gb_, GraphAMG stays --
+  // on a rank idling below a telescope point and for a global bottom above kBottomMaxCells.
+  // gbGid_: every bottom rank's inner cells' global ids in gather order (rank order, then
+  // amgGlobalOfLocal_ order), gathered once per hierarchy.
+  bool buildGlobalBottomLevel() {
+#ifdef PECLET_FLOW_MPI
+    const Level& bt = lv_.back();
+    if (bt.tele)
+      return false;  // this rank holds no bottom (it idles below a telescope point)
+    const C3 gi = bt.gdim;
+    if ((long)gi.x * gi.y * gi.z > kBottomMaxCells)
+      return false;
+    Level g;
+    g.inner = gi;
+    g.gdim = gi;
+    g.ratio = bt.ratio;
+    g.cfac = bt.cfac;
+    g.g = 1;
+    g.ext = C3{gi.x + 2, gi.y + 2, gi.z + 2};
+    g.n = (std::size_t)g.ext.x * g.ext.y * g.ext.z;
+    g.x = CCField("mg_gb_x", g.n);
+    g.rhs = CCField("mg_gb_rhs", g.n);
+    g.ox = CCField("mg_gb_ox", g.n);
+    g.oy = CCField("mg_gb_oy", g.n);
+    g.oz = CCField("mg_gb_oz", g.n);
+    for (FPV* p : {&g.AC, &g.AFX, &g.AFY, &g.AFZ})
+      *p = FPV("mg_gb_A", g.n);
+    // this rank's inner cells -> global bottom id: GraphAMG's map (buildAmg's formula and order)
+    amgGlobalOfLocal_.clear();
+    for (int k = 0; k < bt.inner.z; ++k)
+      for (int j = 0; j < bt.inner.y; ++j)
+        for (int i = 0; i < bt.inner.x; ++i)
+          amgGlobalOfLocal_.push_back((bt.og.x + i) + (bt.og.y + j) * gi.x +
+                                      (bt.og.z + k) * gi.x * gi.y);
+    gatherv(amgGlobalOfLocal_, gbGid_, bt.comm);
+    gb_ = g;
+    gbActive_ = true;
+    return true;
+#else
+    return false;
+#endif
+  }
+  // gb_'s extended index of global bottom id `gid` (x fastest).
+  long gbIndex(int gid) const {
+    const int gx = gid % gb_.inner.x, t = gid / gb_.inner.x;
+    const int gy = t % gb_.inner.y, gz = t / gb_.inner.y;
+    return (long)(gx + 1) + (long)(gy + 1) * gb_.ext.x + (long)(gz + 1) * gb_.ext.x * gb_.ext.y;
+  }
+  // §14 H-6, once per operator change (setOpenness): allgather the bottom level's inner openness
+  // by global id into gb_, then the single-rank fillOpenness, applyBoundaryOpenness and
+  // buildCutcellOpFace (same gf as the single-rank bottom build). An operator the direct engine
+  // can never take (an outflow face, a non-singular operator) is not built.
+  void buildGlobalBottomOp() {
+#ifdef PECLET_FLOW_MPI
+    if (!removeMean_ || hasOutflow_)
+      return;
+    Level& bt = lv_.back();
+    const int g = bt.g, ex = bt.ext.x, ey = bt.ext.y;
+    auto hox = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bt.ox);
+    auto hoy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bt.oy);
+    auto hoz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bt.oz);
+    std::vector<double> lo;
+    lo.reserve(3 * amgGlobalOfLocal_.size());
+    for (int k = 0; k < bt.inner.z; ++k)
+      for (int j = 0; j < bt.inner.y; ++j)
+        for (int i = 0; i < bt.inner.x; ++i) {
+          const long p = (long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey;
+          lo.push_back(hox(p));
+          lo.push_back(hoy(p));
+          lo.push_back(hoz(p));
+        }
+    std::vector<double> go;
+    gatherv(lo, go, bt.comm);
+    Level& gb = gb_;
+    auto gox = Kokkos::create_mirror_view(gb.ox);
+    auto goy = Kokkos::create_mirror_view(gb.oy);
+    auto goz = Kokkos::create_mirror_view(gb.oz);
+    for (std::size_t r = 0; r < gbGid_.size(); ++r) {
+      const long q = gbIndex(gbGid_[r]);
+      gox(q) = go[3 * r];
+      goy(q) = go[3 * r + 1];
+      goz(q) = go[3 * r + 2];
+    }
+    Kokkos::deep_copy(gb.ox, gox);
+    Kokkos::deep_copy(gb.oy, goy);
+    Kokkos::deep_copy(gb.oz, goz);
+    fillLocal(gb, gb.ox);  // the single-rank fillOpenness
+    fillLocal(gb, gb.oy);
+    fillLocal(gb, gb.oz);
+    applyBoundaryOpenness(gb);
+    const double sx = 1.0 / (double)(gb.cfac.x * gb.cfac.x),
+                 sy = 1.0 / (double)(gb.cfac.y * gb.cfac.y),
+                 sz = 1.0 / (double)(gb.cfac.z * gb.cfac.z);
+    buildCutcellOpFace(gb.AC, gb.AFX, gb.AFY, gb.AFZ, CCConst(gb.ox), CCConst(gb.oy),
+                       CCConst(gb.oz), gb.ext, gb.g, gfx_ * sx, gfy_ * sy, gfz_ * sz);
+#endif
+  }
+  // §14 H-6, per V-cycle: allgatherv the bottom rhs (as graphAmgSolveBottom does) into gb_.rhs.
+  void gatherGlobalBottomRhs() {
+#ifdef PECLET_FLOW_MPI
+    Level& bt = lv_.back();
+    const int g = bt.g, ex = bt.ext.x, ey = bt.ext.y;
+    auto hrhs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bt.rhs);
+    std::vector<double> lb;
+    lb.reserve(amgGlobalOfLocal_.size());
+    for (int k = 0; k < bt.inner.z; ++k)
+      for (int j = 0; j < bt.inner.y; ++j)
+        for (int i = 0; i < bt.inner.x; ++i)
+          lb.push_back(hrhs((long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey));
+    std::vector<double> gbv;
+    gatherv(lb, gbv, bt.comm);
+    auto grhs = Kokkos::create_mirror_view(gb_.rhs);
+    for (std::size_t r = 0; r < gbGid_.size(); ++r)
+      grhs(gbIndex(gbGid_[r])) = gbv[r];
+    Kokkos::deep_copy(gb_.rhs, grhs);
+#endif
+  }
+  // §14 H-6, per V-cycle: this rank's block of gb_.x into the bottom level's x (ghosts 0, as
+  // graphAmgSolveBottom leaves them).
+  void scatterGlobalBottomX() {
+    Level& bt = lv_.back();
+    const int g = bt.g, ex = bt.ext.x, ey = bt.ext.y;
+    auto hgx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), gb_.x);
+    auto hx = Kokkos::create_mirror_view(bt.x);
+    Kokkos::deep_copy(hx, 0.0);
+    std::size_t c = 0;
+    for (int k = 0; k < bt.inner.z; ++k)
+      for (int j = 0; j < bt.inner.y; ++j)
+        for (int i = 0; i < bt.inner.x; ++i)
+          hx((long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey) =
+              hgx(gbIndex(amgGlobalOfLocal_[c++]));
+    Kokkos::deep_copy(bt.x, hx);
+  }
   // Condition 6, as B1b replaced it (§5.14): the bottom level's fluid components, labelled on the
   // device by BottomLabelKernel -- eligible with 1..64 of them (the register's per-component
   // projector for the agglomerated bottom; more go to GraphAMG) -- and, along the slow axis, each
@@ -4435,7 +4583,7 @@ class CutcellMG {
     bottomNComp_ = 0;
     if (!bottomStore_)
       return;
-    const Level& bt = lv_.back();
+    const Level& bt = bottomLv();
     BottomLabelKernel k;
     k.ext = bt.ext;
     k.inner = bt.inner;
@@ -4464,7 +4612,7 @@ class CutcellMG {
   template <class FR = float>  // PRECISION-EXEMPT: the FP32 direct factor under an FP64 FCG
   BottomKernel<FR> makeBottomKernel(bool precondOnly) {
     ensureScalars();
-    Level& bt = lv_.back();
+    Level& bt = bottomLv();
     BottomKernel<FR> k;
     k.lv.ext = bt.ext;
     k.lv.inner = bt.inner;
@@ -4522,7 +4670,7 @@ class CutcellMG {
   template <class FR>
   int launchDirectFactor(const BottomDirect<FR>& D, int team, double tauPiv0, bool probe = true,
                          bool teamAlgorithm = false) {
-    const Level& bt = lv_.back();
+    const Level& bt = bottomLv();
     BottomFactorKernel<FR, FPC> k;
     k.D = D;
     k.AFX = bt.AFX;
@@ -4563,6 +4711,8 @@ class CutcellMG {
   // host flag, not a device read).
   void directBottomSolve() {
     const bool first = dirTeam_ == 0;
+    if (gbActive_)
+      gatherGlobalBottomRhs();  // §14 H-6: every rank solves the identical global bottom
     if (facStale_) {
       dirFacTeam_ = launchDirectFactor(dir_, dirFacTeam_, dirPivotTol_, /*probe=*/false);
       facStale_ = false;
@@ -4574,11 +4724,13 @@ class CutcellMG {
     }
     dirTeam_ =
         launchDirectKernel(dir_, false, dirTeam_, false, CCField(), CCField(), /*probe=*/false);
+    if (gbActive_)
+      scatterGlobalBottomX();  // each rank copies its own block of x out
     if (first && mgDebugLevel()) {
       printf(
           "[mg] direct bottom: %dx%dx%d, slow axis %d, P = %d, b = %d, border %d; team sizes "
           "factor %d, solve %d\n",
-          lv_.back().inner.x, lv_.back().inner.y, lv_.back().inner.z, dirPlanes_.s, dirPlanes_.P,
+          bottomLv().inner.x, bottomLv().inner.y, bottomLv().inner.z, dirPlanes_.s, dirPlanes_.P,
           dirPlanes_.b, dirPlanes_.border, dirFacTeam_, dirTeam_);
       fflush(stdout);
     }
@@ -5064,6 +5216,11 @@ class CutcellMG {
       return;
     }
 #endif
+    fillLocal(lv, f);
+  }
+  // The single-rank ghost fill of a level field (the periodic wrap copy); under MPI also the
+  // §14 H-6 global bottom gb_'s, which is single-rank-shaped on every rank.
+  void fillLocal(Level& lv, CCField f) {
     if (lv.inner.x < lv.g || lv.inner.y < lv.g || lv.inner.z < lv.g) {
       // a ghost band wider than the block: the sequential passes copy ghost from ghost, which the
       // one-shot wrap does not reproduce -- keep them
@@ -5850,6 +6007,11 @@ class CutcellMG {
   // factor's staleness (set by setOpenness), the two kernels' team sizes, the first attempt's
   // pivot floor (kBottomPivotTol; the U5 hook raises it).
   bool bottomStore_ = false;
+  // §14 H-6: the host global bottom (buildGlobalBottomLevel), whether it is the direct bottom's
+  // level, and every bottom rank's inner global ids in gather order.
+  Level gb_;
+  bool gbActive_ = false;
+  std::vector<int> gbGid_;
   BottomPlanes dirPlanes_;
   BottomDirect<float> dir_;  // PRECISION-EXEMPT: the FP32 direct factor under an FP64 FCG (§13)
   Kokkos::View<int*, CCMem> dirKc_;
@@ -6203,7 +6365,7 @@ class CutcellMG {
   template <class FR>
   BottomDirect<FR> directFactorForTest(int team, double tauPiv0 = kBottomPivotTol,
                                        int* Tused = nullptr, bool teamAlgorithm = false) {
-    BottomDirect<FR> D = BottomDirect<FR>::allocate(dirPlanes_, lv_.back().ext);
+    BottomDirect<FR> D = BottomDirect<FR>::allocate(dirPlanes_, bottomLv().ext);
     const int T = launchDirectFactor(D, team, tauPiv0, true, teamAlgorithm);
     Kokkos::fence();
     if (Tused)
