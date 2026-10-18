@@ -4440,8 +4440,9 @@ class CutcellMG {
   // single-rank bottom bitwise whenever the gathered openness does (the np-gates' hierarchy
   // property, which GraphAMG's gather relies on too). Returns false -- no gb_, GraphAMG stays --
   // on a rank idling below a telescope point and for a global bottom above kBottomMaxCells.
-  // gbGid_: every bottom rank's inner cells' global ids in gather order (rank order, then
-  // amgGlobalOfLocal_ order), gathered once per hierarchy.
+  // gbLocal_: this rank's inner cells' global ids (x fastest; gb_'s own map, never GraphAMG's
+  // amgGlobalOfLocal_, which buildAmg rewrites); gbGid_: every bottom rank's, in gather order
+  // (rank order, then gbLocal_ order), gathered once per hierarchy.
   bool buildGlobalBottomLevel() {
 #ifdef PECLET_FLOW_MPI
     const Level& bt = lv_.back();
@@ -4465,14 +4466,13 @@ class CutcellMG {
     g.oz = CCField("mg_gb_oz", g.n);
     for (FPV* p : {&g.AC, &g.AFX, &g.AFY, &g.AFZ})
       *p = FPV("mg_gb_A", g.n);
-    // this rank's inner cells -> global bottom id: GraphAMG's map (buildAmg's formula and order)
-    amgGlobalOfLocal_.clear();
+    // this rank's inner cells -> global bottom id (buildAmg's formula and order, on bt.gdim)
+    gbLocal_.clear();
     for (int k = 0; k < bt.inner.z; ++k)
       for (int j = 0; j < bt.inner.y; ++j)
         for (int i = 0; i < bt.inner.x; ++i)
-          amgGlobalOfLocal_.push_back((bt.og.x + i) + (bt.og.y + j) * gi.x +
-                                      (bt.og.z + k) * gi.x * gi.y);
-    gatherv(amgGlobalOfLocal_, gbGid_, bt.comm);
+          gbLocal_.push_back((bt.og.x + i) + (bt.og.y + j) * gi.x + (bt.og.z + k) * gi.x * gi.y);
+    gatherv(gbLocal_, gbGid_, bt.comm);
     gb_ = g;
     gbActive_ = true;
     return true;
@@ -4500,7 +4500,7 @@ class CutcellMG {
     auto hoy = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bt.oy);
     auto hoz = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bt.oz);
     std::vector<double> lo;
-    lo.reserve(3 * amgGlobalOfLocal_.size());
+    lo.reserve(3 * gbLocal_.size());
     for (int k = 0; k < bt.inner.z; ++k)
       for (int j = 0; j < bt.inner.y; ++j)
         for (int i = 0; i < bt.inner.x; ++i) {
@@ -4542,7 +4542,7 @@ class CutcellMG {
     const int g = bt.g, ex = bt.ext.x, ey = bt.ext.y;
     auto hrhs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), bt.rhs);
     std::vector<double> lb;
-    lb.reserve(amgGlobalOfLocal_.size());
+    lb.reserve(gbLocal_.size());
     for (int k = 0; k < bt.inner.z; ++k)
       for (int j = 0; j < bt.inner.y; ++j)
         for (int i = 0; i < bt.inner.x; ++i)
@@ -4568,7 +4568,7 @@ class CutcellMG {
       for (int j = 0; j < bt.inner.y; ++j)
         for (int i = 0; i < bt.inner.x; ++i)
           hx((long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey) =
-              hgx(gbIndex(amgGlobalOfLocal_[c++]));
+              hgx(gbIndex(gbLocal_[c++]));
     Kokkos::deep_copy(bt.x, hx);
   }
   // Condition 6, as B1b replaced it (§5.14): the bottom level's fluid components, labelled on the
@@ -6008,10 +6008,11 @@ class CutcellMG {
   // pivot floor (kBottomPivotTol; the U5 hook raises it).
   bool bottomStore_ = false;
   // §14 H-6: the host global bottom (buildGlobalBottomLevel), whether it is the direct bottom's
-  // level, and every bottom rank's inner global ids in gather order.
+  // level, this rank's inner global ids (gb_'s private map) and every bottom rank's in gather
+  // order.
   Level gb_;
   bool gbActive_ = false;
-  std::vector<int> gbGid_;
+  std::vector<int> gbLocal_, gbGid_;
   BottomPlanes dirPlanes_;
   BottomDirect<float> dir_;  // PRECISION-EXEMPT: the FP32 direct factor under an FP64 FCG (§13)
   Kokkos::View<int*, CCMem> dirKc_;
