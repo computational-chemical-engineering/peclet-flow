@@ -1185,10 +1185,11 @@ class VofBlockSet {
         WyAdvector a = std::move(it->second.back());
         it->second.pop_back();
         ++poolHits_;
-        Kokkos::deep_copy(a.colour(), 0.0);
+        // S4 (doc/vof_gpu_coarse_tail_design.md §5.5): instance-ordered fills, instance fence
+        Kokkos::deep_copy(SExec(), a.colour(), 0.0);
         for (int d = 0; d < 3; ++d)
-          Kokkos::deep_copy(a.faceVel(d), 0.0);
-        Kokkos::fence();
+          Kokkos::deep_copy(SExec(), a.faceVel(d), 0.0);
+        SExec().fence("vof::block::pool_reset");
         a.cflLimit = cflLimit;
         a.wispEps = wispEps;
         a.metric = metric_;  // a pooled advector carries whatever metric it last had
@@ -1336,7 +1337,7 @@ class VofBlockSet {
             v = src(L3(lx + g, ly + g, lz + g, se));
           dst(L3(x + g, y + g, z + g, de)) = v;
         });
-    Kokkos::fence();
+    SExec().fence("vof::block::recentre_copy");  // S4: instance, not global
     b.box = nb;
     retireAdvector(std::move(b.adv_));
     b.adv_ = std::move(fresh);
@@ -1698,7 +1699,7 @@ class VofBlockSet {
           a += c(L3(x, y, z, e));
         },
         v);
-    Kokkos::fence();
+    SExec().fence("vof::block::out_of_box");  // S4: instance, not global
     return v;
   }
 
@@ -2164,8 +2165,11 @@ class VofBlockSet {
     // (1) Courant numbers: one launch, one read, the throw before any block moves (R4)
     for (std::size_t j0 = 0; j0 < nb; j0 += kVofBlockBatch)
       vofBatchCfl(batchTable(jobs, j0), cfl);
-    Kokkos::deep_copy(Kokkos::subview(bRead1Host_, std::make_pair(std::size_t(0), off + nb)),
+    // S4: instance-scoped copy + fence (an exec-less deep_copy drains every stream twice)
+    Kokkos::deep_copy(SExec(),
+                      Kokkos::subview(bRead1Host_, std::make_pair(std::size_t(0), off + nb)),
                       Kokkos::subview(bRead1_, std::make_pair(std::size_t(0), off + nb)));
+    SExec().fence("vof::block::read1");
     applyStats(bRead1Host_.data());
     for (std::size_t k = 0; k < nb; ++k)
       mb[k]->adv_.enforceCfl(bRead1Host_(off + k), dt);
