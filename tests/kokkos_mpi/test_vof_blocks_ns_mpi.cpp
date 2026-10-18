@@ -196,14 +196,23 @@ int main(int argc, char** argv) {
     }
 
     const int STEPS = (argc > 1) ? std::atoi(argv[1]) : 12;
-    for (int cfg = 0; cfg < 2; ++cfg) {
+    // cfg 2 (host backends only, WO-H6 review note 8): configuration 0 with BOTH sides pinned to
+    // 'algebraic', so distributed GraphAMG stays gated bitwise against single-rank GraphAMG at
+    // np = 1 -- still the production engine for an outflow face, a bottom above 8192 cells or more
+    // than 64 components -- now that the host default ('auto') takes the 'direct' bottom.
+    constexpr bool hostBackend =
+        std::is_same_v<peclet::flow::CCExec::memory_space, Kokkos::HostSpace>;
+    for (int cfg = 0; cfg < (hostBackend ? 3 : 2); ++cfg) {
     const bool csf = (cfg == 1);
     if (rank == 0)
-      std::printf("  --- configuration: block advection + varRho%s\n",
-                  csf ? " + the BLOCK CSF" : " (surface tension OFF)");
+      std::printf("  --- configuration: block advection + varRho%s%s\n",
+                  csf ? " + the BLOCK CSF" : " (surface tension OFF)",
+                  cfg == 2 ? ", bottom 'algebraic' on both sides" : "");
     IbmSolver sd(lnx, lny, lnz);
     sd.initMpi(dec, MPI_COMM_WORLD);
     configure(sd, ox, oy, oz, lnx, lny, lnz, csf);
+    if (cfg == 2)
+      sd.setPressureBottomSolver(2);  // 'algebraic'
     // vof_overlap_design G0: the overlap rules must be INERT on this non-colliding pair -- no
     // clipped curvature, no debris, no marker overlap (so no phantom capillary bound) -- at
     // every step, on every rank.
@@ -264,8 +273,7 @@ int main(int argc, char** argv) {
       // GraphAMG on a device (§13.9 Q-D7), where the single-rank solver would take the device
       // bottom; the np = 1 bit-exact gate pins the reference to the engine the distributed path
       // runs.
-      ref.setPressureBottomSolver(
-          std::is_same_v<peclet::flow::CCExec::memory_space, Kokkos::HostSpace> ? 0 : 2);
+      ref.setPressureBottomSolver(hostBackend && cfg != 2 ? 0 : 2);
       for (int k = 0; k < STEPS; ++k)
         ref.step();
       std::vector<double> r[5] = {ref.getVelocity(0), ref.getVelocity(1), ref.getVelocity(2),
