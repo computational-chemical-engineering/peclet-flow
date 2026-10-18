@@ -1044,6 +1044,13 @@ class CutcellMG {
     // setOpenness at each operator build (noteFluidCells). nFluid < 0: not known -> today's path.
     long nFluid = -1;
     bool allFluid = false;
+    // S1 (doc/vof_gpu_coarse_tail_design.md §5.1, device single rank only): the same count in a
+    // device scalar, counted at each AC build by noteFluidCellsDevice, so removeMean / exitFp32 run
+    // a single-result (asynchronous) reduction instead of the {sum, count} combined reducer (Kokkos
+    // 5.1 fences twice on every reduction with two results). nFluidDevValid: counted from the
+    // current AC (a deferred level is not, until ensureFp64 builds it).
+    Kokkos::View<long, CCMem> nFluidDev;
+    bool nFluidDevValid = false;
     // D (doc/vof_projection_cost_design.md §4.4.2; single rank, non-bottom levels, built only while
     // the V-cycle precision is not 'fp64'): the FP32 face weights w_f = fl32(t_f) > 0 -- no
     // diagonal in any precision, D_i is summed from the six weights -- and the FP32 iterates.
@@ -1231,6 +1238,7 @@ class CutcellMG {
         v.x = CCField("mg_x", v.n);
         v.AC = FPV("mg_A", v.n);
       }
+      v.nFluidDev = Kokkos::View<long, CCMem>("mg_nfluid");
       v.ox = CCField("mg_ox", v.n);
       v.oy = CCField("mg_oy", v.n);
       v.oz = CCField("mg_oz", v.n);
@@ -1627,6 +1635,7 @@ class CutcellMG {
       v.x = CCField("mg_x", v.n);
       v.rhs = CCField("mg_rhs", v.n);
       v.res = CCField("mg_res", v.n);
+      v.nFluidDev = Kokkos::View<long, CCMem>("mg_nfluid");
       v.ox = CCField("mg_ox", v.n);
       v.oy = CCField("mg_oy", v.n);
       v.oz = CCField("mg_oz", v.n);
@@ -1850,6 +1859,28 @@ class CutcellMG {
     lv.nFluid = cnt;
     lv.allFluid = cnt == (long)lv.inner.x * lv.inner.y * lv.inner.z;
   }
+  // S1 (doc/vof_gpu_coarse_tail_design.md §5.1): the device twin of noteFluidCells -- the same
+  // predicate and range, a single-result reduction into the level's device scalar (asynchronous,
+  // no host read). Device single rank only; elsewhere it only clears the flag.
+  void noteFluidCellsDevice(Level& lv) {
+    lv.nFluidDevValid = false;
+    if constexpr (!kHostMemory) {
+      if (distributed_ || lv.nFluidDev.data() == nullptr)
+        return;
+      C3 e = lv.ext;
+      const int g = lv.g;
+      FPV ac = lv.AC;
+      ccReduce3(
+          "mgfluidcount", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+          KOKKOS_LAMBDA(int x, int y, int z, long& k) {
+            const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+            if (ac(i) > 1e-30f)
+              k += 1;
+          },
+          Kokkos::Sum<long, CCMem>(lv.nFluidDev));
+      lv.nFluidDevValid = true;
+    }
+  }
   // H-1: the host single-rank all-fluid fast path of the reductions below (same cells, same
   // order as the masked body; the device never takes it).
   bool hostAllFluid(const Level& lv) const {
@@ -1908,6 +1939,7 @@ class CutcellMG {
       buildCutcellOpFace(f.AC, f.AFX, f.AFY, f.AFZ, CCConst(f.ox), CCConst(f.oy), CCConst(f.oz),
                          f.ext, G, idx2, idy2, idz2);
     noteFluidCells(f);
+    noteFluidCellsDevice(f);
 #ifdef PECLET_FLOW_MPI
     // A telescope point gathers this level's openness onto the group roots (all group ranks take
     // part); the next level coarsens from that stage. A rank idling below holds no next level, so
@@ -1966,8 +1998,11 @@ class CutcellMG {
       if (deferC) {  // no AC on a deferred level: its count comes with ensureFp64
         c.nFluid = -1;
         c.allFluid = false;
-      } else
+        c.nFluidDevValid = false;
+      } else {
         noteFluidCells(c);
+        noteFluidCellsDevice(c);
+      }
 #ifdef PECLET_FLOW_MPI
       if (c.tele) {
         teleGather(c, c.ox, c.tele->ox);
@@ -3814,6 +3849,7 @@ class CutcellMG {
         buildCutcellOpFace(lv.AC, lv.AFX, lv.AFY, lv.AFZ, CCConst(lv.ox), CCConst(lv.oy),
                            CCConst(lv.oz), lv.ext, lv.g, gfx_ * sx, gfy_ * sy, gfz_ * sz);
       noteFluidCells(lv);
+      noteFluidCellsDevice(lv);
     }
   }
   // D5: release of the non-bottom levels' FP64 V-cycle data when a setter (the V-cycle precision,
@@ -3833,6 +3869,7 @@ class CutcellMG {
         v.AC = FPV();
         v.nFluid = -1;
         v.allFluid = false;
+        v.nFluidDevValid = false;
       }
     }
     fp64Stale_ = opBuilt_;
@@ -4050,8 +4087,11 @@ class CutcellMG {
     const bool counted = kHostMemory && l0.nFluid >= 0;  // H-1: the precomputed fluid count
     const bool all = counted && l0.allFluid;
     const long cnt0 = l0.nFluid;
+    // S1 (doc/vof_gpu_coarse_tail_design.md §5.1): on a device, single rank, the count counted at
+    // the operator build (no count reduction here, so the mean is a single-result reduction)
+    const bool devCounted = !kHostMemory && !distributed_ && l0.nFluidDevValid;
     auto ks = ks_;
-    auto kc = kcnt_;
+    auto kc = devCounted ? l0.nFluidDev : kcnt_;
     // the joint {sum, count} body (no precomputed count)
     auto joint = KOKKOS_LAMBDA(int x, int y, int zc, double& a, long& c) {
       const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
@@ -4061,7 +4101,16 @@ class CutcellMG {
       }
     };
     if (!distributed_) {
-      if (counted)
+      if (devCounted)
+        ccReduce3Lanes(
+            "peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+            KOKKOS_LAMBDA(int x, int y, int zc, double& a) {
+              const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+              if (ac(i) > 1e-30f)
+                a += (double)xf(i);
+            },
+            Kokkos::Sum<double, CCMem>(slot(kMsum)));
+      else if (counted)
         ccReduce3Lanes(
             "peclet::flow::mgmeanr_f32", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
             KOKKOS_LAMBDA(int x, int y, int zc, double& a) {
@@ -5960,10 +6009,24 @@ class CutcellMG {
         removeMeanHostCounted(lv, f, stopGuard);
         return;
       }
-      ccReduce3Lanes("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body,
-                     Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
+      // S1 (doc/vof_gpu_coarse_tail_design.md §5.1): on a device the count was counted at the
+      // operator build -- a single-result (asynchronous) sum; the {sum, count} pair otherwise
+      assert(kHostMemory || lv.nFluidDevValid);  // a deferred level is never mean-projected
+      const bool devCounted = !kHostMemory && lv.nFluidDevValid;
+      if (devCounted)
+        ccReduce3Lanes(
+            "mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+            KOKKOS_LAMBDA(int x, int y, int z, double& s) {
+              const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+              if (ac(i) > 1e-30f)
+                s += ff(i);
+            },
+            Kokkos::Sum<double, CCMem>(slot(kMsum)));
+      else
+        ccReduce3Lanes("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body,
+                       Kokkos::Sum<double, CCMem>(slot(kMsum)), Kokkos::Sum<long, CCMem>(kcnt_));
       auto ks = ks_;
-      auto kc = kcnt_;
+      auto kc = devCounted ? lv.nFluidDev : kcnt_;
       const bool guard = stopGuard;
       ccFor3(
           "mgmeans", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
