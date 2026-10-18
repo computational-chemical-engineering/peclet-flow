@@ -4388,6 +4388,8 @@ class CutcellMG {
     if (lv_.empty() ||
         (long)lv_.back().gdim.x * lv_.back().gdim.y * lv_.back().gdim.z > kBottomMaxCells)
       return "the bottom level has more than 8192 inner cells";  // GLOBAL (== inner single rank)
+    if (gbActive_ && !dirPlanes_.valid())  // gb_'s labels ran on no operator (buildGlobalBottomOp)
+      return "no axis gives planes of at most 192 cells (the direct factor's cap)";
     if (!bottomConnKnown_)
       return "the pressure operator has not been built (no setOpenness since the hierarchy)";
     if (!bottomConnected_)
@@ -4512,6 +4514,12 @@ class CutcellMG {
   void buildGlobalBottomOp() {
 #ifdef PECLET_FLOW_MPI
     if (!removeMean_ || hasOutflow_)
+      return;
+    // Review note 4: nor on a hierarchy where the direct bottom can never run -- no axis with
+    // valid planes (fixed at the hierarchy build), or the first build's labels outside 1..64 (fixed
+    // per hierarchy). Both are replicated over bt.comm (gb_ is), so the skip is rank-uniform. The
+    // labels of a plane-less hierarchy then run on the never-built (zero) operator: no component.
+    if (!dirPlanes_.valid() || (bottomConnKnown_ && !bottomConnected_))
       return;
     Level& bt = lv_.back();
     const int g = bt.g, ex = bt.ext.x, ey = bt.ext.y;
