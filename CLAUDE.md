@@ -256,6 +256,14 @@ you want). Detail and numbers for every bullet: ref §6.
   Known cost edge: at 1 thread per rank with a bottom near the cap, `'algebraic'` is faster (workstation
   24×1: 113 vs 161 ms/step); `'auto'` does not choose by thread count (results would then depend on
   `OMP_NUM_THREADS`). A/B with `diagnostics.set_pressure_bottom_solver`.
+- **On device, `step()` holds no global synchronization** (2026-10-19, design `doc/vof_gpu_coarse_tail_design.md`):
+  copies, fills and fences are instance-scoped (`CCExec().fence()`, never bare `Kokkos::fence()` or an exec-less
+  `deep_copy` in the step); host reads go through pinned packets. The ctest `device_sync_budget` pins 0 global
+  fences and 0 View allocations per step, and allows combined-reducer fences only for `vmg_resid_max`, `rho_minmax`
+  and `overlap_census`. Variable-ρ single-rank device: the bottom `'direct'` factor runs on a side execution
+  instance right after `updateProperties()`, joined before the first bottom solve (`joinPrefactor()` also before
+  any `lv_.clear()`); `prefactor_hoist_bitwise` proves hoist on = off. Consequence: a driver that writes
+  `field_view` arrays from its own non-blocking stream must sync that stream before `step()`.
 - **Depth follows the factors of two, per axis**: an odd dimension never coarsens; under MPI only if
   every rank's block is even. **Telescoping is the default** (`set_pressure_telescope`); the in-place
   requirement on intermediate levels is the top open item at scale
