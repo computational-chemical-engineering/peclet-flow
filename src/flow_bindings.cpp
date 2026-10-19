@@ -3903,7 +3903,12 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "needed. Call it BEFORE the geometry (set_solid / set_pressure_geometry / "
           "set_solid_from_scene): the geometry builds the pressure and velocity multigrids for "
           "the partition in force when it runs, so init_mpi raises if a geometry already exists "
-          "(built first, every rank would solve its own block-periodic pressure problem).")
+          "(built first, every rank would solve its own block-periodic pressure problem).\n\n"
+          "Placement (host OpenMP builds): threads per rank should divide the cores per L3 cache "
+          "domain (AMD EPYC Zen 4: 8; Threadripper 5965WX: 6), ideally one rank per domain -- a "
+          "rank whose threads span two domains runs measurably slower (up to +18 % step time) "
+          "and no partition fixes it. When every OpenMP thread is pinned to one CPU, rank 0 "
+          "prints one stderr line naming the ranks that straddle; nothing else changes.")
       .def(
           "rank",
           [](S&) {

@@ -66,6 +66,11 @@ not gates), 148 from `tests/kokkos_mpi` (48 cases at np = 1, 2, 4 + two np = 8 r
 module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_operator_casts`,
 `iteration_order`, and 24 `scalar_cutcell_*` gates; the six `_g6_*` take 20–35 min each).
 
+- **Threads per rank must divide the cores per L3 (CCD) domain; prefer one rank per L3 domain**
+  (`doc/vof_distributed_partition_design.md` §4(d)): a rank whose threads straddle two CCDs runs its
+  synchronization-bound kernels 1.4–2.7× slower (genoa 8×3: +17.6 ms/step), and no partition fixes
+  it. `init_mpi` prints one stderr line on rank 0 naming such ranks when every OpenMP thread is
+  pinned to one CPU (no API, no result effect). Recipes: `../docs/SNELLIUS.md`.
 - **Always bound the OpenMP pool** — unbounded on a many-core host is an hour-long trap. On a shared,
   loaded host run `_np*` with `OMP_NUM_THREADS=2` (threads per RANK): at 8 per rank, load ~110 on 48
   cores, `velocitymg_bc_mpi_np2` took 45 min instead of seconds.
@@ -261,9 +266,13 @@ you want). Detail and numbers for every bullet: ref §6.
   host — single-rank, and since 2026-10-18 distributed, redundantly on every rank from the allgathered
   bottom openness (np 1 bitwise to single-rank; np > 1 within G-NUM-H) — and on an eligible
   single-rank GPU; GraphAMG (`'algebraic'`) otherwise (outflow, above the size caps, distributed GPU).
-  Known cost edge: at 1 thread per rank with a bottom near the cap, `'algebraic'` is faster (workstation
-  24×1: 113 vs 161 ms/step); `'auto'` does not choose by thread count (results would then depend on
-  `OMP_NUM_THREADS`). A/B with `diagnostics.set_pressure_bottom_solver`.
+  The host solve (B1, `doc/vof_distributed_partition_design.md` §5.3) runs on ONE thread
+  (`kBottomHostTeam` = 1) with M lane-scheduled (`BottomDirect::laneSubstitute`, rows as SIMD lanes,
+  bitwise to the team schedule, which stays the device path and the host oracle: ctest
+  `bottom_direct` U9). That removes the old 1-thread-per-rank cost edge, which was the M
+  application (genoa 24×1: 0.70 ms per bottom solve with the team schedule). `'auto'` does not choose
+  by thread count (results would then depend on `OMP_NUM_THREADS`). A/B with
+  `diagnostics.set_pressure_bottom_solver`.
 - **On device, `step()` holds no global synchronization** (2026-10-19, design `doc/vof_gpu_coarse_tail_design.md`):
   copies, fills and fences are instance-scoped (`CCExec().fence()`, never bare `Kokkos::fence()` or an exec-less
   `deep_copy` in the step); host reads go through pinned packets. The ctest `device_sync_budget` pins 0 global
