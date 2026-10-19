@@ -144,6 +144,11 @@ Fields runChannel(int nx, int ny, int nz, double lam, bool arm) {
   s.setVelocityIterations(400);
   s.setVelocityResidualTolerance(1e-14);
   s.setPressurePcg(true, 80, 1e-13);
+  // WO-F (doc/vof_projection_distributed_design.md §9, R-8): this gate is about units, so it pins
+  // the FP64 V-cycle -- the FP32 weight rounding is not covariant under a non-power-of-two unit
+  // change (p 2.0e-11 / 1.05e-10 vs 1e-13 under 'auto' on a device); P§13 G-D2(a) gates D's
+  // power-of-two covariance.
+  s.setPressureVcyclePrecision(peclet::flow::CutcellMG::kVcycleFp64);
   // The SDF is a PHYSICAL signed distance sampled at the physical cell centres.
   const std::vector<double> cx = s.cellCentres(0), cy = s.cellCentres(1), cz = s.cellCentres(2);
   std::vector<double> sdf((std::size_t)nx * ny * nz);
@@ -184,6 +189,11 @@ Fields runSphere(int N, double lam, bool arm, bool scene) {
   s.setVelocityIterations(200);
   s.setVelocityResidualTolerance(1e-14);
   s.setPressurePcg(true, 120, 1e-13);
+  // WO-F (doc/vof_projection_distributed_design.md §9, R-8): this gate is about units, so it pins
+  // the FP64 V-cycle -- the FP32 weight rounding is not covariant under a non-power-of-two unit
+  // change (p 2.0e-11 / 1.05e-10 vs 1e-13 under 'auto' on a device); P§13 G-D2(a) gates D's
+  // power-of-two covariance.
+  s.setPressureVcyclePrecision(peclet::flow::CutcellMG::kVcycleFp64);
   if (scene) {
     namespace g = peclet::core::geom;
     g::SceneBuilder<double> b;

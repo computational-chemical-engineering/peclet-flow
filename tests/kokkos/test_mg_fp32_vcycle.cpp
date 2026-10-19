@@ -16,13 +16,13 @@
 ///       stored FP32 weights, evaluated in long double on the host);
 ///   (c) max_f |w_f / t_f - 1| <= 2^-24 (t_f = open_f * gf from the level's own operands), and
 ///       the FP32 decoupled set (all six weights 0) equals the FP64 AC < 1e-30 set;
-///   the setter's rebuild from the stored openness gives the fused build's weights bitwise; the
-///   default 'fp64' allocates no FP32 data;
+///   the setter's rebuild from the stored openness gives the fused build's weights bitwise; an
+///   'fp64' hierarchy allocates no FP32 data;
 ///   (d) eligibility is false (and names the condition) on an outflow, an overlay, an odd-dimension
 ///       and a single-level configuration and on a face weight below 1e-30 (the distributed case
 ///       is checked in the MPI ctest cutcellmg_aniso_mpi);
-///   (f) the default is 'fp64' on every backend (FP32 opt-in, USER ruling 2026-10-15) and builds
-///       no FP32 data; on the ineligible outflow and odd-dimension configurations a PCG solve
+///   (f) the default is 'auto' (WO-F, USER 2026-10-19) and its solve is bitwise the explicit
+///       'auto' solve; on a host backend it builds no FP32 data; on the ineligible outflow and odd-dimension configurations a PCG solve
 ///       with 'fp32' raises, naming the condition; 'auto' (opt-in) is bitwise (x, iterations,
 ///       reported precision) to 'fp32' on an eligible configuration (to 'fp64' on a host backend:
 ///       'auto' is FP32 on device backends only, doc/vof_projection_distributed_design.md WO-A)
@@ -578,12 +578,14 @@ void eligibilityChecks() {
     check(mg.fp32VcycleIneligible(true) == nullptr && mg.fp32WeightsOk(0),
           "eligible 16^3, scope back to 'fine': eligible, weights rebuilt");
   }
-  // (f) the default is 'fp64' on every backend (FP32 opt-in, USER ruling 2026-10-15): no FP32 data
-  // built; 'fp32' on the ineligible solvable configurations raises at the solve, naming why
+  // (f) the default is 'auto' (WO-F, USER 2026-10-19; 'fp64' under the 2026-10-15 opt-in ruling):
+  // the default solve is bitwise the explicit 'auto' solve; on a host backend 'auto' is 'fp64'
+  // (WO-A) and builds no FP32 data, on a device backend it is 'fp32' where eligible; 'fp32' on the
+  // ineligible solvable configurations raises at the solve, naming why
   {
     Problem ok = makeProblem("eligible", 16, 16, 16, 3, bcPer, ones, uni);
     CutcellMG dflt;
-    check(dflt.vcyclePrecision() == CutcellMG::kVcycleFp64, "(f) the default mode is 'fp64'");
+    check(dflt.vcyclePrecision() == CutcellMG::kVcycleAuto, "(f) the default mode is 'auto'");
     dflt.init(ok.nx, ok.ny, ok.nz, ok.levels);
     dflt.setBoundaryConditions(ok.bc);
     dflt.setOpenness(CCConst(toDevice(ok.ox, "ox")), CCConst(toDevice(ok.oy, "oy")),
@@ -592,10 +594,16 @@ void eligibilityChecks() {
     for (int L = 0; L < dflt.nLevels(); ++L)
       none = none && dflt.level(L).WX.extent(0) == 0;
     const Solve a = solveOn(dflt, ok);
-    check(none && !a.fp32, "eligible 16^3: (f) the default builds no FP32 data, FP64 reported");
-    const Solve f = solve(ok, CutcellMG::kVcycleFp32), b = solve(ok, CutcellMG::kVcycleAuto);
+    const Solve f = solve(ok, CutcellMG::kVcycleFp32), b = solve(ok, CutcellMG::kVcycleAuto),
+                d = solve(ok, CutcellMG::kVcycleFp64);
+    check(sameSolve(a, b), "eligible 16^3: (f) the default solve == the explicit 'auto' solve "
+                           "bitwise, it " + std::to_string(a.it) + " / " + std::to_string(b.it));
+    check(CutcellMG::kHostMemory ? (none && !a.fp32) : (!none && a.fp32),
+          std::string("eligible 16^3: (f) the default ") +
+              (CutcellMG::kHostMemory ? "builds no FP32 data, FP64 reported (host)"
+                                      : "builds FP32 data, FP32 reported (device)"));
     if (CutcellMG::kHostMemory)  // WO-A: 'auto' is FP32 on device backends only
-      check(f.fp32 && !b.fp32 && sameSolve(a, b),
+      check(f.fp32 && !b.fp32 && sameSolve(d, b),
             "eligible 16^3: (f) host 'auto' == 'fp64' bitwise, it " + std::to_string(a.it) + " / " +
                 std::to_string(b.it) + ", FP64 reported ('fp32' runs: it " + std::to_string(f.it) +
                 ")");

@@ -3,8 +3,11 @@
 > **Landed (2026-10-17), defaults unchanged:** WO-R 99dd50b, WO-A 85b66fb, WO-D1 acf495a, WO-D2a 87cdd62,
 > WO-D2b0 5baf24b, WO-D2b1 afa062b, WO-E a7d3e9e, WO-G 471b03b, review fixes e4f75df (review:
 > `bubble_column_perf/gate_dist/REVIEW.md`, WO-F GO, no blockers). Gate numbers: `doc/vof_step_performance_log.md`.
-> **WO-F (the flip) waits on S-4** (Snellius H100, one rank per GPU, np 1/2/4/8): the workstation's np 2
-> G-DD4 (two ranks on one GPU, latency-bound) passed at 1.019 vs 1.02 and cannot show the np > 1 gain.
+> **WO-F landed (2026-10-19, USER "Yes, make the GPU V-cycle default 'auto'"): the V-cycle default is
+> `'auto'`** at every np, after S-4 (Snellius H100, one rank per GPU: projection auto/fp64 0.970 np 1,
+> 0.974/0.711/0.645 strong np 2/4/8, 0.979/0.981/0.829 weak np 2/4/8; 0 restarts) and F-1…F-7 on the
+> flip commit (numbers: `doc/vof_step_performance_log.md`). CUDA results recorded, host bitwise; E stays
+> `'zero'`.
 > **Open issue (pre-existing, not this package):** the staggered cut-cell cylinder Stokes case is not
 > bitwise serial ↔ np = 1 even under `'zero'` (step 1: du 1.0e-17, dp 4.6e-11, at 0cc1a3a).
 
@@ -22,7 +25,7 @@
 > **E-dist.** The Gram packet is allreduced (one SUM of five, one MAX), the guard unchanged, history
 > reset on `init_mpi` and every `redistribute`. Opt-in parity only. **Flip.** `'auto'` becomes
 > FP32-where-eligible **on device backends only** (host `'auto'` = FP64), then one commit makes it the
-> default once gates F-1…F-7 (§9) pass on the commit itself.
+> default once gates F-1…F-7 (§9) pass on the commit itself (done 2026-10-19, WO-F).
 
 **Status:** DESIGN, 2026-10-16. Brief: `~/Codes/bubble_column_perf/gate_dist/BRIEF_ARCH.md`, recon
 digest `…/gate_dist/RECON.md`. Code read at flow `ab8a4ee` (branch `projdist`). Parent design:

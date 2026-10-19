@@ -6300,9 +6300,12 @@ class CutcellMG {
   // P1 of the defect-correction campaign — the exact (matrix-free, double, flux-form) level-0
   // operator apply in the residual and the Krylov matvec. See mac_cutcell.hpp.
   bool exactResidual_ = false;
-  // D (§4.4.6): the V-cycle precision mode (kVcycleFp64 = the default; kVcycleFp32, kVcycleAuto
-  // opt-in). opBuilt_: setOpenness has built the operator of the current hierarchy.
-  int vprec_ = kVcycleFp64;
+  // D (§4.4.6): the V-cycle precision mode. kVcycleAuto = the default since WO-F (USER
+  // 2026-10-19; doc/vof_projection_distributed_design.md §9): FP32 where eligible on a device
+  // backend, single rank and distributed, FP64 restart on failure; host 'auto' = FP64.
+  // kVcycleFp64 / kVcycleFp32 forced. opBuilt_: setOpenness has built the operator of the current
+  // hierarchy.
+  int vprec_ = kVcycleAuto;
   bool opBuilt_ = false;
   // Finding 5: the per-level face-range flags of the FP32 weights (device) and their read-back.
   Kokkos::View<int*, CCMem> wBad_;

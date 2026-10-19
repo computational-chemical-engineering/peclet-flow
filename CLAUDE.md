@@ -231,8 +231,9 @@ you want). Detail and numbers for every bullet: ref §6.
   degraded** on a high-contrast bed (`../docs/SCALING_ISSUES.md` #1). Ctest `no_float_operator_casts`
   fails on a new `(float)` cast outside `// PRECISION-EXEMPT: <reason>`; `GpOverlay`'s two exempt
   casts are a real cross-repo gap (core's `gpFillRow` is float-hardcoded), not dead code.
-- **Projection fast paths are OPT-IN; the defaults stay `'fp64'` / `'zero'` (USER 2026-10-15).**
-  `diagnostics.set_pressure_vcycle_precision('fp64'|'fp32'|'auto')`: an FP32 V-cycle preconditioner
+- **The V-cycle precision defaults to `'auto'` (USER 2026-10-19, WO-F); the initial guess stays
+  `'zero'` (opt-in, USER 2026-10-15).**
+  `diagnostics.set_pressure_vcycle_precision('auto'|'fp64'|'fp32')`: an FP32 V-cycle preconditioner
   below the exact FP64 PCG/FCG (face weights, derived diagonal, flux form; projection −19 % on the
   RTX 5080, −11 % on host, bubble column). `diagnostics.set_pressure_initial_guess('zero'|'projected'|
   'auto')`: the A-norm projected guess (−0.83…−0.87 PCG iterations/step). The forced value raises
@@ -241,9 +242,11 @@ you want). Detail and numbers for every bullet: ref §6.
   FP64 below), and `'auto'` for the V-cycle = FP32 where eligible **on device backends only** (host
   `'auto'` ≡ `'fp64'`) **with an FP64 restart**: an FP32 attempt that misses its stop test (cap,
   non-finite, pAp breakdown) is re-solved cold in FP64 (bitwise the `'fp64'` solve) and FP64 is
-  latched for the run until the setter is called again; forced `'fp32'` never restarts. The D default
-  flip (to `'auto'`) waits on the S-4 one-rank-per-GPU measurement; E's default stays `'zero'` (E1
-  failed its own gate). `'auto'` at np > 1 keeps FP64 + FP32 level data (≈ +30 % MG memory). Host CutcellMG sums use 4 x-lanes (`ccReduce3Lanes`, C0: host pressure
+  latched for the run until the setter is called again; forced `'fp32'` never restarts. The default
+  became `'auto'` on 2026-10-19 (gates F-1…F-7, design §9; S-4: auto/fp64 ≤ 1 at np 1/2/4/8 on H100),
+  so CUDA results moved (class "recorded"; host `'auto'` ≡ `'fp64'`, host results bitwise); pass
+  `'fp64'` for an FP64-only device run (`units_scale_invariance` does: FP32 weight rounding is not
+  covariant under a non-power-of-two unit change). E's default stays `'zero'` (E1 failed its own gate). `'auto'` at np > 1 keeps FP64 + FP32 level data (≈ +30 % MG memory). Host CutcellMG sums use 4 x-lanes (`ccReduce3Lanes`, C0: host pressure
   results moved once, ≤ 6.5e-14 relative); the fused host Krylov reductions (C1–C4) are
   single-rank host only.
 - `set_pressure_bottom("auto")` (default) agglomerates the coarsest level into a global operator solved
