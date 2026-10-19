@@ -232,7 +232,10 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    auto dec = peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size), N, N, N);
+    // levels = 1 pins the LEGACY aligned ORB: the tow path below was laid out across its cuts
+    // (48^3 np 2: x = 32 | 16). The auto default balances 48^3 np 2 to 24 | 24, which the towed
+    // sphere never crosses, and the crossing is what this test gates.
+    auto dec = peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size), N, N, N, 1);
     auto blk = dec.block(rank);
     const int ox = (int)blk.origin[0], oy = (int)blk.origin[1], oz = (int)blk.origin[2];
     const int lnx = (int)blk.size[0], lny = (int)blk.size[1], lnz = (int)blk.size[2];

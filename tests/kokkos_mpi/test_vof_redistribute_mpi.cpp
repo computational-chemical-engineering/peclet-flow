@@ -208,10 +208,12 @@ int main(int argc, char** argv) {
     const int STEPS = (argc > 1) ? std::atoi(argv[1]) : 12;
     const int MOVE_AT = STEPS / 2;
 
-    // D1 = the solver's own default partition; D2 = the WEIGHTED ORB the rebalance produces.
-    // The weight field is the interface-weighted one WO-V9 item 4 uses (1 + W*[mixed]), condensed
-    // to "1 + W where the two bubbles are" so the test does not depend on the transported state.
-    auto D1 = peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size), NX, NY, NZ);
+    // D1 = the legacy aligned ORB (levels = 1, pinned); D2 = the WEIGHTED ORB the rebalance
+    // produces. The weight field is the interface-weighted one WO-V9 item 4 uses (1 + W*[mixed]),
+    // condensed to "1 + W where the two bubbles are" so the test does not depend on the transported
+    // state. D1 is pinned because the auto default balances 24x24x48 np 2 to exactly the weighted
+    // ORB's partition, so the partition would not move and nothing would be gated.
+    auto D1 = peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size), NX, NY, NZ, 1);
     std::vector<peclet::core::Real> w(GCELLS, 1.0);
     for (int z = 0; z < NZ; ++z)
       for (int y = 0; y < NY; ++y)
