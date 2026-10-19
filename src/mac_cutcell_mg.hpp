@@ -2216,6 +2216,7 @@ class CutcellMG {
     if (f32 && fp32FaultKind_ == 2)
       maxit = std::min(maxit, fp32FaultAt_);
     attemptMaxit_ = maxit;
+    const bool fuseK4 = distKrylovFusion();  // K4 (§5.4): C2-C4, the same MPI calls
     auto rzFp32 = [&](int k) {  // the exit pass's local r^T z (slot k), summed over the ranks
 #ifdef PECLET_FLOW_MPI
       return allreduce(readSlot(k), MPI_SUM_, l0.comm);
@@ -2252,6 +2253,9 @@ class CutcellMG {
         precondVcycleFp32(z, r, std::ilogb(r0), kRz, CCField());
         Kokkos::deep_copy(CCExec(), p, z);
         rz = rzFp32(kRz);
+      } else if (fuseK4) {  // K4 C4: r^T z from the V-cycle's level-0 exit pass
+        rz = precondDotDist(z, r);
+        Kokkos::deep_copy(CCExec(), p, z);
       } else {
         precond(z, r);
         Kokkos::deep_copy(CCExec(), p, z);
@@ -2286,10 +2290,15 @@ class CutcellMG {
           break;                  // keep the last finite iterate
         }
         const double alpha = rz / pAp;
-        axpy(x, alpha, p);
-        axpy(r, -alpha, Ap);
-        removeMean(l0, r);
-        const double rn = maxabs(l0, r);
+        double rn = 0.0;
+        if (fuseK4) {
+          rn = pcgUpdateMeanMaxDist(l0, x, r, p, Ap, alpha);  // K4 C2 + C3
+        } else {
+          axpy(x, alpha, p);
+          axpy(r, -alpha, Ap);
+          removeMean(l0, r);
+          rn = maxabs(l0, r);
+        }
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
@@ -2301,6 +2310,8 @@ class CutcellMG {
         if (f32) {  // §5.7
           precondVcycleFp32(z, r, std::ilogb(rn), kRzNew, CCField());
           rznew = rzFp32(kRzNew);
+        } else if (fuseK4) {
+          rznew = precondDotDist(z, r);  // K4 C4
         } else {
           precond(z, r);
           rznew = dot(l0, r, z);
@@ -3097,6 +3108,8 @@ class CutcellMG {
     if (f32 && fp32FaultKind_ == 2)
       maxit = std::min(maxit, fp32FaultAt_);
     attemptMaxit_ = maxit;
+    const bool fuseC23 = distKrylovFusion();  // K4 (§5.4): C2 + C3, the same MPI calls
+    const bool fuseC4 = fuseC23 && !f32;      // C4 on the FP64 V-cycle (FP32 keeps FCG's dots)
     healthLog_.clear();
     auto precond = [&](CCField zz, CCField rr, double rn) {
       if (f32)
@@ -3142,9 +3155,15 @@ class CutcellMG {
     if (r0 > 0.0 && std::isfinite(r0)) {
       if (f32 && distributed_)  // D-dist §5.5: the exit writes inner z only; wall ghosts stay 0
         Kokkos::deep_copy(CCExec(), z, 0.0);
-      precond(z, r, r0);
-      Kokkos::deep_copy(CCExec(), p, z);
-      double rz = dot(l0, r, z);
+      double rz = 0.0;
+      if (fuseC4) {  // K4 C4: r^T z from the V-cycle's level-0 exit pass
+        rz = precondDotDist(z, r);
+        Kokkos::deep_copy(CCExec(), p, z);
+      } else {
+        precond(z, r, r0);
+        Kokkos::deep_copy(CCExec(), p, z);
+        rz = dot(l0, r, z);
+      }
       if (!std::isfinite(rz)) {
         solveFailed_ = true;  // ISSUES sweep item 6 -- see solvePCG for the mechanism
         printf(
@@ -3170,10 +3189,15 @@ class CutcellMG {
           break;                  // keep the last finite iterate
         }
         const double alpha = rz / pAp;
-        axpy(x, alpha, p);
-        axpy(r, -alpha, Ap);
-        removeMean(l0, r);
-        const double rn = maxabs(l0, r);
+        double rn = 0.0;
+        if (fuseC23) {
+          rn = pcgUpdateMeanMaxDist(l0, x, r, p, Ap, alpha);  // K4 C2 + C3
+        } else {
+          axpy(x, alpha, p);
+          axpy(r, -alpha, Ap);
+          removeMean(l0, r);
+          rn = maxabs(l0, r);
+        }
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
@@ -3182,8 +3206,14 @@ class CutcellMG {
           break;
         }
         Kokkos::deep_copy(CCExec(), zp, z);  // z_k, before the preconditioner overwrites it
-        precond(z, r, rn);
-        const double rznew = dot(l0, r, z), rzcross = dot(l0, r, zp);
+        double rznew = 0.0;
+        if (fuseC4) {
+          rznew = precondDotDist(z, r);  // K4 C4
+        } else {
+          precond(z, r, rn);
+          rznew = dot(l0, r, z);
+        }
+        const double rzcross = dot(l0, r, zp);
         if (!std::isfinite(rznew) || !std::isfinite(rzcross)) {
           solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
           break;                // preconditioner breakdown: keep the last finite iterate
@@ -3712,6 +3742,11 @@ class CutcellMG {
     if (L == 0 && exitDot_.k >= 0) {  // C4: the exit subtract also forms r^T z (solvePCGResident)
       removeMeanDotTo(lv, exitDot_.k, exitDot_.p);
       exitDot_.done = true;
+      return;
+    }
+    if (L == 0 && exitDotDist_.on) {  // K4 C4: the distributed exit also forms the local r^T z
+      exitDotDist_.local = removeMeanDotDist(lv);
+      exitDotDist_.done = true;
       return;
     }
     if (meanRemovalAll_ || L == 0)
@@ -6228,22 +6263,154 @@ class CutcellMG {
     double sum = 0;
     long cnt = 0;
     ccReduce3Lanes("mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, body, sum, cnt);
+    double mean = 0.0;
+    if (!globalMean(lv, sum, cnt, mean))
+      return;
+    ccFor3(
+        "mgmeans", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, KOKKOS_LAMBDA(int x, int y, int z) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          meanSubtractCell(ff, ac, i, mean);
+        });
+  }
+  // The distributed removeMean's global mean: the local fluid {sum, count} summed over the
+  // level's ranks by ONE allreduceSum2 (one latency hit for the pair). false when the global
+  // count is 0 (removeMean then subtracts nothing).
+  bool globalMean(Level& lv, double sum, long cnt, double& mean) {
     double dcnt = (double)cnt;
     allreduceSum2(sum, dcnt
 #ifdef PECLET_FLOW_MPI
                   ,
                   lv.comm
 #endif
-    );  // ONE latency hit for the {sum, count} pair (was two)
+    );
     cnt = (long)dcnt;
     if (cnt == 0)
-      return;
-    const double mean = sum / (double)cnt;
-    ccFor3(
-        "mgmeans", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g}, KOKKOS_LAMBDA(int x, int y, int z) {
+      return false;
+    mean = sum / (double)cnt;
+    return true;
+  }
+
+  // --- K4 (doc/vof_distributed_host_comm_design.md §5.4): distributed host Krylov fusion ------
+  // C2-C4 of doc/vof_projection_cost_design.md §6 in the distributed host-scalar loops of
+  // solvePCGAttempt and solveFCGAttempt: the same cells, operand order, masks and 4-lane order
+  // as the unfused kernels, then the SAME MPI calls in the same order (removeMean's
+  // allreduceSum2, maxabs' MAX, dot's SUM), so every global scalar is bitwise unchanged at every
+  // np. Host memory and a singular operator only (removeMean_: otherwise removeMean spends no
+  // Allreduce and there is no sum to fuse); C1 is not ported (the box matvec splits rows between
+  // interior and shell, so the lane order cannot be kept). Elsewhere the unfused kernels.
+  bool distKrylovFusion() const { return kHostMemory && distributed_ && removeMean_; }
+  // C2 + C3: x += alpha p, r -= alpha Ap (axpy's expressions) over the INNER cells, with the
+  // fluid {sum, count} of the new r in removeMean's body and 4-lane order; the global mean
+  // (removeMean's allreduceSum2); then the subtract (meanSubtractCell, skipped on a zero global
+  // count) fused with the local max|r| (maxabs' predicate and Max reducer; max is order-free) and
+  // maxabs' MAX Allreduce. Returns the global max|r|: bitwise to axpy, axpy, removeMean, maxabs.
+  // The ghost entries of x and r are no longer updated (§ C amendment 4): no reader consumes them
+  // -- the matvec exchanges or wrap-reads p, never x or r; the V-cycle reads r = l0.rhs at inner
+  // cells only (no level-0 rhs exchange: A5), the FP32 entry/exit likewise; the reductions and
+  // the final removeMean run over inner cells; the caller copies x's inner cells (copyInner), and
+  // a warm-start / projected-guess x is exchanged or wrap-read by the next solve's matvec.
+  double pcgUpdateMeanMaxDist(Level& l0, CCField x, CCField r, CCField p, CCField Ap,
+                              double alpha) {
+    const C3 e = l0.ext;
+    const int g = l0.g;
+    CCField xx = x, rr = r, pp = p, aa = Ap;
+    FPV ac = l0.AC;
+    const double a = alpha, na = -alpha;
+    double sum = 0;
+    long cnt = 0;
+    ccReduce3Lanes(
+        "mgpcg_update_sum", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x_, int y, int z, double& s, long& k) {
+          const long i = (long)x_ + (long)y * e.x + (long)z * (long)e.x * e.y;
+          xx(i) += a * pp(i);
+          rr(i) += na * aa(i);
+          if (ac(i) > 1e-30f) {
+            s += rr(i);
+            k += 1;
+          }
+        },
+        sum, cnt);
+    double mean = 0.0;
+    const bool sub = globalMean(l0, sum, cnt, mean);
+    double m = 0;
+    ccReduce3(
+        "mgmeans_max", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x_, int y, int z, double& acc) {
+          const long i = (long)x_ + (long)y * e.x + (long)z * (long)e.x * e.y;
+          if (sub)
+            meanSubtractCell(rr, ac, i, mean);
+          if (ac(i) > 1e-30f) {
+            const double v = Kokkos::fabs(rr(i));
+            if (v > acc)
+              acc = v;
+          }
+        },
+        Kokkos::Max<double>(m));
+#ifdef PECLET_FLOW_MPI
+    return allreduce(m, MPI_MAX_, l0.comm);
+#else
+    return allreduce(m, MPI_MAX_);
+#endif
+  }
+  // C4, the level-0 V-cycle exit (vcycleImpl, on request of precondDotDist): removeMean(lv, z =
+  // lv.x)'s distributed {sum, count} reduce and allreduceSum2, then the subtract fused with the
+  // local r^T z (r = lv.rhs: A5 binds the caller's r) in dot's mask, operand order and 4-lane
+  // order. Returns the LOCAL r^T z; the caller spends dot's SUM Allreduce on it.
+  double removeMeanDotDist(Level& lv) {
+    const C3 e = lv.ext;
+    const int g = lv.g;
+    CCField zz = lv.x, rr = lv.rhs;
+    FPV ac = lv.AC;
+    double sum = 0;
+    long cnt = 0;
+    ccReduce3Lanes(
+        "mgmeanr", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int z, double& s, long& k) {
           const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
-          meanSubtractCell(ff, ac, i, mean);
-        });
+          if (ac(i) > 1e-30f) {
+            s += zz(i);
+            k += 1;
+          }
+        },
+        sum, cnt);
+    double mean = 0.0;
+    const bool sub = globalMean(lv, sum, cnt, mean);
+    double acc = 0;
+    ccReduce3Lanes(
+        "mgmeans_dot", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int zc, double& d) {
+          const long i = (long)x + (long)y * e.x + (long)zc * (long)e.x * e.y;
+          if (sub)
+            meanSubtractCell(zz, ac, i, mean);
+          if (ac(i) > 1e-30f)
+            d += rr(i) * zz(i);
+        },
+        acc);
+    return acc;
+  }
+  // C4's driver half: z = M r (precondVcycle) with r^T z formed in the level-0 exit pass, then
+  // dot's SUM Allreduce; a V-cycle without that exit (a one-level hierarchy) leaves `done` false
+  // -> dot(). Returns the global r^T z: bitwise to precondVcycle(z, r) + dot(l0, r, z).
+  struct ExitDotDist {
+    bool on = false, done = false;
+    double local = 0.0;
+  };
+  ExitDotDist exitDotDist_;
+  double precondDotDist(CCField z, CCField r) {
+    struct Reset {  // the request never outlives this V-cycle (exception-safe)
+      ExitDotDist& d;
+      ~Reset() { d = ExitDotDist{}; }
+    } reset{exitDotDist_};
+    exitDotDist_ = ExitDotDist{true, false, 0.0};
+    precondVcycle(z, r);
+    Level& l0 = lv_[0];
+    if (!exitDotDist_.done)
+      return dot(l0, r, z);
+#ifdef PECLET_FLOW_MPI
+    return allreduce(exitDotDist_.local, MPI_SUM_, l0.comm);
+#else
+    return allreduce(exitDotDist_.local, MPI_SUM_);
+#endif
   }
 
   // Mean-removal scope. "all" (legacy): project the nullspace out at every V-cycle level,

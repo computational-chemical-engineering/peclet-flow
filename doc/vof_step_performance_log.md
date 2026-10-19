@@ -1865,3 +1865,37 @@ Exchanges/step stay 377 (K3 changes partners, not exchanges). Package gate L-c n
 (met, provisional, K1 + fence + K3 together). L-e ≤ 1.10× L-a: L-a not re-run interleaved (WO-0's 79.4 at load
 54–84). The L-c bench median moving opposite to its M1 non-kernel share is not resolved at this load. Scripts
 `distcomm/k3/gperf.sh`, raw `distcomm/wo0/{k3perf_base,k3perf_k3,k3trace}/`.
+
+### distcomm WO-K4 — distributed host Krylov fusion C2–C4 (2026-10-19; `doc/vof_distributed_host_comm_design.md` §5.4)
+
+`CutcellMG::distKrylovFusion()` (host memory, distributed, singular operator) selects in the distributed
+host-scalar loops of `solvePCGAttempt` and `solveFCGAttempt`: **C2 + C3** `pcgUpdateMeanMaxDist` — the update
+over the inner rows with the fluid {sum, count} of r in removeMean's 4-lane order, removeMean's `allreduceSum2`
+(`globalMean`, now shared with `removeMean`), the subtract fused with the local max|r|, maxabs' MAX Allreduce;
+**C4** `precondDotDist` — the level-0 V-cycle exit (`removeMeanDotDist`) subtracts and forms the local r·z, the
+driver spends dot's SUM Allreduce (FCG: r·z_new only, FP64 V-cycle only; r·z_old stays a dot). C1 not ported.
+The same MPI calls in the same order; ghost entries of x and r no longer updated (readers checked: commit
+message). Class a. Scripts `bubble_column_perf/distcomm/k4/`.
+
+| gate | result |
+|---|---|
+| G-BIT-D 1 (state_hash all cases + np 2, 50-step dumps) | host PASS, CUDA PASS (bitwise to base b820652) |
+| G-BIT-D 2 (bubble column 50 steps from ckpt_t43, np 1/2/4/8 × rtol 1e-8/1e-10 × auto/algebraic) | 25/25 dumps bitwise to base, iterations equal; np 1 = single rank |
+| G-BIT-D 3/4 (solids np 2/4; outflow/wall/slip bcdist np 1/2/4) | bitwise |
+| K4 variants (20 steps; FCG, forced FP32 V-cycle, projected guess, FCG + guess; np 1/2/4 vs base, np 1 vs single) | 16/16 bitwise, iterations equal (196, 200, 181, 180) |
+| G-BIT-D 5 host battery | 98/98 + 148/148 |
+| G-BIT-D 5 CUDA battery | 98 + 148: 9 non-np `scalar_cutcell_g*` GPU-OOM at -j6 pass serially (9/9), 146 np passed + 2 skipped by design (`bottom_direct_mpi_np{2,4}`, host-only) |
+
+§9 count (np 1 `init_mpi`, 1×24, 10 steps × 10.00 iterations, kp_trace, per iteration incl. per-solve setup):
+Krylov launches **single rank 8.3** (`cc_apply_exact_dot`, `mgpcg_alpha`, `mgpcg_update_sum`, `mgmeans_max`, exit
+`mgmeanr` + `mgmeans_dot`, `mgpcg_beta`, `mgaypx`) · **K3 np 1 11.6** (`cc_apply_exact_box`, 2 `mgdot`, 2 `mgaxpy`,
+2 `mgmeanr`, 2 `mgmeans`, `mgmax`, `mgaypx`) · **K4 np 1 7.6** (`cc_apply_exact_box`, `mgdot`, `mgpcg_update_sum`,
+`mgmeans_max`, exit `mgmeanr` + `mgmeans_dot`, `mgaypx`). In-loop 11 → 7 against single's 8 (accept ≤ 8 + 2);
+all launches 91.9 → 87.9 per iteration (single 85.8).
+G-PERF-D (§7 bench, 300 steps from ckpt_t43, 5 interleaved reps K3 = `flow-distcomm-k3/build_omp_r` vs K4; **load
+27–57, spread 61–805 ms/step within one layout: not judged**). Best-of-5 ms/step K3 / K4: L-c 95.4 / 93.6, L-d
+86.1 / 84.7, L-e 61.0 / 62.5 (min single step L-e 58.1 / 59.0). K4 M1 (30 steps): non-kernel L-c 38.9, L-d 44.4,
+L-e 2.6 ms/step; launches/step L-c 1238 → 1198, L-d 763 → 723, L-e 916 → 876 (−40 = −4 per iteration × 10.0);
+exchanges/step 377 and wait/exchange (L-c 66.2, L-d 65.3 µs) unchanged by construction. The model saving
+(≈ −4 launches × 10 iterations × 3–20 µs) is below this load's resolution. Raw `distcomm/wo0/{k4perf_k3,k4perf_k4,
+k4trace,k4cnt,k3cnt}/`.
