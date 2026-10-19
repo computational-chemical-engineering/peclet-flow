@@ -1450,10 +1450,10 @@ class CutcellMG {
   //   levels == 0 (DEFAULT, "auto"): the legacy aligned ORB A when it is exactly balanced (so every
   //     balanced run keeps its partition bit for bit); else the coarse-first partition with the
   //     balance-aware split axis (core SplitAxis::Balanced) at depth 5, then 4, the first within
-  //     maxImbalance; else the balance-aware aligned ORB A2 iff it has a smaller largest block;
-  //     else A. Every candidate (C5, C4, A2) must nest at least min(nestDepth(A), 3) levels, and
-  //     one that cuts an axis A leaves whole is never taken (the wall-normal invariant's status
-  //     quo).
+  //     maxImbalance that nests at least as deep as A (nestDepth(C) >= nestDepth(A)); else the
+  //     balance-aware aligned ORB A2 iff it has a smaller largest block and nests at least
+  //     min(nestDepth(A), 3) levels; else A. A candidate that cuts an axis A leaves whole is never
+  //     taken (the wall-normal invariant's status quo).
   //   levels == 1: the legacy aligned ORB A (the pre-2026-10 default, for reproducing old np > 1
   //     partitions).
   //   levels >= 2: coarse-first search from depth `levels` down to 2 (balance-aware split axis),
@@ -1541,10 +1541,9 @@ class CutcellMG {
       report("A-exact", A);
       return A;
     }
-    // Every candidate must nest at least min(nestDepth(A), 3) levels (nestDepth counts the
-    // minimum-extent rule too): a coarse-first partition whose blocks are too thin to coarsen
-    // as deep as legacy's is rejected, like A2 below.
-    const int needDepth = std::min(nestDepth(A), 3);
+    // A coarse-first candidate must nest at least as deep as legacy (nestDepth counts the
+    // minimum-extent rule too); A2 below needs min(nestDepth(A), 3).
+    const int depthA = nestDepth(A);
     for (int L : {5, 4}) {
       bool ok = false;
       Dec C = coarseFirst(L, ok);
@@ -1554,14 +1553,14 @@ class CutcellMG {
         continue;
       }
       if (minCells(C) > 0 && imbalanceOf(C) <= maxImbalance && within(C) &&
-          nestDepth(C) >= needDepth) {
+          nestDepth(C) >= depthA) {
         report(L == 5 ? "C5" : "C4", C);
         return C;
       }
     }
     Dec A2;
     A2.init(numBlocks, G, coarsenAlignment(gnx, gny, gnz), one, cdec::SplitAxis::Balanced);
-    if (maxCells(A2) < maxCells(A) && nestDepth(A2) >= needDepth && within(A2)) {
+    if (maxCells(A2) < maxCells(A) && nestDepth(A2) >= std::min(depthA, 3) && within(A2)) {
       report("A2", A2);
       return A2;
     }
