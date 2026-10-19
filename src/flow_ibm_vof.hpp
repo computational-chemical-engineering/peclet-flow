@@ -2376,7 +2376,9 @@ template <class Grid>
 double Solver<Grid>::vofTick() const {
   if (!vofTiming_)
     return 0.0;
-  Kokkos::fence();
+  // As phaseTick(): the step's device work is on the default instance, so its fence times it; a
+  // global fence would also wait on the side factor (X) and bill it to the stage (curvature).
+  CCExec().fence("peclet::flow::vof_tick");
   return vof::WyAdvector::wallSeconds();
 }
 
@@ -2384,7 +2386,7 @@ template <class Grid>
 void Solver<Grid>::vofAdd(double& acc, double t0) {
   if (!vofTiming_)
     return;
-  Kokkos::fence();
+  CCExec().fence("peclet::flow::vof_add");  // as vofTick()
   acc += vof::WyAdvector::wallSeconds() - t0;
 }
 
