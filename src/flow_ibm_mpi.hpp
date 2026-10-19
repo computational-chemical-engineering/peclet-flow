@@ -8,14 +8,99 @@
 #ifndef PECLET_FLOW_FLOW_IBM_MPI_HPP
 #define PECLET_FLOW_FLOW_IBM_MPI_HPP
 
+#if defined(PECLET_FLOW_MPI) && defined(__linux__) && defined(KOKKOS_ENABLE_OPENMP)
+#include <omp.h>
+#include <sched.h>
+
+#include <fstream>
+#endif
+
 namespace peclet::flow {
 
 #ifdef PECLET_FLOW_MPI
+namespace detail {
+// doc/vof_distributed_partition_design.md §5.4 (WO-5): this rank's OpenMP placement against the
+// L3 (CCD) domains -- 0 unknown (not a host OpenMP build, not Linux, a thread not pinned to ONE
+// cpu, or sysfs unreadable), 1 every thread in one L3 domain, 2 threads in more than one. Each
+// thread of one host parallel region reads its own affinity mask. No result depends on it.
+inline int hostL3PlacementStatus() {
+#if defined(__linux__) && defined(KOKKOS_ENABLE_OPENMP)
+  if constexpr (!std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::OpenMP>) {
+    return 0;
+  } else {
+    const int T = omp_get_max_threads();
+    std::vector<int> cpu(T, -1);
+#pragma omp parallel num_threads(T)
+    {
+      cpu_set_t m;
+      CPU_ZERO(&m);
+      if (sched_getaffinity(0, sizeof m, &m) == 0 && CPU_COUNT(&m) == 1)
+        for (int c = 0; c < CPU_SETSIZE; ++c)
+          if (CPU_ISSET(c, &m)) {
+            cpu[omp_get_thread_num()] = c;
+            break;
+          }
+    }
+    long first = -1;
+    bool many = false;
+    for (int c : cpu) {
+      if (c < 0)
+        return 0;
+      std::ifstream f("/sys/devices/system/cpu/cpu" + std::to_string(c) + "/cache/index3/id");
+      long id = -1;
+      if (!(f >> id))
+        return 0;
+      if (first < 0)
+        first = id;
+      else if (id != first)
+        many = true;
+    }
+    return many ? 2 : 1;
+  }
+#else
+  return 0;
+#endif
+}
+// Collective over `comm` (one MPI_Gather): rank 0 prints one stderr line, once per process, if
+// any rank's OpenMP threads span more than one L3 domain. No API, no flag, no result effect.
+inline void warnL3Placement(MPI_Comm comm) {
+  static bool printed = false;
+  int rank = 0, size = 1;
+  MPI_Comm_rank(comm, &rank);
+  MPI_Comm_size(comm, &size);
+  const int mine = hostL3PlacementStatus();
+  std::vector<int> all(rank == 0 ? size : 0);
+  MPI_Gather(&mine, 1, MPI_INT, all.data(), 1, MPI_INT, 0, comm);
+  if (rank != 0 || printed)
+    return;
+  std::string list;
+  int n = 0;
+  for (int r = 0; r < size; ++r)
+    if (all[r] == 2) {
+      if (n < 8)
+        list += (n ? "," : "") + std::to_string(r);
+      else if (n == 8)
+        list += ",...";
+      ++n;
+    }
+  if (n == 0)
+    return;
+  printed = true;
+  std::fprintf(stderr,
+               "peclet.flow: rank%s %s run%s OpenMP threads on more than one L3 cache domain "
+               "(measured up to +18 %% step time); use threads per rank dividing the cores per L3 "
+               "domain (AMD EPYC Zen 4: 8), ideally one rank per domain.\n",
+               n > 1 ? "s" : "", list.c_str(), n > 1 ? "" : "s");
+  std::fflush(stderr);
+}
+}  // namespace detail
+
 template <class Grid>
 void Solver<Grid>::initMpi(int gnx, int gny, int gnz, MPI_Comm comm) {
   int size = 1;
   MPI_Comm_size(comm, &size);
-  weightedDec_ = false;  // the equal-weight partition; rebalanceByWeights sets it
+  detail::warnL3Placement(comm);  // WO-5: one stderr line on rank 0 for a CCD-straddling placement
+  weightedDec_ = false;           // the equal-weight partition; rebalanceByWeights sets it
   // Build the shared decomposition so the pressure MG can derive nested coarse levels
   // (CutcellMG::coarsened) — aligned ORB by default, or coarse-first when `set_decomposition`
   // asks for it. Depends only on the global grid and that setting, so it matches mpi_block()'s
