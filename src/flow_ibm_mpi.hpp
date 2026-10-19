@@ -63,11 +63,14 @@ inline int hostL3PlacementStatus() {
 }
 // Collective over `comm` (one MPI_Gather): rank 0 prints one stderr line, once per process, if
 // any rank's OpenMP threads span more than one L3 domain. No API, no flag, no result effect.
+// One rank stays silent: it has no better layout to move to (design §5.4, ruling 2026-10-19).
 inline void warnL3Placement(MPI_Comm comm) {
   static bool printed = false;
   int rank = 0, size = 1;
   MPI_Comm_rank(comm, &rank);
   MPI_Comm_size(comm, &size);
+  if (size < 2)
+    return;  // the same answer on every rank of `comm`, so no rank waits in the gather
   const int mine = hostL3PlacementStatus();
   std::vector<int> all(rank == 0 ? size : 0);
   MPI_Gather(&mine, 1, MPI_INT, all.data(), 1, MPI_INT, 0, comm);

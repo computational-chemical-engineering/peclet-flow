@@ -3908,8 +3908,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "Placement (host OpenMP builds): threads per rank should divide the cores per L3 cache "
           "domain (AMD EPYC Zen 4: 8; Threadripper 5965WX: 6), ideally one rank per domain -- a "
           "rank whose threads span two domains runs measurably slower (up to +18 % step time) "
-          "and no partition fixes it. When every OpenMP thread is pinned to one CPU, rank 0 "
-          "prints one stderr line naming the ranks that straddle; nothing else changes.")
+          "and no partition fixes it. With more than one rank, when every OpenMP thread is "
+          "pinned to one CPU, rank 0 prints one stderr line naming the ranks that straddle; "
+          "nothing else changes.")
       .def(
           "rank",
           [](S&) {

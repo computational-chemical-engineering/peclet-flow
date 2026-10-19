@@ -69,8 +69,9 @@ module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_ope
 - **Threads per rank must divide the cores per L3 (CCD) domain; prefer one rank per L3 domain**
   (`doc/vof_distributed_partition_design.md` §4(d)): a rank whose threads straddle two CCDs runs its
   synchronization-bound kernels 1.4–2.7× slower (genoa 8×3: +17.6 ms/step), and no partition fixes
-  it. `init_mpi` prints one stderr line on rank 0 naming such ranks when every OpenMP thread is
-  pinned to one CPU (no API, no result effect). Recipes: `../docs/SNELLIUS.md`.
+  it. With np > 1, `init_mpi` prints one stderr line on rank 0 naming such ranks when every OpenMP
+  thread is pinned to one CPU (no API, no result effect; a one-rank job stays silent). Recipes:
+  `../docs/SNELLIUS.md`.
 - **Always bound the OpenMP pool** — unbounded on a many-core host is an hour-long trap. On a shared,
   loaded host run `_np*` with `OMP_NUM_THREADS=2` (threads per RANK): at 8 per rank, load ~110 on 48
   cores, `velocitymg_bc_mpi_np2` took 45 min instead of seconds.
