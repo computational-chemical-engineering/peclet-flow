@@ -214,11 +214,20 @@ struct BottomDirect {
   // M (§13.4.4): z = s * x~ on the fluid cells (comp >= 0), 0 on the other inner cells, where
   // x~ = (A~')^{-1} FacReal(s r) by the stored factor. With `keep`, z's old inner values go there
   // first (the FCG's z_prev), fused into the cast phase. The caller removes the component means.
+  //
+  // The substitution (u -> g = x~) has two schedules with the same bits. The TEAM schedule (every
+  // device backend; a host backend's oracle, `teamAlgorithm`) gives each row i a thread whose
+  // serial `acc += Q(k, j, i) * v_j` runs j = 0 .. b-1. The host LANE schedule (doc/
+  // vof_distributed_partition_design.md §5.3, B1) forms v_j once per plane with the same
+  // expression and runs the rows as SIMD lanes, j ascending: each acc[i] sees the same operands in
+  // the same order, so under -ffp-contract=off (the host flags) it is bitwise the team schedule.
+  // On a host backend the production launch has team size 1 (kBottomHostTeam); a larger team
+  // splits each plane's rows into contiguous shares.
+  static constexpr bool kHostLaneM = std::is_same_v<CCMem, Kokkos::HostSpace>;
   template <class Member, class RV, class ZV, class CV>
   KOKKOS_INLINE_FUNCTION void apply(const Member& t, const RV& r, const ZV& z, const CV& comp,
-                                    const ZV* keep) const {
+                                    const ZV* keep, bool teamAlgorithm = false) const {
     const int P = pl.P, b = pl.b, nn = P * b;
-    const int Pt = pl.border ? P - 1 : P;
     Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nn), [&](int f) {
       const int ei = extOf(f);
       if (keep)
@@ -226,6 +235,111 @@ struct BottomDirect {
       u(f) = (FacReal)(s(f) * r(ei));
     });
     t.team_barrier();
+    if constexpr (kHostLaneM) {
+      if (teamAlgorithm)
+        teamSubstitute(t);
+      else
+        laneSubstitute(t);
+    } else {
+      teamSubstitute(t);
+    }
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nn), [&](int f) {
+      const int ei = extOf(f);
+      z(ei) = (comp(ei) >= 0) ? s(f) * (double)g(f) : 0.0;
+    });
+    t.team_barrier();
+  }
+  // acc[i] = sum_j x[j b + i] * v[j], j = 0 .. b-1 IN THAT ORDER from acc[i] = 0, lanes i in
+  // [lo, hi): four j per pass over the lanes (acc loaded and stored once per four terms), each lane
+  // still adding its terms one at a time in ascending j.
+  KOKKOS_INLINE_FUNCTION static void laneMatVec(FacReal* acc, const FacReal* x, const FacReal* v,
+                                                int b, int lo, int hi) {
+    PECLET_BOTTOM_HOST_SIMD
+    for (int i = lo; i < hi; ++i)
+      acc[i] = 0;
+    int j = 0;
+    for (; j + 4 <= b; j += 4) {
+      const FacReal *x0 = x + j * b, *x1 = x0 + b, *x2 = x1 + b, *x3 = x2 + b;
+      const FacReal v0 = v[j], v1 = v[j + 1], v2 = v[j + 2], v3 = v[j + 3];
+      PECLET_BOTTOM_HOST_SIMD
+      for (int i = lo; i < hi; ++i) {
+        FacReal a = acc[i];
+        a += x0[i] * v0;
+        a += x1[i] * v1;
+        a += x2[i] * v2;
+        a += x3[i] * v3;
+        acc[i] = a;
+      }
+    }
+    for (; j < b; ++j) {
+      const FacReal* xj = x + j * b;
+      const FacReal vj = v[j];
+      PECLET_BOTTOM_HOST_SIMD
+      for (int i = lo; i < hi; ++i)
+        acc[i] += xj[i] * vj;
+    }
+  }
+  // The host lane schedule (B1). Q(k, j, .) and Y(k, j, .) are unit-stride in i (LayoutRight).
+  template <class Member>
+  KOKKOS_INLINE_FUNCTION void laneSubstitute(const Member& t) const {
+    const int P = pl.P, b = pl.b;
+    const int Pt = pl.border ? P - 1 : P;
+    const int rank = t.team_rank(), T = t.team_size();
+    const int lo = (int)((long)b * rank / T), hi = (int)((long)b * (rank + 1) / T);
+    FacReal* gp = g.data();
+    const FacReal* up = u.data();
+    FacReal acc[kBottomMaxPlane], v[kBottomMaxPlane];
+    for (int k = 0; k < Pt; ++k) {  // forward
+      const int o = k * b, op = o - b;
+      if (k == 0) {
+        for (int j = 0; j < b; ++j)
+          v[j] = up[o + j];
+      } else {
+        for (int j = 0; j < b; ++j)
+          v[j] = up[o + j] - e(k, j) * gp[op + j];
+      }
+      laneMatVec(acc, &Q(k, 0, 0), v, b, lo, hi);
+      PECLET_BOTTOM_HOST_SIMD
+      for (int i = lo; i < hi; ++i)
+        gp[o + i] = acc[i];
+      t.team_barrier();
+    }
+    for (int k = Pt - 2; k >= 0; --k) {  // backward (in place: x~ overwrites g)
+      const int o = k * b, on = o + b;
+      for (int j = 0; j < b; ++j)
+        v[j] = e(k + 1, j) * gp[on + j];
+      laneMatVec(acc, &Q(k, 0, 0), v, b, lo, hi);
+      PECLET_BOTTOM_HOST_SIMD
+      for (int i = lo; i < hi; ++i)
+        gp[o + i] = gp[o + i] - acc[i];
+      t.team_barrier();
+    }
+    if (pl.border) {
+      const int oB = (P - 1) * b, oL = (P - 2) * b;
+      for (int j = 0; j < b; ++j)
+        v[j] = (up[oB + j] - e(0, j) * gp[j]) - e(P - 1, j) * gp[oL + j];
+      laneMatVec(acc, &Q(P - 1, 0, 0), v, b, lo, hi);
+      PECLET_BOTTOM_HOST_SIMD
+      for (int i = lo; i < hi; ++i)
+        gp[oB + i] = acc[i];
+      t.team_barrier();
+      for (int j = 0; j < b; ++j)
+        v[j] = gp[oB + j];
+      for (int k = 0; k < P - 1; ++k) {
+        const int o = k * b;
+        laneMatVec(acc, &Y(k, 0, 0), v, b, lo, hi);
+        PECLET_BOTTOM_HOST_SIMD
+        for (int i = lo; i < hi; ++i)
+          gp[o + i] = gp[o + i] - acc[i];
+      }
+      t.team_barrier();
+    }
+  }
+  // The team schedule.
+  template <class Member>
+  KOKKOS_INLINE_FUNCTION void teamSubstitute(const Member& t) const {
+    const int P = pl.P, b = pl.b;
+    const int Pt = pl.border ? P - 1 : P;
     for (int k = 0; k < Pt; ++k) {  // forward
       const int o = k * b, op = o - b;
       Kokkos::parallel_for(Kokkos::TeamThreadRange(t, b), [&](int i) {
@@ -274,11 +388,6 @@ struct BottomDirect {
       });
       t.team_barrier();
     }
-    Kokkos::parallel_for(Kokkos::TeamThreadRange(t, nn), [&](int f) {
-      const int ei = extOf(f);
-      z(ei) = (comp(ei) >= 0) ? s(f) * (double)g(f) : 0.0;
-    });
-    t.team_barrier();
   }
 };
 

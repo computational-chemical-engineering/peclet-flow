@@ -655,12 +655,15 @@ inline constexpr long kBottomMaxCells = 8192;
 inline constexpr double kBottomTau = 1e-5;
 inline constexpr int kBottomMaxComponents = 64;  // B1b (§5.14): more -> GraphAMG
 inline constexpr int kBottomCap = 100;
-// §14 H-1: the team size of the solve launch on a HOST backend, min(this, team_size_max) -- one
-// Zen CCX (the factor launch: kBottomHostFactorTeam). The factor and M are bitwise independent of T
-// by construction (§13.2), and on a host backend the FCG's reductions are single-lane
+// §14 H-1: the team size of the solve launch on a HOST backend, min(this, team_size_max) (the
+// factor launch: kBottomHostFactorTeam). The factor and M are bitwise independent of T by
+// construction (§13.2), and on a host backend the FCG's reductions are single-lane
 // (BottomKernel::teamSum / teamMax), so the host bottom's bits do not depend on T or
-// OMP_NUM_THREADS; T affects speed only.
-inline constexpr int kBottomHostTeam = 8;
+// OMP_NUM_THREADS; T affects speed only. ONE thread since B1 (doc/vof_distributed_partition_design
+// .md §5.3): M runs the rows as SIMD lanes (BottomDirect::laneSubstitute), ~5-8 us per M on the
+// 16x12x8 walls-y bottom, less than the 23 per-plane team barriers a larger team would add (was 8:
+// one Zen CCX; genoa 24x1, 1 thread: 0.70 ms per solve with the team schedule).
+inline constexpr int kBottomHostTeam = 1;
 // §14 H-1, A(b): the FACTOR launch's host team size. The host schedule (mg_bottom_direct.hpp) has
 // ~2.5 barriers per tile and one-thread diagonal tiles, so it scales little past two threads:
 // bench_bottom_factor (16x12x8 walls-y, P = 12, b = 128) on a loaded 24-core Zen 3, ms per factor,
@@ -806,6 +809,7 @@ struct BottomKernel {
   CCField x, b, r, p, z, zp, ap;  // the bottom's solution and rhs (its x, rhs), FCG vectors
   int precondOnly = 0;            // test hook: z = M(b) and nothing else
   int noMeanForTest = 0;          // test hook: M without the component means' removal
+  int teamAlgorithm = 0;          // test hook (U9): M by the team schedule even on a host backend
   // B1b (§5.14): the bottom's fluid components -- comp(i) in [0, nc) on fluid cells, -1 on cells
   // with AC <= 1e-30 (which keep x = 0) -- their cell counts, and a scratch for their means.
   int nc = 1;
@@ -914,7 +918,7 @@ struct BottomKernel {
   // `keep`, z's previous values go there first.
   KOKKOS_INLINE_FUNCTION void applyM(const Member& t, const CCField& R, const CCField& Z,
                                      const CCField* keep) const {
-    dir.apply(t, R, Z, comp, keep);
+    dir.apply(t, R, Z, comp, keep, teamAlgorithm != 0);
     if (!noMeanForTest)
       removeMeanBottom(t, Z);
   }
@@ -5040,10 +5044,12 @@ class CutcellMG {
   // for the tests, z = M(lv.rhs) alone. Returns the team size used.
   template <class FR>
   int launchDirectKernel(const BottomDirect<FR>& D, bool precondOnly, int team, bool noMean,
-                         CCField zOut = CCField(), CCField rIn = CCField(), bool probe = true) {
+                         CCField zOut = CCField(), CCField rIn = CCField(), bool probe = true,
+                         bool teamAlgorithm = false) {
     BottomKernel<FR> k = makeBottomKernel<FR>(precondOnly);
     k.dir = D;
     k.noMeanForTest = noMean ? 1 : 0;
+    k.teamAlgorithm = teamAlgorithm ? 1 : 0;
     if (precondOnly) {
       k.z = zOut;
       k.b = rIn;
@@ -6909,7 +6915,8 @@ class CutcellMG {
   // default), `*Tused` = the team size it ran with; `teamAlgorithm`: by the team algorithm even on
   // a host backend (the host schedule's oracle, U8). `directApplyForTest`: z = M(r) by that factor
   // through the FCG kernel's precondition-only path (`noMean`: without the component means'
-  // removal); returns the team size. `directSolveForTest`: the production solve (FP32 factor,
+  // removal; `teamAlgorithm`: M by the team schedule even on a host backend, the lane schedule's
+  // oracle, U9); returns the team size. `directSolveForTest`: the production solve (FP32 factor,
   // lazily refactored) on the bottom's rhs; returns the inner iterations.
   const BottomPlanes& directPlanes() const { return dirPlanes_; }
   template <class FR>
@@ -6925,8 +6932,8 @@ class CutcellMG {
   }
   template <class FR>
   int directApplyForTest(const BottomDirect<FR>& D, CCField z, CCField r, int team,
-                         bool noMean = false) {
-    const int T = launchDirectKernel(D, true, team, noMean, z, r);
+                         bool noMean = false, bool teamAlgorithm = false) {
+    const int T = launchDirectKernel(D, true, team, noMean, z, r, true, teamAlgorithm);
     Kokkos::fence();
     return T;
   }

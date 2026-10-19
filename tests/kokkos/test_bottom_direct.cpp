@@ -8,6 +8,7 @@
 ///   periodic-P2     2x2x2 all periodic: slow axis z (the tie rule), P = 2 (treated non-periodic),
 ///                   every in-plane axis of length 2 (the doubled faces);
 ///   walls-y         16x12x8, walls on y: slow axis y, P = 12, b = 128, no border;
+///   walls-z         16x12x8, walls on z: slow axis z, P = 8, b = 192 (the plane cap), no border;
 ///   solids          the B1b solid sheet (three fluid components), periodic;
 ///   solids-walls-y  the same with walls on y;
 ///   pocket          periodic, plus a closed two-cell pocket along the slow axis whose last plane
@@ -35,8 +36,13 @@
 ///   U8  (OpenMP) the host schedule of the factor (§14 H-1, A(b)) against the team algorithm, its
 ///       oracle, at team sizes {1, 2, 4}: the factor storage (Q, Y, e, s, stat) BITWISE identical,
 ///       FP32 and FP64, with the production pivot floor and with a first-attempt floor of 1e30
-///       (every pivot fails: the restart path).
+///       (every pivot fails: the restart path);
+///   U9  (OpenMP) the host LANE schedule of M (doc/vof_distributed_partition_design.md §5.3, B1)
+///       against the team schedule, its oracle: z = M(r) for a random r BITWISE identical, FP32
+///       and FP64, with and without the component means' removal, at team sizes {1, 2, 4}, on the
+///       production factor and on a shifted one (first-attempt floor 1e30: restarts = 1).
 /// Host sums use long double so the checks measure the device result, not the host's rounding.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -500,6 +506,57 @@ int runCase(const Case& cs) {
     printf(": %s -> %s\n", ok ? "bitwise identical" : "DIFFER (or < 2 sizes)", ok ? "ok" : "FAIL");
     fails += !ok;
   }
+  if (kHost) {  // U9: the host lane schedule of M against the team schedule, its bitwise oracle
+    std::vector<double> hr(bt.n, 0.0);
+    std::mt19937 rng(9);
+    std::uniform_real_distribution<double> U(-1.0, 1.0);
+    H.forCells([&](const int*, long i) { hr[i] = U(rng); });
+    CCField rr = toDevice(hr, "r9");
+    bool ok = true;
+    int compared = 0;
+    std::vector<int> used;
+    auto check = [&](const auto& D, double tau, bool noMean) {
+      CCField zt("zt", bt.n);
+      const int To = mg.directApplyForTest(D, zt, rr, 4, noMean, /*teamAlgorithm=*/true);
+      for (int T : {1, 2, 4}) {
+        CCField zl("zl", bt.n);
+        if (mg.directApplyForTest(D, zl, rr, T, noMean) != T)
+          continue;
+        if (tau == kBottomPivotTol && noMean &&
+            std::find(used.begin(), used.end(), T) == used.end())
+          used.push_back(T);
+        ++compared;
+        if (!sameBits(zl, zt)) {
+          printf("[%s] U9 lane M (team %d) differs from team M (team %d), floor %.0e, noMean %d\n",
+                 cs.name, T, To, tau, noMean ? 1 : 0);
+          ok = false;
+        }
+      }
+    };
+    for (double tau : {kBottomPivotTol, 1e30}) {  // 1e30: the shifted (restart) factor
+      const auto D = mg.directFactorForTest<float>(0, tau);
+      const auto D64 = mg.directFactorForTest<double>(0, tau);
+      auto st = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), D.stat);
+      if (st(0) != 1 || st(1) != (tau == kBottomPivotTol ? 0 : 1)) {
+        printf("[%s] U9 factor floor %.0e: ok %d, restarts %d (unexpected)\n", cs.name, tau, st(0),
+               st(1));
+        ok = false;
+      }
+      for (bool noMean : {true, false}) {
+        check(D, tau, noMean);
+        check(D64, tau, noMean);
+      }
+    }
+    ok = ok && used.size() >= 2;
+    printf(
+        "[%s] U9 host lane M vs team M (FP32 + FP64, both shift paths, +/- mean removal), %d "
+        "comparisons, team sizes",
+        cs.name, compared);
+    for (int T : used)
+      printf(" %d", T);
+    printf(": %s -> %s\n", ok ? "bitwise identical" : "DIFFER (or < 2 sizes)", ok ? "ok" : "FAIL");
+    fails += !ok;
+  }
   if (kHost) {  // U3, host: the whole FCG solve is bitwise across T (single-lane reductions)
     std::vector<double> hb(bt.n, 0.0);
     std::mt19937 rng(5);
@@ -635,6 +692,7 @@ int main(int argc, char** argv) {
         {"periodic", {0, 0, 0, 0, 0, 0}, 32, 24, 16, false, false},
         {"periodic-P2", {0, 0, 0, 0, 0, 0}, 4, 4, 4, false, false},
         {"walls-y", {0, 0, 1, 1, 0, 0}, 32, 24, 16, false, false},
+        {"walls-z", {0, 0, 0, 0, 1, 1}, 32, 24, 16, false, false},
         {"solids", {0, 0, 0, 0, 0, 0}, 32, 24, 16, true, false},
         {"solids-walls-y", {0, 0, 1, 1, 0, 0}, 32, 24, 16, true, false},
         {"pocket", {0, 0, 0, 0, 0, 0}, 32, 24, 16, false, true},
