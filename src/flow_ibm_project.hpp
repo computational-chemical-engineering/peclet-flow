@@ -599,8 +599,8 @@ void Solver<Grid>::buildBalancedFaceForce(int c) {
 
 template <class Grid>
 bool Solver<Grid>::prefactorHoistEligible() const {
-  return varRho_ && !porous_ && outerIters_ == 1 && !balancedForceActive() && !useChebyshev_ &&
-         !ghostProjection_ && mg_.directPrefactorEligible();
+  return prefactorHoist_ && varRho_ && !porous_ && outerIters_ == 1 && !balancedForceActive() &&
+         !useChebyshev_ && !ghostProjection_ && mg_.directPrefactorEligible();
 }
 
 template <class Grid>
@@ -610,7 +610,7 @@ void Solver<Grid>::applyBalancedForceProjection() {
   if (varRho_) {
     projectBuildCoefficients();
     coeffBuiltThisStep_ = true;
-    if (!useChebyshev_ && !ghostProjection_)
+    if (prefactorHoist_ && !useChebyshev_ && !ghostProjection_)
       mg_.prefactorBottom();  // X: the factor on the side instance from the early build
   }
   registerBalancedForceState();  // normally already registered by the setter that enabled it

@@ -569,6 +569,11 @@ int Solver<Grid>::pressureTelescopeCount() const {
 }
 
 template <class Grid>
+long Solver<Grid>::pressurePrefactorCount() const {
+  return mg_.prefactorLaunches();
+}
+
+template <class Grid>
 void Solver<Grid>::setPressureGraphAmg(bool on) {
   pressGraphAmg_ = on;
   if (cutcellPressure_)

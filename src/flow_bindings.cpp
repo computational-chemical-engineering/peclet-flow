@@ -806,6 +806,17 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "the uninterrupted run to the solver tolerance, not bitwise. "
           "doc/vof_projection_cost_design.md §5, doc/vof_projection_distributed_design.md §6.")
       .def(
+          "set_pressure_prefactor_hoist", [](D& diag, bool on) { diag.s->setPressurePrefactorHoist(on); },
+          nb::arg("on"),
+          "Switch the side-instance bottom prefactor (doc/vof_gpu_coarse_tail_design.md §5.6, "
+          "default ON) off: the variable-rho coefficients are then built in the projection and "
+          "the direct bottom factored lazily in the bottom solve. Same state bit for bit; for "
+          "tests and timing comparisons.")
+      .def_prop_ro(
+          "num_pressure_prefactors", [](D& diag) { return diag.s->pressurePrefactorCount(); },
+          "Side-instance bottom factors launched so far (0 where the prefactor is ineligible: "
+          "host backends, MPI, constant density, a balanced-force or Chebyshev configuration).")
+      .def(
           "pressure_vcycle_precision",
           [](D& diag) { return std::string(diag.s->pressureVcycleFp32() ? "fp32" : "fp64"); },
           "The precision ('fp32' or 'fp64') the last pressure solve's V-cycles used "

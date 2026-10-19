@@ -4918,8 +4918,11 @@ class CutcellMG {
           launchDirectFactor(dir_, dirFacTeam_, dirPivotTol_, /*probe=*/false, false, *side_);
       facStale_ = false;
       facPending_ = true;
+      ++prefactorLaunches_;
     }
   }
+  // Side-instance factors launched so far (diagnostics: the WO-X hoist fired).
+  long prefactorLaunches() const { return prefactorLaunches_; }
   bool joinPrefactor() const {
     if (!facPending_)
       return false;
@@ -6266,6 +6269,7 @@ class CutcellMG {
   int dirTeam_ = 0, dirFacTeam_ = 0;
   std::optional<CCExec> side_;       // X: the factor's side instance (partition_space, lazily)
   mutable bool facPending_ = false;  // X: a side factor was launched and not yet joined
+  long prefactorLaunches_ = 0;       // X: side factors launched (diagnostics)
   double dirPivotTol_ = kBottomPivotTol;
   double stopRef_ = -1.0;                 // see setStopReference
   bool zeroGuess_ = false;                // see setZeroInitialGuess

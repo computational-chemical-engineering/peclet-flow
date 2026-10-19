@@ -1867,6 +1867,12 @@ class Solver {
   // the momentum stage. Variable rho, not porous, one outer iteration, no balanced-force stage, a
   // PCG/FCG driver, and the MG's own eligibility (single-rank device direct bottom).
   bool prefactorHoistEligible() const;
+  // Diagnostics tier (tests): switch the X hoist off (default on) -- the pre-X path, coefficients
+  // built in project() and the bottom factor lazily in the bottom solve; bitwise the same state.
+  void setPressurePrefactorHoist(bool on) { prefactorHoist_ = on; }
+  bool pressurePrefactorHoist() const { return prefactorHoist_; }
+  // Side-instance bottom factors launched by the X hoist so far.
+  long pressurePrefactorCount() const;
   bool hasOpenDomainFace() const;  // any inflow (2) / outflow (3) domain face
   // The §4.6.4 refusals. `atStep` adds the checks that are only final once the solver is set up
   // (the cut-cell operator, the collocated density path, an AUTO-selected ghost scheme).
@@ -4925,6 +4931,7 @@ class Solver {
   long balancedForceFailures_ = 0;
   bool bfpFailWarned_ = false;
   bool coeffBuiltThisStep_ = false;
+  bool prefactorHoist_ = true;  // X (diagnostics switch, setPressurePrefactorHoist)
   long lastBalancedForceIters_ = 0;
   // The collocated face field with every OPEN (outflow) domain face replaced by its
   // zero-gradient extrapolation -- see buildOpenFaceField(). Allocated on first use and only
