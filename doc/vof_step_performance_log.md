@@ -1689,3 +1689,36 @@ unmodified `b820652` bench on walls-y and periodic). Scripts: `bubble_column_per
   phases; the diagonal tiles' 0.78 ms is barrier-bound and stays, so F1's expected factor is ≈ 1.0–1.2
   ms rather than 0.4–0.7: the ≤ 1.2 ms gate is tight). B2's gain is per M application, of which P1
   shows one per solve.
+
+## 2026-10-19 — WO-F: V-cycle precision default `'auto'` (design doc/vof_projection_distributed_design.md §9)
+
+Flip commit a942251 on `projdist` = flow main 7af6dee (gpustats + gpucoarse) + WO-F; USER 2026-10-19 ("Yes, make the
+GPU V-cycle default 'auto'"), scope all np after S-4 (H100, one rank per GPU: projection auto/fp64 0.970 np 1,
+0.974 / 0.711 / 0.645 strong np 2/4/8, 0.979 / 0.981 / 0.829 weak; 0 restarts). E stays `'zero'`. RTX 5080, CUDA 13.4;
+scripts `bubble_column_perf/gate_dist/{wof_gates,battery,grun,gcmp,f4,gdd3,gdd4,f6r}.sh`, outputs `gate_dist/wof/`.
+All gates on the flip commit:
+- **F-1 PASS:** CUDA `ctest -LE bench`: 100/100 non-np (4 scalar_cutcell_g4/g6_* parallel GPU-OOM failures, green on
+  the serial rerun: shared-GPU contention) + 145/145 np; `bottom_direct_mpi_np2/4` SKIP by design (host-only engine).
+- **F-2 PASS:** host battery 100/100 + 145/145 (`device_sync_budget`, `prefactor_hoist_bitwise` SKIP: device-only);
+  host state hashes (13 cases + np 2) identical to 7af6dee; 50-step column dumps at 1×8 and 1×24, rtol 1e-8 and
+  1e-10, bitwise (25 arrays each), iterations 10.00 / 13.06.
+- **F-3 PASS:** CUDA 50-step column under the new default (no setter) bitwise to `gd4_cuda` (2/2), iterations
+  10.00 (1e-8) / 13.06 (1e-10).
+- **F-4 PASS:** probe per solve, 66 configurations × 20 steps: 0 violations; 13 restarts, all step 1 of a walled
+  hydro configuration at a forced-`'fp32'` cap/breakdown, p after the restart bitwise `'fp64'` — the WO-G list
+  unchanged (box slab 1e2 PCG 200 → 200, 1e3 FCG 55 nf → 79, 1e3 PCG 200 → 200, 1e4 FCG 16 nf → 200, 1e4 PCG
+  200 → 24; pack slab 1e2 PCG 200 → 200, 1e3 FCG 200 → 112, 1e3 PCG 200 → 200, 1e4 FCG 33 nf → 14, 1e4 PCG 200 →
+  22; pack blob 1e3 PCG, 1e4 FCG, 1e4 PCG 200 → 200).
+- **F-5 PASS:** G-DD3 CUDA `'auto'` vs `'fp64'` same np: rel 6.66e-14 / 3.63e-14 / 2.59e-14 (np 1/2/4; N50_8
+  1.48e-8), iterations 500 → 500, divergence ratio 1.000; np 2 / np 4 vs np 1: du 8.4e-13 / 1.2e-12, dp 4.4e-11 /
+  6.3e-11, dC 3.2e-15 / 3.5e-15 (tolerances 3.6e-10, 5.8e-9, 1e-11).
+- **F-6 PASS:** G-DD4 (min of 3 interleaved rounds, projection ms/step) measured with no other GPU process, load
+  3.4–4.7: CUDA np 2 `'fp64'` 160.52 (+0.16) / `'auto'` 162.18 (+0.60) = **1.010** (≤ 1.02); CUDA single rank
+  8.78 / 6.35 = **0.723** (≤ 0.85; was 12.29 / 9.93 = 0.808 before gpucoarse); host np 4 × 6 forced `'fp32'`
+  95.41 / 80.38 = 0.842 (information, load 10–18). 2000-step CUDA column under `'auto'`: **0 restarts**, iterations
+  mean 10.55, min 9, max 13 (as at WO-G). A first pass under a shared GPU (another session's battery; load 23–62)
+  gave np 2 0.575 and 1.052 with spreads up to +670 ms and single rank 0.834–0.881: discarded as contention.
+- **F-7 PASS:** CUDA `pressure_restart`, `mg_fp32_vcycle_mpi_np1`, `mg_fp32_vcycle_mpi_np2` green (G-R (a)–(h)).
+- `units_scale_invariance` pins `'fp64'` (R-8); CUDA after the pin: Poiseuille u 1.8e-16, p 0; spheres u 6.1e-16,
+  v 1.8e-15, p 6.6e-15 (tolerance 1e-13). CUDA state hashes old → new: in the a942251 commit message (8 of 14 lines
+  move; colocated_ghost, colocated_advect(_bc), channel, vof_droplet, colocated_bfp unchanged).
