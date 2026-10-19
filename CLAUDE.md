@@ -287,8 +287,13 @@ you want). Detail and numbers for every bullet: ref §6.
   `CfdDem.rebalance()` does). Forecast: `flow.predict_hierarchy(..., weights=w)`.
 - **`redistribute` must carry all cross-step state and seed derived state AFTER the scatter**
   (gate `test_porous_redistribute_mpi`; a size-preserving rebalance hides a miss).
-- Decomposition: `set_decomposition(0)` (default) aligned ORB; `set_decomposition(L>=2)` coarse-first
-  (blocks nest for the full depth). Check a combination with `scripts/check_decomposition.py` first.
+- Decomposition (`doc/vof_distributed_partition_design.md`, 2026-10): `set_decomposition(0)` (default)
+  = AUTO — the legacy aligned ORB when exactly balanced (bit-identical partitions there), else
+  coarse-first at depth 5/4 with core's `SplitAxis::Balanced`, else the balance-aware aligned ORB
+  if better; never cuts an axis the legacy ORB leaves whole. `set_decomposition(1)` = the legacy
+  aligned ORB (pre-2026-10 np > 1 partitions); `L >= 2` coarse-first (blocks nest for the full
+  depth). Census ctest `decomposition_policy`. Check a combination with
+  `scripts/check_decomposition.py` first.
 
 ## Velocity solve
 

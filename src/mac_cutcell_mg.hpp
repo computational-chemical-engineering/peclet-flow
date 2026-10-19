@@ -1414,58 +1414,153 @@ class CutcellMG {
     return r;
   }
 
+  // Axes some block of `d` does not span whole (bit k = axis k): the axes the partition cuts.
+  static unsigned splitAxes(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    unsigned m = 0;
+    for (const auto& s : d.sizes())
+      for (int k = 0; k < 3; ++k)
+        if (s[k] < d.globalSize()[k])
+          m |= 1u << k;
+    return m;
+  }
+  // Consecutive in-place coarsenings of `d` from level 0, up to 4, before initMpi's first telescope
+  // trigger: at each step every still-coarsenable axis has even block origins and sizes
+  // (teleLiftable) and no block is thinner than 4 cells (the teleMinExtent_ default).
+  static int nestDepth(const peclet::core::decomp::BlockDecomposer<3>& d0) {
+    namespace cdec = peclet::core::decomp;
+    auto can = [](int e) { return (e % 2 == 0) && (e / 2 >= 2); };
+    cdec::BlockDecomposer<3> d = d0;
+    C3 gs{(int)d.globalSize()[0], (int)d.globalSize()[1], (int)d.globalSize()[2]};
+    int n = 0;
+    for (; n < 4; ++n) {
+      if (!(can(gs.x) || can(gs.y) || can(gs.z)) || !teleLiftable(d, gs) ||
+          cdec::minBlockExtent(d) < 4)
+        break;
+      const peclet::core::IVec<3> r{can(gs.x) ? 2 : 1, can(gs.y) ? 2 : 1, can(gs.z) ? 2 : 1};
+      d = d.coarsened(r);
+      gs = C3{gs.x / (int)r[0], gs.y / (int)r[1], gs.z / (int)r[2]};
+    }
+    return n;
+  }
+
   // THE shared level-0 decomposition. Every call site must go through this so the solver's block,
-  // mpi_block()'s sizing and the MG's level 0 cannot drift apart.
+  // mpi_block()'s sizing and the MG's level 0 cannot drift apart. Pure: a function of (numBlocks,
+  // grid, levels, maxImbalance), so every rank and call site computes the same answer without
+  // communicating (doc/vof_distributed_partition_design.md §5.2).
+  //   levels == 0 (DEFAULT, "auto"): the legacy aligned ORB A when it is exactly balanced (so every
+  //     balanced run keeps its partition bit for bit); else the coarse-first partition with the
+  //     balance-aware split axis (core SplitAxis::Balanced) at depth 5, then 4, the first within
+  //     maxImbalance; else the balance-aware aligned ORB A2 iff it has a smaller largest block and
+  //     nests at least min(nestDepth(A), 3) levels; else A. A candidate that cuts an axis A leaves
+  //     whole is never taken (the wall-normal invariant's status quo).
+  //   levels == 1: the legacy aligned ORB A (the pre-2026-10 default, for reproducing old np > 1
+  //     partitions).
+  //   levels >= 2: coarse-first search from depth `levels` down to 2 (balance-aware split axis),
+  //     the deepest within maxImbalance, else A.
   static peclet::core::decomp::BlockDecomposer<3> decomposition(std::size_t numBlocks, int gnx,
                                                                 int gny, int gnz, int levels = 0,
                                                                 double maxImbalance = 1.05) {
-    if (levels < 2)
-      return peclet::core::decomp::BlockDecomposer<3>(
-          numBlocks, peclet::core::IVec<3>{gnx, gny, gnz}, coarsenAlignment(gnx, gny, gnz));
+    namespace cdec = peclet::core::decomp;
+    using Dec = cdec::BlockDecomposer<3>;
+    const peclet::core::IVec<3> G{gnx, gny, gnz}, one{1, 1, 1};
+    Dec A(numBlocks, G, coarsenAlignment(gnx, gny, gnz));  // legacy: split the longest axis
+    if (levels == 1)
+      return A;
     // Depth and load balance pull against each other: each extra level doubles the quantum on every
     // axis that still coarsens, and a partition built on the coarse grid can only place a split on
     // a coarse-cell boundary. So rather than guess a granularity, BUILD each candidate and measure
-    // its imbalance: take the deepest one that stays within budget, else keep the legacy aligned
-    // ORB. The whole search is a pure function of (numBlocks, grid, levels) — every rank computes
-    // the same answer without communicating.
+    // its imbalance.
     if (!(maxImbalance > 1.0))
       maxImbalance = 1.05;
-    auto imbalanceOf = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
-      std::size_t hi = 0, lo = std::numeric_limits<std::size_t>::max();
-      for (const auto& s : d.sizes()) {
-        const std::size_t n = static_cast<std::size_t>(s[0]) * static_cast<std::size_t>(s[1]) *
-                              static_cast<std::size_t>(s[2]);
-        hi = n > hi ? n : hi;
-        lo = n < lo ? n : lo;
-      }
-      return lo ? static_cast<double>(hi) / static_cast<double>(lo)
+    auto cellsOf = [](const peclet::core::IVec<3>& s) {
+      return static_cast<std::size_t>(s[0]) * static_cast<std::size_t>(s[1]) *
+             static_cast<std::size_t>(s[2]);
+    };
+    auto maxCells = [&](const Dec& d) {
+      std::size_t hi = 0;
+      for (const auto& s : d.sizes())
+        hi = std::max(hi, cellsOf(s));
+      return hi;
+    };
+    auto minCells = [&](const Dec& d) {
+      std::size_t lo = std::numeric_limits<std::size_t>::max();
+      for (const auto& s : d.sizes())
+        lo = std::min(lo, cellsOf(s));
+      return lo;
+    };
+    auto imbalanceOf = [&](const Dec& d) {
+      const std::size_t lo = minCells(d);
+      return lo ? static_cast<double>(maxCells(d)) / static_cast<double>(lo)
                 : std::numeric_limits<double>::infinity();
     };
-    for (int L = levels; L >= 2; --L) {
+    // Decompose the COARSE grid of depth L -- telling the ORB each coarse cell's true extent, so it
+    // compares the axes the fine grid would -- then refine the partition upward: blocks are exact
+    // multiples of r, so every level nests for the full depth. `ok` = false when the coarse grid
+    // is thinner than the rank count (someone would get an empty block) or nothing coarsens.
+    auto coarseFirst = [&](int L, bool& ok) {
+      ok = false;
       const peclet::core::IVec<3> r = refineFactor(gnx, gny, gnz, L);
       if (r[0] == 1 && r[1] == 1 && r[2] == 1)
-        break;  // nothing coarsens on any axis — the aligned ORB is all there is
-      const std::size_t cells = static_cast<std::size_t>(gnx / r[0]) *
-                                static_cast<std::size_t>(gny / r[1]) *
-                                static_cast<std::size_t>(gnz / r[2]);
-      if (cells < numBlocks)
-        continue;  // a coarse grid thinner than the rank count would hand someone an empty block
-      // Decompose the COARSE grid — telling the ORB each coarse cell's true extent, so it picks the
-      // same split axes the fine grid would — then refine the partition upward. Blocks come out as
-      // exact multiples of r, so every level nests for the full depth.
-      peclet::core::decomp::BlockDecomposer<3> coarse;
-      coarse.init(numBlocks, peclet::core::IVec<3>{gnx / r[0], gny / r[1], gnz / r[2]},
-                  peclet::core::IVec<3>{1, 1, 1}, r);
-      peclet::core::decomp::BlockDecomposer<3> fine = coarse.refined(r);
-      if (imbalanceOf(fine) <= maxImbalance) {
-        if (mgDebugLevel())
-          printf("[mg] decomposition: coarse-first depth %d (refine %dx%dx%d, imbalance %.3f)\n", L,
-                 r[0], r[1], r[2], imbalanceOf(fine));
-        return fine;
+        return Dec();
+      const peclet::core::IVec<3> Gc{gnx / r[0], gny / r[1], gnz / r[2]};
+      if (cellsOf(Gc) < numBlocks)
+        return Dec();
+      Dec coarse;
+      coarse.init(numBlocks, Gc, one, r, cdec::SplitAxis::Balanced);
+      ok = true;
+      return coarse.refined(r);
+    };
+    if (levels >= 2) {
+      for (int L = levels; L >= 2; --L) {
+        bool ok = false;
+        Dec fine = coarseFirst(L, ok);
+        if (!ok) {
+          if (refineFactor(gnx, gny, gnz, L) == one)
+            break;  // nothing coarsens on any axis -- the aligned ORB is all there is
+          continue;
+        }
+        if (imbalanceOf(fine) <= maxImbalance) {
+          if (mgDebugLevel())
+            printf("[mg] decomposition: coarse-first depth %d (imbalance %.3f)\n", L,
+                   imbalanceOf(fine));
+          return fine;
+        }
+      }
+      return A;
+    }
+    // levels == 0: auto
+    auto report = [&](const char* branch, const Dec& d) {
+      if (mgDebugLevel())
+        printf("[mg] decomposition: auto %s (max/min %.3f; legacy %.3f)\n", branch, imbalanceOf(d),
+               imbalanceOf(A));
+    };
+    const unsigned axesA = splitAxes(A);
+    auto within = [&](const Dec& d) { return (splitAxes(d) & ~axesA) == 0u; };
+    if (maxCells(A) == minCells(A)) {
+      report("A-exact", A);
+      return A;
+    }
+    for (int L : {5, 4}) {
+      bool ok = false;
+      Dec C = coarseFirst(L, ok);
+      if (!ok) {
+        if (refineFactor(gnx, gny, gnz, L) == one)
+          break;
+        continue;
+      }
+      if (minCells(C) > 0 && imbalanceOf(C) <= maxImbalance && within(C)) {
+        report(L == 5 ? "C5" : "C4", C);
+        return C;
       }
     }
-    return peclet::core::decomp::BlockDecomposer<3>(numBlocks, peclet::core::IVec<3>{gnx, gny, gnz},
-                                                    coarsenAlignment(gnx, gny, gnz));
+    Dec A2;
+    A2.init(numBlocks, G, coarsenAlignment(gnx, gny, gnz), one, cdec::SplitAxis::Balanced);
+    if (maxCells(A2) < maxCells(A) && nestDepth(A2) >= std::min(nestDepth(A), 3) && within(A2)) {
+      report("A2", A2);
+      return A2;
+    }
+    report("A-fallback", A);
+    return A;
   }
 
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,

@@ -75,6 +75,14 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
   endforeach()
 endforeach()
 
+# doc/vof_distributed_partition_design.md §7: the census of the default ("auto") level-0
+# decomposition against the legacy aligned ORB (levels = 1). A pure host function: no mpirun.
+add_executable(test_decomposition_policy test_decomposition_policy.cpp)
+target_include_directories(test_decomposition_policy PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_decomposition_policy PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+add_test(NAME decomposition_policy COMMAND test_decomposition_policy)
+
 # doc/vof_step_performance_design.md §14.3 H-6 (WO-H6 review findings 1, 2 and note 4): the
 # distributed host 'direct' bottom vs 'algebraic' -- iteration identity every step, in place, below
 # a forced telescope and a Repartition stage; an ineligible explicit 'direct' raises on every rank.

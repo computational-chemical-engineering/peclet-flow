@@ -6,8 +6,8 @@
 /// IBM no-slip
 /// + optional cut-cell pressure projection), step, read back the velocity/pressure, and query the
 /// cut-cell flux divergence. Exercised by verify_poiseuille_sdflow (IBM channel) and
-/// verify_periodic_spheres_sdflow (cut-cell Stokes through a sphere packing). rank()/bcast_from_root()
-/// are single-rank stubs (the multi-rank path lives in tests/kokkos_mpi).
+/// verify_periodic_spheres_sdflow (cut-cell Stokes through a sphere packing).
+/// rank()/bcast_from_root() are single-rank stubs (the multi-rank path lives in tests/kokkos_mpi).
 ///
 /// Kokkos teardown follows the suite-wide pattern of peclet/core/python/kokkos_teardown.hpp: Kokkos
 /// is initialized at import; every bound Solver is a `Releasable` (registered on construction) and
@@ -26,15 +26,15 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/vector.h>
 
 #include <array>
 #include <cstdint>
-#include <limits>
 #include <Kokkos_Core.hpp>
+#include <limits>
 #include <string>
 #include <vector>
-#include <nanobind/stl/tuple.h>
 
 #ifdef PECLET_FLOW_MPI
 #include <mpi.h>
@@ -147,10 +147,15 @@ static const std::vector<std::string> kScalarWallTypes{"neumann", "dirichlet", "
 static const std::vector<std::string> kFluidOnly{"off", "filter", "star"};
 static const std::vector<std::string> kCsfModes{"face", "cell"};
 static const std::vector<std::string> kPivots{"volume", "centroid", "projected-centroid",
-                                             "contact-line"};
-static const std::vector<std::string> kAreaModes{
-    "plic",          "cascade-metric",      "cascade-normal",     "cascade-footprint",
-    "sheet-color-centroid", "sheet-color-split", "sheet-plic-centroid", "sheet-plic-split"};
+                                              "contact-line"};
+static const std::vector<std::string> kAreaModes{"plic",
+                                                 "cascade-metric",
+                                                 "cascade-normal",
+                                                 "cascade-footprint",
+                                                 "sheet-color-centroid",
+                                                 "sheet-color-split",
+                                                 "sheet-plic-centroid",
+                                                 "sheet-plic-split"};
 static const std::vector<std::string> kBlockAssign{"round-robin", "lpt", "orb"};
 
 // Zero-copy export of a registered field's padded device buffer as a Fortran-order 3-D array of the
@@ -285,56 +290,74 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(7 adds the wall-aware face map and the solid-cut-cell sliver mask). CHANGES RESULTS; "
           "no effect on the staggered solver. Modes 1-4 and 10-13 (ablations) were deleted with "
           "their kernels at 1.0.0.")
-      .def("set_incremental_pressure", [](D& diag, bool on) { return diag.s->setIncrementalPressure(on); }, nb::arg("on"),
-           "Toggle the rotational incremental-pressure projection.")
-      .def("set_pressure_warmstart", [](D& diag, bool on) { return diag.s->setPressureWarmstart(on); }, nb::arg("on"),
-           "Seed each pressure solve from the previous step's phi (default off).")
       .def(
-          "set_rotational_pressure", [](D& diag, bool on) { return diag.s->setRotationalPressure(on); }, nb::arg("on"),
+          "set_incremental_pressure",
+          [](D& diag, bool on) { return diag.s->setIncrementalPressure(on); }, nb::arg("on"),
+          "Toggle the rotational incremental-pressure projection.")
+      .def(
+          "set_pressure_warmstart",
+          [](D& diag, bool on) { return diag.s->setPressureWarmstart(on); }, nb::arg("on"),
+          "Seed each pressure solve from the previous step's phi (default off).")
+      .def(
+          "set_rotational_pressure",
+          [](D& diag, bool on) { return diag.s->setRotationalPressure(on); }, nb::arg("on"),
           "PM I ablation (Guy-Fogelson 2005): False drops the rotational -mu*div(u*) term from "
           "the incremental pressure accumulation (constant-mu path only). Default True = shipped "
           "rotational (Timmermans) update.")
       .def(
-          "set_rotational_filter", [](D& diag, bool on, double eps) { return diag.s->setRotationalFilter(on, eps); }, nb::arg("on"), nb::arg("eps") = 0.05,
+          "set_rotational_filter",
+          [](D& diag, bool on, double eps) { return diag.s->setRotationalFilter(on, eps); },
+          nb::arg("on"), nb::arg("eps") = 0.05,
           "Experimental filtered rotational update: smooth div(u*) (mask-aware axis-wise 1-2-1, "
           "one-sided into the fluid at walls) before accumulating -mu*div into P. Keeps the O(1) "
           "pressure-relaxation gain, removes the checkerboard feedback channel.")
       .def(
-          "set_rotational_weight", [](D& diag, double w) { return diag.s->setRotationalWeight(w); }, nb::arg("w"),
+          "set_rotational_weight", [](D& diag, double w) { return diag.s->setRotationalWeight(w); },
+          nb::arg("w"),
           "Under-relax the rotational term: P += ct*phi - w*mu*div(u*). 1 = shipped, 0 = PM I; "
           "small w raises the boundary-mode stability threshold ~1/w at ~1/w slower smooth-mode "
           "pressure relaxation. phi=0 stays the unique fixed point for any w>0 at every dt.")
       .def(
-          "set_rotational_wall_weight", [](D& diag, double w0) { return diag.s->setRotationalWallWeight(w0); }, nb::arg("w0"),
+          "set_rotational_wall_weight",
+          [](D& diag, double w0) { return diag.s->setRotationalWallWeight(w0); }, nb::arg("w0"),
           "Wall-banded rotational blend: at fluid cells with a solid axis-neighbour use "
           "P += (rho/dt + w0*mu/dx^2)*phi - (1-w0)*mu*div(u*); bulk keeps the full rotational "
           "update. Stabilizes the boundary rows without slowing bulk pressure relaxation, and "
           "keeps them relaxing at dt->infinity. 0 (default) = off.")
-      .def("set_aperture_order", [](D& diag, int order) { return diag.s->setApertureOrder(order); }, nb::arg("order"),
-           "Face-aperture estimator (DEFAULT 2 since 2026-08-26): 1 = legacy one-sample linear model, 2 = "
-           "marching-squares (5 samples/face, O(h^2); removes the convexity bias measured at "
-           "+0.59/+0.27% bed permeability at R=8/12 -- see doc/collocated_paper_plan.md row 51). "
-           "For analytic geometry, exact apertures via set_openness_override are better still. "
-           "Call before set_solid (a later call raises).")
-      .def("set_advection_wall_velocity", [](D& diag, bool on) { return diag.s->setAdvectionWallVelocity(on); }, nb::arg("on"),
-           "A0: fill the advection inputs' masked (solid) rows with the instantaneous WALL "
-           "velocity instead of zeros, so a MOVING body's advective term sees the body's own "
-           "motion. DEFAULT True; False is the pre-A0 ablation (measurement only). Inert on a "
-           "static scene and on the collocated grid.")
-      .def_prop_ro("advection_wall_velocity", [](D& diag) { return diag.s->advectionWallVelocity(); },
-                   "Whether the wall-velocity advection inputs are in force.")
-      .def("set_uf_advection", [](D& diag, bool on) { return diag.s->setUfAdvection(on); }, nb::arg("on"),
-           "Advect the COLLOCATED momentum with the projected, divergence-free MAC face field "
-           "uf/vf/wf of the last projection instead of the un-projected cell->face average "
-           "0.5*(u_i+u_j). DEFAULT True -- the shipped scheme: doc/flow_colocated_plan.md "
-           "step 3, the Almgren-Bell-Colella prescription (the field the projection just made "
-           "solenoidal IS the conservative advective flux), and what the FOU operator's "
-           "conservative row-sum identity needs. False is the ablation that restores the phase-2 "
-           "average (measurement only; see doc/uf_advection.md). Inert on the staggered grid (the "
-           "stored velocity already IS the projected face velocity) and before the first "
-           "projection or set_velocity has built a face field.")
-      .def_prop_ro("uf_advection", [](D& diag) { return diag.s->ufAdvection(); },
-                   "Whether the projected face field is the collocated advecting velocity.")
+      .def(
+          "set_aperture_order", [](D& diag, int order) { return diag.s->setApertureOrder(order); },
+          nb::arg("order"),
+          "Face-aperture estimator (DEFAULT 2 since 2026-08-26): 1 = legacy one-sample linear "
+          "model, 2 = "
+          "marching-squares (5 samples/face, O(h^2); removes the convexity bias measured at "
+          "+0.59/+0.27% bed permeability at R=8/12 -- see doc/collocated_paper_plan.md row 51). "
+          "For analytic geometry, exact apertures via set_openness_override are better still. "
+          "Call before set_solid (a later call raises).")
+      .def(
+          "set_advection_wall_velocity",
+          [](D& diag, bool on) { return diag.s->setAdvectionWallVelocity(on); }, nb::arg("on"),
+          "A0: fill the advection inputs' masked (solid) rows with the instantaneous WALL "
+          "velocity instead of zeros, so a MOVING body's advective term sees the body's own "
+          "motion. DEFAULT True; False is the pre-A0 ablation (measurement only). Inert on a "
+          "static scene and on the collocated grid.")
+      .def_prop_ro(
+          "advection_wall_velocity", [](D& diag) { return diag.s->advectionWallVelocity(); },
+          "Whether the wall-velocity advection inputs are in force.")
+      .def(
+          "set_uf_advection", [](D& diag, bool on) { return diag.s->setUfAdvection(on); },
+          nb::arg("on"),
+          "Advect the COLLOCATED momentum with the projected, divergence-free MAC face field "
+          "uf/vf/wf of the last projection instead of the un-projected cell->face average "
+          "0.5*(u_i+u_j). DEFAULT True -- the shipped scheme: doc/flow_colocated_plan.md "
+          "step 3, the Almgren-Bell-Colella prescription (the field the projection just made "
+          "solenoidal IS the conservative advective flux), and what the FOU operator's "
+          "conservative row-sum identity needs. False is the ablation that restores the phase-2 "
+          "average (measurement only; see doc/uf_advection.md). Inert on the staggered grid (the "
+          "stored velocity already IS the projected face velocity) and before the first "
+          "projection or set_velocity has built a face field.")
+      .def_prop_ro(
+          "uf_advection", [](D& diag) { return diag.s->ufAdvection(); },
+          "Whether the projected face field is the collocated advecting velocity.")
       .def(
           "set_comm_avoiding",
           [](D& diag, const std::string& mode) {
@@ -366,38 +389,48 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "comm_avoiding",
           [](D& diag) {
             const int m = diag.s->commAvoiding();
-            return std::string(m == peclet::flow::kCaBoth      ? "both"
+            return std::string(m == peclet::flow::kCaBoth       ? "both"
                                : m == peclet::flow::kCaMomentum ? "momentum"
                                : m == peclet::flow::kCaMg       ? "pressure"
                                                                 : "off");
           },
           "The communication-avoiding smoothing mode in force (see set_comm_avoiding).")
-      .def("set_multigrid_aspect_threshold", [](D& diag, double theta) { return diag.s->setMultigridAspectThreshold(theta); }, nb::arg("theta"),
-           "Anisotropic-coarsening aspect threshold theta shared by the pressure and velocity "
-           "multigrids (doc/anisotropic_metric.md §5.1): an axis is coarsened only while its cell "
-           "size stays within theta of the smallest one, so a stretched grid semi-coarsens instead "
-           "of building levels whose operator is dominated by one direction. DEFAULT 2.0; must be "
-           "> 1; 1e9 restores full coarsening on every axis (the §8.5 item (c) ablation). Only "
-           "ever consulted on an ANISOTROPIC metric, so it is inert on cubic cells.")
-      .def_prop_ro("multigrid_aspect_threshold", [](D& diag) { return diag.s->multigridAspectThreshold(); },
-                   "The anisotropic-coarsening threshold in force (see "
-                   "set_multigrid_aspect_threshold).")
-      .def("set_pressure_strict", [](D& diag, bool on) { return diag.s->setPressureStrict(on); }, nb::arg("on"),
-           "Raise instead of report when the pressure preconditioner returns a non-finite "
-           "correction. DEFAULT False: the shipped behaviour caps the solve, prints one line, and "
-           "raises the pressure_solve_failed() flag, so a check can catch it without changing "
-           "control flow. True turns the same event into an exception.")
-      .def_prop_ro("pressure_strict", [](D& diag) { return diag.s->pressureStrict(); },
-                   "Whether a non-finite pressure preconditioner output raises (see "
-                   "set_pressure_strict).")
-      .def("set_pressure_coarse_ghost", [](D& diag, bool on) { return diag.s->setPressureCoarseGhost(on); }, nb::arg("on"),
-           "Zero-gradient (Neumann) coarse ghost on wall/inflow faces before the pressure "
-           "multigrid's prolongation -- the WO-H symmetry repair. DEFAULT True. False restores "
-           "the pre-2026-08-30 periodic-wrap ghost, which reinstates the asymmetry that stalls "
-           "MG-PCG on every 3-D wall-bounded grid: a MEASUREMENT ABLATION, never a production "
-           "setting. Inert on periodic / IBM problems, where the two are the same.")
-      .def_prop_ro("pressure_coarse_ghost", [](D& diag) { return diag.s->pressureCoarseGhost(); },
-                   "Whether the Neumann coarse ghost is in force (see set_pressure_coarse_ghost).")
+      .def(
+          "set_multigrid_aspect_threshold",
+          [](D& diag, double theta) { return diag.s->setMultigridAspectThreshold(theta); },
+          nb::arg("theta"),
+          "Anisotropic-coarsening aspect threshold theta shared by the pressure and velocity "
+          "multigrids (doc/anisotropic_metric.md §5.1): an axis is coarsened only while its cell "
+          "size stays within theta of the smallest one, so a stretched grid semi-coarsens instead "
+          "of building levels whose operator is dominated by one direction. DEFAULT 2.0; must be "
+          "> 1; 1e9 restores full coarsening on every axis (the §8.5 item (c) ablation). Only "
+          "ever consulted on an ANISOTROPIC metric, so it is inert on cubic cells.")
+      .def_prop_ro(
+          "multigrid_aspect_threshold", [](D& diag) { return diag.s->multigridAspectThreshold(); },
+          "The anisotropic-coarsening threshold in force (see "
+          "set_multigrid_aspect_threshold).")
+      .def(
+          "set_pressure_strict", [](D& diag, bool on) { return diag.s->setPressureStrict(on); },
+          nb::arg("on"),
+          "Raise instead of report when the pressure preconditioner returns a non-finite "
+          "correction. DEFAULT False: the shipped behaviour caps the solve, prints one line, and "
+          "raises the pressure_solve_failed() flag, so a check can catch it without changing "
+          "control flow. True turns the same event into an exception.")
+      .def_prop_ro(
+          "pressure_strict", [](D& diag) { return diag.s->pressureStrict(); },
+          "Whether a non-finite pressure preconditioner output raises (see "
+          "set_pressure_strict).")
+      .def(
+          "set_pressure_coarse_ghost",
+          [](D& diag, bool on) { return diag.s->setPressureCoarseGhost(on); }, nb::arg("on"),
+          "Zero-gradient (Neumann) coarse ghost on wall/inflow faces before the pressure "
+          "multigrid's prolongation -- the WO-H symmetry repair. DEFAULT True. False restores "
+          "the pre-2026-08-30 periodic-wrap ghost, which reinstates the asymmetry that stalls "
+          "MG-PCG on every 3-D wall-bounded grid: a MEASUREMENT ABLATION, never a production "
+          "setting. Inert on periodic / IBM problems, where the two are the same.")
+      .def_prop_ro(
+          "pressure_coarse_ghost", [](D& diag) { return diag.s->pressureCoarseGhost(); },
+          "Whether the Neumann coarse ghost is in force (see set_pressure_coarse_ghost).")
       .def(
           "set_fluid_only_constraint",
           [](D& diag, const std::string& mode) {
@@ -405,15 +438,20 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
                 enum_index(mode, kFluidOnly, "set_fluid_only_constraint", "mode"));
           },
           nb::arg("mode"),
-          "Fluid-only pressure constraint (route 2b, a collocated mechanism instrument; call before "
+          "Fluid-only pressure constraint (route 2b, a collocated mechanism instrument; call "
+          "before "
           "set_solid): 'filter' = Design A (openness filter), 'star' = Design B (SPD Kron star "
           "elimination), 'off'. Any setting other than 'off' disables the AUTO scheme.")
-      .def("set_outer_iterations", [](D& diag, int iters) { return diag.s->setOuterIterations(iters); }, nb::arg("n"),
-           "Set the number of Picard/outer iterations per step.")
-      .def("set_outer_tolerance", [](D& diag, double tol) { return diag.s->setOuterTolerance(tol); }, nb::arg("tol"),
-           "Set the outer (Picard) convergence tolerance.")
-      .def("last_outer_iterations", [](D& diag) { return diag.s->lastOuterIterations(); },
-           "Return the outer-iteration count from the last step().")
+      .def(
+          "set_outer_iterations",
+          [](D& diag, int iters) { return diag.s->setOuterIterations(iters); }, nb::arg("n"),
+          "Set the number of Picard/outer iterations per step.")
+      .def(
+          "set_outer_tolerance", [](D& diag, double tol) { return diag.s->setOuterTolerance(tol); },
+          nb::arg("tol"), "Set the outer (Picard) convergence tolerance.")
+      .def(
+          "last_outer_iterations", [](D& diag) { return diag.s->lastOuterIterations(); },
+          "Return the outer-iteration count from the last step().")
       .def(
           "set_velocity_solver",
           [](D& diag, const std::string& name) {
@@ -428,11 +466,11 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             } else if (name == "chebyshev") {
               diag.s->setVelocityMultigrid(false, 3, 40);
               diag.s->setVelocityChebyshev(true);
-            }
-            else
+            } else
               throw std::invalid_argument(
                   "set_velocity_solver: expected 'auto', 'gauss_seidel', 'multigrid' or "
-                  "'chebyshev', got '" + name + "'");
+                  "'chebyshev', got '" +
+                  name + "'");
           },
           nb::arg("name"),
           "Which solver runs the implicit momentum (diffusion) equation. 'auto' (DEFAULT) picks by "
@@ -456,8 +494,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
               diag.s->setVelocityMgChebyshev(true, degree, eig_ratio);
             else
               throw std::invalid_argument(
-                  "set_velocity_mg_smoother: expected 'gauss_seidel' or 'chebyshev', got '" +
-                  name + "'");
+                  "set_velocity_mg_smoother: expected 'gauss_seidel' or 'chebyshev', got '" + name +
+                  "'");
           },
           nb::arg("name"), nb::arg("degree") = 0, nb::arg("eig_ratio") = 10.0,
           "Which smoother the velocity multigrid uses on every level -- orthogonal to "
@@ -469,14 +507,18 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "separate residual and update pass where a Gauss-Seidel sweep fuses the two. Kept "
           "because it is the apparatus for a question that gets asked repeatedly. degree=0 "
           "follows the V-cycle's own pre/post/bottom counts.")
-      .def("velocity_solver", [](D& diag) {
-            return diag.s->velocityChebyshevActive()  ? std::string("chebyshev")
+      .def(
+          "velocity_solver",
+          [](D& diag) {
+            return diag.s->velocityChebyshevActive()   ? std::string("chebyshev")
                    : diag.s->velocityMultigridActive() ? std::string("multigrid")
                                                        : std::string("gauss_seidel");
           },
           "The momentum solver actually in force, resolving 'auto'. Only meaningful after the "
           "first step(), which is where the choice is made (dt and mu are final only then).")
-      .def("velocity_mg_smoother", [](D& diag) {
+      .def(
+          "velocity_mg_smoother",
+          [](D& diag) {
             return diag.s->velocityMgChebyshev() ? std::string("chebyshev")
                                                  : std::string("gauss_seidel");
           },
@@ -493,27 +535,33 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "to rtol of the first sweep's (iters becomes the cap, min_iters the floor). Easy "
           "regimes (small nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the cap "
           "unchanged. rtol = 0 (default) is the legacy fixed count, byte-identical.")
-      .def("set_velocity_multigrid_auto", [](D& diag, long cellsPerRank, long minGlobalCells, int minBlockExtent) { return diag.s->setVelocityMultigridAuto(cellsPerRank, minGlobalCells, minBlockExtent); }, nb::arg("cells_per_rank"),
-           nb::arg("min_global_cells") = -1, nb::arg("min_block_extent") = -1,
-           "Narrow the rule that selects the momentum solver. Since 2026-09-15 the DEFAULT is the "
-           "velocity V-cycle on every validated operator mode and at every rank count: measured on "
-           "the 1.0.0 scaling benchmark it is faster at every rung of both the CPU and the GPU "
-           "ladder (2.23x at 147k cells/rank, 2.19x on one H100), and the red-black smoother it "
-           "replaced was running at its sweep cap -- not converging -- on every rung of both. "
-           "cells_per_rank sets an upper bound in cells per rank (0 = never use the V-cycle); "
-           "set_velocity_multigrid_auto(65536, 1 << 23) restores the 1.0.0 behaviour exactly. "
-           "min_block_extent (default 16) is the shortest per-rank inner extent worth building a "
-           "hierarchy on. An explicit set_velocity_multigrid() overrides all of it.")
-      .def("velocity_multigrid_active", [](D& diag) { return diag.s->velocityMultigridActive(); },
-           "Whether the velocity (momentum) solve uses the multigrid V-cycle rather than plain "
-           "RB-GS. Reads back the OUTCOME, not the setting: an explicit set_velocity_multigrid("
-           "on=...) call always wins, but absent one the AUTO rule (set_velocity_multigrid_auto) "
-           "decides it when the geometry is built (set_solid / set_pressure_geometry / "
-           "set_solid_from_scene) -- on for a distributed run (np > 1) in an eligible operator "
-           "mode with a global problem of at least min_global_cells (default 8M) and fewer than "
-           "cells_per_rank (default 65536) cells per rank, off otherwise. So the value can differ "
-           "from what the caller last set explicitly, and is only meaningful after geometry has "
-           "been installed (False on a fresh solver).")
+      .def(
+          "set_velocity_multigrid_auto",
+          [](D& diag, long cellsPerRank, long minGlobalCells, int minBlockExtent) {
+            return diag.s->setVelocityMultigridAuto(cellsPerRank, minGlobalCells, minBlockExtent);
+          },
+          nb::arg("cells_per_rank"), nb::arg("min_global_cells") = -1,
+          nb::arg("min_block_extent") = -1,
+          "Narrow the rule that selects the momentum solver. Since 2026-09-15 the DEFAULT is the "
+          "velocity V-cycle on every validated operator mode and at every rank count: measured on "
+          "the 1.0.0 scaling benchmark it is faster at every rung of both the CPU and the GPU "
+          "ladder (2.23x at 147k cells/rank, 2.19x on one H100), and the red-black smoother it "
+          "replaced was running at its sweep cap -- not converging -- on every rung of both. "
+          "cells_per_rank sets an upper bound in cells per rank (0 = never use the V-cycle); "
+          "set_velocity_multigrid_auto(65536, 1 << 23) restores the 1.0.0 behaviour exactly. "
+          "min_block_extent (default 16) is the shortest per-rank inner extent worth building a "
+          "hierarchy on. An explicit set_velocity_multigrid() overrides all of it.")
+      .def(
+          "velocity_multigrid_active", [](D& diag) { return diag.s->velocityMultigridActive(); },
+          "Whether the velocity (momentum) solve uses the multigrid V-cycle rather than plain "
+          "RB-GS. Reads back the OUTCOME, not the setting: an explicit set_velocity_multigrid("
+          "on=...) call always wins, but absent one the AUTO rule (set_velocity_multigrid_auto) "
+          "decides it when the geometry is built (set_solid / set_pressure_geometry / "
+          "set_solid_from_scene) -- on for a distributed run (np > 1) in an eligible operator "
+          "mode with a global problem of at least min_global_cells (default 8M) and fewer than "
+          "cells_per_rank (default 65536) cells per rank, off otherwise. So the value can differ "
+          "from what the caller last set explicitly, and is only meaningful after geometry has "
+          "been installed (False on a fresh solver).")
       .def(
           "scalar_geometry",
           [](D& diag, const std::string& name) {
@@ -579,10 +627,12 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "Census of the cut-cell scalar (collective under MPI, summed over ranks). The solve "
           "part, of the last advance or steady solve: 'krylov_iterations', 'krylov_residual' "
           "(the true max-norm residual over the reference max(max|b|, max|A c0|)), "
-          "'krylov_converged', 'mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 alone), "
+          "'krylov_converged', 'mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 "
+          "alone), "
           "'steady_incompatibility' (|sum b| / sum|b| of a singular steady problem before its "
           "projection, else 0), 'num_solid_unknowns' (0: single phase; the solid unknowns of a "
-          "conjugate scalar, whose 'probe_rungs' then carries a 'solid' tuple too), 'solid_volume' / "
+          "conjugate scalar, whose 'probe_rungs' then carries a 'solid' tuple too), 'solid_volume' "
+          "/ "
           "'sealed_solid_volume' (physical: the conjugate solid kappa_s V, and its part in cells "
           "that are not solid unknowns -- kappa_s > 0 with no open solid face and no conjugate "
           "facet, ruling D-WO7-1). The advection part "
@@ -619,8 +669,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           nb::arg("name"),
           "Budget of a cut-cell scalar over the last advance (collective under MPI), physical: "
           "'mass' = sum kappa V c, 'mass_solid' (= sum C_s kappa_s V c_s of a conjugate scalar; 0 "
-          "single phase), 'd_mass' = the change of mass + mass_solid over the advance, 'wall_in' / 'boundary_in' / 'source_in' = the rates INTO the fluid from the "
-          "immersed walls (the conjugate interfaces are internal: not in it), the domain faces (the Dirichlet faces' diffusive flux plus the advective "
+          "single phase), 'd_mass' = the change of mass + mass_solid over the advance, 'wall_in' / "
+          "'boundary_in' / 'source_in' = the rates INTO the fluid from the "
+          "immersed walls (the conjugate interfaces are internal: not in it), the domain faces "
+          "(the Dirichlet faces' diffusive flux plus the advective "
           "flux through inflow/outflow faces) and the source, 'defect' = dt sum V r (r the "
           "linear-solver residual), and 'identity_error' = d_mass - dt (wall_in + boundary_in + "
           "source_in) + defect, which is round-off for a correct discretization. After a steady "
@@ -633,12 +685,13 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             auto f = diag.s->scalarFacets(name);
             const std::size_t n = f.area.size();
             nb::dict d;
-            d["centroid"] = peclet::core::python::vector_to_ndarray(std::move(f.centroid), {n, 3},
-                                                                    {3, 1});
-            d["normal"] = peclet::core::python::vector_to_ndarray(std::move(f.normal), {n, 3},
-                                                                  {3, 1});
+            d["centroid"] =
+                peclet::core::python::vector_to_ndarray(std::move(f.centroid), {n, 3}, {3, 1});
+            d["normal"] =
+                peclet::core::python::vector_to_ndarray(std::move(f.normal), {n, 3}, {3, 1});
             d["area"] = peclet::core::python::vector_to_ndarray(std::move(f.area), {n}, {1});
-            d["instance"] = peclet::core::python::vector_to_ndarray(std::move(f.instance), {n}, {1});
+            d["instance"] =
+                peclet::core::python::vector_to_ndarray(std::move(f.instance), {n}, {1});
             d["wall_value"] =
                 peclet::core::python::vector_to_ndarray(std::move(f.wallValue), {n}, {1});
             d["flux"] = peclet::core::python::vector_to_ndarray(std::move(f.flux), {n}, {1});
@@ -684,15 +737,18 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "|u.n| |u_n|^2 of it; beta >= 0.5 is the unconditional energy bound. All zeros without "
           "an outflow face or without reversal. step() warns once, on stderr, when reversal "
           "appears while the stabilization is switched off.")
-      .def("last_momentum_residual", [](D& diag) { return diag.s->lastMomentumResidual(); },
-           "max over components of max|r|/max|b| at exit of the last step's momentum solves "
-           "(residual mode only; -1 otherwise).")
-      .def("set_deferred_correction", [](D& diag, bool on) { return diag.s->setDeferredCorrection(on); }, nb::arg("on"),
-           "Deferred-correction advection: True (default) = 2nd order (implicit FOU + explicit "
-           "high-order correction, the high-order scheme being SOU by default or Koren TVD via "
-           "set_advection_scheme); False = pure implicit FOU (1st-order upwind, more dissipative "
-           "but "
-           "unconditionally stable at sharp shear layers).")
+      .def(
+          "last_momentum_residual", [](D& diag) { return diag.s->lastMomentumResidual(); },
+          "max over components of max|r|/max|b| at exit of the last step's momentum solves "
+          "(residual mode only; -1 otherwise).")
+      .def(
+          "set_deferred_correction",
+          [](D& diag, bool on) { return diag.s->setDeferredCorrection(on); }, nb::arg("on"),
+          "Deferred-correction advection: True (default) = 2nd order (implicit FOU + explicit "
+          "high-order correction, the high-order scheme being SOU by default or Koren TVD via "
+          "set_advection_scheme); False = pure implicit FOU (1st-order upwind, more dissipative "
+          "but "
+          "unconditionally stable at sharp shear layers).")
       .def(
           "set_pressure_mean_removal",
           [](D& diag, const std::string& scope) {
@@ -717,7 +773,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             else if (engine == "algebraic")
               diag.s->setPressureBottomSolver(2);
             else
-              throw std::runtime_error("set_pressure_bottom_solver: 'auto' | 'direct' | 'algebraic'");
+              throw std::runtime_error(
+                  "set_pressure_bottom_solver: 'auto' | 'direct' | 'algebraic'");
           },
           nb::arg("engine"),
           "Engine of the AGGLOMERATED pressure bottom (set_pressure_bottom 'auto' / "
@@ -750,7 +807,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "distributed). 'auto' (DEFAULT since 2026-10-19): 'fp32' where eligible, else 'fp64', "
           "on a DEVICE backend (CUDA, HIP), with the FP64 restart below; on a host backend "
           "(OpenMP, Serial) 'auto' is 'fp64' -- the host saves too little (~5-8 %) to pay for "
-          "FP32's risks. 'fp64': the FP64 V-cycle. 'fp32': FP32 face weights (the diagonal derived, never "
+          "FP32's risks. 'fp64': the FP64 V-cycle. 'fp32': FP32 face weights (the diagonal "
+          "derived, never "
           "stored), FP32 iterates and flux-form arithmetic on every level above the bottom, the "
           "input scaled by an exact power of two; the Krylov matvec, dots, mean projection and "
           "stop test stay FP64 -- raises at the solve, naming the failed condition, where not "
@@ -766,7 +824,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "V-cycle -- the 'fp64' solve of the same right-hand side -- with one warning line, and "
           "'auto' then stays FP64 for the rest of the run (pressure_vcycle_precision() reads "
           "'fp64'); calling this setter again re-arms it. Forced 'fp32' is never restarted (the "
-          "A/B mode). doc/vof_projection_distributed_design.md §4, §9 (the default). It saves ~19 % of the "
+          "A/B mode). doc/vof_projection_distributed_design.md §4, §9 (the default). It saves ~19 "
+          "% of the "
           "projection on a GPU "
           "(bubble column, RTX 5080), ~11 % on a CPU. Outside the CG drivers' rated contrast "
           "(density ratio above ~1e3 with walls) both precisions may cap; FP32 may cap earlier. "
@@ -782,8 +841,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             else if (mode == "projected")
               m = 2;
             else
-              throw std::runtime_error(
-                  "set_pressure_initial_guess: 'auto' | 'zero' | 'projected'");
+              throw std::runtime_error("set_pressure_initial_guess: 'auto' | 'zero' | 'projected'");
             diag.s->setPressureInitialGuess(m, history);
           },
           nb::arg("mode"), nb::arg("history") = 2,
@@ -795,20 +853,22 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           " 0 on non-fluid cells), and the stop stays relative to the ZERO-guess residual "
           "max|P b|, so the solve is never looser than the cold one. Raises at the solve, naming "
           "the failed condition, where not eligible (the Chebyshev driver, the ghost projection, "
-          "set_pressure_warmstart(True)). 'auto': 'projected' where eligible, else 'zero', on every "
+          "set_pressure_warmstart(True)). 'auto': 'projected' where eligible, else 'zero', on "
+          "every "
           "backend. 'projected' and 'auto' are opt-in, not the default (decided 2026-10-15). "
           "Distributed, the Gram system is allreduced, so every rank takes the same guess; an "
           "np=1 run is bitwise the single-rank run. The history "
           "restarts empty (a cold solve, then one increment, then two) after "
           "this call, a geometry change (set_solid, set_pressure_geometry, init_mpi, "
-          "redistribute / rebalance_by_weights), a state write (set_field of u/v/w/p/phi, set_state, set_velocity), a "
+          "redistribute / rebalance_by_weights), a state write (set_field of u/v/w/p/phi, "
+          "set_state, set_velocity), a "
           "driver change, and a failed or capped solve. RESTARTS: no history is checkpointed, so"
           " a run restarted from saved fields takes those two cold-history steps and agrees with "
           "the uninterrupted run to the solver tolerance, not bitwise. "
           "doc/vof_projection_cost_design.md §5, doc/vof_projection_distributed_design.md §6.")
       .def(
-          "set_pressure_prefactor_hoist", [](D& diag, bool on) { diag.s->setPressurePrefactorHoist(on); },
-          nb::arg("on"),
+          "set_pressure_prefactor_hoist",
+          [](D& diag, bool on) { diag.s->setPressurePrefactorHoist(on); }, nb::arg("on"),
           "Switch the side-instance bottom prefactor (doc/vof_gpu_coarse_tail_design.md §5.6, "
           "default ON) off: the variable-rho coefficients are then built in the projection and "
           "the direct bottom factored lazily in the bottom solve. Same state bit for bit; for "
@@ -822,66 +882,88 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           [](D& diag) { return std::string(diag.s->pressureVcycleFp32() ? "fp32" : "fp64"); },
           "The precision ('fp32' or 'fp64') the last pressure solve's V-cycles used "
           "(set_pressure_vcycle_precision); 'fp64' before any FP32 solve.")
-      .def("set_pressure_graph_amg", [](D& diag, bool on) { return diag.s->setPressureGraphAmg(on); }, nb::arg("on"),
-           "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
-           "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "
-           "mesh-independent pressure solve that works under a WEIGHTED ORB (where the geometric "
-           "coarse levels can't cleanly coarsen). Applied at the next set_solid.")
-      .def("set_exact_crossings", [](D& diag, const std::vector<double>& t) { return diag.s->setExactCrossings(t); }, nb::arg("t"),
-           "Analytic-SDF capability: exact wall-crossing fractions overriding the "
-           "linear-interpolated theta in the momentum cut-cell overlay AND the ghost-projection "
-           "closures. Flat array of 9*nx*ny*nz values, blocks [(c*3+k)]: component c's staggered "
-           "point at inner cell i toward its +k neighbour; NaN = no crossing. Call BEFORE "
+      .def(
+          "set_pressure_graph_amg",
+          [](D& diag, bool on) { return diag.s->setPressureGraphAmg(on); }, nb::arg("on"),
+          "Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic "
+          "multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a "
+          "mesh-independent pressure solve that works under a WEIGHTED ORB (where the geometric "
+          "coarse levels can't cleanly coarsen). Applied at the next set_solid.")
+      .def(
+          "set_exact_crossings",
+          [](D& diag, const std::vector<double>& t) { return diag.s->setExactCrossings(t); },
+          nb::arg("t"),
+          "Analytic-SDF capability: exact wall-crossing fractions overriding the "
+          "linear-interpolated theta in the momentum cut-cell overlay AND the ghost-projection "
+          "closures. Flat array of 9*nx*ny*nz values, blocks [(c*3+k)]: component c's staggered "
+          "point at inner cell i toward its +k neighbour; NaN = no crossing. Call BEFORE "
           "set_solid (a later call raises); empty list clears. Single-rank, staggered momentum "
           "placement.")
-      .def("set_openness_override", [](D& diag, const std::vector<double>& ox, const std::vector<double>& oy, const std::vector<double>& oz) { return diag.s->setOpennessOverride(ox, oy, oz); }, nb::arg("ox"), nb::arg("oy"),
-           nb::arg("oz"),
-           "Analytic-SDF capability: exact face-aperture (openness) fields for the cut-cell "
-           "projection, overriding the sampled-SDF openness. Inner nx*ny*nz arrays, x-fastest; "
-           "ox[i] = fluid fraction of the -x face of cell i. Call BEFORE set_solid (a later call "
+      .def(
+          "set_openness_override",
+          [](D& diag, const std::vector<double>& ox, const std::vector<double>& oy,
+             const std::vector<double>& oz) { return diag.s->setOpennessOverride(ox, oy, oz); },
+          nb::arg("ox"), nb::arg("oy"), nb::arg("oz"),
+          "Analytic-SDF capability: exact face-aperture (openness) fields for the cut-cell "
+          "projection, overriding the sampled-SDF openness. Inner nx*ny*nz arrays, x-fastest; "
+          "ox[i] = fluid fraction of the -x face of cell i. Call BEFORE set_solid (a later call "
           "raises); empty ox clears. Single-rank.")
-      .def("set_ghost_projection", [](D& diag, bool on, int matrixOrder, int rhsOrder) { return diag.s->setGhostProjection(on, matrixOrder, rhsOrder); }, nb::arg("on"),
-           nb::arg("matrix_order") = 2, nb::arg("rhs_order") = 2,
-           "QUARANTINED 2026-08-18 (verification only, unsupported): superseded by the gauge-exact collocated scheme, which matches its accuracy at 5-6x lower cost. Kept as the independent second discretization behind the cross-IBM physics gate. Enabling it on the collocated grid silently selects the plain face map, since it owns the operators the gauge-exact scheme replaces. EXPERIMENTAL directional ghost-cell projection (second staggered IBM): point-based FD "
-           "divergence with wall-anchored directional closures instead of the openness-weighted "
-           "cut-cell projection; solved by MG-preconditioned BiCGStab. Call BEFORE set_solid (a "
+      .def(
+          "set_ghost_projection",
+          [](D& diag, bool on, int matrixOrder, int rhsOrder) {
+            return diag.s->setGhostProjection(on, matrixOrder, rhsOrder);
+          },
+          nb::arg("on"), nb::arg("matrix_order") = 2, nb::arg("rhs_order") = 2,
+          "QUARANTINED 2026-08-18 (verification only, unsupported): superseded by the gauge-exact "
+          "collocated scheme, which matches its accuracy at 5-6x lower cost. Kept as the "
+          "independent second discretization behind the cross-IBM physics gate. Enabling it on the "
+          "collocated grid silently selects the plain face map, since it owns the operators the "
+          "gauge-exact scheme replaces. EXPERIMENTAL directional ghost-cell projection (second "
+          "staggered IBM): point-based FD "
+          "divergence with wall-anchored directional closures instead of the openness-weighted "
+          "cut-cell projection; solved by MG-preconditioned BiCGStab. Call BEFORE set_solid (a "
           "later call raises). "
-           "Closure orders (1=linear, 2=quadratic): (matrix_order, rhs_order) = (2,2) full "
-           "quadratic 13-point matrix; (1,1) linear 7-point; (1,2) mixed/deferred — 2nd-order "
-           "steady constraint on a 7-point matrix. Collocated: the same closures/matrix on the "
-           "face-averaged field, plus a directional (one-sided 2nd-order) cell gradient for the "
-           "-grad(P) predictor and cell correction; requires face_interp 0. v1: single-rank, "
-           "periodic + IBM, stationary walls; incompatible with "
-           "porous/variable-rho/domain-BC/Chebyshev.")
-      .def("pressure_mg_level_ratios", [](D& diag) { return diag.s->pressureMgLevelRatios(); },
-           "The pressure multigrid's per-level coarsening ratio, one (rx, ry, rz) per level "
-           "(read-only).\n\n"
-           "On an isotropic domain every coarsenable axis halves, as it always has. On an "
-           "ANISOTROPIC one (extent giving different spacings per axis) the hierarchy coarsens "
-           "the FINEST coarsenable axis and defers one that is already at least "
-           "set_multigrid_aspect_threshold (default 2) times coarser, so the coarse operators stay close "
-           "to isotropic and the point smoother keeps its rate -- e.g. cells (N, 2N, N/2) on a "
-           "cube gives (1,2,1), (2,2,1), (2,2,2), ... Empty until set_solid/"
-           "set_pressure_geometry has built the operator. See flow/doc/anisotropic_metric.md "
-           "\u00a75.")
-      .def("last_superficial_velocity_shift",
-           [](D& diag) { return diag.s->lastSuperficialVelocityShift(); },
-           "The uniform velocity shift set_superficial_velocity applied at the end of the last "
-           "step() (physical velocity units; 0 when it is off). Reading it synchronises with the "
-           "device.")
-      .def("last_balanced_force_iterations",
-           [](D& diag) { return diag.s->lastBalancedForceIterations(); },
-           "Pressure-driver iterations of the last step's balanced-force solve "
-           "(set_balanced_force_projection); 0 when it is off, the force divergence was zero, or "
-           "the previous split already met the stop.")
-      .def("last_balanced_force_failed",
-           [](D& diag) { return diag.s->lastBalancedForceFailed(); },
-           "Whether the last step's balanced-force solve FAILED (driver breakdown or a non-finite "
-           "result). A failed solve keeps P and p_balanced unchanged for that step; the first one "
-           "warns on stderr.")
-      .def("balanced_force_failures", [](D& diag) { return diag.s->balancedForceFailures(); },
-           "How many balanced-force solves have failed over the solver's lifetime (see "
-           "last_balanced_force_failed).")
+          "Closure orders (1=linear, 2=quadratic): (matrix_order, rhs_order) = (2,2) full "
+          "quadratic 13-point matrix; (1,1) linear 7-point; (1,2) mixed/deferred — 2nd-order "
+          "steady constraint on a 7-point matrix. Collocated: the same closures/matrix on the "
+          "face-averaged field, plus a directional (one-sided 2nd-order) cell gradient for the "
+          "-grad(P) predictor and cell correction; requires face_interp 0. v1: single-rank, "
+          "periodic + IBM, stationary walls; incompatible with "
+          "porous/variable-rho/domain-BC/Chebyshev.")
+      .def(
+          "pressure_mg_level_ratios", [](D& diag) { return diag.s->pressureMgLevelRatios(); },
+          "The pressure multigrid's per-level coarsening ratio, one (rx, ry, rz) per level "
+          "(read-only).\n\n"
+          "On an isotropic domain every coarsenable axis halves, as it always has. On an "
+          "ANISOTROPIC one (extent giving different spacings per axis) the hierarchy coarsens "
+          "the FINEST coarsenable axis and defers one that is already at least "
+          "set_multigrid_aspect_threshold (default 2) times coarser, so the coarse operators stay "
+          "close "
+          "to isotropic and the point smoother keeps its rate -- e.g. cells (N, 2N, N/2) on a "
+          "cube gives (1,2,1), (2,2,1), (2,2,2), ... Empty until set_solid/"
+          "set_pressure_geometry has built the operator. See flow/doc/anisotropic_metric.md "
+          "\u00a75.")
+      .def(
+          "last_superficial_velocity_shift",
+          [](D& diag) { return diag.s->lastSuperficialVelocityShift(); },
+          "The uniform velocity shift set_superficial_velocity applied at the end of the last "
+          "step() (physical velocity units; 0 when it is off). Reading it synchronises with the "
+          "device.")
+      .def(
+          "last_balanced_force_iterations",
+          [](D& diag) { return diag.s->lastBalancedForceIterations(); },
+          "Pressure-driver iterations of the last step's balanced-force solve "
+          "(set_balanced_force_projection); 0 when it is off, the force divergence was zero, or "
+          "the previous split already met the stop.")
+      .def(
+          "last_balanced_force_failed", [](D& diag) { return diag.s->lastBalancedForceFailed(); },
+          "Whether the last step's balanced-force solve FAILED (driver breakdown or a non-finite "
+          "result). A failed solve keeps P and p_balanced unchanged for that step; the first one "
+          "warns on stderr.")
+      .def(
+          "balanced_force_failures", [](D& diag) { return diag.s->balancedForceFailures(); },
+          "How many balanced-force solves have failed over the solver's lifetime (see "
+          "last_balanced_force_failed).")
       .def(
           "anderson_accelerator",
           [](D& diag, int window, double mixing) {
@@ -896,29 +978,32 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "scalars, porous, variable properties, drag, cell forces, moving scenes, superficial "
           "velocity, pressure warm start, the balanced-force projection) and when the history, "
           "(2m+3) * n_fields * 8 * n_padded bytes, does not fit. Collective under MPI.")
-      .def("last_pressure_iterations", [](D& diag) { return diag.s->lastPressureIterations(); },
-           "Return the pressure-solver iteration count from the last step().\n\n"
-           "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "
-           "CAP, so the usual rule-3b 'a capped pressure solve invalidates the run' check sees "
-           "it; pressure_solve_failed() distinguishes the two.")
-      .def_prop_ro("num_pressure_chebyshev_restarts",
-                   [](D& diag) { return diag.s->numPressureChebyshevRestarts(); },
-                   "How many Chebyshev pressure solves were redone on cold spectral bounds since "
-                   "construction. Under variable density the bounds are re-estimated every step "
-                   "from the previous estimate's power iterates (5 + 5 iterations instead of "
-                   "15 + 15 from the right-hand side); a solve on such bounds that reaches the "
-                   "cap, or whose residual after 3 iterations exceeds the initial one, is redone "
-                   "on a cold estimate and counted here; the abandoned attempt's V-cycles count in "
-                   "last_pressure_iterations().")
-      .def("pressure_solve_failed", [](D& diag) { return diag.s->pressureSolveFailed(); },
-           "Did the last pressure solve break down on a non-finite recurrence scalar (a "
-           "preconditioner or operator that produced NaN/Inf)?\n\n"
-           "The driver then zeroes the correction and continues -- so the projection was handed "
-           "NOTHING for that step and the run is invalid. Until 2026-09-04 the only trace was one "
-           "line on stdout ('preconditioner produced non-finite z') while "
-           "last_pressure_iterations() reported 0, i.e. a perfectly healthy-looking solve "
-           "(measured: examples/pore-scale-imbibition, a 3.1-cell throat). Set "
-           "set_pressure_strict(True) to raise instead.")
+      .def(
+          "last_pressure_iterations", [](D& diag) { return diag.s->lastPressureIterations(); },
+          "Return the pressure-solver iteration count from the last step().\n\n"
+          "A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration "
+          "CAP, so the usual rule-3b 'a capped pressure solve invalidates the run' check sees "
+          "it; pressure_solve_failed() distinguishes the two.")
+      .def_prop_ro(
+          "num_pressure_chebyshev_restarts",
+          [](D& diag) { return diag.s->numPressureChebyshevRestarts(); },
+          "How many Chebyshev pressure solves were redone on cold spectral bounds since "
+          "construction. Under variable density the bounds are re-estimated every step "
+          "from the previous estimate's power iterates (5 + 5 iterations instead of "
+          "15 + 15 from the right-hand side); a solve on such bounds that reaches the "
+          "cap, or whose residual after 3 iterations exceeds the initial one, is redone "
+          "on a cold estimate and counted here; the abandoned attempt's V-cycles count in "
+          "last_pressure_iterations().")
+      .def(
+          "pressure_solve_failed", [](D& diag) { return diag.s->pressureSolveFailed(); },
+          "Did the last pressure solve break down on a non-finite recurrence scalar (a "
+          "preconditioner or operator that produced NaN/Inf)?\n\n"
+          "The driver then zeroes the correction and continues -- so the projection was handed "
+          "NOTHING for that step and the run is invalid. Until 2026-09-04 the only trace was one "
+          "line on stdout ('preconditioner produced non-finite z') while "
+          "last_pressure_iterations() reported 0, i.e. a perfectly healthy-looking solve "
+          "(measured: examples/pore-scale-imbibition, a 3.1-cell throat). Set "
+          "set_pressure_strict(True) to raise instead.")
       .def(
           "last_step_timers",
           [](D& diag) {
@@ -932,32 +1017,39 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             d["momentum_sweeps"] = diag.s->lastMomentumSweeps();
             return d;
           },
-          "Per-phase wall times (seconds, THIS rank, device-fenced) of the last step(): 'predictor' "
+          "Per-phase wall times (seconds, THIS rank, device-fenced) of the last step(): "
+          "'predictor' "
           "(ghost fills + RHS/advection/stencil builds), 'momentum' (implicit-diffusion solves), "
           "'projection' (cut-cell pressure projection), 'step' (whole step). "
           "'pressure_allreduce'/'pressure_allreduce_count' = time in / number of global reductions "
           "(MPI_Allreduce) inside the pressure solve — the latency-bound term of the distributed "
           "solve (0 on a single rank).")
-      .def("set_exact_crossings_from_scene", [](D& diag) { return diag.s->setExactCrossingsFromScene(); },
-           "Compute EXACT wall crossings from the installed scene, on device, on every rank -- the "
-           "in-solver replacement for set_exact_crossings + scripts/exact_apertures_spheres.py. "
-           "Bisection, not Newton: only SIGN correctness is guaranteed for bound-only leaves.")
-      .def("set_wall_flux_divergence", [](D& diag, bool on) { return diag.s->setWallFluxDivergence(on); }, nb::arg("on"),
-           "Rung 3 on/off (default on = correct physics). Off leaves the moving wall's no-slip "
-           "datum in the momentum operator but drops the wall's own volume flux from the cut-cell "
-           "projection -- the configuration the Galilean gate uses to exhibit the failure the term "
-           "fixes.")
-      .def("set_fresh_cell_seed", [](D& diag, bool on) { return diag.s->setFreshCellSeed(on); }, nb::arg("on"),
-           "Fresh-cell policy for MOVING geometry. A point a body has just uncovered inherits "
-           "whatever the solid held there -- zero, or a stale masked value -- which is one of the "
-           "two textbook mechanisms behind spurious force oscillations in a moving-boundary IBM. "
-           "True seeds it with the LOCAL WALL VELOCITY instead, so it starts moving with the "
-           "surface that released it. Bounded (no extrapolation), no new field, and exactly the "
-           "old behaviour when nothing moves. DEFAULT TRUE since 2026-08-30: measured on an "
-           "oscillating sphere translating through the grid, it removes a resolution-INDEPENDENT "
-           "+2.6..2.9% drag bias, cuts the spurious force oscillation 20-50x to within 17% of the "
-           "non-moving floor, and improves the resolved CFD-DEM loop's total-momentum "
-           "conservation 95x. Pass False for the pre-2026-08-30 behaviour.")
+      .def(
+          "set_exact_crossings_from_scene",
+          [](D& diag) { return diag.s->setExactCrossingsFromScene(); },
+          "Compute EXACT wall crossings from the installed scene, on device, on every rank -- the "
+          "in-solver replacement for set_exact_crossings + scripts/exact_apertures_spheres.py. "
+          "Bisection, not Newton: only SIGN correctness is guaranteed for bound-only leaves.")
+      .def(
+          "set_wall_flux_divergence",
+          [](D& diag, bool on) { return diag.s->setWallFluxDivergence(on); }, nb::arg("on"),
+          "Rung 3 on/off (default on = correct physics). Off leaves the moving wall's no-slip "
+          "datum in the momentum operator but drops the wall's own volume flux from the cut-cell "
+          "projection -- the configuration the Galilean gate uses to exhibit the failure the term "
+          "fixes.")
+      .def(
+          "set_fresh_cell_seed", [](D& diag, bool on) { return diag.s->setFreshCellSeed(on); },
+          nb::arg("on"),
+          "Fresh-cell policy for MOVING geometry. A point a body has just uncovered inherits "
+          "whatever the solid held there -- zero, or a stale masked value -- which is one of the "
+          "two textbook mechanisms behind spurious force oscillations in a moving-boundary IBM. "
+          "True seeds it with the LOCAL WALL VELOCITY instead, so it starts moving with the "
+          "surface that released it. Bounded (no extrapolation), no new field, and exactly the "
+          "old behaviour when nothing moves. DEFAULT TRUE since 2026-08-30: measured on an "
+          "oscillating sphere translating through the grid, it removes a resolution-INDEPENDENT "
+          "+2.6..2.9% drag bias, cuts the spurious force oscillation 20-50x to within 17% of the "
+          "non-moving floor, and improves the resolved CFD-DEM loop's total-momentum "
+          "conservation 95x. Pass False for the pre-2026-08-30 behaviour.")
       .def(
           "fluid_momentum_cells",
           [](D& diag) {
@@ -1001,15 +1093,19 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "on a lattice plane. Those points are fluid to the mask and not ghosts to the cut-cell "
           "fold, so a moving body's datum never enters there (set_solid_from_scene warns). Empty "
           "when no instance moves.")
-      .def("instance_center_pinned", [](D& diag, int i) { return diag.s->instanceCenterPinned(i); }, nb::arg("i"),
-           "True if instance i's centre of rotation is PINNED (an explicit finite centre in the "
-           "encoding, or set_instance_motion(center=...)); False if it follows the body's "
-           "translation (NaN in the encoding, the builder's default; legacy all-zero raw arrays).")
-      .def("periodic_image_overlap_cells", [](D& diag) { return diag.s->periodicImageOverlapCells(); },
-           "Cells on this rank whose solid/fluid sign was decided by a periodic IMAGE of an "
-           "instance wider than the box (set_solid_from_scene warns when nonzero): the scene "
-           "evaluates the UNION of images, so a slab wider than the box refills any cavity carved "
-           "from it. 0 when no instance is that wide or the images agree.")
+      .def(
+          "instance_center_pinned", [](D& diag, int i) { return diag.s->instanceCenterPinned(i); },
+          nb::arg("i"),
+          "True if instance i's centre of rotation is PINNED (an explicit finite centre in the "
+          "encoding, or set_instance_motion(center=...)); False if it follows the body's "
+          "translation (NaN in the encoding, the builder's default; legacy all-zero raw arrays).")
+      .def(
+          "periodic_image_overlap_cells",
+          [](D& diag) { return diag.s->periodicImageOverlapCells(); },
+          "Cells on this rank whose solid/fluid sign was decided by a periodic IMAGE of an "
+          "instance wider than the box (set_solid_from_scene warns when nonzero): the scene "
+          "evaluates the UNION of images, so a slab wider than the box refills any cavity carved "
+          "from it. 0 when no instance is that wide or the images agree.")
       .def(
           "hydro_force_torque_traction",
           [](D& diag) { return traction_force_torque_array<Grid>(*diag.s); },
@@ -1028,14 +1124,16 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "BCs, implicit advection). A consistent traction (from the momentum operator's "
           "small-cell-robust wall reconstruction) is planned. Was Solver.hydro_force_torque() "
           "(deprecated). Atomics: tolerance-reproducible, not bitwise.")
-      .def("wall_area_probe", [](D& diag) { return diag.s->wallAreaProbe(); },
-           "Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut "
-           "cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, "
-           "so it separates a force-integral error in the GEOMETRY from one in the traction.")
-      .def("wall_flux_imbalance", [](D& diag) { return diag.s->wallFluxImbalance(); },
-           "Sum over cells of u_wall . A_wall -- the compatibility datum of the singular pressure "
-           "problem. Exactly zero for a translating body in a periodic box; small but nonzero for "
-           "rotation. Reported, not corrected.")
+      .def(
+          "wall_area_probe", [](D& diag) { return diag.s->wallAreaProbe(); },
+          "Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut "
+          "cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, "
+          "so it separates a force-integral error in the GEOMETRY from one in the traction.")
+      .def(
+          "wall_flux_imbalance", [](D& diag) { return diag.s->wallFluxImbalance(); },
+          "Sum over cells of u_wall . A_wall -- the compatibility datum of the singular pressure "
+          "problem. Exactly zero for a translating body in a periodic box; small but nonzero for "
+          "rotation. Reported, not corrected.")
       .def(
           "get_cut_owner",
           [](D& diag) {
@@ -1052,7 +1150,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "owner and resolved CFD-DEM posts the hydrodynamic force back to it.")
       .def(
           "field_view",
-          [](D& diag, const std::string& name) { return field3d_out(*diag.s, diag.s->fieldView(name)); },
+          [](D& diag, const std::string& name) {
+            return field3d_out(*diag.s, diag.s->fieldView(name));
+          },
           nb::arg("name"),
           "Zero-copy view of a registered field's full padded buffer as a Fortran-order "
           "(nx+2g, ny+2g, nz+2g) array (g = ghost_width); host → NumPy, device → DLPack (CuPy). "
@@ -1065,8 +1165,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "Fill a registered field's ghost cells (cross-rank + periodic under MPI; periodic "
           "single-rank).")
       .def(
-          "exchange_field_add", [](D& diag, const std::string& name) { diag.s->exchangeFieldAdd(name); },
-          nb::arg("name"),
+          "exchange_field_add",
+          [](D& diag, const std::string& name) { diag.s->exchangeFieldAdd(name); }, nb::arg("name"),
           "Add-reduce halo: fold ghost-layer deposits back onto their owner (cross-rank + "
           "periodic). "
           "The particle->grid deposition primitive for MPI CFD-DEM; single-rank non-periodic "
@@ -1084,7 +1184,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "vof_step_parity", [](D& diag) { return diag.s->vofStepParity(); },
           "The sweep-permutation counter of the next colour advection.")
       .def(
-          "set_vof_wisp_eps", [](D& diag, double eps) { diag.s->setVofWispEps(eps); }, nb::arg("eps"),
+          "set_vof_wisp_eps", [](D& diag, double eps) { diag.s->setVofWispEps(eps); },
+          nb::arg("eps"),
           "Wisp tolerance on the Weymouth-Yue mixed-cell predicate: a cell counts as carrying an "
           "interface only while eps < C < 1 - eps, and one outside that band is fluxed "
           "ALGEBRAICALLY as C_donor * a — its ACTUAL colour, so the exact telescoping conservation "
@@ -1131,7 +1232,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "3.2e-5 liquid volume per step and the conserved functional drifts 1.3e-8 in 30 steps; "
           "with it on the clip stops firing.")
       .def(
-          "vof_filled_color", [](D& diag) { return field_out(*diag.s, diag.s->getVofFilledColour()); },
+          "vof_filled_color",
+          [](D& diag) { return field_out(*diag.s, diag.s->getVofFilledColour()); },
           "The colour field INCLUDING the neutral solid-band fill — what the MYC and "
           "height-function stencils actually read — as a Fortran-order (nx,ny,nz) array. "
           "get_vof()/'C' is the canonical field and carries EXACTLY 0 in solid cells; the fill is "
@@ -1140,7 +1242,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "budget, src/vof/cutcell.hpp), and it is what makes the wall look 90-degree neutral "
           "instead of perfectly non-wetting.")
       .def(
-          "vof_geometry", [](D& diag, int which) { return field_out(*diag.s, diag.s->getVofGeometry(which)); },
+          "vof_geometry",
+          [](D& diag, int which) { return field_out(*diag.s, diag.s->getVofGeometry(which)); },
           nb::arg("which"),
           "The cut-cell geometry the colour block runs on, as a Fortran-order (nx,ny,nz) array: "
           "0 = the cell fluid fraction eps (4^3-subsampled, a multiple of 1/64), 1/2/3 = the "
@@ -1154,7 +1257,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "set_contact_angle_pivot",
           [](D& diag, const std::string& mode) {
-            diag.s->setContactAnglePivot(enum_index(mode, kPivots, "set_contact_angle_pivot", "mode"));
+            diag.s->setContactAnglePivot(
+                enum_index(mode, kPivots, "set_contact_angle_pivot", "mode"));
           },
           nb::arg("mode"),
           "ABLATION -- how the theta-plane is anchored in the fluid cell. 'volume' (DEFAULT) match "
@@ -1188,7 +1292,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             r["max_contact_speed"] = d.maxContactSpeed;
             return r;
           },
-          "The solid-band census of the CURRENT colour field on this rank: how many band cells each "
+          "The solid-band census of the CURRENT colour field on this rank: how many band cells "
+          "each "
           "branch of pass 1 wrote ('contact_cells' the theta plane of the cell's own anchor, "
           "'neighbour_cells' the mean of the anchor's MIXED neighbours' planes where the anchor "
           "itself is pure phase, 'pure_cells' the pure-phase "
@@ -1214,25 +1319,27 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "the Navier closure inapplicable and the no-slip one was kept. Nonzero means part of the "
           "wall is silently no-slip; report it.")
       .def(
-          "set_contact_angle_smoothing", [](D& diag, bool on) { diag.s->setContactAngleSmoothing(on); },
-          nb::arg("on"),
+          "set_contact_angle_smoothing",
+          [](D& diag, bool on) { diag.s->setContactAngleSmoothing(on); }, nb::arg("on"),
           "ABLATION - the 3-point in-wall mean of U_cl (default ON). A MAC velocity next to a wall "
           "is noisy cell to cell and the cube root of the Cox-Voinov relation puts that noise "
           "straight into the imposed angle; off measures what the smoothing is worth.")
       .def(
           "set_contact_angle_clamp",
-          [](D& diag, double lo, double hi) { diag.s->setContactAngleClamp(lo, hi); }, nb::arg("lo"),
-          nb::arg("hi"),
+          [](D& diag, double lo, double hi) { diag.s->setContactAngleClamp(lo, hi); },
+          nb::arg("lo"), nb::arg("hi"),
           "The clamp on the Cox-Voinov cube, in degrees (default 1 / 179). The cubic has no "
           "solution beyond the maximum receding capillary number (film entrainment) and the fill's "
           "plane construction degenerates at 0/180.")
       .def(
-          "vof_dynamic_field", [](D& diag, int w) { return field_out(*diag.s, diag.s->getVofDynamicField(w)); },
+          "vof_dynamic_field",
+          [](D& diag, int w) { return field_out(*diag.s, diag.s->getVofDynamicField(w)); },
           nb::arg("which"),
           "The V6 per-cell dynamic-wetting state on the inner region, as (nx,ny,nz): 0 the IMPOSED "
           "angle in degrees, 1 the measured APPARENT angle in degrees, 2 the smoothed U_cl "
           "(positive = the liquid ADVANCES), 3 Ca_cl, 4 the state (0 not a contact cell, 1 "
-          "Cox-Voinov on the static base, 2 PINNED, 3 advancing, 4 receding). Regenerates the fill, "
+          "Cox-Voinov on the static base, 2 PINNED, 3 advancing, 4 receding). Regenerates the "
+          "fill, "
           "so it is also the direct gate on the pass's decomposition independence.")
       .def(
           "set_vof_timing", [](D& diag, bool on) { diag.s->setVofTiming(on); }, nb::arg("on"),
@@ -1313,8 +1420,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "vof_worklist", [](D& diag) { return diag.s->vofWorklist(); },
           "Whether the reconstruction-pass compaction is on.")
       .def(
-          "set_vof_curvature_worklist", [](D& diag, bool on) { diag.s->setVofCurvatureWorklist(on); },
-          nb::arg("on"),
+          "set_vof_curvature_worklist",
+          [](D& diag, bool on) { diag.s->setVofCurvatureWorklist(on); }, nb::arg("on"),
           "WO-V9: run the V3 curvature cascade (the PLIC plane pass, the height functions and the "
           "PV fallback) over a COMPACTED list of the interfacial cells instead of over the whole "
           "inner region. Default ON. The cascade is the most divergent kernel in the pipeline -- "
@@ -1499,8 +1606,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "Per-rank load census of the block container: 'masters'[r] = blocks rank r masters, "
           "'cells'[r] = the inner cells those blocks carry (the actual VoF work).")
       .def(
-          "vof_block_imbalance_of", [](D& diag, int mode) { return diag.s->vofBlockImbalanceOf(mode); },
-          nb::arg("mode"),
+          "vof_block_imbalance_of",
+          [](D& diag, int mode) { return diag.s->vofBlockImbalanceOf(mode); }, nb::arg("mode"),
           "The max/mean per-rank block-cell load the given assignment mode WOULD give on the "
           "current blocks, without applying it — so a study can put the three modes side by side "
           "on one swarm without perturbing the run.")
@@ -1514,7 +1621,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "device-vs-host measurement compares against. Every step is a copy of a double, so the "
           "two paths are BITWISE identical; the ctest gates that rather than asserting it.")
       .def(
-          "set_vof_block_pool", [](D& diag, bool on) { diag.s->setVofBlockPool(on); }, nb::arg("on"),
+          "set_vof_block_pool", [](D& diag, bool on) { diag.s->setVofBlockPool(on); },
+          nb::arg("on"),
           "Recycle the advectors a re-centring retires, keyed by the exact box extent (rung W1 "
           "item c, default True). A translating bubble keeps its box SIZE and only moves its "
           "origin, so the hit rate is ~100 % and the ten Views of the new box are not allocated. "
@@ -1534,13 +1642,15 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "vof_block_kappa", [](D& diag, long id) { return vofBlockKappaArray(*diag.s, id); },
           nb::arg("id"),
           "One marker's OWN curvature (internal units, 1/cell) over its block box, the layout of "
-          "vof_block_color; empty unless this rank masters it and the block CSF is on. A diagnostic.")
+          "vof_block_color; empty unless this rank masters it and the block CSF is on. A "
+          "diagnostic.")
       .def(
           "vof_block_force",
           [](D& diag, int c) { return field_out(*diag.s, diag.s->getVofBlockForce(c)); },
           nb::arg("component"),
           "The block CSF face force of component c (0,1,2) as scattered (summed over markers) into "
-          "the solver's LOW-face slot of each cell, internal units; the field the momentum RHS adds. "
+          "the solver's LOW-face slot of each cell, internal units; the field the momentum RHS "
+          "adds. "
           "A diagnostic.")
       .def(
           "vof_block_curvature_stats",
@@ -1562,8 +1672,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "|kappa| the admissibility clip bounded (set_vof_block_kappa_clip; a NaN counts too); 0 "
           "on a resolved interface.")
       .def(
-          "set_outflow_rho_correction", [](D& diag, bool on) { diag.s->setOutflowRhoCorrection(on); },
-          nb::arg("on") = true,
+          "set_outflow_rho_correction",
+          [](D& diag, bool on) { diag.s->setOutflowRhoCorrection(on); }, nb::arg("on") = true,
           "The 1/rho_f mobility factor on the HIGH-side outflow face correction. DEFAULT TRUE "
           "since WO-R2; pass False for the ablation.\n\n"
           "A projection correction cancels the discrete divergence only if it uses the SAME face "
@@ -1583,8 +1693,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "Whether the 1/rho_f factor is applied to the outflow face correction (WO-R item 4, "
           "reversed by WO-R2's operator fix; default True).")
       .def(
-          "set_vof_curvature_weight_width", [](D& diag, double d) { diag.s->setVofCurvatureWeightWidth(d); },
-          nb::arg("width"),
+          "set_vof_curvature_weight_width",
+          [](D& diag, double d) { diag.s->setVofCurvatureWeightWidth(d); }, nb::arg("width"),
           "Wendland support width of the PLIC-volumetric fallback fit, in CELL units. Default 2.5, "
           "which is Han et al.'s recommended pairing with the 5^3 stencil. Their translating "
           "droplet recovers first-order convergence of the spurious currents at 3.5 and loses "
@@ -1625,9 +1735,11 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "sat at the cell CENTRE while the mass-flux gradient is fitted from the PLIC PLANE — a "
           "mismatch of up to half a cell that CHANGES SIGN as the interface sweeps through a cell, "
           "and the first-order component of the P1 Stefan error (WO-P01 finding 6). With this on, "
-          "the condition becomes PER FACE: for a pure cell i whose neighbour j is interfacial, that "
+          "the condition becomes PER FACE: for a pure cell i whose neighbour j is interfacial, "
+          "that "
           "face's row carries k*open*(T_i - T_G)/theta with theta the distance in cells from i's "
-          "centre to j's PLIC plane along the face's own axis, and the interfacial cell's own value "
+          "centre to j's PLIC plane along the face's own axis, and the interfacial cell's own "
+          "value "
           "is never read by any neighbour.\n\n"
           "A per-CELL value (the literal reading of the work order) does NOT work and the "
           "measurement is in the findings: giving the interfacial cell the value the one-sided "
@@ -1646,16 +1758,19 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "value (T - T_G = G phi + Q phi^2) instead of linearly. This is VOF_PLAN section 9 item "
           "1's Aslam quadratic extrapolation in least-squares form — the same 5^3 pure-cell "
           "samples, the same Malan collinearity weights, one more basis function, no PDE sweeps. "
-          "Once the plane-anchored Dirichlet has removed the cell-centre mismatch, the linear fit's "
+          "Once the plane-anchored Dirichlet has removed the cell-centre mismatch, the linear "
+          "fit's "
           "O(T'' h) curvature bias is the leading error of the rung: its samples start about one "
           "cell from the plane and reach two and a half, so a curved profile tilts the straight "
-          "line through the origin. ON by default (WO-P23): with the plane-anchored Dirichlet it takes "
+          "line through the origin. ON by default (WO-P23): with the plane-anchored Dirichlet it "
+          "takes "
           "the P1 Stefan interface position from +0.195 % to +0.003 % at N = 256, and the mdot "
           "kernel itself from order 1.1 to order 2.0. set(False) is the ablation.")
       .def(
           "set_phase_change_area",
           [](D& diag, const std::string& mode) {
-            diag.s->setPhaseChangeArea(enum_index(mode, kAreaModes, "set_phase_change_area", "mode"));
+            diag.s->setPhaseChangeArea(
+                enum_index(mode, kAreaModes, "set_phase_change_area", "mode"));
           },
           nb::arg("mode"),
           "WO-P3c: WHICH GEOMETRY the interfacial area A_Gamma comes from. A_Gamma sets the plane "
@@ -1672,7 +1787,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "only per-cell variant whose pieces tile.\n"
           "  'sheet-color-centroid' / 'sheet-color-split' / 'sheet-plic-centroid' / "
           "'sheet-plic-split' = WO-P3d, the JOINED sheet: marching tetrahedra on the cell-centre "
-          "lattice, one watertight surface whose triangles are booked to cells -- the C = 1/2 level "
+          "lattice, one watertight surface whose triangles are booked to cells -- the C = 1/2 "
+          "level "
           "set with whole triangles to the cell holding the centroid, the same sheet clipped to "
           "each cell's cube, and the same two deposits on the zero of the PLIC-reconstructed "
           "signed distance (exact on a TILTED plane, where interpolating C is not, because C(d) is "
@@ -1709,7 +1825,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             r["mdot_mean"] = d.mdotMean;
             r["interface_cells"] = d.interfaceCells;
             r["interface_area"] = d.area;
-            r["area_hf_cells"] = d.areaHf;    // WO-P3c: the area cascade's branch census
+            r["area_hf_cells"] = d.areaHf;  // WO-P3c: the area cascade's branch census
             r["area_pv_cells"] = d.areaPv;
             r["area_no_cascade_cells"] = d.areaNone;
             r["area_orphan"] = d.areaOrphan;  // WO-P3d: area on cells the flux integral drops
@@ -1737,7 +1853,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "1), the deposited divergence source (its sum and how many cells received it), how many "
           "interfacial cells found NO pure gas cell within two cells along +n (the source then "
           "stays put — a fallback that must be 0 on a resolved interface), the colour extrema, "
-          "'band_div' = max|div(open u)| over the INTERFACIAL cells (WO-P23: the direct read-out of "
+          "'band_div' = max|div(open u)| over the INTERFACIAL cells (WO-P23: the direct read-out "
+          "of "
           "whether the field Weymouth-Yue advects with is the liquid velocity there — the "
           "band-extended velocity of VOF_PLAN section 9 item 3 is needed iff this is not at the "
           "projection floor), and the energy-scalar extrema under the consistent transport.\n"
@@ -1807,7 +1924,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "temperature profile exactly at every theta.")
       .def(
           "set_phase_change_curvature_distance",
-          [](D& diag, bool on) { diag.s->setPhaseChangeCurvatureDistance(on); }, nb::arg("on") = true,
+          [](D& diag, bool on) { diag.s->setPhaseChangeCurvatureDistance(on); },
+          nb::arg("on") = true,
           "WO-P3g item 3 (default OFF): measure the GFM row's theta and the one-sided fits' sample "
           "distances to the CURVED interface, with the mean curvature taken PER CELL from the V3 "
           "curvature cascade (the same kappa surface tension uses; positive for a convex blob of "
@@ -1850,8 +1968,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "off (the solve is then bit-identical). Read it with `phase_change_budget()`.\n\n"
           "What it exists for: interfacial cells are Dirichlet rows, i.e. they are OUTSIDE the "
           "energy solve, so the set over which enthalpy is conserved changes membership every step "
-          "as the interface sweeps. A liquid cell that becomes interfacial LEAVES that set carrying "
-          "its superheat rho c_p (T - T_sat) and an interfacial cell that becomes pure RE-ENTERS it "
+          "as the interface sweeps. A liquid cell that becomes interfacial LEAVES that set "
+          "carrying "
+          "its superheat rho c_p (T - T_sat) and an interfacial cell that becomes pure RE-ENTERS "
+          "it "
           "carrying `pcCarriedValue`; neither transfer appears in the latent-heat book-keeping.")
       .def(
           "phase_change_budget",
@@ -1969,7 +2089,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "Shipped as a measured knob for the coefficient-coarsening question (VOF_PLAN S3), not "
           "as an alternative scheme.")
       .def(
-          "set_vof_rho_floor", [](D& diag, double f) { diag.s->setVofRhoFloorFrac(f); }, nb::arg("fraction"),
+          "set_vof_rho_floor", [](D& diag, double f) { diag.s->setVofRhoFloorFrac(f); },
+          nb::arg("fraction"),
           "Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of "
           "min(rho_gas, rho_liquid). Default 1e-6. rho^c leaves [rho_gas, rho_liquid] only through "
           "a wisp in the half-shifted colour and reaching zero would need C^c ~ -1/(ratio-1), so "
@@ -1983,22 +2104,25 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           nb::arg("on") = true,
           "MinMod-limited linear reconstruction of the donor velocity in the momentum flux, "
           "instead of the DEFAULT plain donor-cell upwind. Both preserve the uniform-velocity "
-          "identity exactly (a uniform field has a zero slope bit for bit), but on a control volume "
+          "identity exactly (a uniform field has a zero slope bit for bit), but on a control "
+          "volume "
           "a sweep EMPTIES the slope's deviation from the volume's own velocity is amplified by "
           "drho*F/rho^c, which is unbounded in the density ratio. Measured at ratio 1e4, 50 steps: "
           "with the slope the uniform-velocity residual grows to 2.2e-10, without it it is flat at "
           "6.7e-16; at ratio 1e3 the slope is harmless. Turn it on deliberately and re-run the "
           "ratio sweep if you do.")
       .def(
-          "set_vof_momentum_cell_flag", [](D& diag, bool on) { diag.s->setVofMomentumCellFlag(on); },
-          nb::arg("on") = true,
+          "set_vof_momentum_cell_flag",
+          [](D& diag, bool on) { diag.s->setVofMomentumCellFlag(on); }, nb::arg("on") = true,
           "ABLATION: use the PRESSURE-cell frozen dilation flag H(C^n-1/2) on the shifted control "
           "volume instead of its structural analogue H(C^c,n-1/2). The flag that must be shared is "
           "the one of the pair that telescopes, and both members of that pair live on the shifted "
           "volume — this switch is the literal reading of the work order, kept as a measurement.")
       .def(
-          "set_vof_flux_clamp", [](D& diag, bool on) { diag.s->setVofFluxClamp(on); }, nb::arg("on") = true,
-          "ABLATION: drop the Weymouth flux clamp max(0,|a|-(1-C^c_don)) <= |F| <= min(|a|,C^c_don) "
+          "set_vof_flux_clamp", [](D& diag, bool on) { diag.s->setVofFluxClamp(on); },
+          nb::arg("on") = true,
+          "ABLATION: drop the Weymouth flux clamp max(0,|a|-(1-C^c_don)) <= |F| <= "
+          "min(|a|,C^c_don) "
           "on the half-shifted control volume. The geometric flux is bounded by what the CURRENT "
           "cell planes see in the donor, not by the ADVECTED C^c; the gap is O(a^2) and at density "
           "ratio 1e4 a 2.6e-2 undershoot drives rho^c to -255, which the recovery would divide by. "
@@ -2020,7 +2144,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "half-shifted colour C^c, the summed momentum rho^c u_c (the conservation census), the "
           "minimum rho^c before the floor, and the number of control volumes the floor touched.")
       .def(
-          "vof_advected_velocity", [](D& diag, int c) { return field_out(*diag.s, diag.s->getVofAdvectedVelocity(c)); },
+          "vof_advected_velocity",
+          [](D& diag, int c) { return field_out(*diag.s, diag.s->getVofAdvectedVelocity(c)); },
           nb::arg("component"),
           "The recovered advected velocity (rho^c u_c)/rho^c of component c on the inner cells — "
           "the momentum RHS's time base. Exposed so the uniform-velocity consistency identity can "
@@ -2075,9 +2200,11 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(set_pressure_geometry; an immersed solid, the ghost projection and "
           "set_rho_face_harmonic throw). The face coefficient and the face correction are the same "
           "as on the staggered grid, applied to the ABC projection's MAC face field, which is the "
-          "MOMENTUM-weighted map (rho_L u_L + rho_R u_R)/(rho_L + rho_R) of the cell velocities; the "
+          "MOMENTUM-weighted map (rho_L u_L + rho_R u_R)/(rho_L + rho_R) of the cell velocities; "
+          "the "
           "CELL correction is the average of the two face corrections of each axis (never a "
-          "cell-centred grad(phi)/rho_c). The pressure, the CSF and set_body_force (a mean pressure "
+          "cell-centred grad(phi)/rho_c). The pressure, the CSF and set_body_force (a mean "
+          "pressure "
           "gradient) enter the implicit momentum predictor as the matching face integral "
           "rho_c * avg_faces((f - grad_f P)/rho_f); a per-cell force enters at the cell value. The "
           "pair is adjoint, so the step is stable at every dt and density ratio and its steady "
@@ -2093,7 +2220,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "§10.1); 1.0 = off (default). <1 damps the incremental predictor overshoot on stiff "
           "porous+drag.")
       .def(
-          "set_porous_deps_dt", [](D& diag, bool on) { diag.s->setPorousDepsDt(on); }, nb::arg("on"),
+          "set_porous_deps_dt", [](D& diag, bool on) { diag.s->setPorousDepsDt(on); },
+          nb::arg("on"),
           "Include (default True) or drop the d(eps)/dt source in the porous projection RHS. Drop "
           "it "
           "to enforce div(eps u)=0 when the per-cell eps deposit's time-derivative is too jagged "
@@ -2128,8 +2256,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "bcast_from_root", [](D&, nb::object v) { return v; }, nb::arg("value"),
           "Broadcast a value from rank 0 (identity in the single-rank module; mirrors the MPI "
-          "API).")
-      ;
+          "API).");
 }
 
 // Register a solver class for the given GridLayout policy (Staggered -> "Solver", Colocated ->
@@ -2193,8 +2320,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "grid as `global_cells` - the same numbers init_mpi gets.")
       .def_prop_ro(
           "cells",
-          [](S& s) {
-            return std::array<long, 3>{s.nx(), s.ny(), s.nz()};
+          [](S& s) { return std::array<long, 3>{s.nx(), s.ny(), s.nz()};
           },
           "This rank's inner block resolution (nx, ny, nz) -- the shape of every field array "
           "(get_u, get_p, the SDF for set_solid). Under MPI it is the LOCAL block from mpi_block().")
@@ -2223,14 +2349,14 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
             d["rho_ref"] = u.rhoRef;
             d["t_ref"] = u.tRef;
             d["length_to_internal"] = u.lenToInt();
-            d["velocity_to_internal"] = std::vector<double>{u.velToInt(0), u.velToInt(1),
-                                                            u.velToInt(2)};
+            d["velocity_to_internal"] =
+                std::vector<double>{u.velToInt(0), u.velToInt(1), u.velToInt(2)};
             d["time_to_internal"] = u.timeToInt();
             d["density_to_internal"] = u.rhoToInt();
             d["viscosity_to_internal"] = u.muToInt();
             d["pressure_to_internal"] = u.pToInt();
-            d["force_density_to_internal"] = std::vector<double>{
-                u.forceToInt(0), u.forceToInt(1), u.forceToInt(2)};
+            d["force_density_to_internal"] =
+                std::vector<double>{u.forceToInt(0), u.forceToInt(1), u.forceToInt(2)};
             d["force_to_physical"] = u.forceTotalToPhys();
             d["torque_to_physical"] = u.torqueToPhys();
             // scalar transport + the phase-change energy path (a transported scalar itself, a
@@ -2258,8 +2384,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "True when the solver was given an extent, i.e. lengths are physical rather than cells.")
       .def(
           "cell_centers",
-          [](S& s) {
-            return nb::make_tuple(s.cellCentres(0), s.cellCentres(1), s.cellCentres(2));
+          [](S& s) { return nb::make_tuple(s.cellCentres(0), s.cellCentres(1), s.cellCentres(2));
           },
           "The physical cell-center coordinates of THIS rank's inner block as three 1-D float64 "
           "arrays (x, y, z), i.e. origin + (i + 1/2) * spacing per axis. "
@@ -2380,21 +2505,27 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "published results.")
       .def("set_decomposition", &S::setDecomposition, nb::arg("levels"),
            nb::arg("max_imbalance") = 1.05,
-           "Choose how this solver's shared MPI decomposition is built. levels=0 (DEFAULT) = the "
-           "aligned ORB: split positions on the FINE grid are snapped to a power of two (capped "
-           "at 16, i.e. 5 nested multigrid levels). levels >= 2 = COARSE-FIRST: build the ORB on "
-           "the grid coarsened levels-1 times and refine the partition upward, so every block is "
-           "a multiple of the coarsening factor BY CONSTRUCTION and the hierarchy nests for the "
-           "full requested depth. Each candidate depth is built and MEASURED, and the deepest one "
-           "whose max-block/min-block ratio stays within max_imbalance (default 1.05) is taken, "
-           "else the aligned ORB. Call BEFORE init_mpi() (a later call raises), and pass the SAME "
-           "levels / max_imbalance to flow.mpi_block() -- both derive the same partition and must "
-           "agree.")
+           "Choose how this solver's shared MPI decomposition is built. levels=0 (DEFAULT) = AUTO: "
+           "the aligned ORB (split positions on the FINE grid snapped to a power of two, capped at "
+           "16, i.e. 5 nested multigrid levels) whenever it is exactly balanced; otherwise the "
+           "coarse-first partition at depth 5, then 4, built with a balance-aware split axis, the "
+           "first whose max-block/min-block ratio stays within max_imbalance (default 1.05); "
+           "otherwise the balance-aware aligned ORB if it has a smaller largest block and nests "
+           "at least min(3, the aligned ORB's) levels in place; otherwise the aligned ORB. AUTO "
+           "never cuts an axis the aligned ORB leaves whole. levels=1 = the aligned ORB as is "
+           "(the default before 2026-10: use it to reproduce an older np > 1 partition). "
+           "levels >= 2 = COARSE-FIRST: build the ORB on the grid coarsened levels-1 times and "
+           "refine the partition upward, so every block is a multiple of the coarsening factor BY "
+           "CONSTRUCTION and the hierarchy nests for the full requested depth; each depth from "
+           "`levels` down to 2 is built and MEASURED, and the deepest one within max_imbalance is "
+           "taken, else the aligned ORB. Call BEFORE init_mpi() (a later call raises), and pass "
+           "the SAME levels / max_imbalance to flow.mpi_block() -- both derive the same partition "
+           "and must agree.")
       .def_prop_ro("decomposition_levels", &S::decompositionLevels,
-                   "This solver's decomposition mode (0 = aligned ORB, >= 2 = coarse-first with "
-                   "that depth).")
+                   "This solver's decomposition mode (0 = auto, 1 = aligned ORB, >= 2 = "
+                   "coarse-first with that depth).")
       .def_prop_ro("decomposition_max_imbalance", &S::decompositionMaxImbalance,
-                   "The load-imbalance budget the coarse-first search stays within.")
+                   "The load-imbalance budget the auto and coarse-first searches stay within.")
       .def("set_pressure_bottom_extent", &S::setPressureBottomExtent, nb::arg("cells"),
            "The threshold set_pressure_bottom('auto') applies: agglomerate the coarsest level "
            "onto a global operator once the coarsest GLOBAL grid exceeds this many cells on any "
@@ -2456,10 +2587,14 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "set_pressure_bottom",
           [](S& s, const std::string& m) {
-            if (m == "auto") s.setPressureBottomMode(-1);
-            else if (m == "smoother") s.setPressureBottomMode(0);
-            else if (m == "agglomerated") s.setPressureBottomMode(1);
-            else throw std::runtime_error("set_pressure_bottom: 'auto' | 'smoother' | 'agglomerated'");
+            if (m == "auto")
+              s.setPressureBottomMode(-1);
+            else if (m == "smoother")
+              s.setPressureBottomMode(0);
+            else if (m == "agglomerated")
+              s.setPressureBottomMode(1);
+            else
+              throw std::runtime_error("set_pressure_bottom: 'auto' | 'smoother' | 'agglomerated'");
           },
           nb::arg("mode"),
           "Coarse-level (bottom) solve of the pressure multigrid. A V-cycle converges at a "
@@ -2529,8 +2664,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
               throw std::runtime_error("profile must be (Nb,Nc,3)");
             const int nb_ = (int)prof.shape(0), nc = (int)prof.shape(1);
             s.setDomainBcProfile(
-                face_index(face, "set_domain_bc_profile"), peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_,
-                nc);
+                face_index(face, "set_domain_bc_profile"),
+                peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_, nc);
           },
           nb::arg("face"), nb::arg("profile"),
           "Prescribe a per-position inlet velocity profile (Nb,Nc,3) over a face (one of '-x', "
@@ -2630,8 +2765,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
             std::vector<double> v = s.hydroForceTorqueReaction();
             const std::size_t n = v.size() / 6;
             return peclet::core::python::vector_to_ndarray(
-                std::move(v), {2, n, 3},
-                {static_cast<std::int64_t>(3 * n), 3, 1});
+                std::move(v), {2, n, 3}, {static_cast<std::int64_t>(3 * n), 3, 1});
           },
           "THE hydrodynamic force and torque on each scene instance: the DISCRETE REACTION -- "
           "the momentum the fluid actually lost to each body, assembled from the composed step's "
@@ -3306,7 +3440,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "advect_vof slot.")
       // --- two-phase open boundaries (rung V-BC, WO-R) ------------------------------------------
       .def(
-          "set_vof_inflow", [](S& s, const std::string& face, double value) { s.setVofInflow(face_index(face, "set_vof_inflow"), value); },
+          "set_vof_inflow", [](S& s, const std::string& face, double value) {
+            s.setVofInflow(face_index(face, "set_vof_inflow"), value); },
           nb::arg("face"), nb::arg("value"),
           "Colour of the fluid ENTERING through inflow face 'face' ('-x', '+x', '-y', '+y', '-z', "
           "'+z'); 1 = liquid, 0 = gas. The face must already be an inflow (set_domain_bc(face, "
@@ -3329,8 +3464,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
               throw std::runtime_error("vof inflow profile must be (Nb,Nc)");
             const int nb_ = (int)prof.shape(0), nc = (int)prof.shape(1);
             s.setVofInflowProfile(
-                face_index(face, "set_vof_inflow_profile"), peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_,
-                nc);
+                face_index(face, "set_vof_inflow_profile"),
+                peclet::core::python::ndarray_to_vector<double>(nb::ndarray<>(prof)), nb_, nc);
           },
           nb::arg("face"), nb::arg("profile"),
           "Per-position inflow colour (Nb,Nc) on the INNER grid of the face's two perpendicular "
@@ -3338,7 +3473,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "This is how a liquid distributor over part of an inlet is expressed: the colour "
           "profile says WHERE liquid enters, the velocity profile says how fast.")
       .def(
-          "set_vof_backflow", [](S& s, const std::string& face, double value) { s.setVofBackflow(face_index(face, "set_vof_backflow"), value); },
+          "set_vof_backflow", [](S& s, const std::string& face, double value) {
+            s.setVofBackflow(face_index(face, "set_vof_backflow"), value); },
           nb::arg("face"), nb::arg("value") = 0.0,
           "inletOutlet colour on OUTFLOW face 'face' ('-x' ... '+z'; default 0 = gas): where the "
           "boundary face "
@@ -3855,16 +3991,21 @@ NB_MODULE(_flow, m) {
       "needed.\n\n"
       "levels / max_imbalance choose how the partition is built and MUST match the values given "
       "to Solver.set_decomposition() -- both derive the same partition and have to agree. "
-      "levels=0 (DEFAULT) = the aligned ORB: split positions on the FINE grid are snapped to a "
-      "power of two (capped at 16, i.e. 5 nested multigrid levels). levels >= 2 = COARSE-FIRST: "
-      "build the ORB on the grid coarsened levels-1 times and refine the partition upward, so "
-      "every block is a multiple of the coarsening factor BY CONSTRUCTION and the hierarchy nests "
-      "for the full requested depth. Coarse-first also balances better: the aligned ORB picks a "
-      "split and then rounds it (a balanced 96|96 can round to 128|64), whereas on the coarse "
-      "grid one cell IS the quantum, so the rank count no longer has to be a power of two -- what "
-      "matters is that the COARSE grid divides among the ranks. Each candidate depth is BUILT and "
-      "measured, and the deepest one whose max-block/min-block ratio stays within max_imbalance "
-      "(default 1.05) is taken, else the aligned ORB.");
+      "levels=0 (DEFAULT) = AUTO: the aligned ORB (split positions on the FINE grid snapped to a "
+      "power of two, capped at 16, i.e. 5 nested multigrid levels) whenever it is exactly "
+      "balanced; otherwise the coarse-first partition at depth 5, then 4, with a balance-aware "
+      "split axis, the first within max_imbalance (default 1.05); otherwise the balance-aware "
+      "aligned ORB if it has a smaller largest block and nests at least min(3, the aligned "
+      "ORB's) levels in place; otherwise the aligned ORB. AUTO never cuts an axis the aligned ORB "
+      "leaves whole. levels=1 = the aligned ORB as is (the default before 2026-10: reproduces "
+      "an older np > 1 partition). levels >= 2 = COARSE-FIRST: build the ORB on the grid "
+      "coarsened levels-1 times and refine the partition upward, so every block is a multiple of "
+      "the coarsening factor BY CONSTRUCTION and the hierarchy nests for the full requested "
+      "depth. Coarse-first also balances better: the aligned ORB picks a split and then rounds "
+      "it (a balanced 96|96 can round to 128|64), whereas on the coarse grid one cell IS the "
+      "quantum. Each depth from `levels` down to 2 is BUILT and measured, and the deepest one "
+      "whose max-block/min-block ratio stays within max_imbalance is taken, else the aligned "
+      "ORB.");
 
 #ifdef PECLET_FLOW_MPI
   m.def(
@@ -3888,9 +4029,8 @@ NB_MODULE(_flow, m) {
         return nb::make_tuple(nb::cast(out), align);
       },
       nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"), nb::arg("np"), nb::arg("levels"),
-      nb::arg("telescope") = false, nb::arg("min_extent") = 4,
-      nb::arg("decomposition_levels") = 0, nb::arg("max_imbalance") = 1.05,
-      nb::arg("weights") = nb::none(),
+      nb::arg("telescope") = false, nb::arg("min_extent") = 4, nb::arg("decomposition_levels") = 0,
+      nb::arg("max_imbalance") = 1.05, nb::arg("weights") = nb::none(),
       "The pressure-multigrid hierarchy init_mpi WOULD build for this grid / rank count / level "
       "request, for the level-0 decomposition that decomposition_levels / max_imbalance describe "
       "(pass what you will pass to Solver.set_decomposition) and with or "
