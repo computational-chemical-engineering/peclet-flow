@@ -1043,7 +1043,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           [](D& diag, const std::string& name) { return field3d_out(*diag.s, diag.s->fieldView(name)); },
           nb::arg("name"),
           "Zero-copy view of a registered field's full padded buffer as a Fortran-order "
-          "(nx+2g, ny+2g, nz+2g) array (g = ghost_width); host → NumPy, device → DLPack (CuPy).")
+          "(nx+2g, ny+2g, nz+2g) array (g = ghost_width); host → NumPy, device → DLPack (CuPy). "
+          "step() does not device-synchronize at entry: a driver that writes a view from its own "
+          "non-blocking stream (cupy/torch) must synchronize that stream before calling step() "
+          "(null-stream writers stay ordered).")
       .def(
           "exchange_field", [](D& diag, const std::string& name) { diag.s->exchangeField(name); },
           nb::arg("name"),
