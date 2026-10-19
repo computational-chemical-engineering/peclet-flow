@@ -1198,6 +1198,7 @@ class CutcellMG {
   // build the periodic level hierarchy: per axis, halve inner while even and >=2 (uniform when
   // cubic), capped at nLevels (mirrors DistributedPoissonMG::init uniform path).
   void init(int nx, int ny, int nz, int nLevels) {
+    joinPrefactor();  // X: a pending side factor may still read the bottom AFX lv_ is about to free
     lv_.clear();
     opBuilt_ = false;  // D: no operator (and no FP32 weights) on the new hierarchy yet
     fp64Stale_ = false;
@@ -1430,6 +1431,7 @@ class CutcellMG {
 
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
+    joinPrefactor();  // X: as init(): join the side factor before the levels it reads are freed
     lv_.clear();
     opBuilt_ = false;  // D: no operator (and no FP32 weights) on the new hierarchy yet
     amg_.reset();
