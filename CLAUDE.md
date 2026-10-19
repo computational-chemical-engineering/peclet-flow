@@ -55,12 +55,12 @@ single-rank module byte-identical). Another backend = another prefix and another
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 247 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 249 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-247 registered / **243 with `-LE bench`** (counted 2026-10-18 on `e3fbede`): 62 from `tests/kokkos`
+249 registered / **245 with `-LE bench`** (counted 2026-10-19 on `7f7c017`): 64 from `tests/kokkos`
 (`bench_rbgs`, `vof_timing`, `bench_scalar_cutcell`, `bench_bottom_factor` carry `bench` — instruments,
 not gates), 145 from `tests/kokkos_mpi` (47 cases at np = 1, 2, 4 + two np = 8 rungs + `bottom_direct_mpi` at np = 2, 4, host only), and 40 Python ctests on the
 module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_operator_casts`,
