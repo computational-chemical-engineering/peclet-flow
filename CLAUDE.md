@@ -55,14 +55,14 @@ single-rank module byte-identical). Another backend = another prefix and another
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 249 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 252 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-249 registered / **245 with `-LE bench`** (counted 2026-10-19 on `7f7c017`): 64 from `tests/kokkos`
+252 registered / **248 with `-LE bench`** (counted 2026-10-19 on `fff1e20`): 64 from `tests/kokkos`
 (`bench_rbgs`, `vof_timing`, `bench_scalar_cutcell`, `bench_bottom_factor` carry `bench` — instruments,
-not gates), 145 from `tests/kokkos_mpi` (47 cases at np = 1, 2, 4 + two np = 8 rungs + `bottom_direct_mpi` at np = 2, 4, host only), and 40 Python ctests on the
+not gates), 148 from `tests/kokkos_mpi` (48 cases at np = 1, 2, 4 + two np = 8 rungs + `bottom_direct_mpi` at np = 2, 4, host only), and 40 Python ctests on the
 module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_operator_casts`,
 `iteration_order`, and 24 `scalar_cutcell_*` gates; the six `_g6_*` take 20–35 min each).
 
@@ -247,8 +247,13 @@ you want). Detail and numbers for every bullet: ref §6.
   so CUDA results moved (class "recorded"; host `'auto'` ≡ `'fp64'`, host results bitwise); pass
   `'fp64'` for an FP64-only device run (`units_scale_invariance` does: FP32 weight rounding is not
   covariant under a non-power-of-two unit change). E's default stays `'zero'` (E1 failed its own gate). `'auto'` at np > 1 keeps FP64 + FP32 level data (≈ +30 % MG memory). Host CutcellMG sums use 4 x-lanes (`ccReduce3Lanes`, C0: host pressure
-  results moved once, ≤ 6.5e-14 relative); the fused host Krylov reductions (C1–C4) are
-  single-rank host only.
+  results moved once, ≤ 6.5e-14 relative); the fused host Krylov reductions (C1–C4) run
+  single-rank; the distributed host PCG/FCG runs C2–C4 with the SAME MPI calls (bitwise per np; C1 not: the box
+  matvec splits rows). **Distributed host communication** (`doc/vof_distributed_host_comm_design.md`, 2026-10-19):
+  the smoother, residual and matvec exchange on a faces-only halo (`Level::sdev`/`sdevf`) with rank-local periodic
+  axes read in-kernel (`wrapMask`; np 1 has no stencil exchange and one smoother launch per colour); core's GridHalo
+  adds the fused gather, persistent requests and an on-node shared-memory transport. All bitwise per np (gate
+  `mg_stencil_halo_np*`).
 - `set_pressure_bottom("auto")` (default) agglomerates the coarsest level into a global operator solved
   exactly when it exceeds `set_pressure_bottom_extent` (4) cells on an axis; porous and variable-ρ
   rebuild it every step — avoid `auto` with a badly-factored grid there. Engines: the exact `'direct'`
