@@ -138,8 +138,11 @@ ms/step depending on the layout.
    proves bitwise identity for every currently-balanced run by construction, with no census
    argument.
 2. **Else coarse-first, balance-aware, depth 5 then 4.** For L = 5, 4, build the coarse-first
-   partition with the new core split rule `SplitAxis::Balanced` (§5.1). Return the first one whose
-   max/min ≤ `max_imbalance` (default 1.05).
+   partition C with the new core split rule `SplitAxis::Balanced` (§5.1). Return the first one whose
+   max/min ≤ `max_imbalance` (default 1.05) and whose nestDepth(C) ≥ min(nestDepth(A), 3).
+   nestDepth counts the minimum-extent rule (§5.2): a C whose blocks are 8 cells wide nests 2
+   levels, so it is rejected where legacy nests 3 (amended 2026-10-19: 40³ np 5, 48×32×40 np 8,
+   48×40×30 np 5; the original rule checked depth only for A′).
    - L = 5 is the depth the alignment cap 16 already encodes.
    - L = 4 keeps 3 in-place halvings, which the default 4-level pressure MG and the velocity MG
      need (F10).
@@ -158,7 +161,9 @@ partitions. `levels ≥ 2` keeps its meaning (coarse-first search L…2, legacy 
 Results [sim]:
 - 128×96×64: np 3, 12, 24, 32, 96 → exact (max/min 1.000), ≥ 4 in-place halvings. Every other
   np ≤ 192 tested is unchanged.
-- 48³ at np 4: 4.000 → 1.000 at L4 (the coupling's documented 32|16 vs 24|24 case).
+- 48³ at np 2: 2.000 (legacy 32 | 16) → 1.000 (24 | 24), the coupling's documented case; legacy
+  does not balance 48³ at np 2. At np 4: 4.000 → 1.000 at L4. Tests that rely on the legacy
+  32 | 16 cut pin `levels = 1` (WO-3).
 - 64³ at np 12: 1.500 → stays A (no balanced option within budget at L5/L4).
 
 **Rejected:**
@@ -226,8 +231,10 @@ Results [sim]:
 **Decision.**
 - **WO-4:** document the rule "threads per rank divide the cores per L3 domain; prefer one rank
   per L3 domain", with launch recipes.
-- **WO-5:** at `init_mpi`, when every OpenMP thread is pinned to one CPU, rank 0 prints one stderr
-  line naming the ranks whose threads span more than one L3 domain. No API, no result effect.
+- **WO-5:** at `init_mpi` with np > 1, when every OpenMP thread is pinned to one CPU, rank 0
+  prints one stderr line naming the ranks whose threads span more than one L3 domain. No API, no
+  result effect. A one-rank job stays silent: it has no better layout to move to (ruling
+  2026-10-19).
 
 **Rejected:**
 - **Speed- or placement-weighted partitions** (give straddling ranks fewer cells). Results would
@@ -319,7 +326,8 @@ for L in (5, 4):
     if cells(G / r) < numBlocks: continue
     C = BlockDecomposer.init(numBlocks, G/r, align 1, cellExtent r, Balanced).refined(r)
     if minCells(C) > 0 and maxCells(C)/minCells(C) <= maxImbalance
-       and splitAxes(C) ⊆ splitAxes(A): return C
+       and splitAxes(C) ⊆ splitAxes(A)
+       and nestDepth(C) >= min(nestDepth(A), 3): return C
 A2 = BlockDecomposer.init(numBlocks, G, coarsenAlignment(G), cellExtent 1, Balanced)
 if maxCells(A2) < maxCells(A) and nestDepth(A2) >= min(nestDepth(A), 3)
    and splitAxes(A2) ⊆ splitAxes(A): return A2
@@ -331,8 +339,11 @@ return A
 - **`nestDepth(dec, G)`** is the number of consecutive in-place coarsenings from level 0, up to 4,
   before the first telescope trigger. At each step:
   - every axis that can(g_k) coarsen must have every block origin and size even;
-  - `minBlockExtent ≥ 4` (the `teleMinExtent_` default).
+  - `minBlockExtent ≥ 4` (the `teleMinExtent_` default), checked on the current level before each
+    coarsening: blocks 8 cells wide give depth 2 (8 → 4 → 2, stop).
 
+  The count includes the minimum-extent rule (ruling 2026-10-19), for every candidate (C5, C4,
+  A2) and in the census; the [sim] replica (`dist_cpu/part/orb_sim/`) counts it the same way.
   Reuse `teleLiftable` / `cdec::minBlockExtent` rather than re-deriving them.
 - **Debug print:** `mgDebugLevel()` prints which branch fired (A-exact / C5 / C4 / A2 / A-fallback)
   and the max/min.
@@ -395,7 +406,7 @@ solve, against 700 µs today at T = 1.
    - 1 = one L3;
    - 2 = more than one L3.
 4. `MPI_Gather` one int to rank 0. All ranks call it, inside the already-collective `init_mpi`.
-5. If any status is 2, rank 0 prints once:
+5. If np > 1 and any status is 2, rank 0 prints once (np = 1 stays silent):
 
    `peclet.flow: ranks 2,5 run OpenMP threads on more than one L3 cache domain (measured up to
    +18 % step time); use threads per rank dividing the cores per L3 domain (AMD EPYC Zen 4: 8),
@@ -448,7 +459,7 @@ bound threads. Every Δ is against the WO-0 baseline.
 | **WO-2** | core `SplitAxis::Balanced` (§5.1) on core branch `partition` (worktree `suite/core-partition`); unit tests P-i…P-iii + exactness | G-BIT (core: every existing call byte-identical) | core ctests np 1–8 green. New tests: (P-i) over the census set (§7) Balanced == Longest (origins, sizes, tree split positions) whenever Longest is exact; exactness on 128×96×64, align 16, np 3/12/24/32/96; nesting: `coarsened({2,2,2})` four times valid for those | — |
 | **WO-3** | flow factory auto policy (§5.2), bindings docstrings, CLAUDE.md line; PecletDeps on the core `partition` commit for local builds (sibling headers) | np 1 G-BIT; unchanged partitions G-BIT; changed G-NUM-H | (i) new host ctest `decomposition_policy` (§7). (ii) G-BIT at np 2/4/6/8 vs WO-0. (iii) G-NUM-H at np 3 (T=8), 12 (T=2), 24 (T=1) vs single-rank. (iv) `ctest -LE bench` host and CUDA; every changed hash is in the census's changed list, old → new table in the commit. A ctest whose purpose is legacy-ORB behaviour pins `levels=1`; all others are re-baselined. (v) coupling MPI tests green. (vi) local Δ (B1 already in): 24×1 ≤ −4.5, 12×2 ≤ −1.0, unchanged layouts within ±1 % | local 24×1 −6, 12×2 −2.8; genoa 24×1 −15, 12×2/3×8 −3…−6 |
 | **WO-4** | docs (§5.4) | NONE | review by the coordinator | — |
-| **WO-5** | placement warning (§5.4) | NONE | warning printed for local 6×4 (straddles 6-core CCDs) and silent for 4×6, 12×2, 1×24 and for `--bind-to none` without OpenMP binding; `ctest -LE bench` green | — |
+| **WO-5** | placement warning (§5.4) | NONE | warning printed for local 6×4 (straddles 6-core CCDs) and silent for 4×6, 12×2, 1×24, a one-rank `init_mpi` job (m1×24) and for `--bind-to none` without OpenMP binding; `ctest -LE bench` green | — |
 | **WO-6** | E1 depth experiment on the WO-1+WO-3 build, local: bubble column at `set_pressure_multigrid(True, 5)` vs 4, at 1×24 and 24×1. Report ms/step, mean/max PCG iterations, bottom ms | MEAS | numbers in the campaign log | 5 levels: bottom 8×6×4 = 192 cells (P = 6, b = 32), factor ≈ 0; win iff iterations ≤ 4-level + 0.1 |
 | **WO-7** | S-PART genoa run (§8), user OK | MEAS | §8 falsification criteria | §0 table |
 
