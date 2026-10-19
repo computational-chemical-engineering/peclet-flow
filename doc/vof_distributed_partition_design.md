@@ -139,10 +139,12 @@ ms/step depending on the layout.
    argument.
 2. **Else coarse-first, balance-aware, depth 5 then 4.** For L = 5, 4, build the coarse-first
    partition C with the new core split rule `SplitAxis::Balanced` (§5.1). Return the first one whose
-   max/min ≤ `max_imbalance` (default 1.05) and whose nestDepth(C) ≥ min(nestDepth(A), 3).
-   nestDepth counts the minimum-extent rule (§5.2): a C whose blocks are 8 cells wide nests 2
-   levels, so it is rejected where legacy nests 3 (amended 2026-10-19: 40³ np 5, 48×32×40 np 8,
-   48×40×30 np 5; the original rule checked depth only for A′).
+   max/min ≤ `max_imbalance` (default 1.05) and whose nestDepth(C) ≥ nestDepth(A): a coarse-first
+   candidate that nests less deep than legacy is rejected. nestDepth counts the minimum-extent rule
+   (§5.2): a C whose blocks are 8 cells wide nests 2 levels. Amended 2026-10-19 (the original rule
+   checked depth only for A′); in the census this rejects C at 40³ np 5, 48×32×40 np 8,
+   48×40×30 np 5 (depth 2 < 3) and 96³ np 7 (3 < 4), and on the channel grids 480×80×160 np 4, 8,
+   22, 24, 32 and 768×128×256 np 13, 20, 28, 30, 31 (3 < 4; these fall back to A or A′).
    - L = 5 is the depth the alignment cap 16 already encodes.
    - L = 4 keeps 3 in-place halvings, which the default 4-level pressure MG and the velocity MG
      need (F10).
@@ -327,7 +329,7 @@ for L in (5, 4):
     C = BlockDecomposer.init(numBlocks, G/r, align 1, cellExtent r, Balanced).refined(r)
     if minCells(C) > 0 and maxCells(C)/minCells(C) <= maxImbalance
        and splitAxes(C) ⊆ splitAxes(A)
-       and nestDepth(C) >= min(nestDepth(A), 3): return C
+       and nestDepth(C) >= nestDepth(A): return C
 A2 = BlockDecomposer.init(numBlocks, G, coarsenAlignment(G), cellExtent 1, Balanced)
 if maxCells(A2) < maxCells(A) and nestDepth(A2) >= min(nestDepth(A), 3)
    and splitAxes(A2) ⊆ splitAxes(A): return A2
@@ -342,8 +344,9 @@ return A
   - `minBlockExtent ≥ 4` (the `teleMinExtent_` default), checked on the current level before each
     coarsening: blocks 8 cells wide give depth 2 (8 → 4 → 2, stop).
 
-  The count includes the minimum-extent rule (ruling 2026-10-19), for every candidate (C5, C4,
-  A2) and in the census; the [sim] replica (`dist_cpu/part/orb_sim/`) counts it the same way.
+  The count includes the minimum-extent rule (ruling 2026-10-19), for every candidate (C5, C4
+  against nestDepth(A), A2 against min(nestDepth(A), 3)) and in the census; the [sim] replica
+  (`dist_cpu/part/orb_sim/`) counts it the same way.
   Reuse `teleLiftable` / `cdec::minBlockExtent` rather than re-deriving them.
 - **Debug print:** `mgDebugLevel()` prints which branch fired (A-exact / C5 / C4 / A2 / A-fallback)
   and the max/min.
@@ -592,9 +595,10 @@ replica is wrong. Either needs the caller.
 | Q13 | `max_imbalance` 1.05 for the auto search | fact | keep 1.05 (exact is reached on every bubble-column layout) |
 | Q-W | Should the wall-normal invariant (F13) bind the bubble column? If it does, the factory needs the BCs (a `periodic=`-style input, new API). The 3 in 3/6/12/24 ranks lives only in y = 96, so those counts could then never be exact on this grid; only power-of-two counts could. | fact (does the channel's "centreline decoupling" still reproduce on today's code? one np 2 y-split channel run against single-rank) + preference (re-scope or enforce) | P1 as designed (status quo preserved: never a new split axis); the G-NUM-H runs at np 3/12/24 are the bubble-column evidence; put the re-scope question to the user with that evidence |
 
-**Risk.** C4 gives up a fourth in-place halving that legacy had: [sim] 480×80×160 at np 4, 8 and
-24 go from 1.14–1.50 to exact, at 3 halvings instead of 4. With the default 4-level MG this costs
-nothing. With `nLevels ≥ 5` that level telescopes. Default: accept. The census prints the cases.
+**Risk (superseded 2026-10-19).** C4 would give up a fourth in-place halving that legacy had: [sim]
+480×80×160 at np 4, 8 and 24 would go from 1.14–1.50 to exact, at 3 halvings instead of 4. The
+ruling of 2026-10-19 rejects such a C (nestDepth(C) ≥ nestDepth(A)): those configurations keep
+legacy (or A′ where it is better and nests as deep). The census prints the changed cases.
 
 **Risk.** A ctest that silently depends on the legacy partition at a changed (grid, np). The census
 list is the safeguard: any hash change outside it is a bug, not a re-baseline.
