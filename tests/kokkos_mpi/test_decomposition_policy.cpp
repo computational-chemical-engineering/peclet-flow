@@ -20,6 +20,9 @@
 ///      384^3 and 400^3, channel_dns 377/754/1508/3016 x 240 x 503 and 384x128x128 -- reproduce the
 ///      pre-partition partitions bit for bit (CutcellMG::fingerprint recorded from core fcb3b06 +
 ///      flow 91964b7; review 2026-10-20 #1);
+///  10. at np > 1, nestDepth(d) == the leading in-place coarsenings (rows neither telescoped nor
+///      final) of CutcellMG::predict(telescope = true, min_extent = 4), capped at 4, for d = auto
+///      and legacy: nestDepth re-implements initMpi's telescope trigger (review 2026-10-20 #4);
 /// plus the §9 block shapes of 128x96x64 at np 3, 12, 24, and np 192 = one 16^3 block per rank.
 /// Prints the CHANGED list (auto != legacy): the state-hash re-baseline list.
 #include <algorithm>
@@ -107,6 +110,19 @@ Dec alignedBalanced(std::size_t np, const IVec<3>& G) {
 bool tookCoarseFirst(const Dec& A, const Dec& L, std::size_t np, const IVec<3>& G) {
   return !same(A, L) && !same(A, alignedBalanced(np, G));
 }
+// In-place coarsenings before the first telescope stage, as CutcellMG::predict forecasts them
+// (initMpi's trigger at min extent 4), capped at 4 as nestDepth is.
+int predictedNestDepth(const IVec<3>& G, std::size_t np, int decompLevels) {
+  const auto rows =
+      CutcellMG::predict((int)G[0], (int)G[1], (int)G[2], (int)np, 8, true, 4, decompLevels);
+  int n = 0;
+  for (const auto& r : rows) {
+    if (r.tele || (r.ratio.x == 1 && r.ratio.y == 1 && r.ratio.z == 1))
+      break;
+    ++n;
+  }
+  return std::min(n, 4);
+}
 // block shape -> count
 std::map<std::array<Index, 3>, int> shapes(const Dec& d) {
   std::map<std::array<Index, 3>, int> m;
@@ -182,6 +198,12 @@ int main() {
       const bool isC = tookCoarseFirst(A, L, np, G);
       nCoarseFirst += isC ? 1 : 0;
       CHECK(!isC || dA >= dL, "%s: (3) coarse-first auto nests %d < legacy %d", name, dA, dL);
+      if (np > 1) {
+        const int pA = predictedNestDepth(G, np, 0), pL = predictedNestDepth(G, np, 1);
+        CHECK(dA == pA && dL == pL,
+              "%s: (10) nestDepth auto %d legacy %d != predict's in-place depth auto %d legacy %d",
+              name, dA, dL, pA, pL);
+      }
       CHECK(same(A, A2), "%s: (6) two calls differ", name);
       CHECK((CutcellMG::splitAxes(A) & ~CutcellMG::splitAxes(L)) == 0u,
             "%s: (7) auto cuts an axis legacy leaves whole (auto %u legacy %u)", name,
@@ -247,6 +269,10 @@ int main() {
       CHECK(!tookCoarseFirst(A, L, np, G) || CutcellMG::nestDepth(A) >= CutcellMG::nestDepth(L),
             "%lldx%lldx%lld np %zu: (3) coarse-first auto nests %d < legacy %d", (long long)G[0],
             (long long)G[1], (long long)G[2], np, CutcellMG::nestDepth(A), CutcellMG::nestDepth(L));
+      CHECK(CutcellMG::nestDepth(A) == predictedNestDepth(G, np, 0) &&
+                CutcellMG::nestDepth(L) == predictedNestDepth(G, np, 1),
+            "%lldx%lldx%lld np %zu: (10) nestDepth != predict's in-place depth", (long long)G[0],
+            (long long)G[1], (long long)G[2], np);
       if (!same(A, L))
         std::printf(
             "CHANGED %lldx%lldx%lld np %zu (channel): legacy max/min %.3f depth %d -> auto "
