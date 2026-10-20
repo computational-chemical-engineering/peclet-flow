@@ -157,8 +157,8 @@ split iff some block has size[k] < G[k]. A candidate that would cut an axis the 
 leaves whole is skipped (F13).
 
 `levels = 1` returns **A** exactly: today's default, kept for reproducing pre-change np > 1
-partitions. `levels ≥ 2` keeps its meaning (coarse-first search L…2, legacy fallback) but uses
-`SplitAxis::Balanced`.
+partitions. `levels ≥ 2` = the legacy coarse-first search (L…2, `SplitAxis::Longest`, legacy
+fallback), unchanged: the pre-partition partitions bit for bit (review 2026-10-20 #1, coordinator).
 
 Results [sim]:
 - 128×96×64: np 3, 12, 24, 32, 96 → exact (max/min 1.000), ≥ 4 in-place halvings. Every other
@@ -320,7 +320,7 @@ The coarse-first call has align = 1 and cellExtent = r, so step 2 never excludes
 if numBlocks == 1:            return whole grid                    # unchanged
 A = BlockDecomposer(numBlocks, G, coarsenAlignment(G))             # legacy, today's levels=0
 if levels == 1:               return A
-if levels >= 2:               return coarseFirstSearch(L = levels..2, Balanced) else A
+if levels >= 2:               return coarseFirstSearch(L = levels..2, Longest) else A   # legacy, unchanged
 # levels == 0: auto
 if maxCells(A) == minCells(A): return A                            # bitwise-unchanged branch
 for L in (5, 4):

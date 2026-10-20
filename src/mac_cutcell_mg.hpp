@@ -18,6 +18,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <Kokkos_Core.hpp>
@@ -1423,6 +1424,35 @@ class CutcellMG {
           m |= 1u << k;
     return m;
   }
+  // 64-bit FNV-1a fingerprint of a decomposition: global size, block count, every block's origin
+  // and size, and the ORB tree's split axes and positions. Equal partitions give equal values on
+  // every rank and build (pure integer arithmetic). Solver::initMpi(dec) agrees it across ranks.
+  static std::uint64_t fingerprint(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    std::uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](long long v) {
+      for (int b = 0; b < 8; ++b) {
+        h ^= static_cast<std::uint64_t>((static_cast<unsigned long long>(v) >> (8 * b)) & 0xffu);
+        h *= 1099511628211ull;
+      }
+    };
+    for (int k = 0; k < 3; ++k)
+      mix((long long)d.globalSize()[k]);
+    mix((long long)d.numBlocks());
+    for (std::size_t b = 0; b < d.numBlocks(); ++b)
+      for (int k = 0; k < 3; ++k) {
+        mix((long long)d.origins()[b][k]);
+        mix((long long)d.sizes()[b][k]);
+      }
+    std::vector<int> dim;
+    std::vector<peclet::core::Index> val;
+    d.flattenTree(dim, val);
+    mix((long long)dim.size());
+    for (std::size_t i = 0; i < dim.size(); ++i) {
+      mix((long long)dim[i]);
+      mix((long long)val[i]);
+    }
+    return h;
+  }
   // Consecutive in-place coarsenings of `d` from level 0, up to 4, before initMpi's first telescope
   // trigger: at each step every still-coarsenable axis has even block origins and sizes
   // (teleLiftable) and no block is thinner than 4 cells (the teleMinExtent_ default).
@@ -1456,8 +1486,9 @@ class CutcellMG {
   //     taken (the wall-normal invariant's status quo).
   //   levels == 1: the legacy aligned ORB A (the pre-2026-10 default, for reproducing old np > 1
   //     partitions).
-  //   levels >= 2: coarse-first search from depth `levels` down to 2 (balance-aware split axis),
-  //     the deepest within maxImbalance, else A.
+  //   levels >= 2: the legacy coarse-first search from depth `levels` down to 2 (longest-axis
+  //     split, unchanged: the pre-2026-10 partitions bit for bit), the deepest within
+  //     maxImbalance, else A.
   static peclet::core::decomp::BlockDecomposer<3> decomposition(std::size_t numBlocks, int gnx,
                                                                 int gny, int gnz, int levels = 0,
                                                                 double maxImbalance = 1.05) {
@@ -1498,7 +1529,7 @@ class CutcellMG {
     // compares the axes the fine grid would -- then refine the partition upward: blocks are exact
     // multiples of r, so every level nests for the full depth. `ok` = false when the coarse grid
     // is thinner than the rank count (someone would get an empty block) or nothing coarsens.
-    auto coarseFirst = [&](int L, bool& ok) {
+    auto coarseFirst = [&](int L, bool& ok, cdec::SplitAxis axis) {
       ok = false;
       const peclet::core::IVec<3> r = refineFactor(gnx, gny, gnz, L);
       if (r[0] == 1 && r[1] == 1 && r[2] == 1)
@@ -1507,14 +1538,17 @@ class CutcellMG {
       if (cellsOf(Gc) < numBlocks)
         return Dec();
       Dec coarse;
-      coarse.init(numBlocks, Gc, one, r, cdec::SplitAxis::Balanced);
+      coarse.init(numBlocks, Gc, one, r, axis);
       ok = true;
       return coarse.refined(r);
     };
+    // levels >= 2: the legacy coarse-first search, longest-axis split (SplitAxis::Longest) --
+    // bit for bit the pre-2026-10 partitions (review 2026-10-20 #1: published benchmarks such as
+    // foxberry's DECOMP_LEVELS=7 and channel_dns's DECOMP >= 2 must keep reproducing).
     if (levels >= 2) {
       for (int L = levels; L >= 2; --L) {
         bool ok = false;
-        Dec fine = coarseFirst(L, ok);
+        Dec fine = coarseFirst(L, ok, cdec::SplitAxis::Longest);
         if (!ok) {
           if (refineFactor(gnx, gny, gnz, L) == one)
             break;  // nothing coarsens on any axis -- the aligned ORB is all there is
@@ -1546,7 +1580,7 @@ class CutcellMG {
     const int depthA = nestDepth(A);
     for (int L : {5, 4}) {
       bool ok = false;
-      Dec C = coarseFirst(L, ok);
+      Dec C = coarseFirst(L, ok, cdec::SplitAxis::Balanced);
       if (!ok) {
         if (refineFactor(gnx, gny, gnz, L) == one)
           break;

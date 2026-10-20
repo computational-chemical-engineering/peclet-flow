@@ -14,9 +14,14 @@
 ///   6. two calls identical;
 ///   7. splitAxes(auto) is a subset of splitAxes(legacy);
 ///   8. 768x128x256 and 480x80x160 at np 2..32: a legacy partition that keeps y whole keeps it;
+///   9. levels 2..7 (the legacy coarse-first search) on the published configurations -- foxberry
+///      384^3 and 400^3, channel_dns 377/754/1508/3016 x 240 x 503 and 384x128x128 -- reproduce the
+///      pre-partition partitions bit for bit (CutcellMG::fingerprint recorded from core fcb3b06 +
+///      flow 91964b7; review 2026-10-20 #1);
 /// plus the §9 block shapes of 128x96x64 at np 3, 12, 24, and np 192 = one 16^3 block per rank.
 /// Prints the CHANGED list (auto != legacy): the state-hash re-baseline list.
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <set>
@@ -230,6 +235,151 @@ int main() {
             (double)maxCells(L) / (double)minCells(L), CutcellMG::nestDepth(L),
             (double)maxCells(A) / (double)minCells(A), CutcellMG::nestDepth(A));
     }
+  // (9) levels >= 2: the legacy coarse-first search (SplitAxis::Longest), bit for bit. The values
+  // are CutcellMG::fingerprint of CutcellMG::decomposition(np, G, L) built against core fcb3b06 +
+  // flow 91964b7 (the pre-partition trees).
+  struct Golden {
+    IVec<3> g;
+    std::size_t np;
+    int levels;
+    std::uint64_t fp;
+  };
+  const Golden golden[] = {
+      {{384, 384, 384}, 24, 2, 0xc76cada7a9cf6f6full},
+      {{384, 384, 384}, 24, 3, 0xc76cada7a9cf6f6full},
+      {{384, 384, 384}, 24, 4, 0xc76cada7a9cf6f6full},
+      {{384, 384, 384}, 24, 5, 0xc76cada7a9cf6f6full},
+      {{384, 384, 384}, 24, 6, 0xc76cada7a9cf6f6full},
+      {{384, 384, 384}, 24, 7, 0xc76cada7a9cf6f6full},
+      {{384, 384, 384}, 48, 2, 0x56973b1c6f4aa7b7ull},
+      {{384, 384, 384}, 48, 3, 0x56973b1c6f4aa7b7ull},
+      {{384, 384, 384}, 48, 4, 0x56973b1c6f4aa7b7ull},
+      {{384, 384, 384}, 48, 5, 0x56973b1c6f4aa7b7ull},
+      {{384, 384, 384}, 48, 6, 0x56973b1c6f4aa7b7ull},
+      {{384, 384, 384}, 48, 7, 0x56973b1c6f4aa7b7ull},
+      {{384, 384, 384}, 96, 2, 0x8c951d34c8581337ull},
+      {{384, 384, 384}, 96, 3, 0x8c951d34c8581337ull},
+      {{384, 384, 384}, 96, 4, 0x8c951d34c8581337ull},
+      {{384, 384, 384}, 96, 5, 0x8c951d34c8581337ull},
+      {{384, 384, 384}, 96, 6, 0x8c951d34c8581337ull},
+      {{384, 384, 384}, 96, 7, 0x8c951d34c8581337ull},
+      {{384, 384, 384}, 192, 2, 0xe4e414c09bbcdb6cull},
+      {{384, 384, 384}, 192, 3, 0xe4e414c09bbcdb6cull},
+      {{384, 384, 384}, 192, 4, 0xe4e414c09bbcdb6cull},
+      {{384, 384, 384}, 192, 5, 0xe4e414c09bbcdb6cull},
+      {{384, 384, 384}, 192, 6, 0xe4e414c09bbcdb6cull},
+      {{384, 384, 384}, 192, 7, 0xe4e414c09bbcdb6cull},
+      {{384, 384, 384}, 384, 2, 0x0db64c506de5f5c9ull},
+      {{384, 384, 384}, 384, 3, 0x0db64c506de5f5c9ull},
+      {{384, 384, 384}, 384, 4, 0x0db64c506de5f5c9ull},
+      {{384, 384, 384}, 384, 5, 0x0db64c506de5f5c9ull},
+      {{384, 384, 384}, 384, 6, 0x0db64c506de5f5c9ull},
+      {{384, 384, 384}, 384, 7, 0x0db64c506de5f5c9ull},
+      {{384, 384, 384}, 768, 2, 0x2cba956cc53f6297ull},
+      {{384, 384, 384}, 768, 3, 0x2cba956cc53f6297ull},
+      {{384, 384, 384}, 768, 4, 0x2cba956cc53f6297ull},
+      {{384, 384, 384}, 768, 5, 0x2cba956cc53f6297ull},
+      {{384, 384, 384}, 768, 6, 0x2cba956cc53f6297ull},
+      {{384, 384, 384}, 768, 7, 0x2cba956cc53f6297ull},
+      {{384, 384, 384}, 1536, 2, 0x6b2c44fefb80e50cull},
+      {{384, 384, 384}, 1536, 3, 0x6b2c44fefb80e50cull},
+      {{384, 384, 384}, 1536, 4, 0x6b2c44fefb80e50cull},
+      {{384, 384, 384}, 1536, 5, 0x6b2c44fefb80e50cull},
+      {{384, 384, 384}, 1536, 6, 0x6b2c44fefb80e50cull},
+      {{384, 384, 384}, 1536, 7, 0x6b2c44fefb80e50cull},
+      {{400, 400, 400}, 48, 2, 0x54b7dda96e2dd65full},
+      {{400, 400, 400}, 48, 3, 0xf56231788a323f4full},
+      {{400, 400, 400}, 48, 4, 0xf56231788a323f4full},
+      {{400, 400, 400}, 48, 5, 0xf56231788a323f4full},
+      {{400, 400, 400}, 48, 6, 0xf56231788a323f4full},
+      {{400, 400, 400}, 48, 7, 0xf56231788a323f4full},
+      {{400, 400, 400}, 96, 2, 0x352e55a97a9a28efull},
+      {{400, 400, 400}, 96, 3, 0x352e55a97a9a28efull},
+      {{400, 400, 400}, 96, 4, 0x352e55a97a9a28efull},
+      {{400, 400, 400}, 96, 5, 0x352e55a97a9a28efull},
+      {{400, 400, 400}, 96, 6, 0x352e55a97a9a28efull},
+      {{400, 400, 400}, 96, 7, 0x352e55a97a9a28efull},
+      {{400, 400, 400}, 192, 2, 0x0965e39854d7dcb4ull},
+      {{400, 400, 400}, 192, 3, 0x0965e39854d7dcb4ull},
+      {{400, 400, 400}, 192, 4, 0x0965e39854d7dcb4ull},
+      {{400, 400, 400}, 192, 5, 0x0965e39854d7dcb4ull},
+      {{400, 400, 400}, 192, 6, 0x0965e39854d7dcb4ull},
+      {{400, 400, 400}, 192, 7, 0x0965e39854d7dcb4ull},
+      {{400, 400, 400}, 384, 2, 0x27a98983bbceb84dull},
+      {{400, 400, 400}, 384, 3, 0x27a98983bbceb84dull},
+      {{400, 400, 400}, 384, 4, 0x27a98983bbceb84dull},
+      {{400, 400, 400}, 384, 5, 0x27a98983bbceb84dull},
+      {{400, 400, 400}, 384, 6, 0x27a98983bbceb84dull},
+      {{400, 400, 400}, 384, 7, 0x27a98983bbceb84dull},
+      {{377, 240, 503}, 1, 2, 0xe42b457e073921dbull},
+      {{377, 240, 503}, 1, 3, 0xe42b457e073921dbull},
+      {{377, 240, 503}, 1, 4, 0xe42b457e073921dbull},
+      {{377, 240, 503}, 1, 5, 0xe42b457e073921dbull},
+      {{377, 240, 503}, 1, 6, 0xe42b457e073921dbull},
+      {{377, 240, 503}, 1, 7, 0xe42b457e073921dbull},
+      {{754, 240, 503}, 2, 2, 0xe51d0609f3f2fa21ull},
+      {{754, 240, 503}, 2, 3, 0xe51d0609f3f2fa21ull},
+      {{754, 240, 503}, 2, 4, 0xe51d0609f3f2fa21ull},
+      {{754, 240, 503}, 2, 5, 0xe51d0609f3f2fa21ull},
+      {{754, 240, 503}, 2, 6, 0xe51d0609f3f2fa21ull},
+      {{754, 240, 503}, 2, 7, 0xe51d0609f3f2fa21ull},
+      {{1508, 240, 503}, 4, 2, 0xdb90dd30d00501d3ull},
+      {{1508, 240, 503}, 4, 3, 0x6483cea14f6e9f6full},
+      {{1508, 240, 503}, 4, 4, 0x6483cea14f6e9f6full},
+      {{1508, 240, 503}, 4, 5, 0x6483cea14f6e9f6full},
+      {{1508, 240, 503}, 4, 6, 0x6483cea14f6e9f6full},
+      {{1508, 240, 503}, 4, 7, 0x6483cea14f6e9f6full},
+      {{3016, 240, 503}, 8, 2, 0xbb2164ae7892e7f9ull},
+      {{3016, 240, 503}, 8, 3, 0x4c4a3e149bcd28fdull},
+      {{3016, 240, 503}, 8, 4, 0xcfadf268c155a0bdull},
+      {{3016, 240, 503}, 8, 5, 0xcfadf268c155a0bdull},
+      {{3016, 240, 503}, 8, 6, 0xcfadf268c155a0bdull},
+      {{3016, 240, 503}, 8, 7, 0xcfadf268c155a0bdull},
+      {{384, 128, 128}, 2, 2, 0x95d56daae4b3edf8ull},
+      {{384, 128, 128}, 2, 3, 0x95d56daae4b3edf8ull},
+      {{384, 128, 128}, 2, 4, 0x95d56daae4b3edf8ull},
+      {{384, 128, 128}, 2, 5, 0x95d56daae4b3edf8ull},
+      {{384, 128, 128}, 2, 6, 0x95d56daae4b3edf8ull},
+      {{384, 128, 128}, 2, 7, 0x95d56daae4b3edf8ull},
+      {{384, 128, 128}, 4, 2, 0x796d44fff0fc7cbbull},
+      {{384, 128, 128}, 4, 3, 0x796d44fff0fc7cbbull},
+      {{384, 128, 128}, 4, 4, 0x796d44fff0fc7cbbull},
+      {{384, 128, 128}, 4, 5, 0x796d44fff0fc7cbbull},
+      {{384, 128, 128}, 4, 6, 0x796d44fff0fc7cbbull},
+      {{384, 128, 128}, 4, 7, 0x796d44fff0fc7cbbull},
+      {{384, 128, 128}, 8, 2, 0xd76f88eae7c4e594ull},
+      {{384, 128, 128}, 8, 3, 0xd76f88eae7c4e594ull},
+      {{384, 128, 128}, 8, 4, 0xd76f88eae7c4e594ull},
+      {{384, 128, 128}, 8, 5, 0xd76f88eae7c4e594ull},
+      {{384, 128, 128}, 8, 6, 0xd76f88eae7c4e594ull},
+      {{384, 128, 128}, 8, 7, 0xd76f88eae7c4e594ull},
+      {{384, 128, 128}, 16, 2, 0x6cd590d87514e30cull},
+      {{384, 128, 128}, 16, 3, 0x6cd590d87514e30cull},
+      {{384, 128, 128}, 16, 4, 0x6cd590d87514e30cull},
+      {{384, 128, 128}, 16, 5, 0x6cd590d87514e30cull},
+      {{384, 128, 128}, 16, 6, 0x6cd590d87514e30cull},
+      {{384, 128, 128}, 16, 7, 0x6cd590d87514e30cull},
+      {{480, 80, 160}, 16, 2, 0x689bdd6c028b5f1cull},
+      {{480, 80, 160}, 16, 3, 0x689bdd6c028b5f1cull},
+      {{480, 80, 160}, 16, 4, 0x689bdd6c028b5f1cull},
+      {{480, 80, 160}, 16, 5, 0x689bdd6c028b5f1cull},
+      {{480, 80, 160}, 16, 6, 0x689bdd6c028b5f1cull},
+      {{480, 80, 160}, 16, 7, 0x689bdd6c028b5f1cull},
+  };
+  int nGolden = 0;
+  for (const auto& r : golden) {
+    const Dec d = CutcellMG::decomposition(r.np, (int)r.g[0], (int)r.g[1], (int)r.g[2], r.levels);
+    ++nGolden;
+    CHECK(CutcellMG::fingerprint(d) == r.fp,
+          "%lldx%lldx%lld np %zu levels %d: (9) partition differs from the pre-partition one "
+          "(fingerprint %016llx, recorded %016llx)",
+          (long long)r.g[0], (long long)r.g[1], (long long)r.g[2], r.np, r.levels,
+          (unsigned long long)CutcellMG::fingerprint(d), (unsigned long long)r.fp);
+  }
+  std::printf(
+      "levels >= 2: %d (published configuration, levels) rows checked against the pre-partition "
+      "trees\n",
+      nGolden);
   std::printf(fails ? "decomposition_policy: FAIL (%d)\n" : "decomposition_policy: PASS\n", fails);
   return fails ? 1 : 0;
 }

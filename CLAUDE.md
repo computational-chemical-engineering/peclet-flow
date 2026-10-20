@@ -302,8 +302,8 @@ you want). Detail and numbers for every bullet: ref §6.
   coarse-first at depth 5/4 with core's `SplitAxis::Balanced`, else the balance-aware aligned ORB
   if better (coarse-first must nest >= legacy's depth, the aligned one >= min(legacy, 3); depth
   counts blocks >= 4 cells); never cuts an axis the legacy ORB leaves whole. `set_decomposition(1)` = the legacy
-  aligned ORB (pre-2026-10 np > 1 partitions); `L >= 2` coarse-first (blocks nest for the full
-  depth). Census ctest `decomposition_policy`. Check a combination with
+  aligned ORB (pre-2026-10 np > 1 partitions); `L >= 2` the legacy coarse-first search (longest-axis
+  split, unchanged: blocks nest for the full depth). Census ctest `decomposition_policy`. Check a combination with
   `scripts/check_decomposition.py` first.
 
 ## Velocity solve
