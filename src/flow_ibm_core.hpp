@@ -899,6 +899,14 @@ void Solver<Grid>::setDecomposition(int levels, double maxImbalance) {
   if (distributed_)
     throw std::runtime_error(
         "set_decomposition: call BEFORE init_mpi -- the decomposition is built there");
+  if (levels < 0)
+    throw std::invalid_argument(
+        "set_decomposition: levels must be >= 0 (0 = auto, 1 = the legacy aligned ORB, >= 2 = "
+        "coarse-first at that depth)");
+  if (!(maxImbalance > 1.0))
+    throw std::invalid_argument(
+        "set_decomposition: max_imbalance must be > 1.0 (the largest / smallest block cell-count "
+        "ratio a candidate may reach; default 1.05)");
   decompLevels_ = levels;
   decompMaxImbalance_ = maxImbalance;
 }

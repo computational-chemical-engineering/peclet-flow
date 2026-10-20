@@ -2520,7 +2520,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "refine the partition upward, so every block is a multiple of the coarsening factor BY "
            "CONSTRUCTION and the hierarchy nests for the full requested depth; each depth from "
            "`levels` down to 2 is built and MEASURED, and the deepest one within max_imbalance is "
-           "taken, else the aligned ORB. Call BEFORE init_mpi() (a later call raises), and pass "
+           "taken, else the aligned ORB. levels < 0 or max_imbalance <= 1.0 raise ValueError. Call "
+           "BEFORE init_mpi() (a later call raises), and pass "
            "the SAME levels / max_imbalance to flow.mpi_block() -- both derive the same partition "
            "and must agree.")
       .def_prop_ro("decomposition_levels", &S::decompositionLevels,

@@ -5029,8 +5029,9 @@ class Solver {
   // Communication-avoiding smoothing mask (kCaMomentum | kCaMg), see setCommAvoiding. Both on by
   // default; the momentum half is additionally gated on the block extent (caMomentum_).
   int caMode_ = kCaBoth;
-  // The shared level-0 MPI decomposition (setDecomposition): 0 = the aligned ORB, >= 2 =
-  // coarse-first with that depth, taking the deepest candidate within maxImbalance.
+  // The shared level-0 MPI decomposition (setDecomposition): 0 = auto (default), 1 = the legacy
+  // aligned ORB, >= 2 = the legacy coarse-first search from that depth (the deepest candidate
+  // within maxImbalance).
   int decompLevels_ = 0;
   double decompMaxImbalance_ = 1.05;
   // True once rebalanceByWeights has put the solver on a WEIGHTED level-0 decomposition (reset by

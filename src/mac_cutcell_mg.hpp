@@ -1311,7 +1311,8 @@ class CutcellMG {
   // dec0: OPTIONAL shared level-0 decomposition (load-balance / CFD-DEM co-decomposition). When
   // given, level 0 uses it so the MG's level-0 block matches the caller's (possibly weighted)
   // block, and each coarse level is the previous one coarsened in place while every block stays
-  // even. nullptr => the solver's own aligned ORB (`decomposition()`), byte-identical to before.
+  // even. nullptr => `decomposition(np, G)` at its defaults: the auto policy (levels 0), which is
+  // the legacy aligned ORB only where that is exactly balanced (levels 1 = legacy everywhere).
   // A WEIGHTED dec0 (rebalanceByWeights) generally has ODD splits: in-place coarsening blocks at
   // the shallowest odd split and a telescope stage fires there — at level 0 when the ORB root
   // split is odd. The sibling-merge search alone then lands at the shallowest even ORB depth,

@@ -105,9 +105,9 @@ void Solver<Grid>::initMpi(int gnx, int gny, int gnz, MPI_Comm comm) {
   detail::warnL3Placement(comm);  // WO-5: one stderr line on rank 0 for a CCD-straddling placement
   weightedDec_ = false;           // the equal-weight partition; rebalanceByWeights sets it
   // Build the shared decomposition so the pressure MG can derive nested coarse levels
-  // (CutcellMG::coarsened) — aligned ORB by default, or coarse-first when `set_decomposition`
-  // asks for it. Depends only on the global grid and that setting, so it matches mpi_block()'s
-  // sizing exactly when the same values are passed there.
+  // (CutcellMG::coarsened) — the auto policy by default (set_decomposition(0)), the legacy
+  // aligned ORB at 1, coarse-first at >= 2. Depends only on the global grid and that setting, so
+  // it matches mpi_block()'s sizing exactly when the same values are passed there.
   initMpi(CutcellMG::decomposition(static_cast<std::size_t>(size), gnx, gny, gnz, decompLevels_,
                                    decompMaxImbalance_),
           comm);
