@@ -132,7 +132,10 @@ static double relErr(const std::vector<double>& a, const std::vector<double>& b)
 template <class S>
 static int runCase(const char* name, double rfrac, int mo, int ro, int rank, int size) {
   const std::vector<double> gsdf = packingSdf(rfrac);
-  peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), IVec<3>{N, N, N});
+  // size the block from the Solver's own factory: initMpi(N, N, N) re-derives this partition
+  // and checks the local block against it
+  const peclet::core::decomp::BlockDecomposer<3> dec =
+      peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size), N, N, N);
   auto blk = dec.block(rank);
   const int ox = (int)blk.origin[0], oy = (int)blk.origin[1], oz = (int)blk.origin[2];
   const int lnx = (int)blk.size[0], lny = (int)blk.size[1], lnz = (int)blk.size[2];

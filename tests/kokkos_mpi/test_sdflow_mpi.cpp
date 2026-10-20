@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
+#include <stdexcept>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -80,7 +81,10 @@ int main(int argc, char** argv) {
     const double gcells = (double)N * N * N;
 
     // --- distributed solve ---
-    peclet::core::decomp::BlockDecomposer<3> dec(static_cast<std::size_t>(size), IVec<3>{N, N, N});
+    // size the block from the Solver's own factory: initMpi(N, N, N) re-derives this partition
+    // and checks the local block against it
+    const peclet::core::decomp::BlockDecomposer<3> dec =
+        peclet::flow::CutcellMG::decomposition(static_cast<std::size_t>(size), N, N, N);
     auto blk = dec.block(rank);
     const int ox = (int)blk.origin[0], oy = (int)blk.origin[1], oz = (int)blk.origin[2];
     const int lnx = (int)blk.size[0], lny = (int)blk.size[1], lnz = (int)blk.size[2];
@@ -129,6 +133,24 @@ int main(int argc, char** argv) {
                   k_ref, reld, div_dist, size, tol);
     if (reld > tol || !(div_dist < 1e-5))
       fail = 1;
+
+    // initMpi(dec) refuses a block that does not match the decomposition -- on EVERY rank, even
+    // when only rank 0's block is wrong (one collective agreement; review 2026-10-20 #2).
+    {
+      int threw = 0, allThrew = 0;
+      IbmSolver bad(lnx + (rank == 0 ? 2 : 0), lny, lnz);
+      try {
+        bad.initMpi(N, N, N, MPI_COMM_WORLD);
+      } catch (const std::runtime_error&) {
+        threw = 1;
+      }
+      MPI_Allreduce(&threw, &allThrew, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+      if (rank == 0)
+        std::printf("  mis-sized block on rank 0: init_mpi raised on every rank: %s\n",
+                    allThrew ? "yes" : "NO");
+      if (!allThrew)
+        fail = 1;
+    }
   }
   int totalFail = 0;
   MPI_Allreduce(&fail, &totalFail, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);

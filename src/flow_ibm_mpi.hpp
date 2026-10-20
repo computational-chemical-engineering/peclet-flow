@@ -131,6 +131,33 @@ void Solver<Grid>::initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, 
         "set_solid_from_scene) -- the geometry builds the pressure and velocity multigrids for the "
         "partition in force when it runs, so a geometry built first gives every rank an "
         "independent, block-periodic pressure solve (a wrong answer at np > 1, with no error)");
+  // The fields were sized by the constructor (or allocateBlock) from SOME partition; the halo is
+  // built from `dec`. If the two differ -- a block sized from another ORB, or ranks holding
+  // different decompositions -- the exchange would read and write the wrong cells with no error.
+  // One collective agrees both: a local mismatch flag (LOR) and the decomposition fingerprint
+  // (MIN == MAX), as MAX over {flag, fp, ~fp}. Every rank throws together.
+  {
+    int csize = 1, crank = 0;
+    MPI_Comm_size(comm, &csize);
+    MPI_Comm_rank(comm, &crank);
+    bool bad = dec.numBlocks() != static_cast<std::size_t>(csize);
+    if (!bad) {
+      const auto b = dec.block(static_cast<std::size_t>(crank));
+      bad = (int)b.size[0] != nx_ || (int)b.size[1] != ny_ || (int)b.size[2] != nz_;
+    }
+    const std::uint64_t fp = CutcellMG::fingerprint(dec);
+    std::uint64_t loc[3] = {bad ? 1ull : 0ull, fp, ~fp}, all[3] = {0, 0, 0};
+    MPI_Allreduce(loc, all, 3, MPI_UINT64_T, MPI_MAX, comm);
+    if (all[0] != 0 || all[1] != ~all[2])
+      throw std::runtime_error(
+          all[0] != 0
+              ? "init_mpi: the solver's local block does not match the decomposition on at least "
+                "one rank -- size Solver(*size) from flow.mpi_block(gnx, gny, gnz, levels=, "
+                "max_imbalance=) with the SAME values given to set_decomposition (C++: "
+                "CutcellMG::decomposition(np, gnx, gny, gnz, levels, max_imbalance).block(rank))"
+              : "init_mpi: the ranks hold different decompositions -- every rank must pass the "
+                "same set_decomposition(levels, max_imbalance) and flow.mpi_block(...) values");
+  }
   pcInDomain_ = CCField();  // WO-P3g: which ghosts carry a row depends on the decomposition
   pguessCount_ = 0;  // E-dist (doc/vof_projection_distributed_design.md §6 item 4): a new partition
   distributed_ = true;
