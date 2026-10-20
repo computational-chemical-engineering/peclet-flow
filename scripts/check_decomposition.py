@@ -12,8 +12,8 @@ Run it before committing a grid or a rank count to a large job. It needs only an
 `flow` (the OpenMP one is fine, no GPU), and `mpirun --oversubscribe` happily runs more ranks than
 there are cores because nothing here is timed.
 
-    # one grid, several rank counts, both decomposition modes:
-    python check_decomposition.py --grid 480,80,160 --levels 6 --np 1,2,4,8,12,16,24 --mode 0,coarse
+    # one grid, several rank counts, auto vs the legacy aligned ORB vs coarse-first:
+    python check_decomposition.py --grid 480,80,160 --levels 6 --np 1,2,4,8,12,16,24 --mode 0,1,coarse
 
     # a whole weak-scaling ladder, ORB only (no solver allocation -> any size, instantly):
     python check_decomposition.py --grid 960,160,320 --np 1 --orb-only
@@ -94,11 +94,13 @@ def child(args):
 
 
 # ---- parent: spawn one mpirun per (mode, np) and tabulate ---------------------------------------
-MODES = {"0": ("aligned", "0"), "aligned": ("aligned", "0"), "legacy": ("aligned", "0")}
+MODES = {"0": ("auto", "0"), "auto": ("auto", "0"),
+         "1": ("aligned", "1"), "aligned": ("aligned", "1"), "legacy": ("aligned", "1")}
 
 
 def mode_spec(tok, levels):
-    """'0'/'aligned' -> the legacy aligned ORB; 'coarse'/'coarse-first'/<int> -> coarse-first."""
+    """'0'/'auto' -> the default auto policy; '1'/'aligned'/'legacy' -> the legacy aligned ORB;
+    'coarse'/'coarse-first'/<int >= 2> -> coarse-first at that depth."""
     if tok in MODES:
         return MODES[tok]
     if tok in ("coarse", "coarse-first", "cf"):
@@ -143,7 +145,8 @@ def main():
     ap.add_argument("--grid", required=True, help="GNX,GNY,GNZ")
     ap.add_argument("--np", default="1", help="comma-separated rank counts")
     ap.add_argument("--levels", type=int, default=5, help="multigrid levels requested (default 5)")
-    ap.add_argument("--mode", default="0", help="comma-separated: 0/aligned, coarse, or a depth")
+    ap.add_argument("--mode", default="0",
+                    help="comma-separated: 0/auto (default), 1/aligned/legacy, coarse, or a depth >= 2")
     ap.add_argument("--walls", action="store_true", help="no-slip -y/+y (the channel's domain-BC MG path)")
     ap.add_argument("--orb-only", action="store_true", help="partition only; no Solver, so any size")
     ap.add_argument("--verbose", action="store_true", help="also print the per-level dims/ratios")
@@ -157,8 +160,9 @@ def main():
                          "array) -- predict the hierarchy AFTER that rebalance and log the "
                          "alignment its aligned weighted ORB picks")
     ap.add_argument("--decomp-levels", type=int, default=0,
-                    help="Solver.set_decomposition(levels) / flow.mpi_block(levels=): 0 = the "
-                         "aligned ORB, >= 2 = coarse-first with that depth")
+                    help="Solver.set_decomposition(levels) / flow.mpi_block(levels=): 0 = auto "
+                         "(default), 1 = the legacy aligned ORB, >= 2 = coarse-first with that "
+                         "depth")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args()
     if args.weights is not None and not args.predict:
