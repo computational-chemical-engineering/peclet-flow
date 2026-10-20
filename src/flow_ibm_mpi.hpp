@@ -28,7 +28,7 @@ inline int hostL3PlacementStatus() {
   if constexpr (!std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::OpenMP>) {
     return 0;
   } else {
-    const int T = omp_get_max_threads();
+    const int T = Kokkos::OpenMP().concurrency();  // the Kokkos pool, not omp_get_max_threads()
     std::vector<int> cpu(T, -1);
 #pragma omp parallel num_threads(T)
     {
