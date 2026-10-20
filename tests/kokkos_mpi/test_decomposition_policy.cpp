@@ -8,7 +8,9 @@
 /// auto = levels 0, legacy = levels 1:
 ///   1. legacy exact => auto == legacy (origins, sizes, tree split positions);
 ///   2. maxCells(auto) <= maxCells(legacy);
-///   3. nestDepth(auto) >= min(nestDepth(legacy), 3);
+///   3. nestDepth(auto) >= min(nestDepth(legacy), 3), and nestDepth(auto) >= nestDepth(legacy)
+///      whenever auto took a coarse-first partition (neither legacy nor the balance-aware aligned
+///      ORB A2, recomputed here; review 2026-10-20 #3);
 ///   4. 128x96x64 at np 3/12/24/32/96 (and 192): max == min, >= 4 in-place halvings (evenness);
 ///   5. 48^3 at np 4: max == min;
 ///   6. two calls identical;
@@ -94,6 +96,17 @@ int evenHalvings(const Dec& d0) {
   }
   return n;
 }
+// The balance-aware aligned ORB the auto policy's A2 branch builds (mac_cutcell_mg.hpp).
+Dec alignedBalanced(std::size_t np, const IVec<3>& G) {
+  Dec d;
+  d.init(np, G, CutcellMG::coarsenAlignment((int)G[0], (int)G[1], (int)G[2]), IVec<3>{1, 1, 1},
+         peclet::core::decomp::SplitAxis::Balanced);
+  return d;
+}
+// auto took a coarse-first candidate (C5/C4): it is neither legacy nor A2
+bool tookCoarseFirst(const Dec& A, const Dec& L, std::size_t np, const IVec<3>& G) {
+  return !same(A, L) && !same(A, alignedBalanced(np, G));
+}
 // block shape -> count
 std::map<std::array<Index, 3>, int> shapes(const Dec& d) {
   std::map<std::array<Index, 3>, int> m;
@@ -145,7 +158,7 @@ int main() {
       // limiting: no factors of two
       {30, 30, 30}};
   const std::vector<std::size_t> nps = {1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 96};
-  int nConf = 0, nChanged = 0;
+  int nConf = 0, nChanged = 0, nCoarseFirst = 0;
   for (const auto& G : grids) {
     std::vector<std::size_t> list = nps;
     if (G == IVec<3>{128, 96, 64})
@@ -166,6 +179,9 @@ int main() {
       CHECK(maxCells(A) <= maxCells(L), "%s: (2) maxCells auto %lld > legacy %lld", name,
             (long long)maxCells(A), (long long)maxCells(L));
       CHECK(dA >= std::min(dL, 3), "%s: (3) nestDepth auto %d < min(legacy %d, 3)", name, dA, dL);
+      const bool isC = tookCoarseFirst(A, L, np, G);
+      nCoarseFirst += isC ? 1 : 0;
+      CHECK(!isC || dA >= dL, "%s: (3) coarse-first auto nests %d < legacy %d", name, dA, dL);
       CHECK(same(A, A2), "%s: (6) two calls differ", name);
       CHECK((CutcellMG::splitAxes(A) & ~CutcellMG::splitAxes(L)) == 0u,
             "%s: (7) auto cuts an axis legacy leaves whole (auto %u legacy %u)", name,
@@ -184,7 +200,8 @@ int main() {
       }
     }
   }
-  std::printf("census: %d configurations, %d changed\n", nConf, nChanged);
+  std::printf("census: %d configurations, %d changed, %d coarse-first\n", nConf, nChanged,
+              nCoarseFirst);
 
   // (4), (5), §9 shapes and the np = 192 limiting case
   for (std::size_t np : {3, 12, 24, 32, 96, 192}) {
@@ -226,6 +243,9 @@ int main() {
             (long long)G[1], (long long)G[2], np);
       CHECK(CutcellMG::nestDepth(A) >= std::min(CutcellMG::nestDepth(L), 3),
             "%lldx%lldx%lld np %zu: (3) nestDepth auto %d legacy %d", (long long)G[0],
+            (long long)G[1], (long long)G[2], np, CutcellMG::nestDepth(A), CutcellMG::nestDepth(L));
+      CHECK(!tookCoarseFirst(A, L, np, G) || CutcellMG::nestDepth(A) >= CutcellMG::nestDepth(L),
+            "%lldx%lldx%lld np %zu: (3) coarse-first auto nests %d < legacy %d", (long long)G[0],
             (long long)G[1], (long long)G[2], np, CutcellMG::nestDepth(A), CutcellMG::nestDepth(L));
       if (!same(A, L))
         std::printf(
