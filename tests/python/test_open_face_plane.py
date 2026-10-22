@@ -17,7 +17,10 @@ Checks, in the order they would fail:
   3. staggered: max_open_divergence_projected stays at round-off after that scalar step (the
      scalar's fill used to overwrite C[0].u's corrected outlet face in place: 0.785);
   4. a HIGH-side inflow (+x inflow, -x outflow): the collocated inlet-adjacent centreline velocity
-     agrees with the staggered one (1.7e-3 fixed; 3.6e-2 when it read the outlet's plane).
+     agrees with the staggered one (1.7e-3 fixed; 3.6e-2 when it read the outlet's plane);
+  5. checks 1 and 2 again on the collocated grid with VoF enabled (the bubble-column
+     configuration): the VoF bridge fills uf_ IN PLACE between the projection and the scalars and
+     the census, so it must keep the plane too (flow 17d6a8e; reverted, both checks fail).
 
 Run:  OMP_NUM_THREADS=4 OMP_PROC_BIND=false PYTHONPATH=<build> \
           python tests/python/test_open_face_plane.py
@@ -31,7 +34,7 @@ NX, NY, NZ = 24, 12, 4
 MU, DT = 0.1, 0.5
 
 
-def channel(pf, cls, u_in, low="inflow", nx=NX, ny=NY):
+def channel(pf, cls, u_in, low="inflow", nx=NX, ny=NY, vof=False):
     s = cls(nx, ny, NZ)
     s.set_rho(1.0); s.set_mu(MU); s.set_dt(DT)
     s.set_advection(True); s.set_advection_scheme("koren")
@@ -46,6 +49,11 @@ def channel(pf, cls, u_in, low="inflow", nx=NX, ny=NY):
     s.set_domain_bc("-y", "wall"); s.set_domain_bc("+y", "wall")
     s.set_pressure_geometry(np.asfortranarray(np.full((nx, ny, NZ), 10.0)))
     s.set_pressure_pcg(True, 400, 1e-11)
+    if vof:
+        # One phase everywhere (C = 0, no property model): the flow is unchanged, but every step
+        # now runs the VoF bridge between the projection and the readers of the face plane.
+        s.enable_vof()
+        s.set_vof(np.zeros((nx, ny, NZ), order="F"))
     return s
 
 
@@ -58,8 +66,8 @@ def required_outlet(s):
     return uf[i] - (vtop - vf[i]) - (wtop - wf[i])
 
 
-def check_census(pf, cls):
-    s = channel(pf, cls, -1.0)
+def check_census(pf, cls, vof=False):
+    s = channel(pf, cls, -1.0, vof=vof)
     worst = 0.0
     for _ in range(20):
         s.step()
@@ -67,12 +75,12 @@ def check_census(pf, cls):
         req = required_outlet(s)
         worst = max(worst, abs(ob["max_reverse"] - (-req).max()))
         assert ob["reversed_faces"] == ob["outlet_faces"] == NY * NZ, ob
-    assert worst <= 1e-9, f"{cls.__name__}: census vs required outlet flux {worst:.3e}"
+    assert worst <= 1e-9, f"{cls.__name__}{' +VoF' * vof}: census vs required outlet flux {worst:.3e}"
     return worst
 
 
-def check_scalar_outlet(pf, cls):
-    s = channel(pf, cls, 1.0)
+def check_scalar_outlet(pf, cls, vof=False):
+    s = channel(pf, cls, 1.0, vof=vof)
     for _ in range(30):
         s.step()
     s.add_scalar("c", diffusivity=0.0, scheme="fou", iters=1)
@@ -82,7 +90,7 @@ def check_scalar_outlet(pf, cls):
     s.step()
     c = np.asarray(s.get_field("c"))
     out = float(np.abs(c[NX - 1] - 1.0).max())
-    assert out <= 1e-10, f"{cls.__name__}: c = 1 outlet column moved by {out:.3e}"
+    assert out <= 1e-10, f"{cls.__name__}{' +VoF' * vof}: c = 1 outlet column moved by {out:.3e}"
     div = float(s.max_open_divergence_projected())
     if cls is pf.Solver:
         assert div <= 1e-12, f"staggered max_open_divergence_projected {div:.3e} after a scalar step"
@@ -117,6 +125,9 @@ def main():
                   f"div_projected {div:.2e}")
         d = check_high_inflow(pf)
         print(f"  high-side inflow: |u_colo - u_stag| at the inlet cell {d:.2e}")
+        w = check_census(pf, pf.SolverColocated, vof=True)
+        out, _ = check_scalar_outlet(pf, pf.SolverColocated, vof=True)
+        print(f"  SolverColocated +VoF census-required {w:.2e}  outlet |c-1| {out:.2e}")
     except AssertionError as e:
         print(f"FAIL: {e}")
         return 1

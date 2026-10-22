@@ -143,6 +143,7 @@ interpolation gives the face value v. As an UPWIND state it carried u_n (2v − 
 |---|---|
 | 12 state hashes vs `flow-scalar-ibm/doc/scalar_ibm_baseline_hashes.txt` | A: 12/12 byte-identical. B: 11/12. `scalar` 387d9bac → 438db94e, because of defect 1: that case calls `set_field('T')` before step 1. Max\|ΔT\| 5.7e-4 of 0.97 and max\|Δu\| 1.4e-5 of 0.060 at step 5. Defect 2 does not touch it (walls). |
 | ctest `open_face_plane` (new, both grids) | pass. Census − required 1.5e-12 / 4.6e-12; outlet \|c−1\| 4e-16; staggered div 4e-16; high-inflow \|u_colo − u_stag\| 1.7e-3. On the pre-fix module it FAILS at the first check (1.000). |
+| ctest `open_face_plane`, collocated VoF variant (review fix; C = 0, the bridge runs every step) | pass. Census − required 1.5e-12; outlet \|c−1\| 4e-16. With `17d6a8e` reverted it FAILS (census 1.1e-1). |
 | ctest `scalar_inflow` (new, both grids, FOU + Koren) | pass. Inlet \|c−1\| 3e-14; plug inventory − U t ≤ 6e-14; front at U t. Pre-fix: FAIL (0.5). With defect 1 fixed alone: FAIL (inventory +0.500). |
 | full non-bench battery, OMP 4, -j4, MPI tree (`--bind-to none`) | 190/190 pass. 182 passed in the first run. On a host at load ~87 the outer 7000 s timeout stopped the last 8 (`vof_advect/blocks/redistribute_mpi`); rerun at -j2, they passed. |
 
