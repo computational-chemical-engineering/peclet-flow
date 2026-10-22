@@ -60,7 +60,7 @@ inline void addFullStressRhs(int c, CCField bb, CCConst rs, const CCConst (&v)[3
       "peclet::flow::full_stress_rhs", C3{lo[0], lo[1], lo[2]}, C3{e.x - g, e.y - g, e.z - g},
       KOKKOS_LAMBDA(int x, int y, int z) {
         const long i = (long)x + (long)y * st[1] + (long)z * st[2];
-        if constexpr (kSolid) {
+        if (kSolid) {  // not constexpr-if: nvcc cannot first-capture inside one
           if (!rc(i))
             return;  // every element of this row touches u_c(i): nothing is included
         }
@@ -72,7 +72,7 @@ inline void addFullStressRhs(int c, CCField bb, CCConst rs, const CCConst (&v)[3
         double m1 = fp.beta(i, i - s1) * (va1(i) - va1(i - sc));
         double p2 = fp.beta(i, i + s2) * (va2(i + s2) - va2(i + s2 - sc));
         double m2 = fp.beta(i, i - s2) * (va2(i) - va2(i - sc));
-        if constexpr (kSolid) {
+        if (kSolid) {  // not constexpr-if: nvcc cannot first-capture inside one
           if (!rc(i + sc))
             nP = 0.0;
           if (!rc(i - sc))

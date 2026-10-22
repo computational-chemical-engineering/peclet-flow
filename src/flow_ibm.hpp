@@ -34,6 +34,7 @@
 
 #include "collocated_varrho.hpp"  // rung V8: the collocated variable-density (mass-adjoint) kernels
 #include "face_props.hpp"
+#include "full_stress.hpp"
 #include "gauge_exact_gradient.hpp"
 #include "ghost_projection_debug.hpp"  // opt-in gp row forensics (PECLET_FLOW_GP_DEBUG), no-op off
 #include "grid_layout.hpp"
@@ -1902,6 +1903,26 @@ class Solver {
 
 
   VarFaceProps makeFaceProps(int c);
+
+  // FULL VISCOUS STRESS (doc/full_viscous_stress.md). With variable mu the momentum predictor
+  // gains the transpose term T = div(mu (grad u)^T), explicit on the time base u^n (`old_`), as
+  // conservative MAC stress elements with the Laplacian bands' own beta (src/full_stress.hpp).
+  // `set_viscous_stress("full" | "laplacian")`; default "laplacian" (opt-in until the user decides
+  // the default, Q1). Raises on SolverColocated for "full" (planned, §9).
+  void setViscousStress(const std::string& form);
+  // fullStress_ && varProps_ && staggered: the term is evaluated this step (constant mu: inactive,
+  // no error -- the term is identically zero).
+  bool fullStressActive() const;
+  // §5.6 refusals (harmonic face mu, porous momentum, moving scene instances), raised at the head
+  // of step() when "full" is requested under variable mu, before the first mutator.
+  void requireFullStressScope(const char* who) const;
+  // §4.3 prelude, once per step right after old_ = u^n: mu ghosts on the implicit-FOU path, the
+  // exact global uniformity test (muUniform_), the u^n ghosts incl. edges, the regular-node masks.
+  void fullStressPrelude();
+  // §4.3: rs_c * T_c(u^n) added to C[c].b, after the CSF, in every Picard iteration.
+  void addFullStressRhsComp(int c);
+  // §5.4: reg_c = not solid and not a cut row, ghosts by the property-ghost fill incl. edges.
+  void buildFullStressRegMasks();
 
 
   // Mirror the host motion arrays onto the device (KBs; rebuilt only when a driver changes a
@@ -5314,6 +5335,10 @@ class Solver {
   bool hasCellForce_ = false;
   bool varProps_ = false;    // variable-coefficient momentum (variable viscosity)
   bool harmonicMu_ = false;  // harmonic vs arithmetic face-viscosity mean
+  bool fullStress_ = false;  // set_viscous_stress("full"): add the transpose term (staggered)
+  bool muUniform_ = true;    // this step's exact global test min mu == max mu (full stress skips)
+  bool regDirty_ = true;     // the full-stress regular-node masks need a rebuild (geometry built)
+  RegMask fsReg_[3];         // full-stress regular-node masks, 1 B/cell each (solids only)
   CCField muField_;          // per-cell dynamic viscosity (when varProps_)
   int varRotMode_ = 0;       // rotational term under varProps: 0 chi*mu_min, 1 chi*mu(i), 2 off
   double varRotChi_ = 1.0;   // rotational coefficient scale chi

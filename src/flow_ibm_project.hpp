@@ -31,6 +31,8 @@ void Solver<Grid>::step() {
     requireCollocatedFaceForceScope("step");
   if (balancedForceActive())
     requireBalancedForceScope("step", true);
+  if (fullStress_ && varProps_)  // §5.6 refusals of the full viscous stress (constant mu: inert)
+    requireFullStressScope("step");
 
   // The momentum-solver choice, for a configuration that never calls set_solid. set_solid is the
   // other (and historically the only) place it is made; a domain-BC case with no immersed solid
@@ -110,6 +112,11 @@ void Solver<Grid>::step() {
   // base).
   for (int c = 0; c < 3; ++c)
     Kokkos::deep_copy(CCExec(), old_[c], C[c].u);  // S4: instance-ordered, no global fence
+  // Full viscous stress (doc/full_viscous_stress.md §4.3): the once-per-step prelude -- mu
+  // uniformity test, u^n ghosts incl. edges, regular-node masks. Inert unless requested.
+  const bool fullStress = fullStressActive();
+  if (fullStress)
+    fullStressPrelude();
   if (cutcellPressure_ && incremental_) {
     fillGhosts(P_);
     if (hasBc_)
@@ -202,6 +209,12 @@ void Solver<Grid>::step() {
             : (csfMode_ == 0 ? addCsfRhs(c, C[c].b, true) : addCsfRhsCellInterp(c, C[c].b, true));
       vofAdd(vt_.csf, _t0);
     }
+    // Full viscous stress: rs_c * T_c(u^n), explicit on the time base and constant across Picard
+    // iterations; additive like the CSF, independent of which RHS kernel ran (§4.2-§4.3). Skipped
+    // entirely when mu is globally uniform (§4.4).
+    if (fullStress && !muUniform_)
+      for (int c = 0; c < 3; ++c)
+        addFullStressRhsComp(c);
     // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
     // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
     // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC

@@ -14,6 +14,8 @@ src/face_props.hpp). Two checks:
      driving rho, the body force and (or not) mu, arithmetic and harmonic viscosity means; the
      structured VoF with CSF; the block container with its per-marker CSF. The blob touches the
      LOW wall (the mirror touches the high one) and straddles the periodic x seam.
+     The three variable-mu variants also run with set_viscous_stress('full') (WO-2 of
+     doc/full_viscous_stress.md: the transpose term keeps the mirror symmetry to the same bound).
   2. placement -- steady variable-viscosity Stokes, u = A (sin kx cos ky, -cos kx sin ky, 0),
      mu = 1 + sin(kx + 0.3) cos(ky + 0.7) / 2, forced by -div(mu grad u_c): second order in h
      (the shifted viscosity was first order: 1.39 then 1.05).
@@ -63,7 +65,7 @@ def sphere(c, r, sub=6):
     return np.asfortranarray(frac / sub ** 3)
 
 
-def build(mode, mirror, variable_mu=True, harmonic=False):
+def build(mode, mirror, variable_mu=True, harmonic=False, full=False):
     cy = 2.0 if mode == "scalar" else 3.0  # scalar: straddles the wall; markers: 0.6 cell inside
     c = (0.4, NY - cy if mirror else cy, 6.1)
     s = pf.Solver(NX, NY, NZ)
@@ -92,6 +94,8 @@ def build(mode, mirror, variable_mu=True, harmonic=False):
         s.set_property_model("force_x", "linear", "C", [0.0, -0.02])
     if harmonic:
         s.diagnostics.set_property_mode("variable", True)
+    if full:  # the full viscous stress (doc/full_viscous_stress.md WO-2): same tolerance as off
+        s.set_viscous_stress("full")
     s.set_pressure_pcg(True, 800, 1e-12)
     s.set_superficial_velocity(True, "x", 0.0)
     rng = np.random.default_rng(1)
@@ -171,7 +175,10 @@ def main():
              ("scalar, mu(T) arithmetic", "scalar", {}),
              ("scalar, mu(T) harmonic", "scalar", dict(harmonic=True)),
              ("structured VoF + CSF", "vof", {}),
-             ("block VoF + block CSF", "blocks", {})]
+             ("block VoF + block CSF", "blocks", {}),
+             ("scalar, mu(T) full stress", "scalar", {"full": True}),
+             ("structured VoF + CSF, full stress", "vof", {"full": True}),
+             ("block VoF + CSF, full stress", "blocks", {"full": True})]
     for name, mode, kw in cases:
         vel, p = mirror_asymmetry(mode, **kw)
         good = vel < 1e-10 and p < 1e-8  # p carries the 1e-12 PCG tolerance, not round-off

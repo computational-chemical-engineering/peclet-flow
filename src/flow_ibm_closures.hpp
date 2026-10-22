@@ -102,6 +102,125 @@ VarFaceProps Solver<Grid>::makeFaceProps(int c) {
 }
 
 template <class Grid>
+void Solver<Grid>::setViscousStress(const std::string& form) {
+  if (form == "laplacian") {
+    fullStress_ = false;
+    return;
+  }
+  if (form != "full")
+    throw std::invalid_argument("set_viscous_stress: form must be 'full' or 'laplacian', got '" +
+                                form + "'");
+  if constexpr (Grid::collocated)
+    throw std::runtime_error(
+        "SolverColocated.set_viscous_stress('full'): the full viscous stress is staggered-only in "
+        "v1 (doc/full_viscous_stress.md §9); use peclet.flow.Solver");
+  fullStress_ = true;
+}
+
+template <class Grid>
+bool Solver<Grid>::fullStressActive() const {
+  return fullStress_ && varProps_ && !Grid::collocated;
+}
+
+template <class Grid>
+void Solver<Grid>::requireFullStressScope(const char* who) const {
+  const auto refuse = [&](const char* why) {
+    throw std::runtime_error(std::string(who) + ": set_viscous_stress('full') " + why +
+                             " (doc/full_viscous_stress.md §5.6); call "
+                             "set_viscous_stress('laplacian') for this configuration");
+  };
+  if (harmonicMu_)
+    refuse(
+        "does not support the harmonic face viscosity (the series direction is "
+        "component-dependent and breaks the symmetry of the transpose term)");
+  if (porous_)
+    refuse(
+        "does not support porous (eps-weighted) momentum: the eps-weighted stress is a "
+        "different equation");
+  if (hasMotion_)
+    refuse(
+        "does not support moving scene instances (the regular-node masks would have to follow "
+        "them)");
+}
+
+template <class Grid>
+void Solver<Grid>::fullStressPrelude() {
+  // 1. mu ghosts: rebuildStencils() filled them unless this is the implicit-FOU path (which fills
+  //    them later, in buildAdvStencilVar -- after the uniformity test below would read them).
+  if (implicitAdv())
+    fillMuGhosts();
+  // 2. The exact GLOBAL uniformity test over the inner cells plus the ring T reads: T is either the
+  //    complete conservative term or nothing (§4.4 (C)). One reduction + host read per step.
+  double lo = 0.0, hi = 0.0;
+  muRangeInner(CCConst(muField_), e_, G, lo, hi);
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    double g[2] = {lo, -hi}, r[2];
+    MPI_Allreduce(g, r, 2, MPI_DOUBLE, MPI_MIN, comm_);
+    lo = r[0];
+    hi = -r[1];
+  }
+#endif
+  muUniform_ = (lo == hi);
+  if (muUniform_)
+    return;
+  // 3. The u^n ghosts incl. the (a, c) edges, written into old_ only (C[c].u is untouched);
+  //    doOutflow = false keeps the projected outflow face.
+  for (int c = 0; c < 3; ++c)
+    fillVelGhostsTo(old_[c], c, 0, /*doOutflow=*/false);
+  // 4. The regular-node masks of a static solid geometry, rebuilt after every geometry build.
+  if (hasSolid_ && regDirty_)
+    buildFullStressRegMasks();
+}
+
+template <class Grid>
+void Solver<Grid>::buildFullStressRegMasks() {
+  CCExec space;
+  const std::size_t n = (std::size_t)n_;
+  // A transient double carrier for the ghost exchange (the halo is GridHalo<double>); freed on
+  // return, so the persistent cost is the three uint8 masks.
+  CCField tmp(
+      Kokkos::view_alloc(space, "peclet::flow::full_stress_reg_tmp", Kokkos::WithoutInitializing),
+      n);
+  for (int c = 0; c < 3; ++c) {
+    if (fsReg_[c].extent(0) != n)
+      fsReg_[c] = RegMask(
+          Kokkos::view_alloc(space, "peclet::flow::full_stress_reg", Kokkos::WithoutInitializing),
+          n);
+    CCConst m = CCConst(C[c].mask);
+    Kokkos::parallel_for(
+        "peclet::flow::full_stress_reg_mask", Kokkos::RangePolicy<CCExec>(space, 0, n),
+        KOKKOS_LAMBDA(std::size_t i) { tmp(i) = (m(i) == 0.0) ? 1.0 : 0.0; });
+    const auto ov = C[c].ov;
+    Kokkos::parallel_for(
+        "peclet::flow::full_stress_reg_cut", Kokkos::RangePolicy<CCExec>(space, 0, C[c].nCut),
+        KOKKOS_LAMBDA(int k) { tmp(ov.cell_index(k)) = 0.0; });
+    fillPropGhosts(tmp, /*edges=*/true);
+    RegMask r = fsReg_[c];
+    Kokkos::parallel_for(
+        "peclet::flow::full_stress_reg_pack", Kokkos::RangePolicy<CCExec>(space, 0, n),
+        KOKKOS_LAMBDA(std::size_t i) { r(i) = (tmp(i) != 0.0) ? 1 : 0; });
+  }
+  space.fence();  // tmp is released on return
+  regDirty_ = false;
+}
+
+template <class Grid>
+void Solver<Grid>::addFullStressRhsComp(int c) {
+  // §5.5: the low-face node of component c on a non-periodic global c-face is BC-imposed data.
+  const bool skipLo = bc_[2 * c] != 0 && touchesGlobalFace(2 * c);
+  const CCConst v[3] = {CCConst(old_[0]), CCConst(old_[1]), CCConst(old_[2])};
+  if (hasSolid_) {
+    const RegConst reg[3] = {fsReg_[0], fsReg_[1], fsReg_[2]};
+    addFullStressRhs<VarFaceProps, true>(c, C[c].b, CCConst(C[c].rscale), v, makeFaceProps(c), e_,
+                                         G, u_.w[c], skipLo, reg);
+  } else {
+    addFullStressRhs<VarFaceProps, false>(c, C[c].b, CCConst(C[c].rscale), v, makeFaceProps(c), e_,
+                                          G, u_.w[c], skipLo);
+  }
+}
+
+template <class Grid>
 void Solver<Grid>::computeDivAdv() {
   CCExec space;
   C3 e = e_;

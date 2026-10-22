@@ -41,6 +41,7 @@ void Solver<Grid>::setSolid(const std::vector<double>& sdfInner, bool cutcellPre
 
 template <class Grid>
 void Solver<Grid>::buildVelocityOverlays(bool resetU) {
+  regDirty_ = true;  // the full-stress regular-node masks follow the overlay (§5.4)
   const bool useEx = hasExactCross_ && !Grid::collocated;  // exact-theta arrays are for the
                                                            // staggered point placement
   const mreal lam = (mreal)(wallSlip_ ? slipLambda_ : 0.0);
