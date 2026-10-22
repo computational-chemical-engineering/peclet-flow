@@ -36,6 +36,12 @@ Usage:
   --mu-ratio R               ablation: mu_b/mu_l (default 0.1, the case); Ar and Bo are unchanged
                              (both use mu_l and the density difference)
   --face-mu {arithmetic,harmonic}  ablation: face-viscosity mean (default arithmetic, the driver's)
+  --viscous-stress {laplacian,full}  the viscous stress form (set_viscous_stress; default laplacian,
+                             the solver's default; doc/full_viscous_stress.md)
+  --single-vof               ablation: the structured VoF + CSF without the block container (the
+                             bubble seeded as 8x8x8 sub-sampled sphere fractions)
+  --vof-momentum             ablation: enable_vof_momentum(rho_g, rho_l) (implies --single-vof:
+                             the momentum-consistent transport is refused with the blocks)
 
 Prints one summary line.
 """
@@ -74,6 +80,9 @@ def parse():
     p.add_argument("--dt-safety", type=float, default=0.25)
     p.add_argument("--mu-ratio", type=float, default=MU_RATIO)
     p.add_argument("--face-mu", choices=("arithmetic", "harmonic"), default="arithmetic")
+    p.add_argument("--viscous-stress", choices=("laplacian", "full"), default="laplacian")
+    p.add_argument("--single-vof", action="store_true")
+    p.add_argument("--vof-momentum", action="store_true")
     return p.parse_args()
 
 
@@ -86,7 +95,20 @@ def check_backend(want):
     return str(space)
 
 
-def build(n, mu_g=MU_G, face_mu="arithmetic"):
+def sphere_fractions(n, c, r, sub=8):
+    """Cell volume fractions of a sphere (centre c, radius r, both in cells), sub^3 samples."""
+    off = (np.arange(sub) + 0.5) / sub
+    g = (np.arange(n)[:, None] + off[None, :]).ravel()
+    out = np.zeros((n, n, n))
+    for k in range(n):  # z slabs keep the memory at n^2 sub^3
+        zs = k + off
+        X, Y, Z = np.meshgrid(g, g, zs, indexing="ij")
+        ins = ((X - c) ** 2 + (Y - c) ** 2 + (Z - c) ** 2 < r * r).astype(np.float64)
+        out[:, :, k] = ins.reshape(n, sub, n, sub, sub).mean(axis=(1, 3, 4))
+    return np.asfortranarray(out)
+
+
+def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, vof_mom=False):
     L = L_OVER_D * D
     s = pf.Solver((n, n, n), extent=(L, L, L))
     s.set_rho(RHO_L)
@@ -99,13 +121,19 @@ def build(n, mu_g=MU_G, face_mu="arithmetic"):
     s.set_property_model("mu", "linear", "C", [MU_L, mu_g - MU_L])
     if face_mu == "harmonic":
         s.diagnostics.set_property_mode("variable", True)
+    s.set_viscous_stress(stress)
     s.set_surface_tension(SIGMA)
     s.set_pressure_pcg(True, 800, 1e-8)       # last; the bubble-column driver's setting
     # One marker at the box centre. enable_vof_blocks takes GRID coordinates (cells) even under a
     # physical domain -- derived here from the physical centre and radius, never user input.
     h = L / n
-    s.enable_vof_blocks([(0.5 * L / h, 0.5 * L / h, 0.5 * L / h, 0.5 * D / h)])
-    s.enable_vof_block_csf()
+    if single or vof_mom:
+        s.set_vof(sphere_fractions(n, 0.5 * L / h, 0.5 * D / h))
+        if vof_mom:
+            s.enable_vof_momentum(RHO_G, RHO_L)
+    else:
+        s.enable_vof_blocks([(0.5 * L / h, 0.5 * L / h, 0.5 * L / h, 0.5 * D / h)])
+        s.enable_vof_block_csf()
     alpha = float(np.mean(s.get_vof()))       # discrete gas fraction (exactly conserved)
     rho_av = RHO_L + (RHO_G - RHO_L) * alpha
     s.set_property_model("force_x", "linear", "C",
@@ -148,7 +176,8 @@ def main():
     n = round(L_OVER_D * a.d_over_h)
     os.makedirs(a.out, exist_ok=True)
     t0 = time.perf_counter()
-    s, h, alpha = build(n, a.mu_ratio * MU_L, a.face_mu)
+    s, h, alpha = build(n, a.mu_ratio * MU_L, a.face_mu, a.viscous_stress, a.single_vof,
+                        a.vof_momentum)
     t_setup = time.perf_counter() - t0
     re_of = lambda U: RHO_L * U * D / MU_L
     cols = ["t", "t_star", "step", "dt", "binding", "u_abs", "u_mix", "u_liq", "u_zm", "u_drift",
@@ -158,7 +187,8 @@ def main():
     f.write(f"# case A d/h={a.d_over_h} n={n} L={L_OVER_D * D} d={D} rho_l={RHO_L} "
             f"rho_g={RHO_G} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
             f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e} dt_safety={a.dt_safety} "
-            f"face_mu={a.face_mu}\n")
+            f"face_mu={a.face_mu} viscous_stress={a.viscous_stress} single_vof={a.single_vof} "
+            f"vof_momentum={a.vof_momentum}\n")
     f.write(",".join(cols) + "\n")
 
     t, step, binding, dt = 0.0, 0, "-", 0.0
@@ -224,6 +254,7 @@ def main():
     steady = bool(drel < 1e-3)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
     line = (f"CASE_A d/h={a.d_over_h} n={n} mu_ratio={a.mu_ratio:g} face_mu={a.face_mu} "
+            f"stress={a.viscous_stress} vof={'mom' if a.vof_momentum else ('single' if a.single_vof else 'blocks')} "
             f"dt_safety={a.dt_safety:g} space={space} stop={stop} t*={last['t_star']:.3f} "
             f"steps={step} Re_drift(2L-mean)={re_a:.4f} [min {re_lo:.3f} max {re_hi:.3f}] "
             f"Re_rel_zm(2L-mean)={zm_a:.4f} dRe/Re(2L vs prev 2L)={drel:.2e} steady={steady} "
