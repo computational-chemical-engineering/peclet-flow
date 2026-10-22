@@ -612,7 +612,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             d["krylov_iterations"] = st.iterations;
             d["krylov_residual"] = st.residual;
             d["krylov_converged"] = st.converged;
-            d["mg_levels"] = st.mgLevels;
+            d["num_mg_levels"] = st.mgLevels;
             d["steady_incompatibility"] = st.incompatibility;
             d["num_small_cells"] = st.numSmall;
             d["num_implicit_faces"] = st.numImplicitFaces;
@@ -627,7 +627,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "Census of the cut-cell scalar (collective under MPI, summed over ranks). The solve "
           "part, of the last advance or steady solve: 'krylov_iterations', 'krylov_residual' "
           "(the true max-norm residual over the reference max(max|b|, max|A c0|)), "
-          "'krylov_converged', 'mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 "
+          "'krylov_converged', 'num_mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 "
           "alone), "
           "'steady_incompatibility' (|sum b| / sum|b| of a singular steady problem before its "
           "projection, else 0), 'num_solid_unknowns' (0: single phase; the solid unknowns of a "

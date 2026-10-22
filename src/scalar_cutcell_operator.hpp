@@ -107,7 +107,7 @@ struct ScalarCutState {
   std::shared_ptr<ScalarMG> mg;
   long mgVersion = -1;  ///< the geometry version its level table was built for
   std::size_t mgN = 0;  ///< the block size it was built for
-  int mgLevels = 1;     ///< levels the last solve's V-cycle used (census `mg_levels`)
+  int mgLevels = 1;     ///< levels the last solve's V-cycle used (census `num_mg_levels`)
   // ---- advection (WO-5, §6): the face flux of the last advance and its classification ----
   CCField
       phi[3];  ///< F/V through the LOW a-face of cell i (internal 1/T), guarded (sco::faceFluxes)

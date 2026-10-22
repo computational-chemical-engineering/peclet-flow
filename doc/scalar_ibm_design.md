@@ -1417,7 +1417,7 @@ Both `Solver` and `SolverColocated`. Names were checked against `../docs/NAMING.
 
 | member | returns |
 |---|---|
-| `scalar_census(name)` | dict: `num_unknowns`, `num_solid_unknowns`, `num_cut_cells`, `num_facets`, `num_two_sided`, `num_thin_solid`, `num_sealed`, `sealed_volume`, `probe_rungs` (fluid/solid R0, R1a, R1b, R2), `num_small_cells`, `num_implicit_faces`, `bulk_courant`, `krylov_iterations`, `krylov_residual`, `krylov_converged`, `mg_levels`, `steady_incompatibility` |
+| `scalar_census(name)` | dict: `num_unknowns`, `num_solid_unknowns`, `num_cut_cells`, `num_facets`, `num_two_sided`, `num_thin_solid`, `num_sealed`, `sealed_volume`, `probe_rungs` (fluid/solid R0, R1a, R1b, R2), `num_small_cells`, `num_implicit_faces`, `bulk_courant`, `krylov_iterations`, `krylov_residual`, `krylov_converged`, `num_mg_levels`, `steady_incompatibility` |
 | `scalar_budget(name)` | dict over the last advance: `mass`, `mass_solid`, `d_mass`, `wall_in`, `boundary_in`, `source_in`, `defect` (= Δt Σ r V) and `identity_error` (the round-off residual of the identity in §1.6.1). It is computed on request from the stored state, so it costs nothing per step. |
 | `scalar_facets(name)` | dict of arrays per facet: `centroid` (physical coordinates), `normal`, `area`, `instance`, `wall_value`, `flux` (q_in per area, physical), `probe_rung`. `wall_value` is c_Γ from the elimination: Robin (D u_p + k s g)/(D + k s); Dirichlet g; Neumann u_p + q s/D; conjugate ψ_Γf. These are local Nu/Sh maps (1st-order L∞ in the gradient, §13 Q10). |
 | `scalar_geometry(name)` | dict: `kappa`, `aperture_x/y/z` (snapped), `unknown`, plus `kappa_solid` and `solid_unknown` if conjugate. F-order arrays. |

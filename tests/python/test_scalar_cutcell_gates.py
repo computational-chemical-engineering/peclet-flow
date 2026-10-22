@@ -583,7 +583,7 @@ def giter_transient_case(Rh, off, nsteps=6):
         s.advance_scalars()
         c = s.diagnostics.scalar_census("c")
         its.append(c["krylov_iterations"])
-        lv.append(c["mg_levels"])
+        lv.append(c["num_mg_levels"])
     return its, lv
 
 
@@ -605,7 +605,7 @@ def g5b_geometry_case(n, off):
     s.set_scalar_source("c", -0.5)
     s.solve_scalar_steady("c")
     c = s.diagnostics.scalar_census("c")
-    return c["krylov_iterations"], c["krylov_converged"], c["mg_levels"], 2.0 * R / h
+    return c["krylov_iterations"], c["krylov_converged"], c["num_mg_levels"], 2.0 * R / h
 
 
 def gate_giter():
@@ -1247,7 +1247,7 @@ def g5b_case(n, off, D=0.6):
     c = s.diagnostics.scalar_census("c")
     Jf, _, _, _ = mean_flux_fields(s, "c", D, (1.0, 0.0, 0.0), (True, True, True))
     return dict(k=-J[0] / D, its=c["krylov_iterations"], conv=c["krylov_converged"],
-                lv=c["mg_levels"], nd=2.0 * R / h, jdiff=float(np.max(np.abs(J - Jf)) / abs(J[0])))
+                lv=c["num_mg_levels"], nd=2.0 * R / h, jdiff=float(np.max(np.abs(J - Jf)) / abs(J[0])))
 
 
 def no_solid_case(G, vel=None, D=0.6, n=16):
@@ -1490,7 +1490,7 @@ def gadv_row(tag, s, name, pe, bound, rate=None):
         ident, netr = gadv_budget(s, name)
     extra = f" (INFO: {netr:.1e} of the largest net term)" if netr is not None else ""
     print(f"  {tag} Pe_h {c['max_cell_peclet']:.4g}: {its} iterations (<= {bound}), residual "
-          f"{c['krylov_residual']:.1e}, {c['mg_levels']} levels; budget identity {ident:.1e}{extra}")
+          f"{c['krylov_residual']:.1e}, {c['num_mg_levels']} levels; budget identity {ident:.1e}{extra}")
     check(abs(c["max_cell_peclet"] / pe - 1.0) <= 1e-9, f"{tag}: census Pe_h {c['max_cell_peclet']:.6g} = {pe}")
     check(c["krylov_converged"] and c["krylov_residual"] <= 1e-10,
           f"{tag} Pe_h {pe}: (i) converged to rtol 1e-10 within 200 ({its} iterations)")
@@ -1534,7 +1534,7 @@ def gate_gadv():
                 s = gadv_b_case(n, pe, wall)
                 if wall == "neumann":
                     check(s.diagnostics.scalar_census("c")["steady_incompatibility"] >= 0.0 and
-                          s.diagnostics.scalar_census("c")["mg_levels"] > 1, f"{nm} n={n}: full table")
+                          s.diagnostics.scalar_census("c")["num_mg_levels"] > 1, f"{nm} n={n}: full table")
                 its[n][pe] = gadv_row(f"{nm} n={n}", s, "c", pe, bd)
         gadv_growth(nm, its[32], its[64])
         print(f"  [{nm}: {time.time() - t0:.0f} s]")
@@ -1982,8 +1982,8 @@ def gate_api():
     s.advance_scalars()  # the periodic box: one step runs
     c = s.diagnostics.scalar_census("c")
     # dt D/h^2 = 14.4 -> kappa_A > 13: the full ScalarMG table, 12 -> 6 -> 3
-    check(c["krylov_converged"] and c["mg_levels"] == 3,
-          f"one step converged ({c['krylov_iterations']} iterations, {c['mg_levels']} MG levels)")
+    check(c["krylov_converged"] and c["num_mg_levels"] == 3,
+          f"one step converged ({c['krylov_iterations']} iterations, {c['num_mg_levels']} MG levels)")
     s.set_scalar_bc("c", "-x", "dirichlet", 0.5)  # the flow -x face is periodic
     raises(RuntimeError, s.advance_scalars, "a scalar Dirichlet face against a periodic flow face is refused")
     s.set_scalar_bc("c", "-x", "periodic")
