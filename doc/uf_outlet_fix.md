@@ -154,7 +154,8 @@ interpolation gives the face value v. As an UPWIND state it carried u_n (2v − 
 ### A MAC face field's HIGH-side domain face is kept across every ghost fill
 - decision: every ghost fill of a face field whose consumer reads the boundary face (the
   collocated projection before bcCorrectOutflow, advanceScalars on both grids, the collocated VoF
-  bridge) goes through fillFaceGhostsKeepBoundary: save/restore the high-side face plane over the
+  bridge, the steady cut-cell scalar solve's in-place fill of C[a].u / uf_) goes through
+  fillFaceGhostsKeepBoundary: save/restore the high-side face plane over the
   INNER transverse range on every non-periodic axis whose high global face the rank owns.
 - rejected: (a) reordering the fill and bcCorrectOutflow -- the fill overwrites the plane whatever
   ran first; (b) restoring outflow faces only -- a high-side INFLOW face is wrapped the same way
@@ -164,7 +165,8 @@ interpolation gives the face value v. As an UPWIND state it carried u_n (2v − 
   inlet plane as outflow flux (c overshoot to 1.35 in [0,1]), blinded the collocated backflow
   census, overwrote the staggered corrected outlet in place (max_open_divergence_projected 0.785),
   and fed collocated momentum the outlet plane at a high-side inlet (inlet-cell u 3.8 % off).
-- evidence: flow doc/uf_outlet_fix.md; ctest open_face_plane.
+- evidence: flow doc/uf_outlet_fix.md; ctests open_face_plane (incl. its collocated VoF variant)
+  and open_face_plane_mpi_np3.
 - consequence: momentum at an outflow face is unchanged by construction (openFaceView); results
   change for scalars at any high-side open face and for collocated runs with a high-side inflow.
 
@@ -176,5 +178,11 @@ interpolation gives the face value v. As an UPWIND state it carried u_n (2v − 
   row); applying the constant ghost at Dirichlet WALLS (no flux there; it only moves the limiter).
 - why: stale ghosts gave zero influx on the first step after set_field (c = 1 -> 0.5); the
   reflection gave a plug +0.5 U dt of spurious inventory.
+- trade: upwinding the prescribed state makes the inflow flux exact and conservative at a front,
+  where the error was O(1) before; on a smooth inflow profile the first interior face loses
+  exactness (up_m1 = v gives r = 1/2 there instead of 1: face error gh/6 with the coded limiter,
+  gh/4 with SOU; both were exact before). Accepted for 1.4.0. Follow-up, not in 1.4.0: impose
+  F = u_n v at the Dirichlet inflow face directly and keep the reflection ghost (exact at both
+  faces; what the cut-cell path's openFaceAdvection already does).
 - evidence: flow doc/uf_outlet_fix.md section B; ctest scalar_inflow.
 ```
