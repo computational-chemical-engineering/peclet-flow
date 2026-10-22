@@ -1584,6 +1584,10 @@ class CutcellMG {
       const unsigned ax = splitAxes(d);
       return (ax & ~axesA) == 0u && (ax == axesA || legacyImbalanced);
     };
+    // Debug printing only: a candidate that passes every test but the guard's second clause, i.e.
+    // one the unguarded policy would take, makes the fallback print "A-fallback (guard)".
+    bool guardHit = false;
+    auto guardOnly = [&](const Dec& d) { return (splitAxes(d) & ~axesA) == 0u && !within(d); };
     if (maxCells(A) == minCells(A)) {
       report("A-exact", A);
       return A;
@@ -1604,6 +1608,9 @@ class CutcellMG {
         report(L == 5 ? "C5" : "C4", C);
         return C;
       }
+      if (mgDebugLevel() && minCells(C) > 0 && imbalanceOf(C) <= maxImbalance &&
+          nestDepth(C) >= depthA && guardOnly(C))
+        guardHit = true;
     }
     Dec A2;
     A2.init(numBlocks, G, coarsenAlignment(gnx, gny, gnz), one, cdec::SplitAxis::Balanced);
@@ -1611,7 +1618,10 @@ class CutcellMG {
       report("A2", A2);
       return A2;
     }
-    report("A-fallback", A);
+    if (mgDebugLevel() && maxCells(A2) < maxCells(A) && nestDepth(A2) >= std::min(depthA, 3) &&
+        guardOnly(A2))
+      guardHit = true;
+    report(guardHit ? "A-fallback (guard)" : "A-fallback", A);
     return A;
   }
 
