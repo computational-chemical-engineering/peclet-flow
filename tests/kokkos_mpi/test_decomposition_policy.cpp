@@ -14,7 +14,9 @@
 ///   4. 128x96x64 at np 3/12/24/32/96 (and 192): max == min, >= 4 in-place halvings (evenness);
 ///   5. 48^3 at np 4: max == min;
 ///   6. two calls identical;
-///   7. splitAxes(auto) is a subset of splitAxes(legacy);
+///   7. splitAxes(auto) is a subset of splitAxes(legacy), and equal to it unless legacy's
+///      max/mean >= 5/4 (the WO-D guard, §13.4(2)); a configuration the guard reverts (the auto
+///      policy without the guard, recomputed here, differs from auto) has auto == legacy;
 ///   8. 768x128x256 and 480x80x160 at np 2..32: a legacy partition that keeps y whole keeps it;
 ///   9. levels 2..7 (the legacy coarse-first search) on the published configurations -- foxberry
 ///      384^3 and 400^3, channel_dns 377/754/1508/3016 x 240 x 503 and 384x128x128 -- reproduce the
@@ -23,8 +25,10 @@
 ///  10. at np > 1, nestDepth(d) == the leading in-place coarsenings (rows neither telescoped nor
 ///      final) of CutcellMG::predict(telescope = true, min_extent = 4), capped at 4, for d = auto
 ///      and legacy: nestDepth re-implements initMpi's telescope trigger (review 2026-10-20 #4);
-/// plus the §9 block shapes of 128x96x64 at np 3, 12, 24, and np 192 = one 16^3 block per rank.
-/// Prints the CHANGED list (auto != legacy): the state-hash re-baseline list.
+/// plus the §9 block shapes of 128x96x64 at np 3, 24 (np 12: legacy's, the guard reverts it), and
+/// np 192 = one 16^3 block per rank. Prints the CHANGED list (auto != legacy): the state-hash
+/// re-baseline list; and the REVERTED list (WO-D) over the census and the §13.4(2) replica set
+/// (the design grids also at np 9, 10, 15, 20; the channel grids at np 2..32).
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -105,6 +109,55 @@ Dec alignedBalanced(std::size_t np, const IVec<3>& G) {
   d.init(np, G, CutcellMG::coarsenAlignment((int)G[0], (int)G[1], (int)G[2]), IVec<3>{1, 1, 1},
          peclet::core::decomp::SplitAxis::Balanced);
   return d;
+}
+// The auto policy WITHOUT the WO-D guard (§13.4(2)): CutcellMG::decomposition(levels 0) as it was
+// at flow dfd62c4, recomputed from the public pieces, so the census can name what the guard
+// reverts.
+Dec unguardedAuto(std::size_t np, const IVec<3>& G) {
+  namespace cdec = peclet::core::decomp;
+  const int gx = (int)G[0], gy = (int)G[1], gz = (int)G[2];
+  const Dec L = CutcellMG::decomposition(np, gx, gy, gz, 1);
+  if (maxCells(L) == minCells(L))
+    return L;
+  const unsigned axL = CutcellMG::splitAxes(L);
+  auto within = [&](const Dec& d) { return (CutcellMG::splitAxes(d) & ~axL) == 0u; };
+  const int dL = CutcellMG::nestDepth(L);
+  const IVec<3> one{1, 1, 1};
+  for (int lv : {5, 4}) {
+    const IVec<3> r = CutcellMG::refineFactor(gx, gy, gz, lv);
+    if (r == one)
+      break;
+    const IVec<3> Gc{G[0] / r[0], G[1] / r[1], G[2] / r[2]};
+    if (cells(Gc) < (Index)np)
+      continue;
+    Dec coarse;
+    coarse.init(np, Gc, one, r, cdec::SplitAxis::Balanced);
+    const Dec C = coarse.refined(r);
+    if (minCells(C) > 0 && (double)maxCells(C) / (double)minCells(C) <= 1.05 && within(C) &&
+        CutcellMG::nestDepth(C) >= dL)
+      return C;
+  }
+  const Dec A2 = alignedBalanced(np, G);
+  if (maxCells(A2) < maxCells(L) && CutcellMG::nestDepth(A2) >= std::min(dL, 3) && within(A2))
+    return A2;
+  return L;
+}
+int nReverted = 0;
+std::string shapeStr(const Dec& d);
+// (7) WO-D: the guard clause, and a reverted configuration (auto != the unguarded policy) is legacy
+void checkGuard(const Dec& A, const Dec& L, std::size_t np, const IVec<3>& G, const char* name) {
+  const unsigned aA = CutcellMG::splitAxes(A), aL = CutcellMG::splitAxes(L);
+  CHECK(aA == aL || 4 * maxCells(L) * (Index)np >= 5 * cells(G),
+        "%s: (7) auto changes legacy's split axes (auto %u legacy %u) at legacy max/mean < 5/4",
+        name, aA, aL);
+  const Dec U = unguardedAuto(np, G);
+  if (same(U, A))
+    return;
+  ++nReverted;
+  CHECK(same(A, L), "%s: (7) the guard reverted the unguarded choice, but not to legacy", name);
+  std::printf("REVERTED %s: unguarded max/min %.3f axes %u [%s] -> legacy max/mean %.3f axes %u\n",
+              name, (double)maxCells(U) / (double)minCells(U), CutcellMG::splitAxes(U),
+              shapeStr(U).c_str(), (double)(maxCells(L) * (Index)np) / (double)cells(G), aL);
 }
 // auto took a coarse-first candidate (C5/C4): it is neither legacy nor A2
 bool tookCoarseFirst(const Dec& A, const Dec& L, std::size_t np, const IVec<3>& G) {
@@ -208,6 +261,7 @@ int main() {
       CHECK((CutcellMG::splitAxes(A) & ~CutcellMG::splitAxes(L)) == 0u,
             "%s: (7) auto cuts an axis legacy leaves whole (auto %u legacy %u)", name,
             CutcellMG::splitAxes(A), CutcellMG::splitAxes(L));
+      checkGuard(A, L, np, G, name);
       Index tot = 0;
       for (const auto& s : A.sizes())
         tot += cells(s);
@@ -224,12 +278,25 @@ int main() {
   }
   std::printf("census: %d configurations, %d changed, %d coarse-first\n", nConf, nChanged,
               nCoarseFirst);
+  // (7) the §13.4(2) replica set beyond the census: the design grids at np 9, 10, 15, 20
+  for (std::size_t g = 0; g < 10; ++g)
+    for (std::size_t np : {9, 10, 15, 20}) {
+      const IVec<3>& G = grids[g];
+      char name[64];
+      std::snprintf(name, sizeof name, "%lldx%lldx%lld np %zu", (long long)G[0], (long long)G[1],
+                    (long long)G[2], np);
+      checkGuard(CutcellMG::decomposition(np, (int)G[0], (int)G[1], (int)G[2]),
+                 CutcellMG::decomposition(np, (int)G[0], (int)G[1], (int)G[2], 1), np, G, name);
+    }
 
   // (4), (5), §9 shapes and the np = 192 limiting case
   for (std::size_t np : {3, 12, 24, 32, 96, 192}) {
     const Dec A = CutcellMG::decomposition(np, 128, 96, 64);
-    CHECK(maxCells(A) == minCells(A), "128x96x64 np %zu: (4) not exact (%s)", np,
-          shapeStr(A).c_str());
+    if (np == 12)  // the WO-D guard reverts np 12 to legacy (§13.4(2))
+      CHECK(same(A, CutcellMG::decomposition(np, 128, 96, 64, 1)), "128x96x64 np 12: not legacy");
+    else
+      CHECK(maxCells(A) == minCells(A), "128x96x64 np %zu: (4) not exact (%s)", np,
+            shapeStr(A).c_str());
     CHECK(evenHalvings(A) >= 4, "128x96x64 np %zu: %d in-place halvings < 4", np, evenHalvings(A));
   }
   {
@@ -239,17 +306,14 @@ int main() {
   using S = std::map<std::array<Index, 3>, int>;
   const std::pair<std::size_t, S> table[] = {
       {3, S{{{128, 32, 64}, 1}, {{64, 64, 64}, 2}}},
-      {12, S{{{32, 32, 64}, 0}, {{64, 16, 64}, 0}}},  // shapes only (the design gives no counts)
+      {12, S{{{16, 48, 64}, 4}, {{48, 48, 32}, 8}}},  // legacy's (§13.3(a)): the guard reverts it
       {24, S{{{32, 16, 64}, 8}, {{32, 32, 32}, 16}}},
       {192, S{{{16, 16, 16}, 192}}},
   };
   for (const auto& [np, want] : table) {
     const Dec A = CutcellMG::decomposition(np, 128, 96, 64);
     std::printf("128x96x64 np %zu: auto %s\n", np, shapeStr(A).c_str());
-    S got = shapes(A);
-    if (np == 12)
-      for (auto& kv : got)
-        kv.second = 0;
+    const S got = shapes(A);
     CHECK(got == want, "128x96x64 np %zu: block shapes differ from the design's §9 table", np);
   }
   // (8) channel-shaped grids: a legacy partition that keeps y whole keeps it whole
@@ -258,6 +322,10 @@ int main() {
       const Dec L = CutcellMG::decomposition(np, (int)G[0], (int)G[1], (int)G[2], 1);
       const Dec A = CutcellMG::decomposition(np, (int)G[0], (int)G[1], (int)G[2]);
       const bool yWholeL = (CutcellMG::splitAxes(L) & 2u) == 0u;
+      char name[64];
+      std::snprintf(name, sizeof name, "%lldx%lldx%lld np %zu (channel)", (long long)G[0],
+                    (long long)G[1], (long long)G[2], np);
+      checkGuard(A, L, np, G, name);
       CHECK(!yWholeL || (CutcellMG::splitAxes(A) & 2u) == 0u,
             "%lldx%lldx%lld np %zu: (8) auto splits y, legacy does not", (long long)G[0],
             (long long)G[1], (long long)G[2], np);
@@ -426,6 +494,7 @@ int main() {
       "levels >= 2: %d (published configuration, levels) rows checked against the pre-partition "
       "trees\n",
       nGolden);
+  std::printf("guard (WO-D): %d configurations reverted to legacy\n", nReverted);
   std::printf(fails ? "decomposition_policy: FAIL (%d)\n" : "decomposition_policy: PASS\n", fails);
   return fails ? 1 : 0;
 }

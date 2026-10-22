@@ -302,7 +302,9 @@ you want). Detail and numbers for every bullet: ref §6.
   = AUTO — the legacy aligned ORB when exactly balanced (bit-identical partitions there), else
   coarse-first at depth 5/4 with core's `SplitAxis::Balanced`, else the balance-aware aligned ORB
   if better (coarse-first must nest >= legacy's depth, the aligned one >= min(legacy, 3); depth
-  counts blocks >= 4 cells); never cuts an axis the legacy ORB leaves whole. `set_decomposition(1)` = the legacy
+  counts blocks >= 4 cells); never cuts an axis the legacy ORB leaves whole, and changes legacy's
+  set of cut axes only when legacy max/mean >= 5/4 (WO-D guard, §13.4(2): the uncut axes are the
+  levels' wrap axes, which pick the host code paths; 12×2 lost 9 % to them). `set_decomposition(1)` = the legacy
   aligned ORB (pre-2026-10 np > 1 partitions); `L >= 2` the legacy coarse-first search (longest-axis
   split, unchanged: blocks nest for the full depth). Census ctest `decomposition_policy`. Check a combination with
   `scripts/check_decomposition.py` first.

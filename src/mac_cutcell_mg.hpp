@@ -1486,7 +1486,8 @@ class CutcellMG {
   //     maxImbalance that nests at least as deep as A (nestDepth(C) >= nestDepth(A)); else the
   //     balance-aware aligned ORB A2 iff it has a smaller largest block and nests at least
   //     min(nestDepth(A), 3) levels; else A. A candidate that cuts an axis A leaves whole is never
-  //     taken (the wall-normal invariant's status quo).
+  //     taken (the wall-normal invariant's status quo), and one whose split-axis set differs from
+  //     A's only when A's max/mean >= 5/4 (WO-D, §13.4(2)).
   //   levels == 1: the legacy aligned ORB A (the pre-2026-10 default, for reproducing old np > 1
   //     partitions).
   //   levels >= 2: the legacy coarse-first search from depth `levels` down to 2 (longest-axis
@@ -1572,8 +1573,17 @@ class CutcellMG {
         printf("[mg] decomposition: auto %s (max/min %.3f; legacy %.3f)\n", branch, imbalanceOf(d),
                imbalanceOf(A));
     };
+    // A candidate never cuts an axis A leaves whole. WO-D (doc/vof_distributed_partition_design.md
+    // §13.4(2)): it keeps A's split-axis set unless A's max/mean >= 5/4 (integer form, rank-
+    // consistent). The axes no rank cuts are the levels' wrap axes, which select the K3/H-7 host
+    // code paths; the cell count cannot see their cost (+9.4 % at 12x2, legacy max/mean 1.125), so
+    // a candidate that changes them must buy a >= 20 % cut in the critical rank's cells.
     const unsigned axesA = splitAxes(A);
-    auto within = [&](const Dec& d) { return (splitAxes(d) & ~axesA) == 0u; };
+    const bool legacyImbalanced = 4 * maxCells(A) * numBlocks >= 5 * cellsOf(G);  // max/mean >= 5/4
+    auto within = [&](const Dec& d) {
+      const unsigned ax = splitAxes(d);
+      return (ax & ~axesA) == 0u && (ax == axesA || legacyImbalanced);
+    };
     if (maxCells(A) == minCells(A)) {
       report("A-exact", A);
       return A;
