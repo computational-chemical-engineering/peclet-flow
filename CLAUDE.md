@@ -270,8 +270,9 @@ you want). Detail and numbers for every bullet: ref §6.
   The host solve (B1, `doc/vof_distributed_partition_design.md` §5.3) runs on ONE thread
   (`kBottomHostTeam` = 1) with M lane-scheduled (`BottomDirect::laneSubstitute`, rows as SIMD lanes,
   bitwise to the team schedule, which stays the device path and the host oracle: ctest
-  `bottom_direct` U9). That removes the old 1-thread-per-rank cost edge, which was the M
-  application (genoa 24×1: 0.70 ms per bottom solve with the team schedule). `'auto'` does not choose
+  `bottom_direct` U9). It halves the 1-thread solve (genoa 24×1: 0.70 ms per bottom solve with the
+  team schedule) but no more: 0.25–0.40 ms per solve on genoa against ≤ 0.08 designed
+  (`doc/vof_distributed_partition_design.md` §13.2), so it gains only at T = 1. `'auto'` does not choose
   by thread count (results would then depend on `OMP_NUM_THREADS`). A/B with
   `diagnostics.set_pressure_bottom_solver`.
 - **On device, `step()` holds no global synchronization** (2026-10-19, design `doc/vof_gpu_coarse_tail_design.md`):
