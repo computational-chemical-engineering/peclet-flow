@@ -431,8 +431,8 @@ Design and numbers: [`doc/steady_acceleration.md`](doc/steady_acceleration.md); 
 **Cut-cell scalar transport — pending FRANK** (evidence `doc/scalar_ibm_STATE.md`):
 1. **The conjugate contact model** (§13 Q4): particles in contact do not converge at R/h 8–32 (G13
    conjugate row INFO). Recommended: a body-aware geometry record + a contact conductance.
-2. **Naming** (`doc/scalar_ibm_naming_rows.md`): `set_scalar_tolerance` → `set_scalar_residual_tolerance`,
-   `maxit` → `max_iter`, the `cutcell=` spelling (Q5), when cut-cell becomes the default (Q7).
+2. ~~Naming~~ DECIDED 2026-10-22: `set_scalar_residual_tolerance`, `max_iter`, census `num_mg_levels`;
+   `cutcell=` kept (Q5), opt-in in 1.4.0 (Q7); the default is a new decision after that release.
 3. **Branch `origin/uf-outlet-diag`** (pushed, NOT merged; `doc/uf_outlet_fix.md` on that branch): fixes
    the legacy scalars at high-side open faces on both grids; needs Frank's OK on `c002c8e` and
    `af88101`; changes the state_hash `scalar` case. Until it lands, `advanceScalars`' plain velocity

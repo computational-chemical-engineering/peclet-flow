@@ -60,9 +60,9 @@ and a divergence-free MAC face flux. Then a plan, and a step-by-step implementat
 1. ~~Landing~~ DONE. Core is NOT tagged (a release step).
 2. **Conjugate contact model** (§13 Q4; G13 conjugate row OPEN). Recommendation: a body-aware geometry
    record plus a contact conductance, designed by the architect with Frank's input.
-3. **Naming:** set_scalar_tolerance → set_scalar_residual_tolerance; maxit → max_iter; the
-   `cutcell=` spelling (Q5); when cut-cell becomes the default (Q7). See doc/scalar_ibm_naming_rows.md.
-4. ~~Register entries~~ PLACED (umbrella 4661441). The NAMING rows are still pending (doc/scalar_ibm_naming_rows.md).
+3. ~~Naming~~ DECIDED by Frank 2026-10-22: set_scalar_residual_tolerance, max_iter, num_mg_levels
+   (branch release-fixes); `cutcell=` kept (Q5); opt-in in 1.4.0 (Q7). Rows placed in suite docs/NAMING.md §2.
+4. ~~Register entries~~ PLACED (umbrella 4661441). ~~NAMING rows~~ PLACED (umbrella release-prep, 2026-10-22).
 5. **Battery cadence:** per work order, or only at milestones.
 
 **Follow-up work orders (not started):**
@@ -84,7 +84,7 @@ If it lands, the G12 `scalar` hash becomes 438db94e.
 
 ## Open decisions (defaults; DEFAULT-PENDING-USER in design §13)
 
-- **Q5** API spelling `add_scalar(..., cutcell=True)`.
+- **Q5 — DECIDED by Frank (2026-10-22): keep** `add_scalar(..., cutcell=True)`.
 - **Q6 — DECIDED by Frank (2026-10-02): FIX IT.** Scope (orchestrator): the whole scalar/energy API
   surface (add_scalar D, the phase-change thermal properties, …), converted at the API boundary at
   use time; cell units stay bit-identical. Work is on branch `scalar-units`, worktree
@@ -101,4 +101,4 @@ If it lands, the G12 `scalar` hash becomes 438db94e.
   - The branch could land on flow main independently. Needs Frank's OK.
   Formerly: **MERGE ORDER:** `scalar-units` → `scalar-ibm` BEFORE WO-3. WO-3 must reuse its UnitScales helpers
   instead of adding its own `diffToInt`. Design §1.2 / §13 Q6 are to be amended in WO-10.
-- **Q7** Cut-cell stays opt-in until G1–G13 pass and one release has shipped.
+- **Q7 — DECIDED by Frank (2026-10-22): opt-in this release** (1.4.0); the default is a new decision after it.

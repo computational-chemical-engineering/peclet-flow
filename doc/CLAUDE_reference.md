@@ -469,8 +469,8 @@ questions in §13; every measured number and every ruling (D-WO*) is in
 [`doc/scalar_ibm_log.md`](scalar_ibm_log.md). Legacy scalars are untouched: the dispatch is the
 first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
 
-- **Status.** The `cutcell=` spelling is DEFAULT-PENDING Frank (§13 Q5). The path stays opt-in until
-  G1–G13 pass and one release has shipped it (Q7).
+- **Status.** The `cutcell=` spelling is kept and the path is opt-in in flow 1.4.0 (Frank 2026-10-22,
+  §13 Q5, Q7); making it the default is a new decision after that release.
 - **Method.**
   - Cut-cell FV with κ (fluid fraction) in storage and sources.
   - Plain aperture two-point faces, on the scalar's own apertures (ungated, snapped at both ends).
@@ -576,7 +576,7 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
     lose the grid-independent iteration count; only the warning exists.
   - Host performance: advance ÷ projection ≈ 1.05 at OMP 4 after D-WO9-3, and 1.4–1.6 before it (the
     smoother is 38 % of the advance). The GPU sits at 0.96–0.98 under contention.
-  - Q5 (spelling), Q7 (default), and the NAMING rows in `doc/scalar_ibm_naming_rows.md`.
+  - Q5, Q7 and the three NAMING rows: DECIDED by Frank 2026-10-22 (rows placed in `../docs/NAMING.md` §2).
 
 ## 11. Steady marches
 
