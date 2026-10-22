@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Case A of the bubble-swarm validation: the Esmaeeli-Tryggvason (1999) ordered bubble array.
+
+One bubble in a triply periodic cube is an infinite simple-cubic array. Parameters as rerun by
+Innocenti, Jaccod, Popinet & Chibbaro (2021, JFM 918:A23, arXiv 2002.02209, sec. 3 and Table 3)
+and Loisy, Naso & Spelt (2017, JFM 816:94, case E1, fig. 1a):
+
+    Ar = sqrt(rho_l |rho_b - rho_l| g d^3) / mu_l = 29.9,   Bo = |rho_b - rho_l| g d^2 / sigma = 2,
+    rho_b/rho_l = mu_b/mu_l = 0.1,   L = 1.6 d (Table 3: 16^3 cells at d/h = 10),  phi = 12.8 %.
+
+Re = rho_l U d / mu_l with U the DRIFT velocity  U = <u>_d - <u>  (Loisy 2017 eq. 2.3: the volume
+average over the gas minus the volume average over the whole cell). Targets (Table 3): Basilisk
+23.05/22.01/21.275/21.0 at d/h 10/20/40/80, Loisy 19.05/20.22/20.58 at 10/20/40, E&T 20.49 at 40.
+
+Set-up: the bubble-column driver's (peclet-examples benchmarks/bubble-column/scripts/run_peclet.py)
+multiple-marker VoF with its solver settings, in a PHYSICAL domain (metres, SI properties).
+Gravity points along -x, so the bubble rises along +x:
+  * buoyancy with the mixture weight removed, f_x = -(rho(C) - <rho>) g, <rho> from the discrete
+    gas volume (the -<rho>g body force of Innocenti sec. 3 / Loisy eq. 3.1);
+  * set_superficial_velocity(True, 'x', 0): the volume mean <u_x> is held at 0, so the computational
+    frame is Loisy's zero-mixture-velocity frame and the drift velocity is the gas-averaged u_x.
+    The lateral means <u_y>, <u_z> are free (zero by symmetry) and are written out as a check.
+
+Usage:
+    PYTHONPATH=<flow build> OMP_NUM_THREADS=8 OMP_PROC_BIND=false \\
+        python tests/study/case_a/run_case_a.py --d-over-h 10 --backend host --t-end 20 --out runA10
+
+  --d-over-h {10,20,40,80}   cells per bubble diameter; box = (1.6 d/h)^3 cells
+  --backend {host,cuda}      checked against the imported module's Kokkos execution space (the
+                             backend is chosen by PYTHONPATH, i.e. by which build is imported)
+  --t-end T                  end time in units of sqrt(d/g) (default 20)
+  --out DIR                  writes DIR/case_a.csv (one row per sample) and DIR/summary.txt
+  --dt-out T                 sample interval in sqrt(d/g) (default 0.05)
+  --max-steps N, --wall S    stop early (timing / smoke runs)
+  --dt-safety F              fraction of the CFL and capillary limits (default 0.25, the driver's)
+
+Prints one summary line.
+"""
+import argparse
+import math
+import os
+import resource
+import sys
+import time
+
+import numpy as np
+import peclet.flow as pf
+
+# --- physics: dimensionless groups (verified against the sources, see docstring) -------------
+AR, BO, RHO_RATIO, MU_RATIO, L_OVER_D = 29.9, 2.0, 0.1, 0.1, 1.6
+# --- dimensional realisation (SI): a 1 mm bubble; mu_l and sigma follow from Ar and Bo ---------
+D = 1.0e-3                        # m, volume-equivalent diameter
+RHO_L = 1000.0                    # kg/m^3
+RHO_G = RHO_RATIO * RHO_L
+G = 9.81                          # m/s^2, along -x
+MU_L = math.sqrt(RHO_L * abs(RHO_G - RHO_L) * G * D ** 3) / AR    # 3.1426e-3 Pa s
+MU_G = MU_RATIO * MU_L
+SIGMA = abs(RHO_G - RHO_L) * G * D ** 2 / BO                       # 4.4145e-3 N/m
+T_REF = math.sqrt(D / G)          # time unit of the literature plots (Loisy fig. 1a)
+
+
+def parse():
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    p.add_argument("--d-over-h", type=int, required=True, choices=(10, 20, 40, 80))
+    p.add_argument("--backend", required=True, choices=("host", "cuda"))
+    p.add_argument("--t-end", type=float, default=20.0)
+    p.add_argument("--out", required=True)
+    p.add_argument("--dt-out", type=float, default=0.05)
+    p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument("--wall", type=float, default=float("inf"))
+    p.add_argument("--dt-safety", type=float, default=0.25)
+    return p.parse_args()
+
+
+def check_backend(want):
+    space = getattr(pf, "execution_space", "unknown")
+    got = "cuda" if "cuda" in str(space).lower() else "host"
+    if got != want:
+        sys.exit(f"--backend {want} but the imported peclet.flow runs on '{space}' "
+                 f"({pf.__file__}); point PYTHONPATH at the matching build")
+    return str(space)
+
+
+def build(n):
+    L = L_OVER_D * D
+    s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_rho(RHO_L)
+    s.set_mu(MU_L)
+    s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))      # all fluid (SDF > 0)
+    s.enable_vof()
+    s.set_vof(np.zeros((n, n, n), order="F"))
+    # C = 1 is GAS (the block container's union starts empty)
+    s.set_property_model("rho", "linear", "C", [RHO_L, RHO_G - RHO_L])
+    s.set_property_model("mu", "linear", "C", [MU_L, MU_G - MU_L])
+    s.set_surface_tension(SIGMA)
+    s.set_pressure_pcg(True, 800, 1e-8)       # last; the bubble-column driver's setting
+    # One marker at the box centre. enable_vof_blocks takes GRID coordinates (cells) even under a
+    # physical domain -- derived here from the physical centre and radius, never user input.
+    h = L / n
+    s.enable_vof_blocks([(0.5 * L / h, 0.5 * L / h, 0.5 * L / h, 0.5 * D / h)])
+    s.enable_vof_block_csf()
+    alpha = float(np.mean(s.get_vof()))       # discrete gas fraction (exactly conserved)
+    rho_av = RHO_L + (RHO_G - RHO_L) * alpha
+    s.set_property_model("force_x", "linear", "C",
+                         [-(RHO_L - rho_av) * G, -(RHO_G - RHO_L) * G])
+    s.set_superficial_velocity(True, "x", 0.0)
+    s.update_properties()                     # so the first capillary_dt sees rho(C)
+    return s, h, alpha
+
+
+def sample(s, h, x_prev, t_prev, t):
+    C = s.get_vof()
+    u, v, w = s.get_u(), s.get_v(), s.get_w()
+    # staggered: u[i] sits at x_{i+1/2}; the cell-centre value averages the two faces (periodic)
+    uc = 0.5 * (u + np.roll(u, 1, axis=0))
+    rho = RHO_L + (RHO_G - RHO_L) * C
+    vg = C.sum()
+    ub_abs = float((C * uc).sum() / vg)                       # <u_x>_d, computational frame
+    u_mix = float(uc.mean())                                  # <u_x> (held 0)
+    u_liq = float(((1.0 - C) * uc).sum() / (1.0 - C).sum())   # <u_x>_l
+    u_zm = float((rho * uc).sum() / rho.sum())                # mass-mean (zero-momentum frame)
+    # gas centroid along x, unwrapped: minimal image about the previous (continuous) position
+    n = C.shape[0]
+    L = n * h
+    dxi = (np.arange(n) + 0.5) * h - x_prev
+    dxi -= L * np.round(dxi / L)
+    x = x_prev + float((C.sum(axis=(1, 2)) * dxi).sum() / vg)
+    u_cent = (x - x_prev) / (t - t_prev) if t > t_prev else float("nan")
+    blocks = s.diagnostics.vof_block_stats()
+    return {
+        "u_abs": ub_abs, "u_mix": u_mix, "u_liq": u_liq, "u_zm": u_zm,
+        "u_drift": ub_abs - u_mix, "u_slip": ub_abs - u_liq, "u_rel_zm": ub_abs - u_zm,
+        "u_cent": u_cent, "v_mean": float(v.mean()), "w_mean": float(w.mean()),
+        "gas_vol": float(vg) * h ** 3,
+        "block_vol": float(blocks[0]["volume"]) if blocks else float("nan"), "x_cent": x}
+
+
+def main():
+    a = parse()
+    space = check_backend(a.backend)
+    n = round(L_OVER_D * a.d_over_h)
+    os.makedirs(a.out, exist_ok=True)
+    t0 = time.perf_counter()
+    s, h, alpha = build(n)
+    t_setup = time.perf_counter() - t0
+    re_of = lambda U: RHO_L * U * D / MU_L
+    cols = ["t", "t_star", "step", "dt", "binding", "u_abs", "u_mix", "u_liq", "u_zm", "u_drift",
+            "u_slip", "u_rel_zm", "u_cent", "Re_drift", "Re_abs", "Re_slip", "Re_rel_zm",
+            "v_mean", "w_mean", "gas_vol", "vol_err", "block_vol", "x_cent"]
+    f = open(os.path.join(a.out, "case_a.csv"), "w")  # noqa: SIM115 (closed after the loop)
+    f.write(f"# case A d/h={a.d_over_h} n={n} L={L_OVER_D * D} d={D} rho_l={RHO_L} "
+            f"rho_g={RHO_G} mu_l={MU_L:.6e} mu_g={MU_G:.6e} sigma={SIGMA:.6e} g={G} "
+            f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e}\n")
+    f.write(",".join(cols) + "\n")
+
+    t, step, binding, dt = 0.0, 0, "-", 0.0
+    r0 = sample(s, h, 0.5 * L_OVER_D * D, 0.0, 0.0)
+    vol0 = r0["gas_vol"]
+    x_prev, t_prev = r0["x_cent"], 0.0
+    t_end = a.t_end * T_REF
+    next_out = a.dt_out * T_REF
+    last = None
+    hist = []                                  # (t_star, Re_drift, Re_rel_zm, x_cent)
+    t_loop = time.perf_counter()
+    stop = "t_end"
+    while t < t_end * (1 - 1e-12):
+        L_ = s.vof_step_limits()
+        dt = a.dt_safety * min(L_["cfl_dt"], L_["capillary_dt"])
+        binding = "cap" if L_["capillary_dt"] < L_["cfl_dt"] else "cfl"
+        s.set_dt(dt)
+        s.step()
+        t += dt
+        step += 1
+        done = t >= t_end * (1 - 1e-12)
+        if a.max_steps is not None and step >= a.max_steps:
+            done, stop = True, "max_steps"
+        if time.perf_counter() - t0 > a.wall:
+            done, stop = True, "wall"
+        if t >= next_out or done:
+            r = sample(s, h, x_prev, t_prev, t)
+            x_prev, t_prev = r["x_cent"], t
+            r.update(t=t, t_star=t / T_REF, step=step, dt=dt, binding=binding,
+                     Re_drift=re_of(r["u_drift"]), Re_abs=re_of(r["u_abs"]),
+                     Re_slip=re_of(r["u_slip"]), Re_rel_zm=re_of(r["u_rel_zm"]),
+                     vol_err=r["gas_vol"] / vol0 - 1.0)
+            f.write(",".join(str(r[c]) for c in cols) + "\n")
+            f.flush()
+            hist.append((r["t_star"], r["Re_drift"], r["Re_rel_zm"], r["x_cent"]))
+            last = r
+            while next_out <= t:
+                next_out += a.dt_out * T_REF
+        if done:
+            break
+    wall_loop = time.perf_counter() - t_loop
+    f.close()
+
+    # Steady state. Re(t) carries a component periodic in the bubble's position in the box (period
+    # L/U, measured at d/h 10), so the averaging windows are whole box crossings: A = the last two
+    # crossings (gas displacement 2L), B = the two before. steady <=> |<Re>_A - <Re>_B| < 1e-3 <Re>_A.
+    H = np.array(hist)
+    Lb = L_OVER_D * D
+
+    def window_mean(col, x_hi, x_lo):
+        m = (H[:, 3] > x_lo) & (H[:, 3] <= x_hi)
+        if m.sum() < 2:
+            return float("nan")
+        return float(np.trapezoid(H[m, col], H[m, 0]) / (H[m, 0][-1] - H[m, 0][0]))
+
+    xe = H[-1, 3]
+    re_a = window_mean(1, xe, xe - 2 * Lb) if xe - H[0, 3] >= 2 * Lb else float("nan")
+    re_b = window_mean(1, xe - 2 * Lb, xe - 4 * Lb) if xe - H[0, 3] >= 4 * Lb else float("nan")
+    zm_a = window_mean(2, xe, xe - 2 * Lb) if xe - H[0, 3] >= 2 * Lb else float("nan")
+    wa = (H[:, 3] > xe - 2 * Lb)
+    re_lo, re_hi = float(H[wa, 1].min()), float(H[wa, 1].max())
+    drel = abs(re_a - re_b) / abs(re_a)
+    steady = bool(drel < 1e-3)
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    line = (f"CASE_A d/h={a.d_over_h} n={n} space={space} stop={stop} t*={last['t_star']:.3f} "
+            f"steps={step} Re_drift(2L-mean)={re_a:.4f} [min {re_lo:.3f} max {re_hi:.3f}] "
+            f"Re_rel_zm(2L-mean)={zm_a:.4f} dRe/Re(2L vs prev 2L)={drel:.2e} steady={steady} "
+            f"vol_err={last['vol_err']:.2e} <u>={last['u_mix']:.1e} <v>={last['v_mean']:.1e} "
+            f"<w>={last['w_mean']:.1e} u_cent/u_abs={last['u_cent'] / last['u_abs']:.4f} "
+            f"setup={t_setup:.1f}s ms/step={1e3 * wall_loop / max(step, 1):.2f} "
+            f"maxrss={rss:.0f}MB")
+    with open(os.path.join(a.out, "summary.txt"), "w") as g:
+        g.write(line + "\n")
+    print(line)
+
+
+if __name__ == "__main__":
+    main()
