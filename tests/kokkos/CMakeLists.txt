@@ -108,6 +108,15 @@ target_include_directories(test_variable_mu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(test_variable_mu PRIVATE Kokkos::kokkos)
 add_test(NAME variable_mu COMMAND test_variable_mu)
 
+# Full viscous stress, transpose term (src/full_stress.hpp; doc/full_viscous_stress.md WO-1, gate G1):
+# kernel vs host oracle, rigid rotation / strain / shear identities, telescoping, W-symmetry, energy
+# bounds, smooth convergence order.
+add_executable(test_full_stress test_full_stress.cpp)
+target_include_directories(test_full_stress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_full_stress PRIVATE Kokkos::kokkos)
+add_test(NAME full_stress_operator COMMAND test_full_stress)
+
 # Variable-density projection: hydrostatic acid test (ratio 3 + 1e3) + uniform-rho reduction.
 add_executable(test_vardensity_projection test_vardensity_projection.cpp)
 target_include_directories(test_vardensity_projection PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
