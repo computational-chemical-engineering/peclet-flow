@@ -33,6 +33,9 @@ Usage:
   --dt-out T                 sample interval in sqrt(d/g) (default 0.05)
   --max-steps N, --wall S    stop early (timing / smoke runs)
   --dt-safety F              fraction of the CFL and capillary limits (default 0.25, the driver's)
+  --mu-ratio R               ablation: mu_b/mu_l (default 0.1, the case); Ar and Bo are unchanged
+                             (both use mu_l and the density difference)
+  --face-mu {arithmetic,harmonic}  ablation: face-viscosity mean (default arithmetic, the driver's)
 
 Prints one summary line.
 """
@@ -69,6 +72,8 @@ def parse():
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--wall", type=float, default=float("inf"))
     p.add_argument("--dt-safety", type=float, default=0.25)
+    p.add_argument("--mu-ratio", type=float, default=MU_RATIO)
+    p.add_argument("--face-mu", choices=("arithmetic", "harmonic"), default="arithmetic")
     return p.parse_args()
 
 
@@ -81,7 +86,7 @@ def check_backend(want):
     return str(space)
 
 
-def build(n):
+def build(n, mu_g=MU_G, face_mu="arithmetic"):
     L = L_OVER_D * D
     s = pf.Solver((n, n, n), extent=(L, L, L))
     s.set_rho(RHO_L)
@@ -91,7 +96,9 @@ def build(n):
     s.set_vof(np.zeros((n, n, n), order="F"))
     # C = 1 is GAS (the block container's union starts empty)
     s.set_property_model("rho", "linear", "C", [RHO_L, RHO_G - RHO_L])
-    s.set_property_model("mu", "linear", "C", [MU_L, MU_G - MU_L])
+    s.set_property_model("mu", "linear", "C", [MU_L, mu_g - MU_L])
+    if face_mu == "harmonic":
+        s.diagnostics.set_property_mode("variable", True)
     s.set_surface_tension(SIGMA)
     s.set_pressure_pcg(True, 800, 1e-8)       # last; the bubble-column driver's setting
     # One marker at the box centre. enable_vof_blocks takes GRID coordinates (cells) even under a
@@ -141,7 +148,7 @@ def main():
     n = round(L_OVER_D * a.d_over_h)
     os.makedirs(a.out, exist_ok=True)
     t0 = time.perf_counter()
-    s, h, alpha = build(n)
+    s, h, alpha = build(n, a.mu_ratio * MU_L, a.face_mu)
     t_setup = time.perf_counter() - t0
     re_of = lambda U: RHO_L * U * D / MU_L
     cols = ["t", "t_star", "step", "dt", "binding", "u_abs", "u_mix", "u_liq", "u_zm", "u_drift",
@@ -149,8 +156,9 @@ def main():
             "v_mean", "w_mean", "gas_vol", "vol_err", "block_vol", "x_cent"]
     f = open(os.path.join(a.out, "case_a.csv"), "w")  # noqa: SIM115 (closed after the loop)
     f.write(f"# case A d/h={a.d_over_h} n={n} L={L_OVER_D * D} d={D} rho_l={RHO_L} "
-            f"rho_g={RHO_G} mu_l={MU_L:.6e} mu_g={MU_G:.6e} sigma={SIGMA:.6e} g={G} "
-            f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e}\n")
+            f"rho_g={RHO_G} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
+            f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e} dt_safety={a.dt_safety} "
+            f"face_mu={a.face_mu}\n")
     f.write(",".join(cols) + "\n")
 
     t, step, binding, dt = 0.0, 0, "-", 0.0
@@ -215,7 +223,8 @@ def main():
     drel = abs(re_a - re_b) / abs(re_a)
     steady = bool(drel < 1e-3)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    line = (f"CASE_A d/h={a.d_over_h} n={n} space={space} stop={stop} t*={last['t_star']:.3f} "
+    line = (f"CASE_A d/h={a.d_over_h} n={n} mu_ratio={a.mu_ratio:g} face_mu={a.face_mu} "
+            f"dt_safety={a.dt_safety:g} space={space} stop={stop} t*={last['t_star']:.3f} "
             f"steps={step} Re_drift(2L-mean)={re_a:.4f} [min {re_lo:.3f} max {re_hi:.3f}] "
             f"Re_rel_zm(2L-mean)={zm_a:.4f} dRe/Re(2L vs prev 2L)={drel:.2e} steady={steady} "
             f"vol_err={last['vol_err']:.2e} <u>={last['u_mix']:.1e} <v>={last['v_mean']:.1e} "
