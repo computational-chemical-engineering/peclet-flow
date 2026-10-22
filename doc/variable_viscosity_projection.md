@@ -44,6 +44,14 @@ The solver advances the momentum equation in the *divided-by-dt* convention (ope
 Enabled by `diagnostics.set_property_mode("variable", harmonic=…)` on the Python side (or automatically when a
 property closure targets `"mu"`); internal flag `varProps_`.
 
+> **Stress form.** This section describes the Laplacian form `∇·(μ∇u)`, which is still the default. On the
+> staggered `Solver`, `set_viscous_stress("full")` (opt-in) adds the transpose term `∇·(μ(∇u)ᵀ)`, so the
+> predictor approximates the full deviatoric stress `∇·(2μD)`. The term is built from conservative MAC
+> stress elements with the same face μ as the bands below, and is explicit on uⁿ. The design, the gates and
+> the rejected alternatives are in [`full_viscous_stress.md`](full_viscous_stress.md). The bands, the
+> smoother and the projection of this note are unchanged by it. In v1 it refuses the harmonic face mean,
+> porous momentum, moving scene instances and `SolverColocated`.
+
 - **Viscosity field**: a registered cell-centred field `"mu"` (`muField_`), set from Python
   (`set_field("mu", arr)`) or by a closure (e.g. Arrhenius in temperature) each step.
 - **Face viscosity**: the stencil needs μ *on faces between cells*. `FieldFaceProps`
@@ -195,12 +203,17 @@ analytic steady profile piecewise linear with interface velocity `u_i/U = μ₂/
 
 ## 6. Limitations and deferred work
 
-1. **Laplacian stress form.** The momentum operator is `∇·(μ∇u)`, not the full deviatoric stress
+1. **Laplacian stress form — resolved on staggered** (2026-10, [`full_viscous_stress.md`](full_viscous_stress.md)).
+   The default momentum operator is still `∇·(μ∇u)`, not the full deviatoric stress
    `∇·(μ(∇u + ∇uᵀ))`. For incompressible flow the omitted term is
-   `(∇·(μ∇uᵀ))_i = (∂_i u_j)(∂_j μ)` — it vanishes for layered configurations (Couette/Poiseuille
+   `(∇·(μ∇uᵀ))_i = (∂_i u_j)(∂_j μ)`. It vanishes for layered configurations (Couette/Poiseuille
    with μ = μ(y), which is why §5 converges to the exact profile) but is nonzero at general
-   μ-gradients. Adding the transpose term pairs naturally with the SRP upgrade (both come from the
-   full-stress formulation of [5]).
+   μ-gradients. At a sharp jump it imposes the wrong tangential stress condition, an h-independent
+   interface force: case A (bubble array, μ ratio 0.1) rose about 20 % too fast.
+   `Solver.set_viscous_stress("full")` adds the term on the staggered grid, as conservative stress
+   elements explicit on uⁿ. It is opt-in, and making it the default is a user decision (design Q1).
+   SRP is **not** required for it (design §7); a later SRP can reuse its kernel. The collocated solver
+   remains Laplacian-only (design §9).
 2. **Shear-rate projection (SRP)** [4, 5]: the fully consistent pressure correction (extra ψ
    Poisson, §3) — the upgrade if maximal pressure accuracy at strong contrast or with
    open/natural boundaries [6] is needed.

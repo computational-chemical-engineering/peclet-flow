@@ -21,6 +21,7 @@ suite-wide contracts are in `../../docs/`.
 | [collocated_paper_plan.md](collocated_paper_plan.md) | 2026-08 … 09 | Live paper plan and results tracker for that work. |
 | [fluid_only_constraint_plan.md](fluid_only_constraint_plan.md) | 2026-08 | The production fluid-only constraint (the `"ghost"` scheme) — design plan, with parts still open. |
 | [variable_viscosity_projection.md](variable_viscosity_projection.md) | 2026-07 | The variable-viscosity momentum operator and the rotational-incremental projection it needs. |
+| [full_viscous_stress.md](full_viscous_stress.md) | 2026-10 | The full deviatoric stress at variable μ (staggered, opt-in `set_viscous_stress("full")`): the transpose term as conservative MAC stress elements, explicit on uⁿ; gates G0–G7 and the rejected alternatives. |
 | [variable_density_projection.md](variable_density_projection.md) | 2026-07 … 09 | Variable density: momentum, projection scaling, the pressure driver, and (§4) the rank-aware domain-BC repair. |
 | [porous_drag_scheme.md](porous_drag_scheme.md) | 2026-07 … 09 | The volume-averaged (porous) CFD-DEM fluid scheme — the gas phase of `peclet.coupling` with `porous=True`. |
 | [cutcell_openbc_convergence.md](cutcell_openbc_convergence.md) | 2026-09-01 … 09-16 | Solid geometry intersecting an inflow/outflow face: the two defects (SDF ghost wrap, Dirichlet row aperture), the fix, and the sealed-pocket rejection. |

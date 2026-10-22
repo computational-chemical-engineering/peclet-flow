@@ -326,6 +326,15 @@ must agree with the solver in use (unenforced; a mismatch silently made advectio
   threshold (above D≈4 RB-GS stops meeting its tolerance); geometry-independent. Decided at the
   **first `step()`** (`set_solid` resets it). `set_velocity_multigrid_auto(65536, 1 << 23)` = the
   1.0.0 rule, `(0)` disables. Rationale, numbers, exceptions: `doc/velocity_mg_plan.md` (last section).
+- **Variable μ: `set_viscous_stress("full" | "laplacian")`** (staggered; default `"laplacian"`, opt-in
+  until Frank decides the default, design Q1). The Laplacian form ∇·(μ∇u) imposes the wrong tangential
+  stress condition at a μ jump, an h-independent interface force: case A (bubble array, μ ratio 0.1)
+  rose about 20 % too fast, Re 24.08 at d/h 10 (Basilisk 23.05 at d/h 10, 21.275 at d/h 40). `"full"` adds
+  ∇·(μ(∇u)ᵀ) as conservative MAC stress elements with the bands' own face μ, explicit on uⁿ. Case A at
+  d/h 10 then gives Re 21.36 (host). The term is skipped exactly when μ is globally uniform. It refuses
+  harmonic face μ, porous momentum, moving scenes and `SolverColocated`. **Never** use the product form
+  (∇μ)·(∇u)ᵀ, and never put the term on the Picard iterate. Design `doc/full_viscous_stress.md`; ctests
+  `full_stress_operator{,_np2,_np4}`, `ghost_edges_mpi_np{2,4}`; large dt `tests/study/full_stress_large_dt.py`.
 
 ## Collocated solver (`SolverColocated`)
 
