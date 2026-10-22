@@ -397,7 +397,7 @@ Opt-in per scalar, landed on main 2026-10-04. Contract
 `doc/scalar_ibm_STATE.md`; the full user-facing summary (method, setters, refusals, traps) is ref
 §10. Legacy scalars are untouched (dispatch on the first line of the `advanceScalars` loop; the 12
 state hashes are the gate). Second order for every BC, Robin number and conjugate contrast (G1–G8).
-The `cutcell=` spelling and making it the default are pending Frank (§13 Q5/Q7).
+`cutcell=` is kept and opt-in in 1.4.0 (§13 Q5/Q7, USER 2026-10-22); making it the default is a new decision after 1.4.0.
 
 - **Refused** (RuntimeError naming the remedy): the collocated `'ghost'` scheme — the
   `SolverColocated` default; collocated open faces; a moving fluid without the cut-cell projection;
@@ -433,9 +433,10 @@ Design and numbers: [`doc/steady_acceleration.md`](doc/steady_acceleration.md); 
    conjugate row INFO). Recommended: a body-aware geometry record + a contact conductance.
 2. ~~Naming~~ DECIDED 2026-10-22: `set_scalar_residual_tolerance`, `max_iter`, census `num_mg_levels`;
    `cutcell=` kept (Q5), opt-in in 1.4.0 (Q7); the default is a new decision after that release.
-3. **`uf-outlet-diag`** (`doc/uf_outlet_fix.md`): approved by Frank 2026-10-22, rebased onto branch
-   `release-fixes`, under review. It keeps the high-side face plane across the face-field ghost
-   fills and fixes the scalar inflow state; it changes the state_hash `scalar` case only.
+3. ~~`uf-outlet-diag`~~ MERGED for 1.4.0 (`doc/uf_outlet_fix.md`, register 2026-10-22): the high-side face
+   plane is kept across every face-field ghost fill; the scalar inflow upwinds the prescribed state. Follow-up:
+   impose F = u_n·v at the Dirichlet inflow face (the first interior face is gh/6 off on a smooth profile).
+   Unchecked (review note): `sadv::koren` (`src/staggered_advection.hpp:17-25`) may be the κ = −1/3 scheme, not κ = 1/3.
 4. Also: collocated open faces for cut-cell scalars; the test-battery cadence; tagging core; the
    ScalarMG agglomerated exact bottom (follow-up WO — only a warning exists today); host advance ÷
    projection ≈ 1.05.
