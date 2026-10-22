@@ -540,7 +540,7 @@ template <class Grid>
 void Solver<Grid>::setScalarMaxIterations(const std::string& name, int maxit) {
   ScalarCutState& st = *cutcellScalar(name, "set_scalar_max_iterations").cut;
   if (maxit < 1)
-    throw std::invalid_argument("set_scalar_max_iterations: maxit must be >= 1");
+    throw std::invalid_argument("set_scalar_max_iterations: max_iter must be >= 1");
   st.maxit = maxit;
 }
 

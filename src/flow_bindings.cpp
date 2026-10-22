@@ -708,10 +708,10 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "order in the max norm) and 'probe_rung' (0..3 = R0, R1a, R1b, R2).")
       .def(
           "set_scalar_max_iterations",
-          [](D& diag, const std::string& name, int maxit) {
-            diag.s->setScalarMaxIterations(name, maxit);
+          [](D& diag, const std::string& name, int max_iter) {
+            diag.s->setScalarMaxIterations(name, max_iter);
           },
-          nb::arg("name"), nb::arg("maxit"),
+          nb::arg("name"), nb::arg("max_iter"),
           "Cut-cell scalars: the BiCGStab iteration cap (default 200). On non-convergence the "
           "iterate is kept, diagnostics.scalar_census reports it and a one-time warning is "
           "printed.")
