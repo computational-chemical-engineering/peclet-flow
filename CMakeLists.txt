@@ -289,6 +289,15 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(scalar_inflow PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # Block VoF + CSF in a physical domain equals the same case in cell units (u, v, w, p, C to
+  # 1e-12 over 30 steps): the block advector once took the internal dt as physical, and the block
+  # CSF kept a sigma from before tRef was pinned (ac09b68). Nothing else runs this combination.
+  add_test(NAME vof_blocks_physical_units
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_vof_blocks_physical_units.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(vof_blocks_physical_units PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The same face plane under MPI: an x-only split at np = 3, so the +x face has one owning rank
   # and the middle rank touches neither open face; distributed == serial to 1e-12 for the outlet
   # scalar, the backflow census and a high-side inflow, both grids (doc/uf_outlet_fix.md).
