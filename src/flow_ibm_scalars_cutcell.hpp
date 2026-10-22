@@ -730,8 +730,8 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
   double vmax = 0.0;
   for (int a = 0; a < 3; ++a) {
     const ScalarFaceFlux ff = scalarFaceFlux(a);
-    if (steady)
-      fillGhosts(ff.vel);
+    if (steady)  // IN PLACE on C[a].u / uf_: keep the high-side face (doc/uf_outlet_fix.md)
+      fillFaceGhostsKeepBoundary(ff.vel, a);
     vmax = std::fmax(vmax, sco::maxabsLocal(CCConst(ff.vel), e_, G));
     sco::faceFluxes(st.phi[a], CCConst(ff.vel), CCConst(ff.open), unk, a, e_);
     for (int side = 0; side < 2; ++side)
