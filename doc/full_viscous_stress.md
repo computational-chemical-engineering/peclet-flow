@@ -616,3 +616,16 @@ Other risks:
   guarded by the wall-face gate.
 - **Float operator storage opt-out.** Rigid-rotation cancellation then holds only to float precision. This
   is acceptable: it is not the default.
+
+## Amendments (coordinator, 2026-10-22)
+
+- **A1 — G2 at μ ratio 10.** The Laplacian sub-gate e_lap(128) ≥ 5·e_full(128) reads 1.108 / 0.239 = 4.63 at N = 128
+  (full-stress order 0.85 over 32/64/128, which passes). At N = 256 on CUDA it reads 0.952 / 0.1285 = 7.42, with full
+  order 0.90. The design's premise holds: the full form converges and the Laplacian does not. The threshold was too
+  tight at N = 128 for ratio 10. **G2 at ratio 10 is judged at N = 256.** Ratio 0.1 passes at N = 128 (lap/full 17.4).
+- **A2 — G3(i).** The quoted 0.0006 % / 0.0002 % Couette errors are harmonic-mean values, and v1 refuses harmonic
+  with full stress (Q4). For layered μ(y) the transpose term vanishes identically. G3(i) therefore reads: on the
+  arithmetic mean, full and Laplacian give the same Couette error to ≤ 1e-8 relative at dt 20 and dt 100. Measured:
+  1.881699 % for both, with differences of 3e-13 and 2e-9.
+- **Smoke (not a gate):** case A, d/h 10, host, full stress gives Re 21.3588. The Laplacian form gives 24.08;
+  Basilisk 23.05 at d/h 10 and 21.275 at d/h 40.
