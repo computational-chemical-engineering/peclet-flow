@@ -609,11 +609,11 @@ void Solver<Grid>::scalarCutRefusals(const ScalarField& sc) const {
     if (bc_[f] == 2 && sc.bc[f] != 2)
       throw std::runtime_error(who + "the inflow face " + kFace[f] +
                                " needs a scalar 'dirichlet' value (set_scalar_bc)");
-    // WO-5b (open, reported): on the collocated grid the projected face field does not keep the
-    // flux the projection constrained on a high-side open face -- projectCorrectVelocities' plain
-    // ghost fill of uf_/vf_/wf_ wraps that plane from the opposite face before the outflow
-    // correction is added to it -- so there is no divergence-free boundary flux to capture (a
-    // constant drifted by 0.48 in the outlet column in one step). Refused until decided.
+    // WO-5b: refused on the collocated grid. The cause it was refused for -- the plain ghost fill
+    // of uf_/vf_/wf_ wrapping the high-side open face plane from the opposite face (a constant
+    // drifted by 0.48 in the outlet column in one step) -- is fixed: every in-place fill of a face
+    // field now goes through fillFaceGhostsKeepBoundary (doc/uf_outlet_fix.md). Lifting the
+    // refusal is a separate decision with its own gate; until then it stands.
     if constexpr (Grid::collocated)
       if (bc_[f] == 2 || bc_[f] == 3)
         throw std::runtime_error(
@@ -664,10 +664,12 @@ typename Solver<Grid>::ScalarFaceFlux Solver<Grid>::scalarFaceFlux(int a) const 
 template <class Grid>
 void Solver<Grid>::scalarCaptureOpenFaceFlux() {
   // WO-5b (§6.5, ruling D-WO5-3). Called right after the projection: the high-side boundary face
-  // is the first GHOST index, which the next plain ghost fill (advanceScalars' own, the VoF
-  // bridge's) wraps from the opposite face, so the flux the projection constrained there is read
-  // now. The plane spans the full transverse extent (its transverse ghost rows fed the locally
-  // computed ghost-layer small flags until D-WOR-6 exchanged them; kept, a plane copy).
+  // is the first GHOST index. A plain ghost fill used to wrap it from the opposite face; the
+  // in-place fills (advanceScalars', the VoF bridge's, the steady solve's) now keep it
+  // (fillFaceGhostsKeepBoundary, doc/uf_outlet_fix.md), and this copy of the flux the projection
+  // constrained there is what the open-face fluxes read. The plane spans the full transverse
+  // extent (its transverse ghost rows fed the locally computed ghost-layer small flags until
+  // D-WOR-6 exchanged them; kept, a plane copy).
   if (!hasBc_)
     return;
   // Captured whether or not a cut-cell scalar exists yet (one plane copy per open face), so a
