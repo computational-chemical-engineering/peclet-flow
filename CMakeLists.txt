@@ -334,6 +334,16 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(velocity_solver_variable_mu PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # Full viscous stress at large dt (doc/full_viscous_stress.md WO-3, G3 (ii) short form): the
+  # rotating-core Stokes problem at mu ratio 100, D = 1e4: no growth as design Amendment A3 states it
+  # (d_n = max|u^n - u^N| <= 2 d_0, d_{N-1} <= 1e-8 d_0). The full G3 set:
+  # tests/study/full_stress_large_dt.py couette rotcore spheres.
+  add_test(NAME full_stress_large_dt
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/study/full_stress_large_dt.py ctest
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(full_stress_large_dt PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The guard against the collocated face-acceleration kick (doc/collocated_varrho_forces.md §7.6;
   # suite-wide register "Collocated forces stay in the implicit predictor"): every collocated
   # density path is stable at mu*dt/(rho h^2) up to 100 (seeded-checkerboard growth, G2) and has a

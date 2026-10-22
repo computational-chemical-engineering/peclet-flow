@@ -189,10 +189,10 @@ def cmd_spheres():
 
 
 def cmd_ctest():
-    _, mx, d = march_rotcore(32, 100.0, 1e4, 500)
+    _, mx, d = march_rotcore(32, 100.0, 1e4, 1000)
     good, peak, last = no_growth(d)
     verdict("full_stress_large_dt ratio 100 D=1e4", good,
-            f"500 steps, max|u| {mx[-1]:.6e}, max d_n/d_0 {peak:.4f} (<= 2), d_499/d_0 {last:.2e} "
+            f"1000 steps, max|u| {mx[-1]:.6e}, max d_n/d_0 {peak:.4f} (<= 2), d_999/d_0 {last:.2e} "
             f"(<= 1e-8)")
 
 
