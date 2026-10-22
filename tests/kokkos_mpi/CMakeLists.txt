@@ -75,6 +75,18 @@ foreach(t cutcellmg_mpi telescope_mpi telescope_varrho_mpi velocitymg_mpi veloci
   endforeach()
 endforeach()
 
+# doc/full_viscous_stress.md WO-0 (gate G0): the width-1 ghost ring incl. EDGES and corners of the mu
+# property fill and the time-base velocity fill, exact against the periodic-wrapped global field.
+# np 4 must be a 2x2 split (two cut axes).
+add_executable(test_ghost_edges_mpi test_ghost_edges_mpi.cpp)
+target_include_directories(test_ghost_edges_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_ghost_edges_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+foreach(np 2 4)
+  add_test(NAME ghost_edges_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_ghost_edges_mpi>)
+endforeach()
+
 # doc/vof_distributed_partition_design.md §7: the census of the default ("auto") level-0
 # decomposition against the legacy aligned ORB (levels = 1). A pure host function: no mpirun.
 add_executable(test_decomposition_policy test_decomposition_policy.cpp)
