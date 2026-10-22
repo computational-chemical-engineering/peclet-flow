@@ -42,6 +42,12 @@ Usage:
                              bubble seeded as 8x8x8 sub-sampled sphere fractions)
   --vof-momentum             ablation: enable_vof_momentum(rho_g, rho_l) (implies --single-vof:
                              the momentum-consistent transport is refused with the blocks)
+  --mpi                      distributed run under mpirun (mpi4py; needs a PECLET_FLOW_MPI build):
+                             mpi_block + init_mpi before the geometry; the fields are gathered for
+                             the samples, rank 0 writes. At one rank the single-rank solver runs (no
+                             mpi_block, no init_mpi), so `--mpi` at np 1 equals a run without it.
+  --dump FILE.npz            write the final global u, v, w, p, C (decomposition-invariance checks,
+                             doc/full_viscous_stress.md G4)
 
 Prints one summary line.
 """
@@ -83,6 +89,8 @@ def parse():
     p.add_argument("--viscous-stress", choices=("laplacian", "full"), default="laplacian")
     p.add_argument("--single-vof", action="store_true")
     p.add_argument("--vof-momentum", action="store_true")
+    p.add_argument("--mpi", action="store_true")
+    p.add_argument("--dump", default=None)
     return p.parse_args()
 
 
@@ -108,14 +116,44 @@ def sphere_fractions(n, c, r, sub=8):
     return np.asfortranarray(out)
 
 
-def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, vof_mom=False):
+class Dist:
+    """The rank's block of the global n^3 box; single-rank when comm is None."""
+
+    def __init__(self, n, comm=None):
+        self.n, self.comm = n, comm
+        if comm is None:
+            self.org, self.siz = (0, 0, 0), (n, n, n)
+        else:
+            self.org, self.siz = pf.mpi_block(n, n, n)
+        self.sl = tuple(slice(o, o + m) for o, m in zip(self.org, self.siz))
+
+    def gather(self, a):
+        """The global array from every rank's local block (identity single-rank)."""
+        if self.comm is None:
+            return a
+        out = np.zeros((self.n,) * 3, order="F")
+        for sl, blk in self.comm.allgather((self.sl, np.asarray(a))):
+            out[sl] = blk
+        return out
+
+    def any(self, flag):
+        return flag if self.comm is None else bool(self.comm.allreduce(bool(flag)))
+
+
+def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, vof_mom=False,
+          dist=None):
     L = L_OVER_D * D
-    s = pf.Solver((n, n, n), extent=(L, L, L))
+    dist = dist or Dist(n)
+    if dist.comm is None:
+        s = pf.Solver((n, n, n), extent=(L, L, L))
+    else:
+        s = pf.Solver(dist.siz, extent=(L, L, L), global_cells=(n, n, n))
+        s.init_mpi(n, n, n)                   # before the geometry
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
-    s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))      # all fluid (SDF > 0)
+    s.set_pressure_geometry(np.full(dist.siz, 1.0, order="F"))      # all fluid (SDF > 0)
     s.enable_vof()
-    s.set_vof(np.zeros((n, n, n), order="F"))
+    s.set_vof(np.zeros(dist.siz, order="F"))
     # C = 1 is GAS (the block container's union starts empty)
     s.set_property_model("rho", "linear", "C", [RHO_L, RHO_G - RHO_L])
     s.set_property_model("mu", "linear", "C", [MU_L, mu_g - MU_L])
@@ -128,13 +166,13 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, 
     # physical domain -- derived here from the physical centre and radius, never user input.
     h = L / n
     if single or vof_mom:
-        s.set_vof(sphere_fractions(n, 0.5 * L / h, 0.5 * D / h))
+        s.set_vof(np.asfortranarray(sphere_fractions(n, 0.5 * L / h, 0.5 * D / h)[dist.sl]))
         if vof_mom:
             s.enable_vof_momentum(RHO_G, RHO_L)
     else:
         s.enable_vof_blocks([(0.5 * L / h, 0.5 * L / h, 0.5 * L / h, 0.5 * D / h)])
         s.enable_vof_block_csf()
-    alpha = float(np.mean(s.get_vof()))       # discrete gas fraction (exactly conserved)
+    alpha = float(np.mean(dist.gather(s.get_vof())))  # discrete gas fraction (exactly conserved)
     rho_av = RHO_L + (RHO_G - RHO_L) * alpha
     s.set_property_model("force_x", "linear", "C",
                          [-(RHO_L - rho_av) * G, -(RHO_G - RHO_L) * G])
@@ -143,9 +181,9 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, 
     return s, h, alpha
 
 
-def sample(s, h, x_prev, t_prev, t):
-    C = s.get_vof()
-    u, v, w = s.get_u(), s.get_v(), s.get_w()
+def sample(s, h, x_prev, t_prev, t, dist):
+    C = dist.gather(s.get_vof())
+    u, v, w = dist.gather(s.get_u()), dist.gather(s.get_v()), dist.gather(s.get_w())
     # staggered: u[i] sits at x_{i+1/2}; the cell-centre value averages the two faces (periodic)
     uc = 0.5 * (u + np.roll(u, 1, axis=0))
     rho = RHO_L + (RHO_G - RHO_L) * C
@@ -162,6 +200,8 @@ def sample(s, h, x_prev, t_prev, t):
     x = x_prev + float((C.sum(axis=(1, 2)) * dxi).sum() / vg)
     u_cent = (x - x_prev) / (t - t_prev) if t > t_prev else float("nan")
     blocks = s.diagnostics.vof_block_stats()
+    if dist.comm is not None:  # each block's stats live on its master rank
+        blocks = [b for lst in dist.comm.allgather(blocks) for b in lst]
     return {
         "u_abs": ub_abs, "u_mix": u_mix, "u_liq": u_liq, "u_zm": u_zm,
         "u_drift": ub_abs - u_mix, "u_slip": ub_abs - u_liq, "u_rel_zm": ub_abs - u_zm,
@@ -174,25 +214,34 @@ def main():
     a = parse()
     space = check_backend(a.backend)
     n = round(L_OVER_D * a.d_over_h)
-    os.makedirs(a.out, exist_ok=True)
+    comm = None
+    if a.mpi:
+        from mpi4py import MPI
+
+        comm = MPI.COMM_WORLD if MPI.COMM_WORLD.Get_size() > 1 else None
+    dist = Dist(n, comm)
+    root = comm is None or comm.Get_rank() == 0
+    nranks = 1 if comm is None else comm.Get_size()
+    if root:
+        os.makedirs(a.out, exist_ok=True)
     t0 = time.perf_counter()
     s, h, alpha = build(n, a.mu_ratio * MU_L, a.face_mu, a.viscous_stress, a.single_vof,
-                        a.vof_momentum)
+                        a.vof_momentum, dist)
     t_setup = time.perf_counter() - t0
     re_of = lambda U: RHO_L * U * D / MU_L
     cols = ["t", "t_star", "step", "dt", "binding", "u_abs", "u_mix", "u_liq", "u_zm", "u_drift",
             "u_slip", "u_rel_zm", "u_cent", "Re_drift", "Re_abs", "Re_slip", "Re_rel_zm",
             "v_mean", "w_mean", "gas_vol", "vol_err", "block_vol", "x_cent"]
-    f = open(os.path.join(a.out, "case_a.csv"), "w")  # noqa: SIM115 (closed after the loop)
+    f = open(os.path.join(a.out, "case_a.csv") if root else os.devnull, "w")  # noqa: SIM115
     f.write(f"# case A d/h={a.d_over_h} n={n} L={L_OVER_D * D} d={D} rho_l={RHO_L} "
             f"rho_g={RHO_G} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
             f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e} dt_safety={a.dt_safety} "
             f"face_mu={a.face_mu} viscous_stress={a.viscous_stress} single_vof={a.single_vof} "
-            f"vof_momentum={a.vof_momentum}\n")
+            f"vof_momentum={a.vof_momentum}" + (f" np={nranks}" if comm is not None else "") + "\n")
     f.write(",".join(cols) + "\n")
 
     t, step, binding, dt = 0.0, 0, "-", 0.0
-    r0 = sample(s, h, 0.5 * L_OVER_D * D, 0.0, 0.0)
+    r0 = sample(s, h, 0.5 * L_OVER_D * D, 0.0, 0.0, dist)
     vol0 = r0["gas_vol"]
     x_prev, t_prev = r0["x_cent"], 0.0
     t_end = a.t_end * T_REF
@@ -212,10 +261,10 @@ def main():
         done = t >= t_end * (1 - 1e-12)
         if a.max_steps is not None and step >= a.max_steps:
             done, stop = True, "max_steps"
-        if time.perf_counter() - t0 > a.wall:
+        if dist.any(time.perf_counter() - t0 > a.wall):
             done, stop = True, "wall"
         if t >= next_out or done:
-            r = sample(s, h, x_prev, t_prev, t)
+            r = sample(s, h, x_prev, t_prev, t, dist)
             x_prev, t_prev = r["x_cent"], t
             r.update(t=t, t_star=t / T_REF, step=step, dt=dt, binding=binding,
                      Re_drift=re_of(r["u_drift"]), Re_abs=re_of(r["u_abs"]),
@@ -231,6 +280,11 @@ def main():
             break
     wall_loop = time.perf_counter() - t_loop
     f.close()
+    if a.dump:
+        flds = {k: dist.gather(g()) for k, g in
+                (("u", s.get_u), ("v", s.get_v), ("w", s.get_w), ("p", s.get_p), ("C", s.get_vof))}
+        if root:
+            np.savez(a.dump, step=step, t=t, **flds)
 
     # Steady state. Re(t) carries a component periodic in the bubble's position in the box (period
     # L/U, measured at d/h 10), so the averaging windows are whole box crossings: A = the last two
@@ -261,10 +315,11 @@ def main():
             f"vol_err={last['vol_err']:.2e} <u>={last['u_mix']:.1e} <v>={last['v_mean']:.1e} "
             f"<w>={last['w_mean']:.1e} u_cent/u_abs={last['u_cent'] / last['u_abs']:.4f} "
             f"setup={t_setup:.1f}s ms/step={1e3 * wall_loop / max(step, 1):.2f} "
-            f"maxrss={rss:.0f}MB")
-    with open(os.path.join(a.out, "summary.txt"), "w") as g:
-        g.write(line + "\n")
-    print(line)
+            f"maxrss={rss:.0f}MB" + (f" np={nranks}" if comm is not None else ""))
+    if root:
+        with open(os.path.join(a.out, "summary.txt"), "w") as g:
+            g.write(line + "\n")
+        print(line)
 
 
 if __name__ == "__main__":
