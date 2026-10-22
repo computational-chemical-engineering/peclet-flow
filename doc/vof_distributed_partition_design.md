@@ -12,6 +12,11 @@ the rule it implements).
 
 ## 0. Outcome
 
+> **Amended 2026-10-22 (§12, §13).** Genoa WO-7 (job 28464076) falsified two predictions of this
+> section: the B1 per-call cost (0.25–0.40 ms, designed ≤ 0.08) and the 12×2 gain (+6.8 ms, not
+> −3…−6). §13 attributes both, corrects one claim of §4(a), and gives the follow-up work orders.
+> The tables below are kept as the pre-registered predictions; §13.8 supersedes their numbers.
+
 1. **Two causes are removed by this design. Both are general fixes, not tuned to the case.**
    - **P1, partition.** The default aligned ORB gives 24 ranks a 2.000 cell imbalance on 128×96×64,
      because it always bisects the longest axis and then snaps the cut to 16 cells. The default
@@ -176,7 +181,8 @@ Results [sim]:
 - **A Cartesian process grid** (px·py·pz = P, MPI_Dims_create style). It is not an ORB tree, so
   it breaks telescoping (sibling merge = tree truncation), the weighted path and `refined()`. It
   also fails for prime counts. The balance-aware ORB reproduces a Cartesian factorization whenever
-  one fits the quanta.
+  one fits the quanta. **[False — corrected in §13.3(e): at np 12 and 24 on 128×96×64 it gives
+  mixed shapes, a slab plus two columns per 3-group.]**
 - **Changing core's default rule.** dem/voro/amr/pnm partitions would move for no measured
   benefit.
 - **Deriving the alignment cap from the MG depth** (DECOMP §4 item 2). It is not needed for the
@@ -633,3 +639,386 @@ list is the safeguard: any hash change outside it is a bug, not a re-baseline.
    partition** (results would depend on the scheduler's placement).
 6. **8×3-type layouts (threads per rank not dividing the L3 domain) are unsupported for speed.** The
    fastest measured hybrid is one rank per L3 domain.
+
+## 12. Landing record
+
+- WO-0…WO-6 landed: flow `dfd62c4` (B1 `91964b7`, auto policy `bd7b6ce` plus review fixes,
+  warning `0e6d22b`, docs `25a4473`), core `v1.7.0` (`SplitAxis::Balanced`), umbrella `3bdb0cd`
+  (register: "The default level-0 decomposition is the AUTO policy").
+- The local quiet run of 2026-10-20 (`dist_cpu/part/perf/final/summary.txt`) already showed both
+  defects that genoa then confirmed:
+  - 12×2: 49.2 (base) → 47.4 (WO-1) → **51.5 (WO-3)**, so WO-3 gate (vi) failed;
+  - WO-1 (iv), the per-call bottom solve at T = 1: 0.203 ms against a gate of ≤ 0.10.
+- WO-6 (E1, 5 MG levels): no gain locally or on genoa. 4 levels stay (closes §10 Q3).
+
+## 13. Genoa WO-7 outcome (2026-10-22)
+
+**Sources.**
+- S-PART: job 28464076 (tcn1000, cores 0–23, N = 200, median of 2 new reps / 1 old rep),
+  `dist_cpu/spart/results/part-353baa8/`.
+- Trace attribution (`trace_attr.py`, `kper.py`, 45 timed steps).
+- The local 12×2 pair, in `dist_cpu/part2/` (evidence, scripts and copies of the genoa
+  attribution): flow `0ec6a9b` module (= the auto policy) on the 5965WX, cores 0–23 pinned,
+  3 ranks per 6-core CCD, machine idle (load 0.12 at start).
+
+### 13.1 Verdict against §8
+
+| criterion | predicted | measured | verdict |
+|---|---|---|---|
+| 24×1 ≤ 85 | 79 ± 4 | 85.53 | rejected (by 0.5) |
+| 6×4 ≤ 79.8 | 78.8 | 81.69 | rejected |
+| 8×3 ≤ 99.4 | 98.2 | 100.06 | rejected (by 0.7) |
+| 1×24 ≤ 69.3 | 68.2 | 67.96 | holds |
+| per-call `mg_bottom_direct` ≤ 0.15 ms | ≤ 0.08 | 0.245 (m1×24) … 0.395 (24×1) | **rejected** (§13.2) |
+| 12×2 | 76–82 | 88.96 (old 82.13) | **rejected** (§13.3) |
+| 3×8 ≤ min(6×4, 12×2, 24×1) | — | 78.47 | **confirmed**: one rank per L3 domain |
+| §4(e): e1 + e3 + e4 ≥ 80 % of 6×4 − m1×24 | — | ≈ 120 %, offset by e5 | holds (§13.5) |
+
+How the measured changes (old → new) split:
+- 24×1, −16.3: B1 −3.0 (`mg_bottom_direct` 6.98 → 3.95 ms/step) and P1 ≈ −13.3 (predicted
+  −15 ± 4: holds).
+- 3×8, −5.2: P1 (predicted −3…−6: holds); B1 ≈ 0.
+- 6×4, +0.6: the partition is unchanged, and B1 ≈ 0 at T = 4 (0.262 ms per solve; before B1 it
+  was 0.28 at T = 3).
+- 12×2, +6.8: §13.3.
+- E1 (5 levels) is slower at 1×24 (68.99 vs 67.96) and at 24×1 (86.10 vs 85.53).
+
+P1's partition model held except at np 12. B1 held only at T = 1, and there at about half its
+designed size.
+
+### 13.2 B1: why the bottom solve still costs 0.25–0.40 ms
+
+**Measured.**
+- Per solve (10 per step):
+  - 0.395 ms at 24×1 (T = 1);
+  - 0.262 at 6×4;
+  - 0.251 at 3×8;
+  - 0.245 at m1×24, where B1 runs it on one thread at any T;
+  - locally, 0.203 at 24×1.
+- Factor (once per step): 2.63 ms at T = 1, 1.29 at T = 4, 1.18–1.19 at T = 8 and 24.
+- So the bottom still costs 3.65 ms/step at m1×24 and 6.6 at 24×1.
+
+**Why the model was wrong.** §5.3 assumed Q is L2-resident and the M application is bound by FMA
+latency (5–8 µs). Two errors fit the numbers [model]:
+- **Q is not L2-resident.**
+  - Q is 12 planes × 128² FP32 = 786 KB. One M reads it about twice: 23 plane mat-vecs × 64 KB
+    ≈ 1.5 MB.
+  - The L2 is 512 KB on Zen 3 and 1 MB on Zen 4, where it is shared with the V-cycle's data. Q
+    therefore streams from L3, at ≈ 30–60 µs per M.
+  - With ≈ 4 M per solve (≤ 3 FCG iterations + 1), a solve costs 0.15–0.25 ms. With eight ranks
+    per CCD each streaming its own Q (24×1), it costs 0.40.
+  - That 24×1 figure is the one number that favours this hypothesis.
+- **The lane loop is not vectorized.** Scalar mul + add under `-ffp-contract=off` is 2 × 377 k
+  flops per M; at 2–4 per cycle that is ≈ 50–100 µs per M.
+
+Which of the two holds (or both) is a fact, settled by WO-M. Nothing is redesigned before that.
+B1 stays: it is bitwise and saves 3.0 ms at T = 1.
+
+### 13.3 Q1: why 12×2 regressed
+
+**(a) The partitions** [sim = C++, `check_decomposition.py`]. Both split 128×96×64 into four
+64×48×64 quarters (x halves × y halves), with three ranks per quarter:
+
+| | blocks per quarter | max/mean | axes cut |
+|---|---|---|---|
+| legacy | one 16×48×64, two 48×48×32 | 1.125 | x, y **and z** |
+| auto (C5) | one 64×16×64 "slab", two 32×32×64 "columns" | 1.000 | x, y; **z is whole on every rank** |
+
+`predict_hierarchy` gives the same hierarchy for both: 4 levels, no telescoping, bottom 16×12×8 on
+all 12 ranks. **Telescoping and MG depth are ruled out.**
+
+**(b) The measurement.** Local, one build; only `set_decomposition` differs.
+
+| | auto (`levels=0`) | legacy (`levels=1`) |
+|---|---|---|
+| ms/step, N = 200, two reps | 52.42, 52.27 | 47.93, 47.69 |
+| traced (45 steps) | 51.85 | 48.45 |
+| kernel ms/rank, mean / max | 35.4 / 39.7 | 36.9 / 39.9 |
+| MPI ms/rank, mean | 4.29 | 4.38 |
+| untraced gap ms/rank, mean [min, max] | 10.9 [7.2, 12.5] | 5.8 [4.7, 7.9] |
+| gap just after a stencil exchange's unpack, ms/step | slabs 1.0; **columns 6.2–6.8** | 48×48×32: 0.95–1.04; 16×48×64: 0.09 |
+
+- The loss is +9.4 % here and +8.3 % on genoa, whose old build also lacks B1: the same relative
+  loss on two machines with different CCD sizes.
+- Balance worked: the critical rank's kernel time is equal, and the mean dropped 1.5 ms.
+- The loss is untraced time on the 8 column ranks:
+  - 54 µs after each of the 80 smoother colour passes per step;
+  - 93 µs after each of the 10 residuals;
+  - 98 µs after each of the 10 operator applies;
+  - total 6.2 ms/step.
+
+**(c) Mechanism** [code + meas].
+1. K3 (`doc/vof_distributed_host_comm_design.md` §5.2) makes an axis a level **wrap axis** iff the
+   level is one block along it (`mac_cutcell_mg.hpp:1107`). Legacy at np 12 cuts z, so no level
+   wraps. Auto never cuts z, so z wraps on every rank.
+2. On a wrap axis the overlapped box passes span the whole block. The boundary *shell*, i.e. the
+   cells the post-exchange launch visits (`ccBoxShellRuns`, `mac_cutcell.hpp:370`), therefore loses
+   its two z-slabs.
+3. For the columns that drops the shell under `kHostSerialCellCutoff = 8192` visited cells
+   (`mac_cutcell.hpp:284`). The shell then runs **serially, on one of the rank's two threads**,
+   outside any Kokkos launch, which is why the trace does not see it:
+
+| level-0 block | wrap | shell cells | x-runs per pass | launch |
+|---|---|---|---|---|
+| auto column 32×32×64 | z | 7936 | 3840 | **serial** |
+| auto slab 64×16×64 | z | 9984 | 1792 | parallel |
+| legacy 48×48×32 | — | 10248 | 2760 | parallel |
+| legacy 16×48×64 | — | 9224 | 5704 | parallel |
+
+4. A serial column-shell pass costs 54 µs. The cost comes from the 3840 single-cell x-runs: the
+   shell's x faces make one `run(...)` call per row and side. A run costs ≈ 11 ns, against
+   ≈ 1.5 ns per cell of a whole row (interior pass: 46 µs for 57600 cells on 2 threads).
+
+Why other configurations escape:
+- Legacy cuts z, so every block's shell keeps its z-slabs and stays above 8192 cells.
+- np 3 and 6 have shells of ≥ 12032 cells (T = 8, 4).
+- At np 24, T = 1, so serial and parallel cost the same.
+
+**(d) What §0/§4(a) missed.** Per-rank cost is not a function of cells. Here it has a
+*discontinuity*: the host launch policy (8192 visited cells, the same at every T), selected by
+block shape and the level's wrap set. The other candidates do not explain the loss:
+- not halo surface: the auto slab has 10240 remote face cells against legacy's 9216, worth
+  ≈ +0.5 ms;
+- not neighbour count;
+- not VoF: the bubbles are the same, and per-rank VoF time is 4.1–6.2 ms (auto) against 4.2–6.4
+  (legacy);
+- not MG depth.
+
+**(e) Correction to §4(a)** [sim]. The balance-aware ORB does **not** reproduce a Cartesian
+factorization at np 12 and 24.
+- The factor 3 is split at an m = 3 node whose y extent is already halved (48 cells = 3 quanta).
+  The 1 : 2 cut makes a 16-thick slab, and the 2-rank remainder is then cut across x.
+- Exact uniform partitions exist: 32×32×64 or 64×32×32 at np 12, and 32³ at np 24.
+- A separate, unattributed observation: at 24×1, the slab ranks carry +4.1 ms of kernel time over
+  the 32³ ranks at equal cells (genoa trace). About 0.9 ms of that is VoF placement; the rest is
+  spread at +4–15 % over the volume kernels and the halo gather. With T = 1 this is not the cutoff.
+  It is Q-U (§13.9).
+
+**(f) Confirming measurement.** Done: (b) is the decisive pair. The cutoff counts cells, not
+seconds, so the mechanism does not depend on the machine, and no billed run is needed to confirm
+it. A genoa 12×2 trace pair is optional at the next billed milestone (WO-S).
+
+### 13.4 Q2: the policy fix
+
+**Decision: fix the discontinuity, not the partition rule. Add a narrow partition guard only if
+the fixed code still loses at 12×2.**
+
+1. **WO-A (G-BIT): the shell's serial test counts its x-runs.**
+   - **Change.** In `ccBoxShellRuns`, the shell branch (non-empty skip box) calls
+     `hostRunSerial(cells + kShellRunCells * runs)` instead of `hostRunSerial(cells)`, where:
+     - `runs = nC * ((nxLo > 0) + (nxHi > 0))`;
+     - `kShellRunCells = 8` is a `constexpr` next to `kHostSerialCellCutoff`, commented "a
+       one-cell x-run costs about 8 streamed cells (5965WX: serial pass 54 µs = 7936 cells × 1.5 ns
+       + 3840 runs × 11 ns)".
+   - **Unchanged:** the interior branch, `kHostSerialCellCutoff`, and every other `hostRunSerial`
+     caller. The serial/parallel choice never changes a bit, by `ccBoxShellRuns`' contract (cells
+     are independent within a launch).
+   - **Which shells change** (cells + 8·runs):
+
+     | shell | before | after | path |
+     |---|---|---|---|
+     | auto column, level 0 | 7936 | 38656 | → parallel |
+     | auto column, level 1 | 1920 | 9088 | → parallel |
+     | 6×4, level 1 | 2944 | 10112 | → parallel |
+     | auto slab, level 1 | 2432 | 5504 | stays serial |
+     | levels ≥ 2 | — | ≤ 1984 | stay serial |
+
+     Slab and legacy level-0 shells are already parallel and stay so.
+   - **Expected** [model]:
+     - 12×2 auto, local: −3 ms (column shells 6.2 ms serial → ≈ 3.1 at T = 2, plus ≈ 100 forks
+       × 0.8 µs);
+     - 6×4: −0.3…−0.6;
+     - every other layout within ±0.3.
+2. **WO-D (conditional): a partition guard.** Every auto candidate (C5, C4, A2) must satisfy,
+   besides `splitAxes(X) ⊆ splitAxes(A)`:
+
+   `splitAxes(X) == splitAxes(A)  OR  4·maxCells(A)·numBlocks ≥ 5·cells(G)`
+
+   The second clause says legacy max/mean ≥ 5/4; the integer form is rank-consistent.
+   - **Why.** The wrap set (the axes no rank cuts) selects the K3/H-7 code paths, and the cell count
+     cannot see what they cost: +9.4 % at a legacy max/mean of 1.125 (§13.3(c)). A candidate that
+     changes the wrap set must therefore buy a ≥ 20 % cut in the critical rank's cells, twice the
+     worst code-path penalty measured.
+   - **Census replica** (`dist_cpu/part2/guard.py`; np ∈ {2…10, 12, 15, 16, 20, 24, 32, 48, 96}
+     over the §7 grids plus the two channel grids). It reverts exactly four configurations to
+     legacy (legacy max/mean 1.03–1.15):
+     - 128×96×64 at np 12;
+     - 384×288×192 at np 9;
+     - 100×50×50 at np 5 and np 10.
+
+     It keeps 48³ at np 3/5/7 (legacy max/mean ≥ 1.25) and 128×96×64 at np 3/24/32/96.
+   - **Landing rule (pre-registered, WO-C).** After WO-A, compute
+     R = median(12×2 auto) / median(12×2 legacy) locally. Land WO-D iff R > 1.01. If WO-C cannot
+     run within 48 h, land WO-D (the default).
+
+**Rejected:**
+- **"Coarse-first only when legacy imbalance ≥ X."** np 3 and np 12 have the same legacy
+  max/mean, 1.125. One gains 6.3 % and the other loses 8.3 %.
+- **An MG-depth or telescope criterion.** The hierarchies are identical and nothing telescopes.
+- **A smooth cost term** (surface, neighbour count, rows per cell). The loss is a step in the
+  launch policy. A term fitted to it is tuning to one case, and a rows term even favours auto at
+  np 12, because legacy's 16×48×64 block has the most rows.
+- **A thread-count-aware partition.** Partitions stay pure functions of global integers (the
+  register precedent of 2026-10-18).
+- **A thread-count-aware `hostRunSerial`.** It is legal, since it is bitwise, but it needs
+  per-machine fork-join constants (μ2: 0.77 / 1.21 / 4.36 µs at T = 4 / 8 / 24 on genoa), which is
+  tuning. The x-run term removes the measured defect with one constant that describes the code,
+  not the machine.
+- **Lowering `kHostSerialCellCutoff` globally.** H-7 measured its benefit at the coarse levels.
+  There is no evidence for touching the interior launches.
+- **"Odd factor last" / uniform shapes (§13.3(e)).** The benefit is unmeasured, and it would move
+  the np 12/24/96 partitions a second time in one campaign. This is Q-U.
+
+### 13.5 Q3: the remaining distributed overhead
+
+Genoa traces, 45 timed steps. The exact coverage decomposition is the rank mean in ms/step
+(`trace_attr` (a)); the attribution by cause below uses the `kper` categories.
+
+| | 6×4 − m1×24 | 24×1 − m1×24 |
+|---|---|---|
+| step | +15.2 (82.65 vs 67.44) | +19.3 (86.76) |
+| kernels | +1.45 | −3.9 |
+| MPI | +4.29 | +8.0 |
+| deep copies | +0.24 | +3.3 (halo receive staging) |
+| untraced gaps | +9.05 | +11.8 |
+
+By cause:
+- **Halo exchange, the dominant term.**
+  - Gather + unpack kernels: +5.7 (6×4), +7.0 (24×1).
+  - Post-exchange gaps (shared-memory completion, `MPI_Iprobe` polling, receive copies): ≈ +9 and
+    ≈ +11.5.
+  - Together that is ≈ 57 µs per exchange at 257 exchanges per step (6×4).
+  - **Caveat:** these gaps mix waiting with untraced serial host work, and §13.3 found 6.2 ms of
+    such work on one layout. Until WO-T, the split overstates the waiting.
+- **Reductions.** 78 `MPI_Allreduce` calls per step add +2.2 (6×4) and +4.8 mean (24×1). Latency
+  is only 0.23 / 0.29 ms of that (μ1: 3.0 / 3.7 µs); the rest is skew. At 24×1 the skew is the VoF
+  imbalance: 9.2–10.6 ms of VoF work on ranks 0–15 against 2.6–3.4 on ranks 16–23.
+- **VoF block exchange** (4 `Waitall` per step): +1.6 and +2.5.
+- **Pressure-MG kernels:** +2.8 at 6×4.
+- **Bottom:** +0.3 at 6×4; +2.95 at 24×1 (factor 2.63 + solve 3.95 at T = 1).
+- **Thread efficiency (a gain):** VoF −2.7, velocity −1.75, other −2.45 at 6×4. Four-thread
+  teams beat one 24-thread team (μ2: 0.77 vs 4.36 µs per launch, and m1×24 makes 877 launches per
+  step).
+
+**Packages, with expected effect and risk:**
+
+| package | where | expected [model] | risk | recommendation |
+|---|---|---|---|---|
+| WO-A (this note) | 12×2; level-1 shells at 6×4 | −3 (12×2 local), −0.3…−0.6 (6×4) | low, bitwise | now |
+| WO-T (this note) | attribution | 0 | none | now; needed before any comm design |
+| P-CA: CA smoothing with domain BCs | every np > 1 (`caSmooth` is off for the bubble column: `hasBC_`, the y walls) | −1.5…−3 (≈ 80 fewer exchanges per step) | medium: the bitwise ring argument must be re-derived with BC ghosts | new architect brief to the comm-design owner, after WO-T |
+| P-B2: bottom Q traffic | every layout, 1×24 included | −1.5…−3 | medium: storage changes may move bits | after WO-M |
+| P-sync: per-exchange completion cost | every np > 1 | unknown until WO-T | — | re-attribute first |
+| P-VoF: VoF weights (F-C) | 24×1 only (≈ 3 ms on the critical path) | ≤ 3 | high | deferred: the trigger (≥ 3 ms at 3×8/6×4/12×2) is not met; VoF spread is 1.0 at 6×4, 0.5 at 3×8 |
+| P-shell: restructure the x-runs in `ccBoxShellRuns` | every np > 1 that cuts x | −0.5…−2 | low–medium (the H-7 run interface) | only if WO-T shows shell x-runs above 15 % of box-pass time at 3×8/6×4 |
+
+**Is ≈ 1×24 reachable at every layout?** Not with today's halo engine.
+- 3×8 and 6×4 carry +11…+15 ms, ≈ 14 ms of it halo exchange. Even with WO-A, P-CA and P-B2 the
+  model gives ≈ 74–76 ms (+10–13 %).
+- Parity needs the per-exchange cost to fall from ≈ 57 µs to ≈ 15–20 µs. That is P-sync's question.
+- 24×1 also carries the VoF imbalance (≈ 3 ms) and the one-thread bottom (factor 2.6 + solve
+  4.0 ms). Its realistic floor is ≈ 78–80 ms.
+
+**What users are told** (genoa, one NUMA domain = 24 cores = 3 CCDs; this case size):
+1. If MPI is not needed: one rank with 24 threads (68.0 ms).
+2. If the run is distributed: **one rank per CCD with 8 threads** (3×8: 78.5 ms, +15 %).
+   - 6×4 (81.7) is acceptable.
+   - Use 24×1 (85.5) only when the code needs 1 thread per rank.
+   - Avoid 12×2 until WO-A, and WO-D if it lands: 89.0 now, ≈ 82 expected after.
+3. Never use a thread count per rank that does not divide the CCD (8×3: 100.1). `init_mpi` names
+   the offending ranks.
+4. Multi-node: the same rule per node, i.e. 24 ranks × 8 threads on a 2-socket genoa node. The
+   recipe is in `docs/SNELLIUS.md`.
+
+### 13.6 Work orders (dependency order)
+
+Local perf below means: 5965WX, cores 0–23, `pin.sh`, idle (load ≤ 1 at start), N = 200, 3
+interleaved reps, median. The baseline is a flow `dfd62c4` host MPI build.
+
+| WO | content | class | gate | expected |
+|---|---|---|---|---|
+| **WO-T** | Name the host serial runs in the profile. In flow `src/`, in each `hostRunSerial(...)` true branch (`grep -n 'hostRunSerial(' src/`), wrap the serial loop in `if (Kokkos::Tools::profileLibraryLoaded()) Kokkos::Profiling::pushRegion("<launch name>@serial")` … `popRegion()`. Each site uses a string literal, so nothing is allocated when no tool is loaded. Tools (outside flow): `trace_attr.py`/`kper.py` count type-6 regions named `*@serial` as kernel time; confirm that `kp_trace` records push/pop with both timestamps | NONE | (i) G-BIT: `state_hash` 1×24, m1×24, np 2/12 at levels 0 and 1. (ii) Untraced 12×2 within ±1 %. (iii) Traced auto 12×2: the column ranks show `cc_smooth_box@serial` ≈ 4.3 ms/step, and their post-unpack gap is ≤ 1.2 ms | — |
+| **WO-A** | §13.4(1) | G-BIT | (i) G-BIT: `state_hash` 1×24, m1×24, np 2/3/4/8/12/24 at levels 0 and 1; `ctest -LE bench` host and CUDA; no hash changes. (ii) Local: 12×2 auto ≤ 50.0 ms; 12×2 legacy within ±1 %; 6×4 ≤ base + 0.3; 4×6, 24×1, m1×24 and 1×24 within ±1 %. (iii) With WO-T: no `cc_*_box@serial` region above 0.1 ms/step at level 0 on any auto 12×2 rank | 12×2 auto −3; 6×4 −0.3…−0.6 |
+| **WO-C** | On the WO-A build, run 12×2 at levels 0 and 1, with traces. Apply the §13.4(2) landing rule; log R in the campaign log | MEAS | one summary line with R | R ≈ 1.03 [model], so WO-D lands |
+| **WO-D** | §13.4(2) in `CutcellMG::decomposition`, in all three candidate tests. The replica (`part/orb_sim/cf2.py`) gets the same condition. Census ctest `decomposition_policy`: assertion 7 adds the condition and prints the reverted list. Update the flow CLAUDE.md "Decomposition" bullet and the `set_decomposition`/`mpi_block` docstrings | G-BIT per configuration (reverted ones equal `levels=1`; all others equal the `dfd62c4` auto partition) | C++ census == replica: exactly the four reverts of §13.4(2). np 12 `state_hash` == the `levels=1` hash; np 3/24 hashes unchanged. Coupling MPI tests green. Local 12×2 at levels 0 and 1 equal within ±1 % | 12×2 = legacy |
+| **WO-M** | Bottom-solve facts: (1) inner FCG iterations per bottom solve (mean and max over 50 steps); (2) per-M time of `BottomDirect::laneSubstitute` at T = 1, on the case's 12-plane bottom and on a 4-plane bottom (Q = 262 KB, L2-resident on both machines); (3) whether the lane loop is vectorized (packed `vmulps`/`vaddps` in `objdump -d` of the host TU, or `-fopt-info-vec`) | MEAS | one table in the campaign log | decides P-B2 |
+| **WO-G** | Docs: `docs/DECOMPOSITION_AND_MULTIGRID.md` rule 9 with the S-PART numbers (the §13.5 list). flow CLAUDE.md: correct the B1 line ("halves the 1-thread solve; 0.25–0.40 ms per solve on genoa, §13.2") and the decomposition bullet if WO-D lands. `docs/SNELLIUS.md`: the 3×8 recipe, now confirmed | NONE | coordinator review | — |
+| **WO-S** | Genoa confirmation, folded into the next billed milestone (no dedicated job): 12×2 at levels 0 and 1, 6×4, 3×8 and 24×1 on the WO-A(+D) build, plus one 12×2 trace pair | MEAS, billed, user OK | the §13.8 numbers within their bands | — |
+
+**Order and landing.**
+- WO-T and WO-A are independent and bitwise. They land on flow main directly with the G-BIT proof
+  and need no reviewer pass, because nothing numeric moves.
+- WO-C then decides WO-D.
+- WO-D changes the default partition of four census configurations, so it gets a reviewer pass and
+  a register entry (§13.10). It needs no core change, so there is no core tag.
+
+### 13.7 Verification gates
+
+- **G-BIT** (§7) for WO-T and WO-A:
+  - `state_hash` from `ckpt_t43`, 50 steps, rtol 1e-8 and 1e-10;
+  - at 1×24, m1×24 and np 2, 3, 4, 8, 12, 24, each with both `set_decomposition(0)` and `(1)`;
+  - host battery `ctest -LE bench` (248) and CUDA unchanged.
+- **WO-D:** G-BIT per configuration against the stated reference (reverted ones against
+  `levels=1`, all others against the `dfd62c4` auto partition), and C++ census == replica. G-NUM-H
+  is not needed: no partition appears outside those two known sets.
+- **Perf:** the local bands in §13.6, noise ±1 %. A WO-A result outside its band is reported with
+  the WO-T trace, not tuned: `kShellRunCells` is never adjusted to pass the gate.
+- **Limiting cases:**
+  - np 1 and m1×24 are untouched (every axis wraps: one launch, no shell);
+  - T = 1 layouts keep the same times within noise (serial = parallel on one thread).
+
+### 13.8 Expected genoa ms/step [model] (supersedes §0's table)
+
+| layout | S-PART new | after WO-A | after WO-A + WO-D (if it lands) |
+|---|---|---|---|
+| 1×24 | 67.96 | 68.0 | 68.0 |
+| m1×24 | 66.87 | 66.9 | 66.9 |
+| 3×8 | 78.47 | 78.5 ± 0.5 | 78.5 |
+| 6×4 | 81.69 | 81.2 ± 0.5 | 81.2 |
+| 12×2 | 88.96 | 84 ± 1.5 | ≈ 81.6 (legacy 82.13, with B1 at T = 2) |
+| 24×1 | 85.53 | 85.5 ± 0.5 | 85.5 |
+| 8×3 | 100.06 | 100 | 100 |
+
+Closing the rest of the gap to 1×24 is the work of P-CA, P-B2 and P-sync (§13.5), not of the
+partition.
+
+### 13.9 Open questions (each with a default)
+
+| # | question | needs | default |
+|---|---|---|---|
+| Q-A | Is `kShellRunCells` = 8 right? | fact (WO-T per-run cost) | 8. Change it only through a new measured derivation, never to pass a gate |
+| Q-D | Land the guard WO-D? | fact (WO-C) | land iff R > 1.01; land it if WO-C cannot run within 48 h |
+| Q-T | The guard threshold 5/4 | preference (how much unpriced code-path risk to accept) | 5/4 (twice the measured 9 % penalty) |
+| Q-U | Uniform-shape partitions ("odd factor last") at np 12/24/96 | fact (an A/B of explicit partitions, which needs a test-only hook for an explicit decomposition) + preference (a second partition change) | not now. Revisit with P-CA/P-sync, once per-shape costs can be attributed (WO-T) |
+| Q-B | Bottom redesign (P-B2) | fact (WO-M) | not before WO-M |
+| Q-C | CA smoothing with domain BCs (P-CA) | preference (scope) + architect | brief after WO-T; expected −1.5…−3 ms at every np > 1 |
+| Q-V | VoF weights (F-C) | fact | deferred; the §10 Q5 trigger is unchanged and not met |
+| Q-S | Confirm WO-A/WO-D on genoa? | preference (billed) | fold into the next milestone. The local pair is decisive because the cutoff counts cells |
+| Q-P | The "≈ 1×24 everywhere" target | preference | target 1×24 + 10 % for one-rank-per-CCD layouts; 24×1 is not a target layout |
+
+Status of the §10 questions:
+- Q2: answered. 3×8 is the fastest distributed layout, +15 % over 1×24.
+- Q3: closed; 4 levels stay.
+- Q4: superseded by Q-C and Q-P.
+- Q5: not triggered.
+- Q10: answered by §13.3. The cost was the cutoff, not the neighbour count; what remains is Q-U.
+
+### 13.10 Register entries (drafts)
+
+1. **Host box-shell launches count their x-runs in the serial test.** `ccBoxShellRuns` runs a shell
+   serially only if cells + 8·runs < 8192.
+   - Rejected: a thread-count-aware cutoff (it needs per-machine constants); lowering the global
+     cutoff (no evidence); no change (12×2 +9.4 %).
+   - Evidence: §13.3, `dist_cpu/part2/`.
+2. *(Only if WO-D lands.)* **The auto partition keeps legacy's split-axis set unless legacy
+   max/mean ≥ 5/4.**
+   - Supersedes in part "The default level-0 decomposition is the AUTO policy".
+   - Rejected: an imbalance threshold alone (np 3 vs np 12); a depth or telescope criterion (the
+     hierarchies are identical); smooth cost terms (the loss is a step in the launch policy);
+     thread-aware partitions.
+3. **B1's cost premise is falsified; B1 is kept.**
+   - Measured 0.25–0.40 ms per host bottom solve on genoa, against ≤ 0.08 designed.
+   - B1 gains only at T = 1 (−3.0 ms at 24×1).
+   - No bottom redesign before WO-M.
+4. **"One rank per L3 domain" is confirmed on genoa.** 3×8 (78.5 ms) is the fastest distributed
+   layout. On a single NUMA domain, one rank (68.0 ms) is still faster.
