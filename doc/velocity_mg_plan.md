@@ -165,12 +165,12 @@ paths are byte-identical, 72/72 green). What shipped:
 
 ## IBM-path coarse operator — CONSOLIDATED to the STAIRCASE (opt-in; RB-GS stays the DEFAULT)
 
-The IBM velocity-MG (`set_velocity_multigrid(on, levels, vcycles)` with `set_ibm_solid`) uses the **staircase**
+The IBM velocity-MG (`set_velocity_multigrid(on, levels, vcycles)` with `set_solid`) uses the **staircase**
 coarse operator — the *only* IBM coarse operator now (the geometry-blind const-coeff and the area-fraction
 variants were built, measured, and **removed** after the staircase dominated both). Off by default — plain
 RB-GS remains the default IBM velocity solve; 72/72 ctests green (default path byte-identical).
 
-**The staircase operator** (`setVelocityStaircaseCoarse`, `mg_build_velocity_op_staircase_k`):
+**The staircase operator** (`VelocityMG::setStaircase` / `setStaircaseBc`, `mg_build_velocity_op_staircase_k`):
 - **Fine level** = the sharp row-based IBM stencil `As_[c]` (so the residual + smoother use the TRUE operator
   and the fixed point is the exact sharp solution). Its solid cells are pinned to 0 in the smoother, and its
   **IBM-cell residuals are filtered before restriction** (the clean-fluid exclude mask `ibm_clean_fluid_mask_k`
