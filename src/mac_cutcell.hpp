@@ -283,6 +283,10 @@ inline void buildOpennessHighFace(CCField oa, CCConst sdf, C3 ext, int g, int a,
 // size) ~0.2%, i.e. below run-to-run noise. A LARGER cutoff back-fires (131072 serializes levels
 // with real work: 64^3 projection 16.6 -> 20.6 ms/step), so keep it small.
 inline constexpr long kHostSerialCellCutoff = 8192L;
+// A one-cell x-run costs about 8 streamed cells (5965WX: serial pass 54 us = 7936 cells x 1.5 ns
+// + 3840 runs x 11 ns); ccBoxShellRuns' shell branch adds this per x-run to its serial test
+// (doc/vof_distributed_partition_design.md §13.4(1), WO-A).
+inline constexpr long kShellRunCells = 8L;
 // True when a host launch of `cells` cells should run sequentially instead (always false on
 // device).
 inline bool hostRunSerial(long cells) {
@@ -394,7 +398,9 @@ inline void ccForRows3(const char* name, C3 lo, C3 hi, F f) {
 // box is one run [rlo.x, rhi.x), with no skip test. Otherwise only the shell is visited: the two
 // z-slabs (every row), then the two y-slabs inside them, then the two x-runs of the remaining rows
 // -- the same cells as the per-cell skip test over every row of the box. One launch either way,
-// serial below kHostSerialCellCutoff cells VISITED. A body that ccFor3's contract admits (cells
+// serial below kHostSerialCellCutoff cells VISITED, the shell counting each of its x-runs as
+// kShellRunCells more (WO-A: 3840 one-cell runs made a 7936-cell shell cost a parallel launch's
+// worth, serially). A body that ccFor3's contract admits (cells
 // independent within the launch: elementwise, or one colour of a red-black pass) gives the same
 // bits in any visiting order. Host backends only; on a device backend this is a no-op (the callers
 // keep their MDRange device branch).
@@ -429,6 +435,7 @@ inline void ccBoxShellRuns(const char* name, C3 rlo, C3 rhi, C3 slo, C3 shi, Run
     const long nC = (nxLo + nxHi > 0) ? (long)nzS * nyS : 0;  // rows with two x-runs
     const long tasks = nA + nB + nC;
     const long cells = (nA + nB) * nx + nC * (nxLo + nxHi);
+    const long runs = nC * ((nxLo > 0) + (nxHi > 0));  // the shell's x-runs (WO-A)
     if (tasks == 0)
       return;
     auto task = [=](long t) {
@@ -450,7 +457,7 @@ inline void ccBoxShellRuns(const char* name, C3 rlo, C3 rhi, C3 slo, C3 shi, Run
       if (nxHi > 0)
         run(ly, lz, sh.x, rhi.x);
     };
-    if (hostRunSerial(cells)) {
+    if (hostRunSerial(cells + kShellRunCells * runs)) {
       const HostSerialRegion serialRegion(name, "@serial");  // WO-T
       for (long t = 0; t < tasks; ++t)
         task(t);
