@@ -1448,7 +1448,11 @@ void Solver<Grid>::disableVofBlocks() {
 
 template <class Grid>
 void Solver<Grid>::advectVofBlocks(double dtPhysArg, bool requireSolenoidal) {
-  const double dt = dtPhysArg * u_.timeToInt();
+  advectVofBlocksInternal(dtPhysArg * u_.timeToInt(), requireSolenoidal);
+}
+
+template <class Grid>
+void Solver<Grid>::advectVofBlocksInternal(double dt, bool requireSolenoidal) {
   if (!vofBlocks_)
     throw std::runtime_error("advect_vof_blocks: call enable_vof_blocks first");
   const double div = requireSolenoidal ? maxOpenDivergenceInternal() : 0.0;  // index-unit gate
@@ -2206,7 +2210,7 @@ void Solver<Grid>::advectVof() {
   // exactly this slot and for exactly the same reason (the face field has just been projected).
   // `vofBlocks_` is null unless `enable_vof_blocks` ran, so every other path is unchanged.
   if (vofBlocks_) {
-    advectVofBlocks(dt_, /*requireSolenoidal=*/false);
+    advectVofBlocksInternal(dt_, /*requireSolenoidal=*/false);  // dt_ is internal
     return;
   }
   requireVofGeometry("enable_vof");

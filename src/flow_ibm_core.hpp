@@ -176,6 +176,10 @@ void Solver<Grid>::refreshUnitDerived() {
   for (int a = 0; a < 3; ++a)
     f_[a] = fPhys_[a] * u_.forceToInt(a);
   sigmaCsf_ = sigmaPhys_ * u_.sigmaToInt();
+  // The block container keeps its own copy of the internal sigma (enable_vof_block_csf): it must
+  // follow a scale that moves after it, e.g. tRef pinned by the first set_dt (sigma' ~ tRef^2).
+  if (vofBlocks_ && vofBlocks_->csfEnabled)
+    vofBlocks_->sigma = sigmaCsf_;
   slipLambda_ = slipPhys_ * u_.lenToInt();
   for (auto& sc : scalars_)
     sc.D = sc.Dphys * u_.diffToInt();  // the scalar diffusivity follows tRef like mu does

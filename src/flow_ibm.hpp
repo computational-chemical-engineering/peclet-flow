@@ -3264,6 +3264,10 @@ class Solver {
   // ~1e-7 without the exact level-0 apply, which would refuse every coupled step.)
   /// `dt` is in the caller's time unit.
   void advectVofBlocks(double dtPhysArg, bool requireSolenoidal = true);
+  /// The same with `dt` already in INTERNAL time (`step()` passes its `dt_`). Under a physical
+  /// domain `step()` used to hand `dt_` to the physical-unit entry, which converted it a second
+  /// time (dt_int / tRef): the first step threw the Weymouth-Yue cap. Cell units: tRef = 1.
+  void advectVofBlocksInternal(double dtInt, bool requireSolenoidal);
 
 
   // Per-bubble Lagrangian census. Only this rank's MASTER blocks carry numbers (volume, centroid,
