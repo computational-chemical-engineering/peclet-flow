@@ -400,6 +400,7 @@ inline void ccWrapForPeeled(const char* name, C3 e, C3 n, int g, const Cell& cel
     ccWrapRowPeeled(g + (int)(t % nyi), g + (int)(t / nyi), e, n, g, g, 1, cell);
   };
   if (hostRunSerial(rows * (e.x - 2 * g))) {
+    const HostSerialRegion serialRegion(name, "@serial");  // WO-T
     for (long t = 0; t < rows; ++t)
       row(t);
     return;
@@ -425,6 +426,7 @@ inline void cutcellSmoothColorFaceWrap(CCField phi, CCConst b, FPC AC, FPC AFX, 
                       });
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      const HostSerialRegion serialRegion("peclet::flow::cc_smooth@serial");  // WO-T
       for (long t = 0; t < (long)nyi * nzi; ++t)
         pencil(t);
       return;
@@ -5834,6 +5836,7 @@ class CutcellMG {
         }
       };
       if (hostRunSerial(nZ + nY + nX)) {
+        const HostSerialRegion serialRegion("peclet::flow::mg_pfill3@serial");  // WO-T
         for (long t = 0; t < rZ + rY + rX; ++t)
           row(t);
         return;

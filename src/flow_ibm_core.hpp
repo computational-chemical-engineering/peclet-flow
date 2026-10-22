@@ -1220,6 +1220,7 @@ void Solver<Grid>::fillPeriodicAxes(CCField f, int axes) {
       }
     };
     if (hostRunSerial(nZ + nY + nX)) {
+      const HostSerialRegion serialRegion("peclet::flow::ibm_pfill3@serial");  // WO-T
       for (long t = 0; t < rZ + rY + rX; ++t)
         row(t);
       return;

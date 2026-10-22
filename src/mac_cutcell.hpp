@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <Kokkos_MathematicalFunctions.hpp>
+#include <string>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -291,6 +292,36 @@ inline bool hostRunSerial(long cells) {
     return false;
 }
 
+// WO-T (doc/vof_distributed_partition_design.md §13.6): names a host serial run in the profile.
+// A hostRunSerial(...) true branch runs its loop outside any Kokkos launch, so a tool sees no
+// kernel there; this guard brackets the loop in the region "<launch name>@serial" when a profiling
+// library is loaded, and does nothing otherwise (one bool test, no allocation). It touches no data:
+// the loop's bits are unchanged.
+class HostSerialRegion {
+ public:
+  // `region` is the full region name, a string literal ("peclet::flow::<launch>@serial").
+  explicit HostSerialRegion(const char* region) : on_(Kokkos::Tools::profileLibraryLoaded()) {
+    if (on_)
+      Kokkos::Profiling::pushRegion(region);
+  }
+  // A helper whose launch name is its caller's: the region is launch + "@serial", built only
+  // when a tool is loaded.
+  HostSerialRegion(const char* launch, const char* suffix)
+      : on_(Kokkos::Tools::profileLibraryLoaded()) {
+    if (on_)
+      Kokkos::Profiling::pushRegion(std::string(launch) + suffix);
+  }
+  ~HostSerialRegion() {
+    if (on_)
+      Kokkos::Profiling::popRegion();
+  }
+  HostSerialRegion(const HostSerialRegion&) = delete;
+  HostSerialRegion& operator=(const HostSerialRegion&) = delete;
+
+ private:
+  bool on_;
+};
+
 // The host launch rule (doc/vof_step_performance_design.md §4.5, "rule H"): a 3-D elementwise
 // kernel is ONE cell body `f(x, y, z)`, launched
 //   * on a device backend as MDRange3 with the default tiling (unchanged), and
@@ -334,6 +365,7 @@ inline void ccRows3(const char* name, C3 lo, C3 hi, F f) {
       }
     };
     if (hostRunSerial(rows * (hi.x - lo.x))) {
+      const HostSerialRegion serialRegion(name, "@serial");  // WO-T
       for (long r = 0; r < rows; ++r)  // too small to be worth a fork/join (bit-identical)
         row(r);
       return;
@@ -381,6 +413,7 @@ inline void ccBoxShellRuns(const char* name, C3 rlo, C3 rhi, C3 slo, C3 shi, Run
       const long rows = (long)ny * nz;
       auto row = [=](long t) { run(rlo.y + (int)(t % ny), rlo.z + (int)(t / ny), rlo.x, rhi.x); };
       if (hostRunSerial(rows * nx)) {
+        const HostSerialRegion serialRegion(name, "@serial");  // WO-T
         for (long t = 0; t < rows; ++t)
           row(t);
         return;
@@ -418,6 +451,7 @@ inline void ccBoxShellRuns(const char* name, C3 rlo, C3 rhi, C3 slo, C3 shi, Run
         run(ly, lz, sh.x, rhi.x);
     };
     if (hostRunSerial(cells)) {
+      const HostSerialRegion serialRegion(name, "@serial");  // WO-T
       for (long t = 0; t < tasks; ++t)
         task(t);
       return;

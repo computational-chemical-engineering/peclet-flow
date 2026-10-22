@@ -69,6 +69,7 @@ inline void cutcellSmoothColorFp32Wrap(VField x, VConst b, VConst WX, VConst WY,
                       });
     };
     if (hostRunSerial(cells)) {
+      const HostSerialRegion serialRegion("peclet::flow::cc_smooth_f32@serial");  // WO-T
       for (long t = 0; t < (long)nyi * nzi; ++t)
         pencil(t);
       return;
@@ -274,6 +275,7 @@ inline void cutcellSmoothColorFp32Box(VField x, VConst b, VConst WX, VConst WY, 
         }
       };
       if (hostRunSerial(cells)) {
+        const HostSerialRegion serialRegion("peclet::flow::cc_smooth_box_f32@serial");  // WO-T
         for (long t = 0; t < (long)nyi * nzi; ++t)
           pencil(t);
         return;
@@ -315,6 +317,7 @@ inline void cutcellSmoothColorFp32Box(VField x, VConst b, VConst WX, VConst WY, 
       }
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      const HostSerialRegion serialRegion("peclet::flow::cc_smooth_box_f32@serial");  // WO-T
       for (long t = 0; t < (long)nyi * nzi; ++t)
         pencil(t);
       return;

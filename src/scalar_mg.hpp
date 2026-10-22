@@ -158,6 +158,7 @@ inline void zeroPlanes(CCField f, C3 e, int a, int lo, int hi) {
   };
   if constexpr (std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>) {
     if (hostRunSerial((long)nb * nc * (hi - lo))) {
+      const HostSerialRegion serialRegion("peclet::flow::smg_zero_planes@serial");  // WO-T
       for (long t = 0; t < (long)nb * nc; ++t)
         row(t);
       return;
@@ -229,6 +230,7 @@ inline void fillShell(CCField f, C3 e, C3 inner, int g, const bool per[3]) {
     };
     const long cells = 2L * g * exy + (long)nz * 2 * g * e.x + (long)nz * ny * 2 * g;
     if (hostRunSerial(cells)) {
+      const HostSerialRegion serialRegion("peclet::flow::smg_fill_shell@serial");  // WO-T
       for (long t = 0; t < rZ + rY + rX; ++t)
         row(t);
       return;
@@ -330,6 +332,7 @@ inline void sweepColorFace(CCField x, CCConst rhs, OpV AC, OpV AFX, OpV AFY, OpV
       }
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      const HostSerialRegion serialRegion("peclet::flow::smg_smooth@serial");  // WO-T
       for (long t = 0; t < (long)nyi * nzi; ++t)
         pencil(t);
       return;
@@ -415,6 +418,7 @@ inline void sweepColorBand(CCField x, CCConst rhs, BV AC, BV AW, BV AE, BV AS, B
       }
     };
     if (hostRunSerial(cells)) {  // coarse MG level: the fork/join costs more than the sweep
+      const HostSerialRegion serialRegion("peclet::flow::smg_smooth_band@serial");  // WO-T
       for (long t = 0; t < (long)nyi * nzi; ++t)
         pencil(t);
       return;
@@ -514,6 +518,7 @@ inline void sweepColorTwo(CCField x, CCField rhs, CCField AC, CCField AFX, CCFie
       }
     };
     if (hostRunSerial(cells)) {
+      const HostSerialRegion serialRegion("peclet::flow::smg_smooth_two@serial");  // WO-T
       for (long t = 0; t < (long)nyi * nzi; ++t)
         pencil(t);
       return;
