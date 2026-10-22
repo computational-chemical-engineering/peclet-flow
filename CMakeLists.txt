@@ -289,6 +289,17 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(scalar_inflow PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # The same face plane under MPI: an x-only split at np = 3, so the +x face has one owning rank
+  # and the middle rank touches neither open face; distributed == serial to 1e-12 for the outlet
+  # scalar, the backflow census and a high-side inflow, both grids (doc/uf_outlet_fix.md).
+  if(PECLET_FLOW_MPI)
+    add_test(NAME open_face_plane_mpi_np3
+             COMMAND ${MPIEXEC_EXECUTABLE} -np 3 ${MPIEXEC_PREFLAGS} ${Python_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_open_face_plane_mpi.py
+             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    set_tests_properties(open_face_plane_mpi_np3 PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                         LABELS verify PROCESSORS 3 SKIP_RETURN_CODE 77)
+  endif()
   # The per-cell body force and drag coefficient are placed where the velocity lives (face mean on
   # the MAC grid, cell value collocated) on every density model; second-order steady Stokes.
   add_test(NAME cell_force_placement
