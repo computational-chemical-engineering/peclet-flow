@@ -134,17 +134,18 @@ void Solver<Grid>::advanceScalars() {
       scalarMaskStencil(sc.AC, sc.AW, sc.AE, sc.AS, sc.AN, sc.AB, sc.AT, CCConst(sc.dmask), e_, G);
     // c^n's ghosts must be valid BEFORE they are frozen into cOld, which the explicit advection
     // reads at +-2: set_field, the coupling drivers and the VoF energy transport write inner
-    // cells only, and the fill below acts on c, not on cOld -- so the first step after any such
-    // write upwinded the inflow from a band of stale values (zeros on a fresh scalar: c = 1 at a
-    // Dirichlet-1 inlet fell to 0.5 in one step). The pcBuildInterface fix (WO-P23) is the same
-    // defect on the phase-change side. doc/uf_outlet_fix.md section B.
+    // cells only, and the one fill used to come after the copy, acting on c, not on cOld -- so the
+    // first step after any such write upwinded the inflow from a band of stale values (zeros on a
+    // fresh scalar: c = 1 at a Dirichlet-1 inlet fell to 0.5 in one step). The pcBuildInterface
+    // fix (WO-P23) is the same defect on the phase-change side. doc/uf_outlet_fix.md section B.
+    // It is the step's only fill of c before the smoother, which refills before every sweep: the
+    // calls up to scalarInflowGhosts write cOld only, so a second fill after them is redundant.
     scalarFillGhosts(sc);
     Kokkos::deep_copy(sc.cOld, sc.c);
     // WO-P3f: add the enthalpy the interfacial cells' overwrite gave back (option, inert off).
     if (hasMask && pcCarryConserve_ && pcCarrySrc_.extent(0) == n_)
       pcCarryApply(sc);
     scalarInflowGhosts(sc);  // cOld's inflow ghosts = the prescribed state (for upwinding)
-    scalarFillGhosts(sc);
     if (energy)
       scalarBuildRhsHeat(sc.b, CCConst(sc.cOld), CCConst(sc.rcp), idt, e_, G);
     else
