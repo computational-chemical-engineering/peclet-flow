@@ -495,7 +495,7 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
     instance=None)`, i.e. D_s, C_s, K and R_c; `get_scalar_solid` returns c_s;
   - the mean-gradient closure mode `set_scalar_mean_gradient` (θ periodic, c = G·x + θ) with
     `scalar_mean_flux` (k*, dispersion), and `solve_scalar_steady`;
-  - `set_scalar_source`, `set_scalar_tolerance`, `scalar_wall_flux` (per body); `set_scalar_bc` takes
+  - `set_scalar_source`, `set_scalar_residual_tolerance`, `scalar_wall_flux` (per body); `set_scalar_bc` takes
     a per-face profile;
   - domain faces: periodic, `'dirichlet'`, `'neumann'`, and flow inflow/outflow faces **on the
     staggered grid**. Their flux is the one the projection constrained, captured by `step()`, and an

@@ -2759,7 +2759,7 @@ class Solver {
   void setScalarSource(const std::string& name, double S);
   void setScalarSourceField(const std::string& name, const std::vector<double>& S);
   // Max-norm relative residual tolerance of the solve (default 1e-10, §5.1).
-  void setScalarTolerance(const std::string& name, double rtol);
+  void setScalarResidualTolerance(const std::string& name, double rtol);
   // BiCGStab iteration cap (default 200, §5.1). Diagnostics tier.
   void setScalarMaxIterations(const std::string& name, int maxit);
   // Mean-gradient (closure) mode (§1.5, WO-6): G physical (c/L); the field then holds theta,

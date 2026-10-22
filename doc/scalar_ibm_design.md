@@ -606,7 +606,7 @@ Vectors are `ScalarVec {CCField f, s; bool solid;}`.
 - Stop when max|r_k| ≤ rtol·ref. The recurrence residual is checked each half-step.
 - At exit, recompute the true residual once. If it is > 10·rtol·ref, restart once from it.
 - The max-norm stop decision is reduction-order independent, so at np = 1 it is bitwise.
-- Default rtol = 1e-10 (`set_scalar_tolerance`).
+- Default rtol = 1e-10 (`set_scalar_residual_tolerance`).
 - maxit = 200. On non-convergence: keep the iterate, set the census flag, print a one-time stderr
   warning. On non-finite: raise.
 
@@ -1392,7 +1392,7 @@ Both `Solver` and `SolverColocated`. Names were checked against `../docs/NAMING.
 | `set_scalar_solid(name, diffusivity, capacity=1.0, partition=1.0, contact_resistance=0.0, instance=None)` | Makes the body/bodies conjugate. The arguments are D_s (L²/T, the solid's own diffusivity), C_s, K (= c_s/c at equilibrium) and R_c (T/L, on ψ). Registers `<name>_solid`. Calling `set_scalar_wall` for the same instance afterwards turns it back into a wall (last call wins). Validation: diffusivity ≥ 0, capacity > 0, partition > 0, contact_resistance ≥ 0. |
 | `set_scalar_source(name, source)` | Volumetric source S, c/T: a float or an (nx, ny, nz) F-order array on this rank's block. Weighted by κ (fluid only, v1). |
 | `set_scalar_mean_gradient(name, gradient)` | Closure mode (§1.5). The registered field then holds θ. `(0, 0, 0)` turns it off. |
-| `set_scalar_tolerance(name, rtol)` | Max-norm relative residual tolerance (default 1e-10). The same public tier as `set_velocity_residual_tolerance`. |
+| `set_scalar_residual_tolerance(name, rtol)` | Max-norm relative residual tolerance (default 1e-10). The same public tier as `set_velocity_residual_tolerance`. |
 | `solve_scalar_steady(name)` | Steady solve now (§1.4, §6.7). Statistics go to diagnostics. |
 | `get_scalar_solid(name)` | Copy of c_s = Kψ_s, (nx, ny, nz) F-order, NaN outside solid unknowns. |
 | `scalar_wall_flux(name)` | Integrated flux **into the fluid** per body over the last advance/solve, (num_bodies,) in c·L³/T. Computed by a deterministic host-side sum in facet order plus MPI_Allreduce. |
@@ -1489,7 +1489,7 @@ General rules for every WO:
   - `flow_ibm_scalars.hpp` (the one-line dispatch of §5.5);
   - `flow_ibm.hpp` (`ScalarField` members, `ScalarCutState`, the `UnitScales` appends);
   - bindings for `add_scalar(cutcell)`, `set_scalar_wall`, `set_scalar_source`,
-    `set_scalar_tolerance`, `solve_scalar_steady`, `scalar_wall_flux`, the `set_scalar_bc` profile,
+    `set_scalar_residual_tolerance`, `solve_scalar_steady`, `scalar_wall_flux`, the `set_scalar_bc` profile,
     `diagnostics.scalar_budget/census/facets`;
   - tests under `tests/python/` (ctests) for G1, G2, G3, G7.
 - In this WO the preconditioner is ScalarMG level 0 only (2 + 2 RB-GS). The face flux is taken as

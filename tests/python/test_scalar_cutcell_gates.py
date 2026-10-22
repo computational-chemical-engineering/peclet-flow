@@ -716,7 +716,7 @@ def g9_case(Rh, off, scheme, cr, rtol=None, nsteps=None):
     c0 = np.where(unk, np.exp(-((X - 0.7) ** 2 + Y * Y) / (2 * 0.08**2)), 0.0)
     s.set_field("c", np.asfortranarray(c0))
     if rtol is not None:
-        s.set_scalar_tolerance("c", rtol)
+        s.set_scalar_residual_tolerance("c", rtol)
     m0 = float(np.sum(kap * c0) * h**3)
     cmax0 = float(c0.max())
     st = dict(min=0.0, max=cmax0, ident=0.0, defects=0.0, finite=True, small=0, impl=0.0,
@@ -1608,7 +1608,7 @@ def g4_case(Rh, off, ratio, K=1.0, rtol=None, G=(0.3, -0.5, 0.8)):
         s.set_scalar_bc("c", f, "dirichlet", out)
     s.set_scalar_solid("c", diffusivity=ratio * D / K, capacity=1.0, partition=K)
     if rtol is not None:
-        s.set_scalar_tolerance("c", rtol)
+        s.set_scalar_residual_tolerance("c", rtol)
     s.solve_scalar_steady("c")
     geo = s.diagnostics.scalar_geometry("c")
     cen = s.diagnostics.scalar_census("c")
@@ -1975,7 +1975,7 @@ def gate_api():
            "set_scalar_wall(instance=0) without a scene is a ValueError")
     raises(ValueError, lambda: s.set_scalar_wall("c", "robin", 0.0, coefficient=-1.0),
            "a negative robin coefficient is a ValueError")
-    raises(ValueError, lambda: s.set_scalar_tolerance("c", 0.0), "rtol = 0 is a ValueError")
+    raises(ValueError, lambda: s.set_scalar_residual_tolerance("c", 0.0), "rtol = 0 is a ValueError")
     raises(ValueError, lambda: s.set_scalar_bc("c", "-x", "dirichlet", np.zeros((n, n + 1))),
            "a profile of the wrong shape is a ValueError")
     s.set_scalar_wall("c", "dirichlet", 1.0)

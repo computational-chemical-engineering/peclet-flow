@@ -462,10 +462,10 @@ void Solver<Grid>::setScalarSourceField(const std::string& name, const std::vect
 }
 
 template <class Grid>
-void Solver<Grid>::setScalarTolerance(const std::string& name, double rtol) {
-  ScalarCutState& st = *cutcellScalar(name, "set_scalar_tolerance").cut;
+void Solver<Grid>::setScalarResidualTolerance(const std::string& name, double rtol) {
+  ScalarCutState& st = *cutcellScalar(name, "set_scalar_residual_tolerance").cut;
   if (!(rtol > 0.0) || !std::isfinite(rtol))
-    throw std::invalid_argument("set_scalar_tolerance: rtol must be finite and > 0");
+    throw std::invalid_argument("set_scalar_residual_tolerance: rtol must be finite and > 0");
   st.rtol = rtol;
 }
 

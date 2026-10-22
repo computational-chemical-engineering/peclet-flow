@@ -2959,7 +2959,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
             if (cutcell && iters)
               throw std::invalid_argument(
                   "add_scalar: iters must be None for a cut-cell scalar (it solves to a residual "
-                  "tolerance, set_scalar_tolerance)");
+                  "tolerance, set_scalar_residual_tolerance)");
             s.addScalar(name, diffusivity,
                         enum_index(scheme, kScalarSchemes, "add_scalar", "scheme"),
                         iters ? *iters : 50, cutcell);
@@ -2976,7 +2976,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "cutcell=True selects the cut-cell discretization (doc/scalar_ibm_design.md): kappa "
           "(fluid fraction) storage, the scalar's own apertures, wall conditions per body "
           "(set_scalar_wall, default insulating), sources (set_scalar_source), BiCGStab to a "
-          "residual tolerance (set_scalar_tolerance; iters must then be None), a steady solve "
+          "residual tolerance (set_scalar_residual_tolerance; iters must then be None), a steady solve "
           "(solve_scalar_steady) and per-body wall fluxes (scalar_wall_flux). Cells that are not "
           "fluid unknowns hold 0. Advection is not yet part of the cut-cell operator.")
       .def(
@@ -3070,8 +3070,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "Cut-cell scalars: a per-cell volumetric source S (c/T, physical), an (nx, ny, nz) "
           "F-order array on this rank's block, weighted by kappa.")
       .def(
-          "set_scalar_tolerance",
-          [](S& s, const std::string& name, double rtol) { s.setScalarTolerance(name, rtol); },
+          "set_scalar_residual_tolerance",
+          [](S& s, const std::string& name, double rtol) {
+            s.setScalarResidualTolerance(name, rtol); },
           nb::arg("name"), nb::arg("rtol"),
           "Cut-cell scalars: the max-norm relative residual tolerance of the solve, "
           "max|b - A c| <= rtol * max(max|b|, max|A c0|) (default 1e-10).")

@@ -129,7 +129,7 @@ def onestep(src, k, out, rtol=None):
     s.set_dt(T / nrev)
     g.set_annulus_velocity(s, fx, fy)
     if rtol is not None:
-        s.set_scalar_tolerance("c", rtol)
+        s.set_scalar_residual_tolerance("c", rtol)
     s.set_field("c", np.asfortranarray(np.load(src)["c"][k - 1]))
     s.advance_scalars()
     cen = s.diagnostics.scalar_census("c")

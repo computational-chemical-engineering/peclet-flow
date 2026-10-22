@@ -142,7 +142,7 @@ void testConstants() {
     setup(s, false);
     s.addScalar("c", 0.9, 1, 50, true);
     s.setScalarWall("c", 1, 1.0, 0.0, -1);
-    s.setScalarTolerance("c", 1e-12);
+    s.setScalarResidualTolerance("c", 1e-12);
     s.setScalarMaxIterations("c", 3000);
     s.solveScalarSteady("c");
     const double d = maxDevUnknown(s, 1.0);

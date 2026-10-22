@@ -128,8 +128,8 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
   sr.setSolid(gsdf, cutcellPressure);
   scalar(sr, Block{{0, 0, 0}, {n, n, n}});
   if (gated) {  // ruling Q-D: G10 is gated at rtol 1e-13
-    sd.setScalarTolerance("c", 1e-13);
-    sr.setScalarTolerance("c", 1e-13);
+    sd.setScalarResidualTolerance("c", 1e-13);
+    sr.setScalarResidualTolerance("c", 1e-13);
   }
   const Run D = solve(sd);
   const Run R = solve(sr);
@@ -739,7 +739,7 @@ int main(int argc, char** argv) {
           s.setScalarBc("c", f, 1, 0.0);
         s.setScalarWall("c", 1, 0.0, 0.0, 1);
         s.setScalarSolid("c", 10.0, 1.0, 1.0, 0.0, 0);
-        s.setScalarTolerance("c", 1e-13);
+        s.setScalarResidualTolerance("c", 1e-13);
         // a smooth positive initial state in both fields: 1 - (r/Ro)^2
         for (const char* nm : {"c", "c_solid"}) {
           auto f = s.fieldView(nm);
