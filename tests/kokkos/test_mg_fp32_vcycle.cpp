@@ -22,13 +22,13 @@
 ///       and a single-level configuration and on a face weight below 1e-30 (the distributed case
 ///       is checked in the MPI ctest cutcellmg_aniso_mpi);
 ///   (f) the default is 'auto' (WO-F, USER 2026-10-19) and its solve is bitwise the explicit
-///       'auto' solve; on a host backend it builds no FP32 data; on the ineligible outflow and odd-dimension configurations a PCG solve
-///       with 'fp32' raises, naming the condition; 'auto' (opt-in) is bitwise (x, iterations,
-///       reported precision) to 'fp32' on an eligible configuration (to 'fp64' on a host backend:
-///       'auto' is FP32 on device backends only, doc/vof_projection_distributed_design.md WO-A)
-///       and to 'fp64' on the outflow,
-///       odd-dimension and face-range ones (the last also with the exact outer, i.e. through the
-///       D5 deferral: FP32 data built, the FP64 data rebuilt on demand);
+///       'auto' solve; on a host backend it builds no FP32 data; on the ineligible outflow and
+///       odd-dimension configurations a PCG solve with 'fp32' raises, naming the condition; 'auto'
+///       (opt-in) is bitwise (x, iterations, reported precision) to 'fp32' on an eligible
+///       configuration (to 'fp64' on a host backend: 'auto' is FP32 on device backends only,
+///       doc/vof_projection_distributed_design.md WO-A) and to 'fp64' on the outflow, odd-dimension
+///       and face-range ones (the last also with the exact outer, i.e. through the D5 deferral:
+///       FP32 data built, the FP64 data rebuilt on demand);
 ///   (a) the FP32 residual of x = c * 1, b = 0 is exactly 0 for c in {1, -3.7, 1e5, 2^-60};
 ///   (e) host: one FP32 smoother colour pass and the FP32 residual equal a scalar plain-float
 ///       reference of §4.4.3 bitwise (device: within 1e-5 relative -- the device contracts FMAs);
@@ -596,8 +596,10 @@ void eligibilityChecks() {
     const Solve a = solveOn(dflt, ok);
     const Solve f = solve(ok, CutcellMG::kVcycleFp32), b = solve(ok, CutcellMG::kVcycleAuto),
                 d = solve(ok, CutcellMG::kVcycleFp64);
-    check(sameSolve(a, b), "eligible 16^3: (f) the default solve == the explicit 'auto' solve "
-                           "bitwise, it " + std::to_string(a.it) + " / " + std::to_string(b.it));
+    check(sameSolve(a, b),
+          "eligible 16^3: (f) the default solve == the explicit 'auto' solve "
+          "bitwise, it " +
+              std::to_string(a.it) + " / " + std::to_string(b.it));
     check(CutcellMG::kHostMemory ? (none && !a.fp32) : (!none && a.fp32),
           std::string("eligible 16^3: (f) the default ") +
               (CutcellMG::kHostMemory ? "builds no FP32 data, FP64 reported (host)"
