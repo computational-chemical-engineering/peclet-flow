@@ -540,6 +540,7 @@ distinguishes R1 from the chosen form.
 - (i) Two-layer Couette at dt = 100 with full stress: error 0.0002 % ± 1e-6 relative, converged by 200
   steps.
 - (ii) G2 at μ ratio 0.01 and 100, D = 1e4, 2000 steps: no growth (max|u| non-increasing after 50 steps).
+  **Amendment A3 (2026-10-22):** "no growth" is judged as d_n ≤ 2·d_0 for all n and d_2000 ≤ 1e-8·d_0, d = ‖uⁿ − u_2000‖. The march starts from the continuum field, so max|u| need not be monotone; the laplacian control fails the old wording too.
   It converges to the same steady error as at D = 10 (relative 1e-8).
 - (iii) Steady Stokes through a periodic sphere array (sdflow set-up) with a smooth 10× μ(x):
   - dt = 20 and dt = 100 give the same steady K to 1e-6;
