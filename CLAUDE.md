@@ -433,11 +433,9 @@ Design and numbers: [`doc/steady_acceleration.md`](doc/steady_acceleration.md); 
    conjugate row INFO). Recommended: a body-aware geometry record + a contact conductance.
 2. ~~Naming~~ DECIDED 2026-10-22: `set_scalar_residual_tolerance`, `max_iter`, census `num_mg_levels`;
    `cutcell=` kept (Q5), opt-in in 1.4.0 (Q7); the default is a new decision after that release.
-3. **Branch `origin/uf-outlet-diag`** (pushed, NOT merged; `doc/uf_outlet_fix.md` on that branch): fixes
-   the legacy scalars at high-side open faces on both grids; needs Frank's OK on `c002c8e` and
-   `af88101`; changes the state_hash `scalar` case. Until it lands, `advanceScalars`' plain velocity
-   ghost fill wraps the high-side open plane — and it cannot simply be skipped (a constant drifts
-   4.1e-2 in 6 steps, D-WOR-7).
+3. **`uf-outlet-diag`** (`doc/uf_outlet_fix.md`): approved by Frank 2026-10-22, rebased onto branch
+   `release-fixes`, under review. It keeps the high-side face plane across the face-field ghost
+   fills and fixes the scalar inflow state; it changes the state_hash `scalar` case only.
 4. Also: collocated open faces for cut-cell scalars; the test-battery cadence; tagging core; the
    ScalarMG agglomerated exact bottom (follow-up WO — only a warning exists today); host advance ÷
    projection ≈ 1.05.

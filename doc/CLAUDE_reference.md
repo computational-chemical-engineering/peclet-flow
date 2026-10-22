@@ -565,8 +565,9 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - The conjugate contact model (§13 Q4, triggered; G13's conjugate row self-converges at −2.84 and is
     INFO, marked OPEN) → Frank.
   - Collocated open faces.
-  - `advanceScalars`' plain velocity ghost fill still wraps the high-side open plane of the live flow
-    state, also for a run with only cut-cell scalars (review note 7; `uf-outlet-diag` owns the fix).
+  - `advanceScalars`' plain velocity ghost fill wrapped the high-side open plane of the live flow
+    state, also for a run with only cut-cell scalars (review note 7). The `uf-outlet-diag` merge
+    (branch `release-fixes`, 2026-10-22) replaces it with `fillFaceGhostsKeepBoundary` on both paths.
     It cannot simply be skipped: the cut-cell advance reads the block's high-face velocity ghost,
     which `projectCorrect` (inner faces only) leaves at u* — skipped, a constant drifts 4.1e-2 in 6
     staggered steps (D-WOR-7, measured).

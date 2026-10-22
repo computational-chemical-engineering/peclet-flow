@@ -75,12 +75,10 @@ and a divergence-free MAC face flux. Then a plan, and a step-by-step implementat
 
 ## Side thread awaiting Frank
 
-Branch `uf-outlet-diag` (PUSHED to origin 2026-10-08, not merged; worktree `suite/flow-uf-outlet`) fixes the legacy scalar open-boundary bugs
-(log 2026-10-03). Three questions are open:
-1. c002c8e: high-side inflow face plane; changes collocated momentum there.
-2. af88101: ghost = v at the Dirichlet inflow.
-3. Its two register entries.
-If it lands, the G12 `scalar` hash becomes 438db94e.
+Branch `uf-outlet-diag` fixes the legacy scalar open-boundary bugs (log 2026-10-03). APPROVED by Frank
+2026-10-22 and rebased onto `release-fixes` (worktree `suite/flow-relfix`), under review; its two
+register entries are in doc/uf_outlet_fix.md for the coordinator. The G12 `scalar` hash changes
+(host fc2ea5dfca8f → fc99aa5139cc on the 0abafe2 base); the other 13 cases are byte-identical.
 
 ## Open decisions (defaults; DEFAULT-PENDING-USER in design §13)
 

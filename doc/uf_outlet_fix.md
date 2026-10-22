@@ -1,7 +1,29 @@
 # The high-side face plane and the scalar inflow (branch `uf-outlet-diag`)
 
-Status: implemented on `uf-outlet-diag`, NOT merged. Landing is Frank's decision, because it
-changes shipped scalar results at open boundaries. Two independent packages:
+Status: implemented on `uf-outlet-diag`; landing APPROVED by Frank 2026-10-22. Rebased (cherry-picked,
+no conflicts, no edits) onto branch `release-fixes` on flow main 0abafe2; awaiting review, not on
+main. The SHAs below are the original branch's; the rebased ones:
+
+| uf-outlet-diag | release-fixes | commit |
+|---|---|---|
+| 1f72b5a | c06b10a | study probes |
+| 4f9c284 | e06917f | A: keep the outflow face plane |
+| c002c8e | b18b9a6 | A: every non-periodic high-side face |
+| 0420c93 | 17d6a8e | A: the collocated VoF bridge |
+| e56dc77 | 9fd2f38 | B: fill c's ghosts before cOld |
+| af88101 | 4ea9731 | B: upwind the inflow from the prescribed state |
+| 5f7015b | 0f2ad69 | test open_face_plane |
+| 3962089 | 36ea5b9 | this note |
+
+Gates on the new base (2026-10-22, `tests/regression/state_hash.py`, 14 cases incl. `colocated_bfp`
+and `mpi_np2`, each run twice, reproducible): host-openmp 13/14 byte-identical, `scalar`
+fc2ea5dfca8f → fc99aa5139cc; nvidia-cuda (RTX 5080) 13/14 byte-identical, `scalar` 2b669f85548d →
+83554517f1ec. With e56dc77 (defect 1) reverted alone, host is 14/14 identical to the base: the whole
+change is defect 1, as below. ctests `open_face_plane`, `scalar_inflow` pass; full `-LE bench`
+battery 251/251 host-openmp and 251/251 nvidia-cuda. The 438db94e below was measured on the
+2026-10-08 base.
+
+Two independent packages:
 
 - **A**: the high-side domain face of a MAC face field survives the ghost fills. Commits `4f9c284`,
   `c002c8e`, `0420c93`, and the `5f7015b` test.
