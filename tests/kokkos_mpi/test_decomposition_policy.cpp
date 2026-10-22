@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <map>
 #include <set>
+#include <string>
 #include <vector>
 
 #include "mac_cutcell_mg.hpp"
@@ -143,6 +144,7 @@ Dec unguardedAuto(std::size_t np, const IVec<3>& G) {
   return L;
 }
 int nReverted = 0;
+std::vector<std::string> reverted;  // names of the configurations the guard reverted
 std::string shapeStr(const Dec& d);
 // (7) WO-D: the guard clause, and a reverted configuration (auto != the unguarded policy) is legacy
 void checkGuard(const Dec& A, const Dec& L, std::size_t np, const IVec<3>& G, const char* name) {
@@ -154,6 +156,7 @@ void checkGuard(const Dec& A, const Dec& L, std::size_t np, const IVec<3>& G, co
   if (same(U, A))
     return;
   ++nReverted;
+  reverted.emplace_back(name);
   CHECK(same(A, L), "%s: (7) the guard reverted the unguarded choice, but not to legacy", name);
   std::printf("REVERTED %s: unguarded max/min %.3f axes %u [%s] -> legacy max/mean %.3f axes %u\n",
               name, (double)maxCells(U) / (double)minCells(U), CutcellMG::splitAxes(U),
@@ -303,6 +306,11 @@ int main() {
     const Dec A = CutcellMG::decomposition(4, 48, 48, 48);
     CHECK(maxCells(A) == minCells(A), "48^3 np 4: (5) not exact (%s)", shapeStr(A).c_str());
   }
+  // (7) WO-D keeps these on auto: legacy max/mean >= 5/4, so the guard lets them change split axes
+  for (std::size_t np : {3, 5, 7})
+    CHECK(!same(CutcellMG::decomposition(np, 48, 48, 48),
+                CutcellMG::decomposition(np, 48, 48, 48, 1)),
+          "48^3 np %zu: (7) the guard reverted it to legacy (legacy max/mean >= 5/4)", np);
   using S = std::map<std::array<Index, 3>, int>;
   const std::pair<std::size_t, S> table[] = {
       {3, S{{{128, 32, 64}, 1}, {{64, 64, 64}, 2}}},
@@ -495,6 +503,17 @@ int main() {
       "trees\n",
       nGolden);
   std::printf("guard (WO-D): %d configurations reverted to legacy\n", nReverted);
+  // (7) the reverted set, exactly (§13.4(2)): guard.py's four, ten small test grids and the one
+  // channel configuration. A guard that is too strict also reverts to legacy, so only the list
+  // catches it.
+  const std::vector<std::string> wantReverted = {
+      "100x50x50 np 10", "100x50x50 np 5", "128x96x64 np 12",  "30x30x30 np 3",
+      "30x30x30 np 5",   "30x30x30 np 6",  "30x30x30 np 7",    "36x36x36 np 3",
+      "36x36x36 np 5",   "36x36x36 np 6",  "384x288x192 np 9", "480x80x160 np 30 (channel)",
+      "48x32x40 np 3",   "48x40x30 np 3"};
+  CHECK(nReverted == 14, "(7) the guard reverted %d configurations, want 14", nReverted);
+  std::sort(reverted.begin(), reverted.end());
+  CHECK(reverted == wantReverted, "(7) the reverted set differs from the 14 of §13.4(2)");
   std::printf(fails ? "decomposition_policy: FAIL (%d)\n" : "decomposition_policy: PASS\n", fails);
   return fails ? 1 : 0;
 }
