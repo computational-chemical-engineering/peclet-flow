@@ -847,6 +847,18 @@ the fixed code still loses at 12×2.**
      - 100×50×50 at np 5 and np 10.
 
      It keeps 48³ at np 3/5/7 (legacy max/mean ≥ 1.25) and 128×96×64 at np 3/24/32/96.
+   - **Amended 2026-10-22 (WO-D review): the guard reverts 14 census configurations.** The C++
+     census ctest (`decomposition_policy`) covers more grids than `guard.py`, and on them the same
+     rule reverts ten more, all with legacy max/mean < 5/4 (1.03–1.24):
+     - the four of `guard.py`'s set above;
+     - ten small test grids that flow's and coupling's MPI tests decompose: 30³ at np 3/5/6/7,
+       36³ at np 3/5/6, 48×32×40 at np 3 and 48×40×30 at np 3;
+     - 480×80×160 at np 30 (the channel loop), the only production-shaped one.
+
+     These are not a deviation from the design. They are the same rule applied to more grids, and
+     every revert returns to the pre-2026-10 (legacy) partition, so no published configuration
+     moves. Restricting the guard to a list of configurations would be tuning to cases. The census
+     ctest asserts the 14 by name, and asserts that 48³ at np 3/5/7 stays on auto.
    - **Landing rule (pre-registered, WO-C).** After WO-A, compute
      R = median(12×2 auto) / median(12×2 legacy) locally. Land WO-D iff R > 1.01. If WO-C cannot
      run within 48 h, land WO-D (the default).
