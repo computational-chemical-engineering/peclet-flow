@@ -183,7 +183,7 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, 
     return s, h, alpha
 
 
-def sample(s, h, x_prev, t_prev, t, dist):
+def sample(s, h, x_prev, t_prev, t, dist, with_blocks=True):
     C = dist.gather(s.get_vof())
     u, v, w = dist.gather(s.get_u()), dist.gather(s.get_v()), dist.gather(s.get_w())
     # staggered: u[i] sits at x_{i+1/2}; the cell-centre value averages the two faces (periodic)
@@ -201,7 +201,7 @@ def sample(s, h, x_prev, t_prev, t, dist):
     dxi -= L * np.round(dxi / L)
     x = x_prev + float((C.sum(axis=(1, 2)) * dxi).sum() / vg)
     u_cent = (x - x_prev) / (t - t_prev) if t > t_prev else float("nan")
-    blocks = s.diagnostics.vof_block_stats()
+    blocks = s.diagnostics.vof_block_stats() if with_blocks else []  # none under --single-vof
     if dist.comm is not None:  # each block's stats live on its master rank
         blocks = [b for lst in dist.comm.allgather(blocks) for b in lst]
     return {
@@ -243,7 +243,8 @@ def main():
     f.write(",".join(cols) + "\n")
 
     t, step, binding, dt = 0.0, 0, "-", 0.0
-    r0 = sample(s, h, 0.5 * L_OVER_D * D, 0.0, 0.0, dist)
+    with_blocks = not (a.single_vof or a.vof_momentum)
+    r0 = sample(s, h, 0.5 * L_OVER_D * D, 0.0, 0.0, dist, with_blocks)
     vol0 = r0["gas_vol"]
     x_prev, t_prev = r0["x_cent"], 0.0
     t_end = a.t_end * T_REF
@@ -266,7 +267,7 @@ def main():
         if dist.any(time.perf_counter() - t0 > a.wall):
             done, stop = True, "wall"
         if t >= next_out or done:
-            r = sample(s, h, x_prev, t_prev, t, dist)
+            r = sample(s, h, x_prev, t_prev, t, dist, with_blocks)
             x_prev, t_prev = r["x_cent"], t
             r.update(t=t, t_star=t / T_REF, step=step, dt=dt, binding=binding,
                      Re_drift=re_of(r["u_drift"]), Re_abs=re_of(r["u_abs"]),
