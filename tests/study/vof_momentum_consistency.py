@@ -285,6 +285,7 @@ def gate_momentum_conservation(n=32, steps=200, R=1000.0):
                 p += float((rf * comps[c]).sum())
             return p
 
+        s.update_properties()  # the registry rho is only filled by the first step otherwise (m0 = 0)
         m0 = total()
         for _ in range(steps):
             s.step()
