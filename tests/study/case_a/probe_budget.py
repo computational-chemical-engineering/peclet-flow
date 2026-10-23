@@ -187,7 +187,8 @@ def main():
                 (predB[c] - csf[c] - grav * (c == 0) - (pred[c] - predC[c])) / N / unit
                 for c in range(3)
             ]
-            ub = float(np.sum(C1 * face_avg(u1[0], 0)) / np.sum(C1))
+            # cell-centre u_x of cell i = faces i, i+1 (face_avg is cell -> face, the other way)
+            ub = float(np.sum(C1 * 0.5 * (u1[0] + np.roll(u1[0], -1, axis=0))) / np.sum(C1))
             n_avg = int(a.avg_crossings * ca.L_OVER_D * ca.D / max(ub, 1e-9) / dt)
         un = [x.copy() for x in u1]
         un[0] = un[0] + sh

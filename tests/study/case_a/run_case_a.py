@@ -192,8 +192,9 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, 
 def sample(s, h, x_prev, t_prev, t, dist, with_blocks=True):
     C = dist.gather(s.get_vof())
     u, v, w = dist.gather(s.get_u()), dist.gather(s.get_v()), dist.gather(s.get_w())
-    # staggered: u[i] sits at x_{i+1/2}; the cell-centre value averages the two faces (periodic)
-    uc = 0.5 * (u + np.roll(u, 1, axis=0))
+    # staggered: get_u()[i] is the face between cells i-1 and i (suite CONVENTIONS: u at
+    # (i, j+1/2, k+1/2)); the cell-centre value of cell i averages faces i and i+1 (periodic)
+    uc = 0.5 * (u + np.roll(u, -1, axis=0))
     rho = RHO_L + (RHO_G - RHO_L) * C
     vg = C.sum()
     ub_abs = float((C * uc).sum() / vg)                       # <u_x>_d, computational frame
