@@ -57,6 +57,7 @@ std::vector<double> allFluid() {
 
 template <class S>
 void basics(S& s) {
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(1.0);
   s.setDt(6.0);

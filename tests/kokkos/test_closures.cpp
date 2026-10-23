@@ -20,6 +20,7 @@ int failures = 0;
 void run() {
   const int N = 8;
   peclet::flow::IbmSolver s(N, N, 4);
+  s.setAdvection(false);
   s.setPressureGeometry(std::vector<double>((std::size_t)N * N * 4, 10.0));
   s.addScalar("T", 0.0, 1, 1);
 

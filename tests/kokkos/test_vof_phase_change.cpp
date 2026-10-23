@@ -529,6 +529,7 @@ void p0a() {
   const int nx = 64, ny = 4, nz = 4;
   const double x0 = 32.25, mdot = 0.02, dt = 1.0;
   peclet::flow::IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.01);
   s.setDt(dt);
@@ -577,6 +578,7 @@ void p0b() {
   const int nx = 64, ny = 4, nz = 4;
   const double rg = 1.0, rl = 100.0, mdot = 0.01, x0 = 32.25;
   peclet::flow::IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(rg);
   s.setMu(1e-3);
   s.setDt(1.0);
@@ -663,6 +665,7 @@ double stefanRun(int N, double& exact) {
   int ns = (int)std::llround((te - t0) / (Fo / D));
   const double dt = (te - t0) / ns;
   peclet::flow::IbmSolver s(N, ny, nz);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(1e-3);
   s.setDt(dt);
@@ -734,6 +737,7 @@ double stefanRunP23(int N, double& exact) {
   int ns = (int)std::llround((te - t0) / (Fo / D));
   const double dt = (te - t0) / ns;
   peclet::flow::IbmSolver s(N, ny, nz);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(1e-3);
   s.setDt(dt);
@@ -803,6 +807,7 @@ void energyIdentity(double rcpRatio) {
         C[idx(x, y, z, nx, ny)] =
             std::fmin(1.0, std::fmax(0.0, 0.37 * x + 0.21 * y - 0.13 * z - 3.4));
   peclet::flow::IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.0);
   s.setDt(1.0);
@@ -857,6 +862,7 @@ void p2(int N) {
   const double k_l = al * rho_l * cpl, k_v = k_l / ratio, dT = 1.0;
   const double h_lv = rho_l * cpl * dT / (rho_v * ja);
   peclet::flow::IbmSolver s(N, ny, nz);
+  s.setAdvection(false);
   s.setRho(rho_l);  // the OUTLET phase: makes the boundary coefficient the varRho one exactly
   s.setMu(1e-3);
   s.setDomainBc(0, 1, 0, 0, 0);
@@ -932,6 +938,8 @@ void inert() {
       for (int x = 0; x < nx; ++x)
         C[idx(x, y, z, nx, ny)] = std::fmin(1.0, std::fmax(0.0, 16.4 - x));
   peclet::flow::IbmSolver a(nx, ny, nz), b(nx, ny, nz);
+  a.setAdvection(false);
+  b.setAdvection(false);
   a.setDt(1.0);
   b.setDt(1.0);
   a.enableVof();

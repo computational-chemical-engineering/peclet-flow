@@ -119,11 +119,15 @@ static void compare(const char* tag, int n, const std::vector<double>& gsdf, Flo
             gsdf[(std::size_t)(x + B.o[0]) + (std::size_t)(y + B.o[1]) * n +
                  (std::size_t)(z + B.o[2]) * n * n];
   IbmSolver sd(B.l[0], B.l[1], B.l[2]);
+  // pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
+  sd.setAdvection(false);
   flow(sd);
   sd.initMpi(n, n, n, MPI_COMM_WORLD);
   sd.setSolid(lsdf, cutcellPressure);
   scalar(sd, B);
   IbmSolver sr(n, n, n);
+  // pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
+  sr.setAdvection(false);
   flow(sr);
   sr.setSolid(gsdf, cutcellPressure);
   scalar(sr, Block{{0, 0, 0}, {n, n, n}});
@@ -356,6 +360,7 @@ int main(int argc, char** argv) {
       std::vector<double> vx((std::size_t)N * N * N), vy((std::size_t)N * N * N);
       {
         IbmSolver g(N, N, N);
+        g.setAdvection(false);
         flowG9(g);
         g.setSolid(gsdf, true);  // the projection's openness needs the cut-cell operator
         const std::vector<double> ox = g.getOpennessProj(0), oy = g.getOpennessProj(1);
@@ -527,6 +532,7 @@ int main(int argc, char** argv) {
       const char* nm[3] = {"u", "v", "w"};
       {
         IbmSolver g(N, N, N);
+        g.setAdvection(false);
         flowAdv(g);
         g.setSolid(gsdf, true);
         g.setBodyForce(1e-3, 4e-4, 2e-4);
@@ -757,8 +763,10 @@ int main(int argc, char** argv) {
         }
       };
       IbmSolver sd(B.l[0], B.l[1], B.l[2]);
+      sd.setAdvection(false);
       build(sd, B, true);
       IbmSolver sr(N, N, N);
+      sr.setAdvection(false);
       build(sr, Block{{0, 0, 0}, {N, N, N}}, false);
       std::vector<int> itD, itR;
       std::vector<double> fxD, fxR, idD, idR;

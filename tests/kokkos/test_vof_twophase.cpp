@@ -138,6 +138,7 @@ void bridge() {
   // projection is a no-op on an already-divergence-free field: step() transports C and nothing
   // else. The velocity is re-prescribed every step (the field is time dependent).
   peclet::flow::IbmSolver s(N, N, N);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.0);
   s.setDt(dtSolver);
@@ -241,6 +242,7 @@ void bridge() {
 double hydrostaticC(double ratio, bool freeze, bool harmonic, int steps, double g, double dt) {
   const int N = 8, NZ = 24;
   peclet::flow::IbmSolver s(N, N, NZ);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.0);  // inviscid: the balance is exact (no viscous wall layer in the predictor)
   // bitwise / machine-precision gates: keep the legacy fixed-sweep momentum loop (the default
@@ -299,6 +301,7 @@ double hydrostaticC(double ratio, bool freeze, bool harmonic, int steps, double 
 double hydrostaticRhoRef(double ratio, int steps, double g, double dt) {
   const int N = 8, NZ = 24;
   peclet::flow::IbmSolver s(N, N, NZ);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.0);
   s.setDt(dt);
@@ -454,6 +457,7 @@ void interfaceLocalCfl() {
   const int N = 24;
   const double dt = 1.0;
   peclet::flow::IbmSolver s(N, N, N);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.05);
   s.setDt(dt);

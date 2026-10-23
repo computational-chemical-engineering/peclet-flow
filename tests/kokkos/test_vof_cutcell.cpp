@@ -133,6 +133,7 @@ void bridgeWithGeometry() {
   const int N = 24;
   const SphereArray arr = makeArray(N);
   peclet::flow::IbmSolver s(N, N, N);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.2);
   s.setDt(1.0);
@@ -301,6 +302,7 @@ void bridgeWithGeometry() {
 void conservationThroughPacking(int N, int nAdv) {
   const SphereArray arr = makeArray(N);
   peclet::flow::IbmSolver s(N, N, N);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.2);
   s.setDt(1.0);
@@ -390,6 +392,7 @@ void neutralFillCap(int steps, bool zeroSolid = true) {
       }
 
   peclet::flow::IbmSolver s(NX, NY, NZ);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.05);
   s.setSolid(sd, true);
@@ -587,6 +590,7 @@ void momentumCutCells() {
     const double R = 10.0, grav = 2e-3;
     const double liq = 0.25, rhoMean = liq * R + (1.0 - liq);
     peclet::flow::IbmSolver s(N, N, N);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.05);
     s.setDt(0.5);

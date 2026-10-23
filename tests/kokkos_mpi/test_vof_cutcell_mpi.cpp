@@ -183,6 +183,7 @@ int main(int argc, char** argv) {
     const int kinSteps = 40;
     {
       IbmSolver ref(NX, NY, NZ);
+      ref.setAdvection(false);
       ref.setRho(1.0);
       ref.setMu(0.2);
       ref.setDt(1.0);
@@ -212,6 +213,7 @@ int main(int argc, char** argv) {
     // ---- distributed kinematic run on the SAME velocity ---------------------------------------
     {
       IbmSolver sd(lnx, lny, lnz);
+      sd.setAdvection(false);
       sd.initMpi(dec, MPI_COMM_WORLD);
       sd.setRho(1.0);
       sd.setMu(0.2);
@@ -222,6 +224,7 @@ int main(int argc, char** argv) {
       double dg = 0.0;
       {
         IbmSolver r2(NX, NY, NZ);
+        r2.setAdvection(false);
         r2.setRho(1.0);
         r2.setMu(0.2);
         r2.setDt(1.0);
@@ -242,6 +245,7 @@ int main(int argc, char** argv) {
         const auto g = gatherGlobal(sd.getVofFilledColour(), ox, oy, oz, lnx, lny, lnz, rank, size);
         if (rank == 0) {
           IbmSolver r2(NX, NY, NZ);
+          r2.setAdvection(false);
           r2.setRho(1.0);
           r2.setMu(0.2);
           r2.setDt(1.0);

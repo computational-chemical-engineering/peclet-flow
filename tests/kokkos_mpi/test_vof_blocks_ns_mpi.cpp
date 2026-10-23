@@ -66,6 +66,8 @@ static double bubbleAt(int b, int x, int y, int z) {
 
 static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz,
                       bool csf) {
+  // pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
+  s.setAdvection(false);
   s.setRho(RHO_L);
   s.setMu(MU_L);
   s.setDomainBc(4, 1, 0, 0, 0);

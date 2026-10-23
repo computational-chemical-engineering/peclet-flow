@@ -312,6 +312,7 @@ CapResult relaxCap(double thetaSet, int steps, bool setAngle = true) {
   CapScene sc;
   sc.build(setAngle ? thetaSet : 90.0);
   peclet::flow::IbmSolver s(sc.nx, sc.nx, sc.nz);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(sc.mu);
   s.setSolid(sc.sdf, true);

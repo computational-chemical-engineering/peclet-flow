@@ -156,6 +156,7 @@ int main(int argc, char** argv) {
       std::vector<double> refC;
       {  // the full-grid single-rank run, on every rank (identical arithmetic, no reduction)
         IbmSolver ref(NX, NY, NZ);
+        ref.setAdvection(false);
         ref.setRho(1.0);
         ref.setMu(0.01);
         ref.setDt(dt);
@@ -170,6 +171,7 @@ int main(int argc, char** argv) {
         refC = ref.getVof();
       }
       IbmSolver sd(lnx, lny, lnz);
+      sd.setAdvection(false);
       sd.initMpi(dec, MPI_COMM_WORLD);
       sd.setRho(1.0);
       sd.setMu(0.01);
@@ -210,6 +212,7 @@ int main(int argc, char** argv) {
         return xp < x0p ? 1.0 - std::erf(lam * xp / x0p) / std::erf(lam) : 0.0;
       };
       auto configure = [&](IbmSolver& s, int nx, int ny, int nz, int Ox, int Oy, int Oz) {
+        s.setAdvection(false);
         s.setRho(1.0);
         s.setMu(1e-3);
         s.setDt(dt);
@@ -294,6 +297,7 @@ int main(int argc, char** argv) {
         return dT - dT * std::erfc(sv) / std::erfc(b * rr);
       };
       auto configure = [&](IbmSolver& s, int nx, int ny, int nz, int Ox, int Oy, int Oz) {
+        s.setAdvection(false);
         s.setRho(rho_l);
         s.setMu(1e-3);
         s.setDomainBc(0, 1, 0, 0, 0);

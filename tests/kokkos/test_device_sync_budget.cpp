@@ -101,6 +101,7 @@ constexpr int NX = 32, NY = 24, NZ = 16;
 // The bubble: `autoGuess` selects 'auto' V-cycles + the projected guess (else 'fp64' + zero).
 void setup(Stag& s, bool autoGuess) {
   const double rl = 1.0, rg = 0.02, ml = 0.01, mg = 2e-4, g = 2e-3, R = 4.0;
+  s.setAdvection(false);
   s.setRho(rl);
   s.setMu(ml);
   s.setDomainBc(2, 1, 0.0, 0.0, 0.0);  // -y wall

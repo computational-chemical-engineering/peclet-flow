@@ -149,6 +149,7 @@ int main(int argc, char** argv) {
 
     auto setup = [&](IbmSolver& s, int aox, int aoy, int aoz, int anx, int any, int anz,
                      bool hyst) {
+      s.setAdvection(false);
       s.setRho(1.0);
       s.setMu(MU);
       s.setSolid(sliceOf(gSdf, aox, aoy, aoz, anx, any, anz), true);

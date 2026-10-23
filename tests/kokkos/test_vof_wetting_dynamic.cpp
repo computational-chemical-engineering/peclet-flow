@@ -192,6 +192,7 @@ void solverGates() {
       "sigma = %.1f)\n",
       NX, NY, NZ, ZW, XL, XR, U, thE, slip, muL, sigma);
   peclet::flow::IbmSolver s(NX, NY, NZ);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(muL);
   s.setSolid(slitSdf(), true);
@@ -263,6 +264,7 @@ void solverGates() {
                          {130.0, 110.0, "90 below theta_r=110 -> receding"}};
   for (const HRow& h : hrows) {
     peclet::flow::IbmSolver s2(NX, NY, NZ);
+    s2.setAdvection(false);
     s2.setRho(1.0);
     s2.setMu(muL);
     s2.setSolid(slitSdf(), true);

@@ -67,6 +67,7 @@ def build(mode, mirror, variable_mu=True, harmonic=False):
     cy = 2.0 if mode == "scalar" else 3.0  # scalar: straddles the wall; markers: 0.6 cell inside
     c = (0.4, NY - cy if mirror else cy, 6.1)
     s = pf.Solver(NX, NY, NZ)
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(0.05)
     s.set_domain_bc("-y", "wall", (0, 0, 0))

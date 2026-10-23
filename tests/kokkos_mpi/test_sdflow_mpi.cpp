@@ -139,6 +139,7 @@ int main(int argc, char** argv) {
     {
       int threw = 0, allThrew = 0;
       IbmSolver bad(lnx + (rank == 0 ? 2 : 0), lny, lnz);
+      bad.setAdvection(false);
       try {
         bad.initMpi(N, N, N, MPI_COMM_WORLD);
       } catch (const std::runtime_error&) {

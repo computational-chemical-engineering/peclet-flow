@@ -1030,6 +1030,7 @@ struct DebrisScene {
     return (x - b[0]) + nx * ((y - b[1]) + ny * static_cast<long>(z - b[2]));
   }
   void build(peclet::flow::IbmSolver& s, bool speck, bool clip, bool debris = true) const {
+    s.setAdvection(false);
     s.setRho(RHO_L);
     s.setMu(MU);
     s.setPressureGeometry(std::vector<double>(static_cast<std::size_t>(NX) * NY * NZ, 10.0));
@@ -1310,6 +1311,7 @@ void gateMomentumRefused() {
   }
   {  // blocks first: momentum consistency is refused
     peclet::flow::IbmSolver s(n, n, n);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.1);
     s.enableVof();

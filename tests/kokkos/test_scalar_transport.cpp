@@ -26,6 +26,7 @@ std::vector<double> allFluid(int nx, int ny, int nz) {
 double measureEigen(int N) {
   const double D = 1.0, dt = 0.5;
   peclet::flow::IbmSolver s(N, 4, 4);
+  s.setAdvection(false);
   s.setDt(dt);
   s.setPressureGeometry(allFluid(N, 4, 4));
   s.addScalar("c", D, 0, 600);
@@ -56,6 +57,7 @@ void run() {
   const int N = 32;
   const double U = 0.4, dt = 0.5;
   peclet::flow::IbmSolver s(N, 4, 4);
+  s.setAdvection(false);
   s.setDt(dt);
   s.setPressureGeometry(allFluid(N, 4, 4));
   s.addScalar("c", 0.0, 1, 1);  // pure advection, Koren

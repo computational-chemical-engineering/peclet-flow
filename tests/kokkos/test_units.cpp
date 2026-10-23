@@ -135,6 +135,7 @@ Fields runChannel(int nx, int ny, int nz, double lam, bool arm) {
   const double H = 1.0 / lam;  // one cell, physically
   const double ylo = (std::round(0.30 * ny) + 0.5) * H, yhi = (std::round(0.70 * ny) + 0.5) * H;
   peclet::flow::Solver<Grid> s(nx, ny, nz);
+  s.setAdvection(false);
   if (arm)
     s.setPhysicalDomain({nx * H, ny * H, nz * H}, {0.0, 0.0, 0.0}, {nx, ny, nz});
   s.setRho(RHO);
@@ -273,6 +274,7 @@ Drop runDroplet(int n, double Rcells, double lam, bool constantKappa, int steps)
   const double SIGMA = 1.0;    // invariant under a change of LENGTH unit
   const double MU = 0.1 * lam, RHO = 1.0 * lam * lam * lam;
   peclet::flow::Solver<peclet::flow::Staggered> s(n, n, n);
+  s.setAdvection(false);
   s.setPhysicalDomain({n * H, n * H, n * H}, {0.0, 0.0, 0.0}, {n, n, n});
   s.setRho(RHO);
   s.setMu(MU);
@@ -365,6 +367,7 @@ Channel runChannelBox(int nx, int ny, int nz, const std::array<double, 3>& exten
                       bool arm) {
   const double RHO = 1.0, MU = 0.1, F = 0.01, DT = 50.0;
   peclet::flow::Solver<peclet::flow::Staggered> s(nx, ny, nz);
+  s.setAdvection(false);
   if (arm)
     s.setPhysicalDomain(extent, {0.0, 0.0, 0.0}, {nx, ny, nz});
   s.setRho(RHO);
@@ -495,6 +498,7 @@ void gateAnisoPoiseuille() {
     bool threw = false;
     try {
       peclet::flow::Solver<peclet::flow::Colocated> sc(16, 40, 8);
+      sc.setAdvection(false);
       sc.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
       const auto sp = sc.spacing();
       std::printf("      ADMITTED (collocated): spacing (%.17g, %.17g, %.17g), aniso %d\n", sp[0],
@@ -518,6 +522,7 @@ void gateAnisoPoiseuille() {
       // identity is at machine zero (2.3e-17 at aspect 2, 1.9e-17 at aspect 4) and Young-Laplace
       // is exact, which is only true if the CSF weight is EXACTLY this file's `w_a`.
       peclet::flow::Solver<peclet::flow::Staggered> ss(16, 40, 8);
+      ss.setAdvection(false);
       ss.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
       ss.enableVof();
       std::printf("      ADMITTED (enable_vof — Phase 3; see units_vof_aniso)\n");
@@ -529,6 +534,7 @@ void gateAnisoPoiseuille() {
     threw = false;
     try {
       peclet::flow::Solver<peclet::flow::Staggered> ss(16, 40, 8);
+      ss.setAdvection(false);
       ss.setPhysicalDomain({16.0, 12.0, 16.0}, {0.0, 0.0, 0.0}, {16, 40, 8});
       ss.hydroForceTorque();  // C4: admitted (no scene here, so it returns an empty result)
       std::printf("      ADMITTED (hydro_force_torque)\n");
@@ -547,6 +553,7 @@ void gateIdentity() {
   // (a) No domain: the historical cell-unit reports.
   {
     peclet::flow::Solver<peclet::flow::Staggered> s(6, 8, 10);
+    s.setAdvection(false);
     CHECK(!s.hasPhysicalDomain());
     const auto h = s.spacing();
     CHECK(h[0] == 1.0 && h[1] == 1.0 && h[2] == 1.0);
@@ -562,6 +569,7 @@ void gateIdentity() {
   // (b) extent == cells with a shifted origin: spacing 1, centres shifted, scales all 1.
   {
     peclet::flow::Solver<peclet::flow::Staggered> s(6, 8, 10);
+    s.setAdvection(false);
     s.setPhysicalDomain({6.0, 8.0, 10.0}, {-2.0, 0.5, 100.0}, {6, 8, 10});
     CHECK(s.hasPhysicalDomain());
     const auto h = s.spacing();
@@ -586,6 +594,7 @@ void gateIdentity() {
     auto run = [](bool arm) {
       const int nx = 8, ny = 24, nz = 8;
       peclet::flow::Solver<peclet::flow::Staggered> s(nx, ny, nz);
+      s.setAdvection(false);
       if (arm)
         s.setPhysicalDomain({(double)nx, (double)ny, (double)nz}, {0.0, 0.0, 0.0}, {nx, ny, nz});
       s.setRho(1.0);
@@ -1119,6 +1128,7 @@ AnisoDrop runDropletAniso(const int n[3], const double h[3], double R, bool cons
                           int steps) {
   const double SIGMA = 1.0, MU = 0.1, RHO = 1.0;
   peclet::flow::Solver<peclet::flow::Staggered> s(n[0], n[1], n[2]);
+  s.setAdvection(false);
   s.setPhysicalDomain({n[0] * h[0], n[1] * h[1], n[2] * h[2]}, {0.0, 0.0, 0.0}, {n[0], n[1], n[2]});
   s.setRho(RHO);
   s.setMu(MU);
@@ -1283,6 +1293,7 @@ ScalarSine runScalarSine(int N, const std::array<double, 3>& ext, double D, doub
                          int nsteps, const Units& un, bool dtFirst, int scheme = 1) {
   const int ny = 4, nz = 4;
   peclet::flow::Solver<peclet::flow::Staggered> s(N, ny, nz);
+  s.setAdvection(false);
   s.setPhysicalDomain({un.len(ext[0]), un.len(ext[1]), un.len(ext[2])}, {0.0, 0.0, 0.0},
                       {N, ny, nz});
   s.setRho(un.rho(1.0));
@@ -1323,6 +1334,7 @@ ScalarSine runScalarSine(int N, const std::array<double, 3>& ext, double D, doub
 double closureProbe(const Units& un, bool rhoFirst) {
   const int N = 8;
   peclet::flow::Solver<peclet::flow::Staggered> s(N, N, N);
+  s.setAdvection(false);
   s.setPhysicalDomain({un.len(1.0), un.len(1.0), un.len(1.0)}, {0.0, 0.0, 0.0}, {N, N, N});
   if (rhoFirst) {
     s.setRho(un.rho(998.0));
@@ -1451,6 +1463,7 @@ PcRun runStefanUnits(int N, const Units& un, bool energy, bool scalesFirst) {
   const int ns = (int)std::llround((te - t0) / (Fo / D));
   const double dt = (te - t0) / ns;
   peclet::flow::IbmSolver s(N, ny, nz);
+  s.setAdvection(false);
   s.setPhysicalDomain({un.len(N), un.len(ny), un.len(nz)}, {0.0, 0.0, 0.0}, {N, ny, nz});
   auto scales = [&] {
     s.setRho(un.rho(1.0));
@@ -1525,6 +1538,7 @@ PcRun runSuckingUnits(int N, int nsteps, const Units& un) {
   const double k_l = al * rho_l * cpl, k_v = k_l / ratio, dT = 1.0;
   const double h_lv = rho_l * cpl * dT / (rho_v * ja);
   peclet::flow::IbmSolver s(N, ny, nz);
+  s.setAdvection(false);
   s.setPhysicalDomain({un.len(N), un.len(ny), un.len(nz)}, {0.0, 0.0, 0.0}, {N, ny, nz});
   s.setRho(un.rho(rho_l));
   s.setMu(un.mu(1e-3));
@@ -1639,6 +1653,7 @@ void gatePhaseChange() {
     const int nx = 16, ny = 32, nz = 8;
     const double Lx = 1.6, Ly = 0.8, Lz = 0.4;  // h = (0.1, 0.025, 0.05): three spacings
     peclet::flow::IbmSolver s(nx, ny, nz);
+    s.setAdvection(false);
     s.setPhysicalDomain({Lx, Ly, Lz}, {0.0, 0.0, 0.0}, {nx, ny, nz});
     s.setRho(1.0);
     s.setDt(1e-3);
@@ -1662,6 +1677,7 @@ void gatePhaseChange() {
   //     transport has no heat capacity to be physical with.
   {
     peclet::flow::IbmSolver s(16, 4, 4);
+    s.setAdvection(false);
     s.setPhysicalDomain({1.0, 0.25, 0.25}, {0.0, 0.0, 0.0}, {16, 4, 4});
     s.setPressureGeometry(std::vector<double>(16 * 4 * 4, 1.0));
     s.enablePhaseChange(1.0, 1000.0, 2.26e6);

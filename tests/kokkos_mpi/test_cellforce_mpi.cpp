@@ -187,6 +187,7 @@ int main(int argc, char** argv) {
     // ---- order: a geometry built before initMpi must be refused -------------------------------
     {
       IbmSolver s(lnx, lny, lnz);
+      s.setAdvection(false);
       s.setPressureGeometry(allFluid);
       bool threw = false;
       std::string what;
@@ -214,6 +215,8 @@ int main(int argc, char** argv) {
     for (const Config& c : configs) {
       const std::vector<double> fg = blobs(c.comp);
       IbmSolver sd(lnx, lny, lnz);
+      // pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
+      sd.setAdvection(false);
       sd.initMpi(dec, MPI_COMM_WORLD);
       sd.setPressureGeometry(allFluid);
       configure(sd, c, slice(fg, ox, oy, oz, lnx, lny, lnz));
@@ -227,6 +230,8 @@ int main(int argc, char** argv) {
 
       if (rank == 0) {
         IbmSolver ref(N, N, N);
+        // pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
+        ref.setAdvection(false);
         ref.setPressureGeometry(std::vector<double>(GCELLS, 10.0));
         configure(ref, c, fg);
         for (int it = 0; it < STEPS; ++it)

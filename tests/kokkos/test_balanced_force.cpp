@@ -98,6 +98,7 @@ double runDrop(const DropCfg& c, bool on, long* bfIters = nullptr) {
   const int n = 32;
   const double R = 8.0, cx = n / 2 + 0.13, cy = n / 2 + 0.27, cz = n / 2 + 0.11;
   Stag s(n, n, n);
+  s.setAdvection(false);
   s.setRho(c.ratio);
   s.setMu(c.mu);
   s.setDt(1.0);
@@ -144,6 +145,7 @@ HydroResult hydrostatic(double ratio, double mu, int steps, bool sphere, bool on
   const int N = sphere ? 16 : 8, NZ = sphere ? 32 : 24;
   const double g = 0.1;
   Stag s(N, N, NZ);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(mu);
   s.setDt(1.0);
@@ -274,6 +276,7 @@ void gateRefusals() {
   const int N = 16;
   const std::vector<double> fluid((std::size_t)N * N * N, 10.0);
   auto base = [&](auto& s) {
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.01);
     s.setDt(1.0);

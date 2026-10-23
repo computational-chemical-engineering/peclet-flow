@@ -117,6 +117,7 @@ void g1Setup(IbmSolver& s, int n, double R, double off) {
 void testCoarse() {
   const int n = 32;
   IbmSolver s(n, n, n);
+  s.setAdvection(false);
   g1Setup(s, n, 8.0, 0.37);
   s.solveScalarSteady("c");
   auto& st = *s.scalarField("c").cut;
@@ -172,6 +173,7 @@ void testCoarse() {
 void testLevelRule() {
   const int n = 32;
   IbmSolver s(n, n, n);
+  s.setAdvection(false);
   g1Setup(s, n, 8.0, 0.37);
   // dt D / h^2 = F -> kappa_A = 1 + 12 F; F just below / above the switch (D-WO9-3: 25 -> F = 2)
   const double Fsw = (ScalarMG::kFullTableKappa - 1.0) / 12.0;
@@ -253,6 +255,7 @@ void testContraction() {
   char tag[96];
   for (int n : {32, 64, 128}) {  // G1: Dirichlet sphere R = n/4, Dirichlet box
     IbmSolver s(n, n, n);
+    s.setAdvection(false);
     g1Setup(s, n, 0.25 * n, 0.37);
     std::snprintf(tag, sizeof tag, "C2 G1 R/h=%d (%d^3)", n / 4, n);
     guardRow(s, tag, 2);
@@ -261,6 +264,7 @@ void testContraction() {
   for (int k = 0; k < 3; ++k) {  // G2 on its multigrid-friendly boxes (ruling D-WO4-1)
     const int Rih = 6 << k, n = g2box[k];
     IbmSolver s(n, n, n);
+    s.setAdvection(false);
     walls(s);
     shellsScene(s, 0.5 * n + 0.29, Rih, 2.5 * Rih);
     s.addScalar("c", 0.8, 1, 50, true);
@@ -273,6 +277,7 @@ void testContraction() {
   }
   for (int n : {32, 64, 128}) {  // G3a, Da = 1: Robin sphere, Dirichlet box
     IbmSolver s(n, n, n);
+    s.setAdvection(false);
     g1Setup(s, n, 0.25 * n, 0.37);
     s.setScalarWall("c", 2, 0.0, 0.7 / (0.25 * n), -1);  // k = Da D / R
     std::snprintf(tag, sizeof tag, "C2 G3a Da=1 R/h=%d (%d^3)", n / 4, n);
@@ -280,12 +285,14 @@ void testContraction() {
   }
   {  // Neumann sphere, Dirichlet box
     IbmSolver s(64, 64, 64);
+    s.setAdvection(false);
     g1Setup(s, 64, 16.0, 0.37);
     s.setScalarWall("c", 0, 0.3, 0.0, -1);
     guardRow(s, "C2 Neumann sphere + Dirichlet box (64^3)", 2);
   }
   {  // no solid, Dirichlet box
     IbmSolver s(64, 64, 64);
+    s.setAdvection(false);
     walls(s);
     s.setSolid(std::vector<double>((std::size_t)64 * 64 * 64, 100.0), false);
     s.addScalar("c", 0.7, 1, 50, true);
@@ -296,6 +303,7 @@ void testContraction() {
   }
   for (int n : {32, 48, 80, 77}) {  // G5b's geometry: periodic SC array, c = 0.3, singular
     IbmSolver s(n, n, n);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(1.0);
     s.setDt(1.0);
@@ -312,6 +320,7 @@ void testContraction() {
   }
   for (int n : {64, 128}) {  // C3: periodic box, the only sink one Dirichlet sphere R = n/4
     IbmSolver s(n, n, n);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(1.0);
     s.setDt(1.0);
@@ -351,6 +360,7 @@ void testAdvUniform() {
   for (const auto& n : nn)
     for (int ax = 0; ax < 3; ++ax) {
       IbmSolver s(n[0], n[1], n[2]);
+      s.setAdvection(false);
       openBox(s);
       const std::size_t nc = (std::size_t)n[0] * n[1] * n[2];
       const char* nm[3] = {"u", "v", "w"};
@@ -393,6 +403,7 @@ void testAdvUniform() {
 void testAdvDivergenceFree() {
   const int n = 32;
   IbmSolver s(n, n, n);
+  s.setAdvection(false);
   openBox(s);
   std::vector<double> psi[3];
   unsigned long long st = 0x2545F4914F6CDD1Dull;
@@ -486,6 +497,7 @@ void testAdvDivergenceFree() {
 // whatever the field's divergence (review finding 3); the field's divergence moves only the row
 // sums, which is why the former row check needed the pressure PCG at 1e-14.
 void c3Stokes(IbmSolver& s, int n) {
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(1.0);
   s.setDt(1.0);
@@ -659,6 +671,7 @@ void testAdvective() {
 void testAdvOpenFaces() {
   const int nx = 64, ny = 32, nz = 32;
   IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(1.0);
   s.setDt(2.0);

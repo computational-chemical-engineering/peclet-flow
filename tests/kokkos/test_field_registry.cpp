@@ -21,6 +21,7 @@ void run() {
   using peclet::flow::IbmSolver;
   const int nx = 6, ny = 5, nz = 4;
   IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
 
   // Built-in members are registered.
   CHECK(s.hasField("u") && s.hasField("v") && s.hasField("w"));

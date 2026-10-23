@@ -140,12 +140,14 @@ static void runCase(const char* label, const double c[3], double R, const int bc
             gsdf[(std::size_t)(x + ox) + (std::size_t)(y + oy) * N + (std::size_t)(z + oz) * N * N];
 
   IbmSolver sd(lnx, lny, lnz);
+  sd.setAdvection(false);
   for (int f = 0; f < 6; ++f)
     if (bc[f] != 0)
       sd.setDomainBc(f, bc[f], 0.0, 0.0, 0.0);
   sd.initMpi(N, N, N, MPI_COMM_WORLD);
   sd.setSolid(lsdf, false);
   IbmSolver sr(N, N, N);  // the single-rank reference of the same global problem
+  sr.setAdvection(false);
   for (int f = 0; f < 6; ++f)
     if (bc[f] != 0)
       sr.setDomainBc(f, bc[f], 0.0, 0.0, 0.0);

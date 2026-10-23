@@ -65,6 +65,7 @@ std::vector<double> runChannel(int nx, int ny, int nz, double ylo, double yhi, i
   // slipFace = -1: both walls are SDF walls (the full channel); 2 / 3: that face is type 4 and
   // only the OTHER wall is an SDF wall.
   peclet::flow::Solver<Grid> s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(RHO);
   s.setMu(MU);
   s.setDt(DT);

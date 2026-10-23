@@ -127,6 +127,7 @@ std::vector<double> sceneSphere(int n) {
 std::unique_ptr<IbmSolver> makeSolver(int n, const std::vector<double>& C, double rhoG, double rhoL,
                                       double dt, const double U[3], bool momentum) {
   auto s = std::make_unique<IbmSolver>(n, n, n);
+  s->setAdvection(false);
   s->setRho(rhoL);
   s->setMu(0.0);
   s->setDt(dt);

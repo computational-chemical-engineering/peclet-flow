@@ -167,6 +167,7 @@ def case_channel():
 def case_vof_droplet():
     n, R = 16, 4.0
     s = pf.Solver(n, n, n)
+    s.set_advection(False)
     s.set_rho(1.0); s.set_mu(0.1)
     s.set_pressure_geometry(np.asfortranarray(np.full((n, n, n), 10.0)))
     s.set_pressure_pcg(True, 500, 1e-12)
@@ -186,6 +187,7 @@ def case_colocated_bfp():
     one path where the resident PCG stops on the caller's stop reference (WO-X1, setStopReference)."""
     n, R = 16, 4.0
     s = pf.SolverColocated(n, n, n)
+    s.set_advection(False)
     s.set_rho(1000.0); s.set_mu(0.1); s.set_dt(1.0)
     s.set_pressure_geometry(np.asfortranarray(np.full((n, n, n), 10.0)))
     s.enable_vof()
@@ -204,6 +206,8 @@ def case_colocated_bfp():
 def case_scalar():
     N, nz = 16, 4
     s = pf.Solver(N, N, nz)
+    # pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
+    s.set_advection(False)
     s.set_rho(1.0); s.set_mu(0.05); s.set_dt(8.0)
     s.set_implicit_advection(True); s.diagnostics.set_outer_iterations(2)
     for f in ("-x", "+x", "-y", "+y"):

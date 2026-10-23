@@ -85,6 +85,7 @@ static std::vector<double> blockOf(Fn f, int ox, int oy, int oz, int lnx, int ln
 
 static void configure(IbmSolver& s, const Config& c, int ox, int oy, int oz, int lnx, int lny,
                       int lnz) {
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.01);
   s.setDt(1.0);

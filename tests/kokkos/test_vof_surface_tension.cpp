@@ -140,6 +140,7 @@ struct Cfg {
 // nothing is mesh-aligned.
 std::unique_ptr<IbmSolver> makeDroplet(const Cfg& c) {
   auto s = std::make_unique<IbmSolver>(c.n, c.n, c.n);
+  s->setAdvection(false);
   s->setRho(c.rhoL);
   s->setMu(c.mu);
   s->setDt(1.0);
@@ -303,6 +304,7 @@ void gateInert() {
   const int n = 24;
   auto build = [&](bool st) {
     auto s = std::make_unique<IbmSolver>(n, n, n);
+    s->setAdvection(false);
     s->setRho(10.0);
     s->setMu(0.05);
     s->setDt(0.2);

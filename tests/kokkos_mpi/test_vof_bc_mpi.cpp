@@ -137,6 +137,7 @@ static double sumOf(const std::vector<double>& a) {
 
 // ------------------------------------------------------------------- config A: the kinematic slug
 static void configureSlug(IbmSolver& s, int lnx, int lny, int lnz) {
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.0);
   s.setDt(DT);
@@ -154,6 +155,7 @@ static void configureSlug(IbmSolver& s, int lnx, int lny, int lnz) {
 
 // ------------------------------------------------------------------- config B: the coupled jet
 static void configureJet(IbmSolver& s, int lnx, int lny, int lnz) {
+  s.setAdvection(false);
   const double rhoG = 1.0, rhoL = 100.0;
   s.setRho(rhoL);
   s.setMu(0.2);
@@ -184,6 +186,7 @@ static void configureJet(IbmSolver& s, int lnx, int lny, int lnz) {
 // a statement about the transport and the boundary ledger alone, with no two-phase pressure
 // coupling in the way.
 static void configureColoJet(Colo& s, int oz, int lnx, int lny, int lnz) {
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.05);
   s.setDt(0.05);
@@ -257,6 +260,7 @@ static void packingVelocity(IbmSolver& s, int ox, int oy, int oz, int lnx, int l
 }
 
 static void configurePacking(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz) {
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.5);
   s.setDt(0.1);

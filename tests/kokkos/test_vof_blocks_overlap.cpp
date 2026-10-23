@@ -103,6 +103,7 @@ void gateClipOnBlockPath() {
     return (x - box[0]) + nx * ((y - box[1]) + ny * static_cast<long>(z - box[2]));
   };
   auto build = [&](peclet::flow::IbmSolver& s, bool speck, bool clip) {
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.5);
     s.setPressureGeometry(std::vector<double>(static_cast<std::size_t>(NX) * NY * NZ, 10.0));
@@ -350,6 +351,7 @@ void gateSolverMetric() {
   const std::array<int, 6> box = {8, 8, 8, 24, 24, 24};
   // cells 1.5 : 1 : 2 -- every axis different, so a dropped or permuted metric is caught
   peclet::flow::IbmSolver s(NX, NY, NZ, {48.0, 32.0, 64.0}, {0.0, 0.0, 0.0}, {NX, NY, NZ});
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.5);
   s.setPressureGeometry(std::vector<double>(static_cast<std::size_t>(NX) * NY * NZ, 10.0));

@@ -122,6 +122,7 @@ def face_points(s, face):
 
 def walled(cells, extent, origin=(0.0, 0.0, 0.0), periodic_z=False):
     s = pf.Solver(cells, extent=extent, origin=origin)
+    s.set_advection(False)
     for f in FACES:
         if not (periodic_z and f in ("-z", "+z")):
             s.set_domain_bc(f, "wall")
@@ -593,6 +594,7 @@ def g5b_geometry_case(n, off):
     L = 1.0
     h = L / n
     s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     R = 0.5 * L * (0.3 * 6.0 / math.pi) ** (1.0 / 3.0)
@@ -650,6 +652,7 @@ def annulus_case(Rh, off, scheme="koren"):
     L = n * h
     s = pf.Solver((n, n, 4), extent=(L, L, 4 * h), origin=(-0.5 * L + off[0] * h,
                                                            -0.5 * L + off[1] * h, 0.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     X, Y, Z = grid(s)
@@ -775,6 +778,7 @@ def koren_bulk_control(cr, n=32):
     """No solid: a periodic box, uniform translation (1, 0.5) for one x-period, Koren at bulk Courant
     cr. Returns (min c, C_bulk) — the bulk scheme's own boundedness, for G9 (iii)'s reading."""
     s = pf.Solver((n, n, 4), extent=(1.0, 1.0, 4.0 / n))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_pressure_geometry(np.asfortranarray(np.ones((n, n, 4))))
@@ -841,6 +845,7 @@ def gate_g9():
 def g9b_case(kind, scheme, n=32, nsteps=50):
     cls = pf.Solver if kind == "staggered" else pf.SolverColocated
     s = cls((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_dt(0.01)
@@ -890,6 +895,7 @@ def channel_case(kind="staggered", n=24, dt=0.008, D=0.01, scheme="koren", out_b
     0.5), Neumann on the walls and the solids; `c0` in the fluid."""
     cls = pf.Solver if kind == "staggered" else pf.SolverColocated
     s = cls((2 * n, n, n), extent=(2.0, 1.0, 1.0))
+    s.set_advection(False)
     if kind != "staggered":
         s.set_collocated_scheme("gauge-exact")  # not the refused 'ghost' (D-WO5-4)
     s.set_rho(1.0)
@@ -1041,6 +1047,7 @@ def backflow_steady_row(n=12, nsteps=10):
     solve converges -- to a constant, the null vector --, and the backflow rows are counted and
     warned about once. Returns the census."""
     s = pf.Solver((2 * n, n, n), extent=(2.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(0.05)
     s.set_dt(0.01)
@@ -1233,6 +1240,7 @@ def g5b_case(n, off, D=0.6):
     L = 1.0
     h = L / n
     s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     R = 0.5 * L * (0.3 * 6.0 / math.pi) ** (1.0 / 3.0)
@@ -1254,6 +1262,7 @@ def no_solid_case(G, vel=None, D=0.6, n=16):
     """The no-solid identity: a box with no solid (SDF > 0 everywhere), mean gradient G, at rest
     or with a uniform velocity; the closure solution is theta = const and J = -D G exactly."""
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_solid(np.asfortranarray(np.ones((n, n, n))), cutcell_pressure=vel is not None)
@@ -1360,6 +1369,7 @@ def gadv_a_case(Rh, pe):
     L = 4.0 * R
     h = L / n
     s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_dt(h * h)
@@ -1383,6 +1393,7 @@ def sc_array(n):
     sphere per unit period on n^3 cells; Stokes through it from step() (G9b's body force, 50
     steps)."""
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_dt(0.01)
@@ -1649,6 +1660,7 @@ def gate_conj_unit():
         check(bool(np.all(np.isnan(cs[~us]))), f"K={K}: get_scalar_solid NaN outside the solid unknowns")
     n, D = 24, 0.6
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     R = 0.5 * (0.3 * 6.0 / math.pi) ** (1.0 / 3.0)
@@ -1734,6 +1746,7 @@ def g5a_case(n, off, D=0.6, ratio=1e4):
     L = 1.0
     h = L / n
     s = pf.Solver((n, n, n), extent=(L, L, L))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     R = 0.5 * L * (0.3 * 6.0 / math.pi) ** (1.0 / 3.0)
@@ -1955,6 +1968,7 @@ def gate_api():
     print("API: the opt-in, the refusals (§8.1) and the name checks (ruling D-WO3-2)")
     n = 12
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_dt(0.1)
@@ -1994,6 +2008,7 @@ def gate_api():
     s.set_scalar_mean_gradient("c", (1.0, 0.0, 0.0))
     s.advance_scalars()  # periodic box: the closure mode steps
     sw = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    sw.set_advection(False)
     sw.set_rho(1.0)
     sw.set_mu(1.0)
     sw.set_domain_bc("-y", "wall")
@@ -2013,6 +2028,7 @@ def gate_api():
     # ruling D-WO5-2: a moving fluid without the cut-cell projection is refused, naming the remedy
     # (a fluid at rest keeps WO-3/WO-4's behaviour: the periodic box above stepped)
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_dt(0.1)
@@ -2024,6 +2040,7 @@ def gate_api():
                   "a moving fluid without cutcell_pressure is refused, naming the remedy (D-WO5-2)")
     # ruling D-WO5-4: the ghost projection is refused, the message listing the accepted ones
     s = pf.SolverColocated((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_dt(0.1)
@@ -2041,6 +2058,7 @@ def gate_api():
     # set_velocity, the same case advects
     for seed in ("set_field", "set_velocity"):
         s = pf.SolverColocated((n, n, n), extent=(1.0, 1.0, 1.0))
+        s.set_advection(False)
         s.set_rho(1.0)
         s.set_mu(1.0)
         s.set_dt(0.1)
@@ -2067,6 +2085,7 @@ def gate_api():
     # (an odd box cannot halve: level 0 alone, 15^3) warns once per scalar; a factor-of-two box not
     for m, want in ((15, True), (16, False)):
         s = pf.Solver((m, m, m), extent=(1.0, 1.0, 1.0))
+        s.set_advection(False)
         Xm, Ym, Zm = grid(s)
         s.set_solid(np.asfortranarray(np.sqrt((Xm - 0.5) ** 2 + (Ym - 0.5) ** 2 + (Zm - 0.5) ** 2) - 0.2))
         s.add_scalar("c", 1.0, cutcell=True)
@@ -2081,6 +2100,7 @@ def gate_api():
     # rebuilt geometry re-issues the §9 resolution warnings (a 0.4 h plate: thin solid)
     for scheme in ("koren", "fou"):
         s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+        s.set_advection(False)
         s.set_dt(0.05)
         s.set_solid(np.asfortranarray(np.sqrt((X - 0.5) ** 2 + (Y - 0.5) ** 2 + (Z - 0.5) ** 2) - 0.2),
                     cutcell_pressure=True)
@@ -2096,6 +2116,7 @@ def gate_api():
     h = 1.0 / n
     plate = np.asfortranarray(np.abs(X - (n // 2 + 0.55) * h) - 0.2 * h)
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_solid(plate)
     s.add_scalar("c", 1.0, cutcell=True)
     errs = [capture_stderr(lambda: s.solve_scalar_steady("c"))[1]]
@@ -2107,6 +2128,7 @@ def gate_api():
           f"{['thin-solid' in e for e in errs]})")
     # WO-7 (§8.1): set_scalar_solid's validation, the registered solid field, get_scalar_solid
     s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_dt(0.1)

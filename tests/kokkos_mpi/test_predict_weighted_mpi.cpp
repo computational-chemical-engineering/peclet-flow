@@ -117,6 +117,7 @@ int main(int argc, char** argv) {
         const auto blk = dec.block((std::size_t)rank);
         const int lnx = (int)blk.size[0], lny = (int)blk.size[1], lnz = (int)blk.size[2];
         IbmSolver s(lnx, lny, lnz);
+        s.setAdvection(false);
         s.initMpi(g.x, g.y, g.z, MPI_COMM_WORLD);
         s.setRho(1.0);
         s.setMu(0.1);

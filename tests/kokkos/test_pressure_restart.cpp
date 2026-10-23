@@ -185,6 +185,7 @@ std::unique_ptr<IbmSolver> bubble(int vprec, int guessMode) {
   for (double& cc : C)
     cc = 1.0 - cc;  // liquid (C = 1) around a gas bubble
   auto s = std::make_unique<IbmSolver>(n, n, n);
+  s->setAdvection(false);
   s->setRho(rhoL);
   s->setMu(0.01);
   s->setDt(0.2);

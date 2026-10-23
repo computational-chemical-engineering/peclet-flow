@@ -67,6 +67,7 @@ void setup(IbmSolver& s, bool walls) {
 
 void testStructure() {
   IbmSolver s(N, N, N);
+  s.setAdvection(false);
   setup(s, false);
   s.addScalar("c", 1.3, 1, 50, true);
   s.solveScalarSteady("c");  // insulating walls, no source: b = 0, assembled, nothing to solve
@@ -139,6 +140,7 @@ double maxDevUnknown(IbmSolver& s, double v) {
 void testConstants() {
   {  // Dirichlet walls at g = 1, steady: A 1 = b exactly up to round-off
     IbmSolver s(N, N, N);
+    s.setAdvection(false);
     setup(s, false);
     s.addScalar("c", 0.9, 1, 50, true);
     s.setScalarWall("c", 1, 1.0, 0.0, -1);
@@ -153,6 +155,7 @@ void testConstants() {
   }
   {  // transient, insulating walls: c == 5 stays
     IbmSolver s(N, N, N);
+    s.setAdvection(false);
     setup(s, false);
     s.addScalar("c", 0.9, 1, 50, true);
     std::vector<double> five((std::size_t)N * N * N, 5.0);
@@ -167,6 +170,7 @@ void testConstants() {
 
 void testSingular() {
   IbmSolver s(N, N, N);
+  s.setAdvection(false);
   setup(s, false);
   s.addScalar("c", 0.9, 1, 50, true);
   s.setScalarWall("c", 0, 0.1, 0.0, -1);  // a flux into the fluid
@@ -201,6 +205,7 @@ void testSingular() {
 void testBudget() {
   for (int steady = 0; steady < 2; ++steady) {
     IbmSolver s(N, N, N);
+    s.setAdvection(false);
     setup(s, true);
     s.addScalar("c", 1.1, 1, 50, true);
     s.setScalarBc("c", 0, 2, 0.25);
@@ -241,6 +246,7 @@ void testBudget() {
 void testRefusals() {
   {  // scalar Dirichlet face against a periodic flow face
     IbmSolver s(N, N, N);
+    s.setAdvection(false);
     setup(s, false);
     s.addScalar("c", 1.0, 1, 50, true);
     s.setScalarBc("c", 2, 2, 1.0);
@@ -254,6 +260,7 @@ void testRefusals() {
   }
   {  // flow wall on -x, scalar left periodic
     IbmSolver s(N, N, N);
+    s.setAdvection(false);
     setup(s, true);
     s.addScalar("c", 1.0, 1, 50, true);
     bool threw = false;

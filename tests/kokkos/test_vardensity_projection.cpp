@@ -31,6 +31,7 @@ void hydrostatic(double ratio) {
   const int N = 8, NZ = 24;
   const double g = 0.1;
   peclet::flow::IbmSolver s(N, N, NZ);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.0);  // inviscid: the balance is exact (no viscous wall layer in the predictor)
   s.setDt(1.0);
@@ -77,6 +78,7 @@ void uniformReduction() {
   std::vector<std::vector<double>> uu, pp;
   for (int var = 0; var < 2; ++var) {
     peclet::flow::IbmSolver s(N, N, NZ);
+    s.setAdvection(false);
     s.setRho(2.0);
     s.setMu(0.1);
     s.setDt(5.0);

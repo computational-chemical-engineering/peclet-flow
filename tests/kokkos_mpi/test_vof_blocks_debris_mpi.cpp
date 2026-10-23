@@ -75,6 +75,7 @@ static std::vector<double> colour(int m) {
 }
 
 static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz) {
+  s.setAdvection(false);
   const std::size_t loc = (std::size_t)lnx * lny * lnz;
   s.setRho(1.0);
   s.setMu(0.5);
@@ -114,6 +115,7 @@ static std::vector<double> pairColour(int m) {
   return c;
 }
 static void configurePair(IbmSolver& s, int lnx, int lny, int lnz, bool bound) {
+  s.setAdvection(false);
   const std::size_t loc = (std::size_t)lnx * lny * lnz;
   s.setRho(RHO_L);
   s.setMu(0.5);
@@ -171,6 +173,7 @@ static double wallPsi(int x, int y) {
          (double)(NY * NY);
 }
 static void configureWall(IbmSolver& s, int ox, int oy, int lnx, int lny, int lnz) {
+  s.setAdvection(false);
   const std::size_t loc = (std::size_t)lnx * lny * lnz;
   s.setRho(1.0);
   s.setMu(0.5);

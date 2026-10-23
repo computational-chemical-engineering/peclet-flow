@@ -46,6 +46,8 @@ def build(pf, phys):
     sigma = SIGMA_CELL * sr * sl**3 / (st * st)
     g = G_CELL * sl / (st * st)
     s = pf.Solver((N, N, N), extent=(N * H,) * 3) if phys else pf.Solver(N, N, N)
+    # pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
+    s.set_advection(False)
     s.set_rho(rho_l)
     s.set_mu(mu_l)
     s.set_pressure_geometry(np.full((N, N, N), 1.0, order="F"))

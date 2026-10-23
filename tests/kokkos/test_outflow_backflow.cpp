@@ -81,6 +81,7 @@ int main(int argc, char** argv) {
     // (3) no outflow face at all (a periodic box): everything zero, total zero.
     {
       peclet::flow::IbmSolver s(nx, ny, nz);
+      s.setAdvection(false);
       s.setRho(1.0);
       s.setMu(0.1);
       s.setDt(0.01);

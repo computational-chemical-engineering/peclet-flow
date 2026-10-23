@@ -70,6 +70,7 @@ void checkGhosts(const char* label, const int bc[6]) {
       for (int x = 0; x < nx; ++x)
         sdf[(std::size_t)x + (std::size_t)y * nx + (std::size_t)z * nx * ny] = f(x, y, z);
   IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   for (int face = 0; face < 6; ++face)
     if (bc[face] != 0)
       s.setDomainBc(face, bc[face], 0.0, 0.0, 0.0);
@@ -200,6 +201,7 @@ Measure measure(IbmSolver& s, const int n[3], const double hp[3]) {
 Measure sphereCase(const int n[3], const double hp[3], double R, const double off[3]) {
   const std::array<double, 3> extent{n[0] * hp[0], n[1] * hp[1], n[2] * hp[2]};
   IbmSolver s(n[0], n[1], n[2], extent, {0.0, 0.0, 0.0}, {(long)n[0], (long)n[1], (long)n[2]});
+  s.setAdvection(false);
   std::vector<double> sdf((std::size_t)n[0] * n[1] * n[2]);
   const double c[3] = {0.5 * extent[0] + off[0], 0.5 * extent[1] + off[1],
                        0.5 * extent[2] + off[2]};
@@ -286,6 +288,7 @@ void pipeSet() {
       const double cx = 0.5 * nxy + u(rng), cy = 0.5 * nxy + u(rng);
       IbmSolver s(n[0], n[1], n[2], {(double)n[0], (double)n[1], (double)n[2]}, {0.0, 0.0, 0.0},
                   {(long)n[0], (long)n[1], (long)n[2]});
+      s.setAdvection(false);
       std::vector<double> sdf((std::size_t)n[0] * n[1] * n[2]);
       for (int z = 0; z < n[2]; ++z)
         for (int y = 0; y < n[1]; ++y)

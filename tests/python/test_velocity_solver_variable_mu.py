@@ -34,6 +34,7 @@ def make(variable_mu, solver=None, dt=2.0):
     """Walled box, a transported scalar T driving the body force (and mu(T) when variable_mu).
     dt = 2, mu = 0.5: kappa = 1 + 12 * 1.0 = 13 -> AUTO picks the V-cycle at constant mu."""
     s = pf.Solver(N, N, N)
+    s.set_advection(False)
     s.set_rho(1.0)
     s.set_mu(0.5)
     s.set_dt(dt)

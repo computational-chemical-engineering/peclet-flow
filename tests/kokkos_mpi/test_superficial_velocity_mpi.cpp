@@ -71,6 +71,7 @@ static std::vector<double> slice(const std::vector<double>& g, int ox, int oy, i
 
 // BCs first (they are folded into the operators the geometry builds), then the geometry.
 static void build(IbmSolver& s, std::size_t cells) {
+  s.setAdvection(false);
   s.setDomainBc(4, 1, 0.0, 0.0, 0.0);  // -z wall
   s.setDomainBc(5, 1, 0.0, 0.0, 0.0);  // +z wall
   s.setPressureGeometry(std::vector<double>(cells, 10.0));

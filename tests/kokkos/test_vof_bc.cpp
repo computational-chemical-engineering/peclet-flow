@@ -175,6 +175,7 @@ void budgetGate(int nz, int nSlug, int nAfter) {
   const int nx = 32, ny = 32;
   const double W = 1.0, dt = 0.2;
   peclet::flow::IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.0);
   s.setDt(dt);
@@ -257,6 +258,7 @@ void propGhostGate() {
   const int nx = 8, ny = 8, nz = 16;
   const double rhoG = 1.0, rhoL = 1000.0;
   peclet::flow::IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(rhoL);
   s.setMu(1.0);
   s.setDt(0.05);
@@ -400,6 +402,7 @@ double outflowFaceProbe(bool corr, double ratio, double& divOut, double& uInner,
   const int nx = 32, ny = 4, nz = 16;
   const double rhoL = 100.0, rhoG = rhoL / ratio;
   peclet::flow::IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(rhoL);
   s.setMu(5.0);
   s.setDt(ratio > 1.0 ? 0.1 : 0.2);
@@ -494,6 +497,7 @@ void composedGate(bool cutOutlet, int nSlug, int nAfter) {
   const int nx = 20, ny = 20, nz = 32;
   const double W = 1.0;
   peclet::flow::IbmSolver s(nx, ny, nz);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(0.5);
   s.setDt(0.25);

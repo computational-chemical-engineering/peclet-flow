@@ -140,6 +140,7 @@ HydroResult hydrostatic(double ratio, double mu, int steps, bool periodic, bool 
   const int N = 8, NZ = 24;
   const double g = 0.1;
   S s(N, N, NZ);
+  s.setAdvection(false);
   s.setRho(1.0);
   s.setMu(mu);
   s.setDt(1.0);
@@ -268,6 +269,7 @@ void gateInvisibleSubspace() {
   const double g = 0.1;
   for (double mu : {0.0, 0.01}) {
     Colo s(N, N, NZ);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(mu);
     s.setDt(1.0);
@@ -323,6 +325,7 @@ template <class S>
 std::unique_ptr<S> makeDroplet(int n, double R, double sigma, double mu, double rhoG, double rhoL,
                                double kappa, double dtFac, int bfp = -1) {
   auto s = std::make_unique<S>(n, n, n);
+  s->setAdvection(false);
   s->setRho(rhoL);
   s->setMu(mu);
   s->setDt(1.0);
@@ -514,6 +517,7 @@ void gateUniformReduction() {
   std::vector<std::vector<double>> uu, pp;
   for (int var = 0; var < 2; ++var) {
     Colo s(N, N, NZ);
+    s.setAdvection(false);
     s.setRho(2.0);
     s.setMu(0.0);
     s.setDt(4.0);
@@ -550,6 +554,7 @@ void gateBridge() {
   // A collocated run whose cell velocity is a prescribed smooth solenoidal field; one step()
   // projects it onto uf_/vf_/wf_, and every advect_vof afterwards reuses that frozen face field.
   Colo co(N, N, N);
+  co.setAdvection(false);
   co.setRho(1.0);
   co.setMu(0.0);
   co.setDt(0.1);  // the ABC field peaks at ~1.7, so the interface CFL is ~0.17 < the WY cap 0.25
@@ -593,6 +598,7 @@ void gateBridge() {
 
   // --- (a) the same faces on the STAGGERED solver, whose u(i) IS the low face -------------------
   Stag st(N, N, N);
+  st.setAdvection(false);
   st.setRho(1.0);
   st.setMu(0.0);
   st.setDt(0.1);
@@ -633,6 +639,7 @@ void gateScope() {
       }
   {  // enable_vof with an immersed solid
     Colo s(N, N, N);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.01);
     s.setDt(1.0);
@@ -649,6 +656,7 @@ void gateScope() {
   }
   {  // variable density with an immersed solid: caught at the first project()
     Colo s(N, N, N);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.01);
     s.setDt(1.0);
@@ -668,6 +676,7 @@ void gateScope() {
   }
   {  // momentum consistency stays staggered-only
     Colo s(N, N, N);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.01);
     s.setDt(1.0);
@@ -684,6 +693,7 @@ void gateScope() {
   }
   {  // the harmonic rho_f knob is not wired into the face acceleration
     Colo s(N, N, N);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.01);
     s.setDt(1.0);
@@ -704,6 +714,7 @@ void gateScope() {
   }
   {  // the pressure force lives in the implicit predictor: the non-incremental step has none
     Colo s(N, N, N);
+    s.setAdvection(false);
     s.setRho(1.0);
     s.setMu(0.01);
     s.setDt(1.0);

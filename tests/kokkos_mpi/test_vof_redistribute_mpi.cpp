@@ -85,6 +85,7 @@ static double bubbleAt(int b, int x, int y, int z) {
 // (`pcAreaC_`/`pcAreaMc_`) and `vofEnergy_`, whose own `ready()`/`initialized()` predicates ask
 // "has init run", not "is it the right size".
 static void configure(IbmSolver& s, int ox, int oy, int oz, int lnx, int lny, int lnz, int cfg) {
+  s.setAdvection(false);
   const bool blocks = (cfg == 1), pc = (cfg == 2);
   s.setRho(RHO_L);
   s.setMu(MU_L);
