@@ -456,6 +456,8 @@ class Solver {
   void setPressureIterations(int it);
 
 
+  // Momentum advection, ON by default (2026-10-23 user directive; off = Stokes). Inert under
+  // enable_vof_momentum: see advectsMomentum().
   void setAdvection(bool on);
 
   // explicit high-order advection (default SOU)
@@ -5025,7 +5027,8 @@ class Solver {
   int bcProfNb_[6] = {0, 0, 0, 0, 0, 0};  // buffer above can be rebuilt when the block is resized
   int bcProfRawNc_[6] = {0, 0, 0, 0, 0, 0};
   CCField bcDcorr_[3], bcBrhs_[3];        // implicit-diffusion face fold (per component)
-  bool advect_ = false, cutcellPressure_ = false, implicitFou_ = false;
+  bool advect_ = true;  // momentum advection ON by default (user directive 2026-10-23)
+  bool cutcellPressure_ = false, implicitFou_ = false;
   bool deferredCorr_ = true;  // deferred-correction advection (off = pure implicit FOU, 1st order)
   int advScheme_ = 0;         // high-order advection: 0 = SOU (default), 1 = Koren TVD
   bool incremental_ = true,

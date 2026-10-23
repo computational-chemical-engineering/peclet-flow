@@ -2458,8 +2458,10 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
                    "Whether the balanced-force projection runs (see "
                    "set_balanced_force_projection).")
       .def("set_advection", &S::setAdvection, nb::arg("on"),
-           "Enable/disable explicit high-order momentum advection (default scheme SOU). Off ⇒ "
-           "Stokes.")
+           "Enable/disable momentum advection (high-order scheme SOU by default; implicit FOU + "
+           "deferred correction on the domain-BC path). ON by default since 2026-10-23; False => "
+           "Stokes (no inertia), which a creeping-flow script must now ask for. Inert under "
+           "enable_vof_momentum, whose VoF fluxes carry the momentum advection.")
       .def(
           "set_advection_scheme",
           [](S& s, const std::string& scheme) {
