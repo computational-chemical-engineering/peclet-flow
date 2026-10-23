@@ -130,6 +130,10 @@ mistake. Full entries with quotes and provenance:
 - **IBM velocity-MG must never un-scale the residual by `1/D_rescale`.**
 - **The ORB must never split the wall-normal axis** in wall-bounded flow.
 - **Geometric const-coeff operators + masking are the validated defaults**; Galerkin/CG is opt-in.
+- **Momentum advection is ON by default (`advect_ = true`, USER DIRECTIVE 2026-10-23); never
+  reintroduce a default off.** NS drivers rely on it (an off default silently ran case A and the
+  bubble-column benchmark as unsteady Stokes); Stokes scripts call `set_advection(False)`. Under
+  `enable_vof_momentum` the VoF fluxes own the advection: every read goes through `advectsMomentum()`.
 - **Momentum advection uses the actual wall velocity field**, not `maskVelocity`'s solid zeros.
 - **COLLOCATED momentum advection uses the PROJECTED face field** `uf_/vf_/wf_` — never the
   un-projected ½(u_i+u_j) (ablation `diagnostics.set_uf_advection(False)` only). Implicit FOU and the
