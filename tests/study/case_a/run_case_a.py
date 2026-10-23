@@ -40,9 +40,11 @@ Usage:
   --face-mu {arithmetic,harmonic}  ablation: face-viscosity mean (default arithmetic, the driver's)
   --viscous-stress {laplacian,full}  the viscous stress form (set_viscous_stress; default laplacian,
                              the solver's default; doc/full_viscous_stress.md)
-  --advection                momentum advection on (set_advection(True), explicit SOU). The solver's
-                             default, and every run before 2026-10-23, is OFF: unsteady Stokes
-                             momentum (G5 diagnosis, validation/G5_DIAG.md)
+  --no-advection             momentum advection off (unsteady Stokes momentum). The default is ON
+                             (set_advection(True), explicit SOU): case A is Navier-Stokes. The
+                             solver's own default is OFF, and every case-A run before 2026-10-23
+                             ran without it (G5 diagnosis, validation/G5_DIAG.md); `--advection`
+                             is accepted and is the default
   --single-vof               ablation: the structured VoF + CSF without the block container (the
                              bubble seeded as 8x8x8 sub-sampled sphere fractions)
   --vof-momentum             ablation: enable_vof_momentum(rho_g, rho_l) (implies --single-vof:
@@ -92,7 +94,8 @@ def parse():
     p.add_argument("--mu-ratio", type=float, default=MU_RATIO)
     p.add_argument("--face-mu", choices=("arithmetic", "harmonic"), default="arithmetic")
     p.add_argument("--viscous-stress", choices=("laplacian", "full"), default="laplacian")
-    p.add_argument("--advection", action="store_true")
+    p.add_argument("--advection", action=argparse.BooleanOptionalAction, default=True,
+                   help="momentum advection (default on; --no-advection: unsteady Stokes)")
     p.add_argument("--single-vof", action="store_true")
     p.add_argument("--vof-momentum", action="store_true")
     p.add_argument("--mpi", action="store_true")
@@ -147,7 +150,7 @@ class Dist:
 
 
 def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, vof_mom=False,
-          dist=None, advection=False):
+          dist=None, advection=True):
     L = L_OVER_D * D
     dist = dist or Dist(n)
     if dist.comm is None:
