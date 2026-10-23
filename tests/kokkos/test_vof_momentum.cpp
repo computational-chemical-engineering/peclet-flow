@@ -44,6 +44,7 @@
 #include <Kokkos_Core.hpp>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -329,6 +330,51 @@ void inertWhenOff() {
   CHECK(dc == 0.0);
 }
 
+// ------------------------------------------- K6: the density pair is checked against the closure
+// enable_vof_momentum(rho_gas, rho_liquid) means (rho at C = 0, rho at C = 1). A swapped pair used
+// to run silently and carry the momentum at the other phase's density (Q6, 2026-10-23); with a
+// "rho" closure on C registered it must now raise, naming the swap. Without one it stays unchecked.
+void densityOrderGuard() {
+  const int n = 8;
+  auto build = [&](int closure) {  // 0 none, 1 linear (C = 1 is the GAS), 2 table (same)
+    auto s = std::make_unique<IbmSolver>(n, n, n);
+    s->setRho(1.0);
+    s->setDt(0.1);
+    s->setPressureGeometry(std::vector<double>((std::size_t)n * n * n, 10.0));
+    s->enableVof();
+    s->setVof(std::vector<double>((std::size_t)n * n * n, 0.0));
+    if (closure == 1)
+      s->setPropertyModel("rho", ClosureKind::LinearMix, "C", "", {1000.0, 1.2 - 1000.0});
+    if (closure == 2)
+      s->setPropertyTable("rho", "C", {0.0, 0.5, 1.0}, {1000.0, 500.6, 1.2});
+    return s;
+  };
+  auto outcome = [](auto&& f) -> std::string {
+    try {
+      f();
+    } catch (const std::runtime_error& e) {
+      return e.what();
+    }
+    return "";
+  };
+  for (int closure : {1, 2}) {
+    const std::string ok = outcome([&] { build(closure)->enableVofMomentum(1000.0, 1.2); });
+    const std::string sw = outcome([&] { build(closure)->enableVofMomentum(1.2, 1000.0); });
+    const std::string bad = outcome([&] { build(closure)->enableVofMomentum(1000.0, 2.0); });
+    std::printf("K6 %s closure: matched -> %s; swapped -> %s; mismatched -> %s\n",
+                closure == 1 ? "linear" : "table ", ok.empty() ? "accepted" : "RAISED",
+                sw.find("SWAPPED") != std::string::npos ? "raises (SWAPPED)" : "NOT CAUGHT",
+                !bad.empty() && bad.find("SWAPPED") == std::string::npos ? "raises" : "NOT CAUGHT");
+    CHECK(ok.empty());
+    CHECK(sw.find("SWAPPED") != std::string::npos);
+    CHECK(sw.find("rho(C=0) = 1000") != std::string::npos);
+    CHECK(!bad.empty() && bad.find("SWAPPED") == std::string::npos);
+  }
+  const std::string none = outcome([&] { build(0)->enableVofMomentum(1.2, 1000.0); });
+  std::printf("K6 no closure: unchecked -> %s\n", none.empty() ? "accepted" : "RAISED");
+  CHECK(none.empty());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -340,6 +386,7 @@ int main(int argc, char** argv) {
     singlePhase();
     momentumConservation();
     inertWhenOff();
+    densityOrderGuard();
   }
   Kokkos::finalize();
   if (failures == 0) {

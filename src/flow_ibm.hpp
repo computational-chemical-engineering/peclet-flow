@@ -3920,8 +3920,19 @@ class Solver {
   // instead would break the hydrostatic acid test at O(d rho) — measured and recorded in the WO-K
   // findings.
   /// `rhoGas` / `rhoLiquid` are PHYSICAL densities, the same numbers the rho closure is given.
+  /// They mean the density at C = 0, then the density at C = 1 — whichever phase that is: when
+  /// C = 1 marks the gas, `rhoGas` is the LIQUID density (the names assume C = 1 is the liquid).
+  /// When a "rho" closure on "C" is already registered, the pair is checked against that closure
+  /// evaluated at C = 0 and C = 1 and a mismatch throws (a swapped pair once ran silently and
+  /// carried a bubble at the liquid density, Q6 2026-10-23); with no such closure yet, unchecked.
   /// Refused together with the block container (`enableVofBlocks*`), in either call order.
   void enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys);
+
+
+  // The registered "rho" closure on the colour "C" evaluated at C = 0 and C = 1, in PHYSICAL
+  // units (the parameters the caller gave). False when there is none, or when the last closure
+  // writing "rho" is not a function of C alone (another input, a second input, a non-mix kind).
+  bool vofRhoClosureEnds(double& rho0Phys, double& rho1Phys) const;
 
 
   bool vofMomentumEnabled() const;

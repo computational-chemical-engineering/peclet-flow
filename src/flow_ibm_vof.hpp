@@ -2264,6 +2264,29 @@ void Solver<Grid>::enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys) {
     throw std::runtime_error("enable_vof_momentum: both phase densities must be > 0");
   if (vofBlocks_)
     throw std::runtime_error(kVofMomBlocksMsg);
+  // The pair is (rho at C = 0, rho at C = 1) and must be what the density closure produces there:
+  // the momentum flux is rho(C=0)*(a-F) + rho(C=1)*F. A swapped pair is not caught by anything
+  // downstream — it transports the momentum at the other phase's density, silently (Q6).
+  double rho0Phys = 0.0, rho1Phys = 0.0;
+  if (vofRhoClosureEnds(rho0Phys, rho1Phys)) {
+    auto differs = [](double a, double b) {
+      return std::fabs(a - b) > 1e-9 * std::fmax(std::fabs(a), std::fabs(b));
+    };
+    if (differs(rhoGasPhys, rho0Phys) || differs(rhoLiquidPhys, rho1Phys)) {
+      char msg[640];
+      std::snprintf(
+          msg, sizeof(msg),
+          "enable_vof_momentum(rho_gas=%.10g, rho_liquid=%.10g): the pair must be the density at "
+          "C = 0, then the density at C = 1 (the names assume C = 1 is the liquid; when C = 1 is "
+          "the gas, rho_gas is the liquid density). The 'rho' closure gives rho(C=0) = %.10g, "
+          "rho(C=1) = %.10g%s",
+          rhoGasPhys, rhoLiquidPhys, rho0Phys, rho1Phys,
+          (!differs(rhoGasPhys, rho1Phys) && !differs(rhoLiquidPhys, rho0Phys))
+              ? " -- the pair is SWAPPED."
+              : ".");
+      throw std::runtime_error(msg);
+    }
+  }
   vofRhoG_ = rhoGas;
   vofRhoL_ = rhoLiquid;
   vofMomEnabled_ = true;
@@ -2271,6 +2294,41 @@ void Solver<Grid>::enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys) {
     if (uAdv_[c].extent(0) != n_)
       uAdv_[c] = CCField("uAdv", n_);
   vofMom_.init(vofAdv_, vofRhoG_, vofRhoL_);
+}
+
+template <class Grid>
+bool Solver<Grid>::vofRhoClosureEnds(double& rho0Phys, double& rho1Phys) const {
+  // The LAST closure writing "rho" is the one in force (closures apply in registration order).
+  const Closure* cl = nullptr;
+  for (const auto& c : closures_)
+    if (c.outName == "rho")
+      cl = &c;
+  if (!cl || cl->in0Name != "C" || !cl->in1Name.empty())
+    return false;
+  if (cl->kind == ClosureKind::LinearMix) {
+    rho0Phys = cl->pPhys[0];
+    rho1Phys = cl->pPhys[0] + cl->pPhys[1];
+    return true;
+  }
+  if (cl->kind != ClosureKind::Table1D || cl->nTab <= 0)
+    return false;
+  // Clamped piecewise-linear, as applyClosure evaluates it, on the caller's (physical) ys.
+  auto hx = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cl->tabX);
+  const auto& ys = cl->tabYPhys;
+  auto at = [&](double s) {
+    const int n = cl->nTab;
+    if (s <= hx(0))
+      return ys[0];
+    if (s >= hx(n - 1))
+      return ys[n - 1];
+    int lo = 0;
+    while (lo + 1 < n - 1 && hx(lo + 1) <= s)
+      ++lo;
+    return ys[lo] + (s - hx(lo)) / (hx(lo + 1) - hx(lo)) * (ys[lo + 1] - ys[lo]);
+  };
+  rho0Phys = at(0.0);
+  rho1Phys = at(1.0);
+  return true;
 }
 
 template <class Grid>
