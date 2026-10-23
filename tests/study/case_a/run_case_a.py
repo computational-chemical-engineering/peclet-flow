@@ -37,6 +37,10 @@ Usage:
   --dt-safety F              fraction of the CFL and capillary limits (default 0.25, the driver's)
   --mu-ratio R               ablation: mu_b/mu_l (default 0.1, the case); Ar and Bo are unchanged
                              (both use mu_l and the density difference)
+  --rho-ratio R              ablation: the INERTIAL density ratio rho_b/rho_l (default 0.1, the case).
+                             The buoyancy force keeps the case density, -(rho_case(C) - <rho_case>) g
+                             with rho_b = 0.1 rho_l, so at R = 1 the buoyancy is Boussinesq and Ar,
+                             Bo, mu_l, sigma are unchanged (refused with --vof-momentum)
   --face-mu {arithmetic,harmonic}  ablation: face-viscosity mean (default arithmetic, the driver's)
   --viscous-stress {laplacian,full}  the viscous stress form (set_viscous_stress; default laplacian,
                              the solver's default; doc/full_viscous_stress.md)
@@ -92,6 +96,7 @@ def parse():
     p.add_argument("--wall", type=float, default=float("inf"))
     p.add_argument("--dt-safety", type=float, default=0.25)
     p.add_argument("--mu-ratio", type=float, default=MU_RATIO)
+    p.add_argument("--rho-ratio", type=float, default=RHO_RATIO)
     p.add_argument("--face-mu", choices=("arithmetic", "harmonic"), default="arithmetic")
     p.add_argument("--viscous-stress", choices=("laplacian", "full"), default="laplacian")
     p.add_argument("--advection", action=argparse.BooleanOptionalAction, default=True,
@@ -150,7 +155,7 @@ class Dist:
 
 
 def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, vof_mom=False,
-          dist=None, advection=True):
+          dist=None, advection=True, rho_g_in=RHO_G):
     L = L_OVER_D * D
     dist = dist or Dist(n)
     if dist.comm is None:
@@ -164,7 +169,7 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, 
     s.enable_vof()
     s.set_vof(np.zeros(dist.siz, order="F"))
     # C = 1 is GAS (the block container's union starts empty)
-    s.set_property_model("rho", "linear", "C", [RHO_L, RHO_G - RHO_L])
+    s.set_property_model("rho", "linear", "C", [RHO_L, rho_g_in - RHO_L])   # inertial density
     s.set_property_model("mu", "linear", "C", [MU_L, mu_g - MU_L])
     if face_mu == "harmonic":
         s.diagnostics.set_property_mode("variable", True)
@@ -237,8 +242,10 @@ def main():
     if root:
         os.makedirs(a.out, exist_ok=True)
     t0 = time.perf_counter()
+    if a.vof_momentum and a.rho_ratio != RHO_RATIO:
+        sys.exit("--rho-ratio is refused with --vof-momentum")
     s, h, alpha = build(n, a.mu_ratio * MU_L, a.face_mu, a.viscous_stress, a.single_vof,
-                        a.vof_momentum, dist, a.advection)
+                        a.vof_momentum, dist, a.advection, a.rho_ratio * RHO_L)
     t_setup = time.perf_counter() - t0
     re_of = lambda U: RHO_L * U * D / MU_L
     cols = ["t", "t_star", "step", "dt", "binding", "u_abs", "u_mix", "u_liq", "u_zm", "u_drift",
@@ -246,7 +253,7 @@ def main():
             "v_mean", "w_mean", "gas_vol", "vol_err", "block_vol", "x_cent", "a_closure_g"]
     f = open(os.path.join(a.out, "case_a.csv") if root else os.devnull, "w")  # noqa: SIM115
     f.write(f"# case A d/h={a.d_over_h} n={n} L={L_OVER_D * D} d={D} rho_l={RHO_L} "
-            f"rho_g={RHO_G} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
+            f"rho_g={RHO_G} rho_g_inertial={a.rho_ratio * RHO_L} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
             f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e} dt_safety={a.dt_safety} "
             f"face_mu={a.face_mu} viscous_stress={a.viscous_stress} single_vof={a.single_vof} "
             f"vof_momentum={a.vof_momentum} advection={a.advection}" + (f" np={nranks}" if comm is not None else "") + "\n")
@@ -322,7 +329,7 @@ def main():
     drel = abs(re_a - re_b) / abs(re_a)
     steady = bool(drel < 1e-3)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
-    line = (f"CASE_A d/h={a.d_over_h} n={n} mu_ratio={a.mu_ratio:g} face_mu={a.face_mu} "
+    line = (f"CASE_A d/h={a.d_over_h} n={n} mu_ratio={a.mu_ratio:g} rho_ratio={a.rho_ratio:g} face_mu={a.face_mu} "
             f"stress={a.viscous_stress} adv={'on' if a.advection else 'off'} vof={'mom' if a.vof_momentum else ('single' if a.single_vof else 'blocks')} "
             f"dt_safety={a.dt_safety:g} space={space} stop={stop} t*={last['t_star']:.3f} "
             f"steps={step} Re_drift(2L-mean)={re_a:.4f} [min {re_lo:.3f} max {re_hi:.3f}] "
