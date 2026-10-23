@@ -40,6 +40,9 @@ Usage:
   --face-mu {arithmetic,harmonic}  ablation: face-viscosity mean (default arithmetic, the driver's)
   --viscous-stress {laplacian,full}  the viscous stress form (set_viscous_stress; default laplacian,
                              the solver's default; doc/full_viscous_stress.md)
+  --advection                momentum advection on (set_advection(True), explicit SOU). The solver's
+                             default, and every run before 2026-10-23, is OFF: unsteady Stokes
+                             momentum (G5 diagnosis, validation/G5_DIAG.md)
   --single-vof               ablation: the structured VoF + CSF without the block container (the
                              bubble seeded as 8x8x8 sub-sampled sphere fractions)
   --vof-momentum             ablation: enable_vof_momentum(rho_g, rho_l) (implies --single-vof:
@@ -89,6 +92,7 @@ def parse():
     p.add_argument("--mu-ratio", type=float, default=MU_RATIO)
     p.add_argument("--face-mu", choices=("arithmetic", "harmonic"), default="arithmetic")
     p.add_argument("--viscous-stress", choices=("laplacian", "full"), default="laplacian")
+    p.add_argument("--advection", action="store_true")
     p.add_argument("--single-vof", action="store_true")
     p.add_argument("--vof-momentum", action="store_true")
     p.add_argument("--mpi", action="store_true")
@@ -143,7 +147,7 @@ class Dist:
 
 
 def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, vof_mom=False,
-          dist=None):
+          dist=None, advection=False):
     L = L_OVER_D * D
     dist = dist or Dist(n)
     if dist.comm is None:
@@ -162,6 +166,8 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, 
     if face_mu == "harmonic":
         s.diagnostics.set_property_mode("variable", True)
     s.set_viscous_stress(stress)
+    if advection:
+        s.set_advection(True)
     s.set_surface_tension(SIGMA)
     s.set_pressure_pcg(True, 800, 1e-8)       # last; the bubble-column driver's setting
     # One marker at the box centre. enable_vof_blocks takes GRID coordinates (cells) even under a
@@ -228,7 +234,7 @@ def main():
         os.makedirs(a.out, exist_ok=True)
     t0 = time.perf_counter()
     s, h, alpha = build(n, a.mu_ratio * MU_L, a.face_mu, a.viscous_stress, a.single_vof,
-                        a.vof_momentum, dist)
+                        a.vof_momentum, dist, a.advection)
     t_setup = time.perf_counter() - t0
     re_of = lambda U: RHO_L * U * D / MU_L
     cols = ["t", "t_star", "step", "dt", "binding", "u_abs", "u_mix", "u_liq", "u_zm", "u_drift",
@@ -239,7 +245,7 @@ def main():
             f"rho_g={RHO_G} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
             f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e} dt_safety={a.dt_safety} "
             f"face_mu={a.face_mu} viscous_stress={a.viscous_stress} single_vof={a.single_vof} "
-            f"vof_momentum={a.vof_momentum}" + (f" np={nranks}" if comm is not None else "") + "\n")
+            f"vof_momentum={a.vof_momentum} advection={a.advection}" + (f" np={nranks}" if comm is not None else "") + "\n")
     f.write(",".join(cols) + "\n")
 
     t, step, binding, dt = 0.0, 0, "-", 0.0
@@ -313,7 +319,7 @@ def main():
     steady = bool(drel < 1e-3)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
     line = (f"CASE_A d/h={a.d_over_h} n={n} mu_ratio={a.mu_ratio:g} face_mu={a.face_mu} "
-            f"stress={a.viscous_stress} vof={'mom' if a.vof_momentum else ('single' if a.single_vof else 'blocks')} "
+            f"stress={a.viscous_stress} adv={'on' if a.advection else 'off'} vof={'mom' if a.vof_momentum else ('single' if a.single_vof else 'blocks')} "
             f"dt_safety={a.dt_safety:g} space={space} stop={stop} t*={last['t_star']:.3f} "
             f"steps={step} Re_drift(2L-mean)={re_a:.4f} [min {re_lo:.3f} max {re_hi:.3f}] "
             f"Re_rel_zm(2L-mean)={zm_a:.4f} dRe/Re(2L vs prev 2L)={drel:.2e} steady={steady} "
