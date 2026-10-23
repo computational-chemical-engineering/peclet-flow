@@ -11,7 +11,7 @@ Usage:
     PYTHONPATH=<flow build> OMP_NUM_THREADS=8 OMP_PROC_BIND=false \\
         python tests/study/vof_perf/prof.py N [--pcg [--rtol R]] [--timing] [--dump out.npz]
             [--warm W] [--flux device|python|none] [--levels L] [--bottom MODE] [--fixdt DT]
-            [--ckpt PATH] [--case-dir DIR] [--dummy N]
+            [--ckpt PATH] [--case-dir DIR] [--dummy N] [--viscous-stress MODE]
 
     --ckpt      checkpoint (default ~/Codes/bubble_column_perf/ckpt_t43.npz)
     --case-dir  directory holding run_peclet.py + case.py (default:
@@ -30,6 +30,7 @@ Usage:
                 (doc/vof_projection_cost_design.md §4: the FP32 V-cycle A/B on one build)
     --initial-guess MODE  diagnostics.set_pressure_initial_guess(MODE, --guess-history H):
                 auto | zero | projected, H = 1 | 2 (default 2) (the same note, §5)
+    --viscous-stress MODE  set_viscous_stress(MODE): laplacian | full (absent: the build default)
     --div       with --dump: also store each timed step's max_open_divergence_projected() (div),
                 read after the step (G-NUM item 3)
     --stats     with --dump: also store every timed step's measured block statistics (st_volume,
@@ -83,6 +84,8 @@ if "--levels" in A:
 if not hasattr(rp.pf.Solver, "set_superficial_velocity") and hasattr(rp.pf.Solver, "set_bulk_velocity"):
     rp.pf.Solver.set_superficial_velocity = rp.pf.Solver.set_bulk_velocity  # pre-rename build
 s = rp.build(blocks)
+if "--viscous-stress" in A:  # laplacian | full (set_viscous_stress; doc/full_viscous_stress.md)
+    s.set_viscous_stress(arg("--viscous-stress", "laplacian"))
 for c, a in enumerate(vel):
     s.set_velocity(c, a)
 s.set_field("p", pres)
