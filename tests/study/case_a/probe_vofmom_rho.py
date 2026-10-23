@@ -144,6 +144,13 @@ def main():
             # the replay's own PRED / SEED sums (cross-check of the Python-only ones)
             row[f"pred_r{c}"] = float(np.sum(m * ca.RHO_L * UA[c])) / unit
             row[f"seed_r{c}"] = float(np.sum(-ms * ca.RHO_L * U0[c])) / unit
+        # Buoyancy projection (as probe_budget.py): the step's net reinterpretation force field
+        # f = [SEED + PRED] per face / dt against the buoyancy -(rho_f - <rho>) g, both weighted
+        # by the face gas pattern (C_f - alpha): the fraction by which it adds to the buoyancy.
+        Cf = 0.5 * (C1 + np.roll(C1, 1, axis=0))
+        f_x = ((face_rho(C1, 0) - rho_of(Ce[0])) * UA[0] + (rho_of(Cs[0]) - face_rho(C0, 0)) * U0[0]) / dt
+        b_x = -(face_rho(C1, 0) - rho_av) * ca.G
+        row["buoy_frac"] = float(np.sum(f_x * (Cf - alpha)) / np.sum(b_x * (Cf - alpha)))
         rows.append(row)
 
     keys = list(rows[0].keys())
@@ -157,6 +164,7 @@ def main():
             f"PRED={M['pred'].mean():+.4e} (replay {M['pred_r0'].mean():+.4e}) "
             f"SEED={M['seed'].mean():+.4e} (replay {M['seed_r0'].mean():+.4e}) "
             f"PRED+SEED={(M['pred'] + M['seed']).mean():+.4e} a/g={M['a_g'].mean():+.4e} "
+            f"buoy_frac={M['buoy_frac'].mean():+.3e} (sd {M['buoy_frac'].std():.1e}) "
             f"[<rho>g] | face |rhoF-rho^e|/rho_l x: max {M['max_m0'].max():.3e} "
             f"mean(nonzero) {M['mean_m0'].mean():.3e} faces {M['nface0'].mean():.0f}/{n**3} "
             f"seed max {M['max_ms0'].max():.3e}; y,z PRED {M['pred_r1'].mean():+.1e},"
