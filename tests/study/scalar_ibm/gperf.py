@@ -33,6 +33,7 @@ def advance(n=128, warm=5, steps=5):
     s.set_mu(1.0)
     dt = 0.01
     s.set_dt(dt)
+    s.set_advection(False)
     R = (0.3 * 3.0 / (4.0 * math.pi)) ** (1.0 / 3.0)
     X, Y, Z = g.grid(s)
     s.set_solid(np.asfortranarray(np.sqrt((X - 0.513) ** 2 + (Y - 0.479) ** 2 + (Z - 0.507) ** 2) - R),

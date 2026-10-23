@@ -19,7 +19,7 @@ def packing_sdf(N, radius_frac=0.18):
 
 N = 32
 s = sdflow.Solver(N, N, N)
-s.set_rho(1.0); s.set_mu(1.0); s.set_dt(50.0)
+s.set_rho(1.0); s.set_mu(1.0); s.set_dt(50.0); s.set_advection(False)
 s.set_solid(np.asfortranarray(packing_sdf(N)), cutcell_pressure=True)
 s.set_body_force(1.0, 0.0, 0.0)
 for _ in range(40): s.step()

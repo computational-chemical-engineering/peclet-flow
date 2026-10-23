@@ -29,7 +29,7 @@ import peclet.flow as F
 
 def hydrostatic(ratio, mu=0.0, steps=100, g=0.1, dt=1.0, N=8, NZ=24):
     s = F.Solver(N, N, NZ)
-    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
+    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_advection(False)
     s.set_domain_bc("-z", "wall", (0, 0, 0)); s.set_domain_bc("+z", "wall", (0, 0, 0))   # walls +-z
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, NZ), 10.0)))
     z = np.arange(NZ)

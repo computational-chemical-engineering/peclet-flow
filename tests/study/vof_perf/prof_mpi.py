@@ -84,6 +84,7 @@ s = pf.Solver(*siz)
 s.init_mpi(NX, NY, NZ)
 s.set_rho(case.RHO_L)
 s.set_mu(S * S * case.MU_L)
+s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
 s.set_domain_bc("-y", "wall", (0, 0, 0))
 s.set_domain_bc("+y", "wall", (0, 0, 0))
 s.set_pressure_geometry(np.full(tuple(siz), 10.0, order="F"))

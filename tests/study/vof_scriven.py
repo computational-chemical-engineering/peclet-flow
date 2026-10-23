@@ -204,6 +204,7 @@ def run(n, ja, ratio, r0, r1, cfl=0.2, alpha_l=1.0, sweeps=200, plane=True, cons
     s = pf.Solver(n, n, n)
     s.set_rho(rho_l)
     s.set_mu(1e-3)
+    s.set_advection(False)
     for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
         s.set_domain_bc(f, "outflow")              # outflow everywhere: the vapour production must leave
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
@@ -575,6 +576,7 @@ def area_advect(n=128, R=16.0, sub=16, steps=100, cfl=0.2, amp=0.0, drift=(0.5, 
     s = pf.Solver(n, n, n)
     s.set_rho(1.0)
     s.set_mu(1e-3)
+    s.set_advection(False)
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
     s.enable_vof()
     c0 = sphere_colour_chunked(n, ctr, R, sub)
@@ -650,6 +652,7 @@ def area_probe(n, radii, ratio=100.0, sub=4, mode=None, shape="sphere"):
         s = pf.Solver(n, n, n)
         s.set_rho(rho_l)
         s.set_mu(1e-3)
+        s.set_advection(False)
         s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
         s.enable_vof()
         if R > 0 and shape == "cylinder":
@@ -792,6 +795,7 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
             s = pf.Solver(n, n, n)
             s.set_rho(1.0)
             s.set_mu(1e-3)
+            s.set_advection(False)
             s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
             s.enable_vof()
             s.set_vof(c0)
@@ -820,6 +824,7 @@ def regress_probe(n=128, radii=(16.0,), deltas=(0.05, 0.1, 0.2), sub=16, modes=(
                 s = pf.Solver(n, n, n)
                 s.set_rho(rho_l)
                 s.set_mu(1e-3)
+                s.set_advection(False)
                 s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
                 s.enable_vof()
                 s.set_vof(cstart)
@@ -936,6 +941,7 @@ def _mdot_scene(n, R, ja, ratio, sub, alpha_l, area_mode, quad, plane, geom, dt,
     s = pf.Solver(n, n, n)
     s.set_rho(rho_l)
     s.set_mu(1e-3)
+    s.set_advection(False)
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))
     s.enable_vof()
     s.set_vof(c0)
@@ -1063,6 +1069,7 @@ def carry_probe(n, steps, ratio=100.0, carry=False, sub=16, grad=0.05, mdot=2.0e
     s = pf.Solver(n, n, n)
     s.set_rho(rho_l)
     s.set_mu(1e-3)
+    s.set_advection(False)
     for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
         s.set_domain_bc(f, "outflow")
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))

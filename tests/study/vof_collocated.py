@@ -69,6 +69,7 @@ def gate_static():
             s = cls(n, n, n)
             s.set_rho(1.0)
             s.set_mu(0.1)
+            s.set_advection(False)
             s.set_pressure_geometry(np.full((n, n, n), 10.0, order="F"))
             s.set_pressure_chebyshev(True, 500, 1e-14)
             s.enable_vof()
@@ -107,6 +108,7 @@ def gate_wave():
             s = cls(nx, ny, nz)
             s.set_rho(rho)
             s.set_mu(nu * rho)
+            s.set_advection(False)
             s.set_domain_bc("-z", "wall", (0, 0, 0))
             s.set_domain_bc("+z", "wall", (0, 0, 0))
             s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
@@ -168,6 +170,7 @@ def gate_hysing1(nx=64):
         s = cls(nx, ny, nz)
         s.set_rho(p["rho1"])
         s.set_mu(sc.mu(p["mu1"]))
+        s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
         s.set_domain_bc("-z", "wall", (0, 0, 0))
         s.set_domain_bc("+z", "wall", (0, 0, 0))
         s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))

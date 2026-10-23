@@ -47,6 +47,7 @@ def scene_cfl(n=16):
     s.set_rho(1.0)
     s.set_mu(0.01)
     s.set_dt(0.1)
+    s.set_advection(False)
     s.set_pressure_geometry(np.full((n, n, n), 1e30, order="F"))
     s.set_body_force((0.0, 0.0, 1e-3))
     s.enable_vof()
@@ -85,6 +86,7 @@ def gate_atomic():
     s = pf.Solver(n, n, n)
     s.set_rho(1.0)
     s.set_mu(0.05)
+    s.set_advection(False)
     s.set_pressure_geometry(np.full((n, n, n), 1e30, order="F"))
     s.set_body_force((0.0, 0.0, 1e-3))
     s.enable_vof()
@@ -113,6 +115,7 @@ def scene_hysing(nx=32, nz=64, sigma=0.02):
     s = pf.Solver(nx, 4, nz)
     s.set_rho(1.0)
     s.set_mu(0.01)
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_domain_bc("-z", "wall"); s.set_domain_bc("+z", "wall")
     s.set_pressure_geometry(np.full((nx, 4, nz), 1e30, order="F"))
     s.enable_vof()
@@ -262,7 +265,7 @@ def gate_collocated():
 # ------------------------------------------------------------------ item 7: free-slip domain BC
 def half_channel(nz, top_type, mu=0.05, F=1e-3, dt=5000.0, steps=200):
     s = pf.Solver(4, 4, nz)
-    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt)
+    s.set_rho(1.0); s.set_mu(mu); s.set_dt(dt); s.set_advection(False)
     s.set_domain_bc("-z", "wall")            # -z no-slip wall
     s.set_domain_bc("+z", top_type)     # +z: 'wall' = no-slip, 'slip' = FREE SLIP
     s.set_pressure_geometry(np.full((4, 4, nz), 1e30, order="F"))

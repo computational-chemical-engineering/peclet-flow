@@ -45,6 +45,7 @@ def build(cls, on, u0, kappa=None):
     s.set_rho(RATIO)
     s.set_mu(MU)
     s.set_dt(1.0)
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, N), 10.0)))
     s.enable_vof()
     s.set_vof(sphere_c())

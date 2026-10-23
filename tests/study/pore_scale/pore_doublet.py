@@ -124,6 +124,7 @@ def build(theta_deg, U, momentum=True, slip=0.0):
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
     s.set_dt(0.1)
+    s.set_advection(False)
     s.set_domain_bc("-x", "inflow", (U, 0.0, 0.0))      # -x inflow, uniform U
     s.set_domain_bc("+x", "outflow", (0.0, 0.0, 0.0))    # +x outflow
     s.set_domain_bc("-z", "wall", (0.0, 0.0, 0.0))    # -z wall  (buried in the solid)

@@ -29,7 +29,7 @@ for m, c in enumerate(CEN):
     inst_reals[m, 7] = 1.0   # scale
 
 s = sdflow.Solver(N, N, N)
-s.set_rho(1.0); s.set_mu(1.0); s.set_dt(50.0)
+s.set_rho(1.0); s.set_mu(1.0); s.set_dt(50.0); s.set_advection(False)
 s.set_scene(node_ints, node_reals, inst_ints.ravel(), inst_reals.ravel(), periodic=True)
 s.set_solid_from_scene(True)
 owner = np.asarray(s.get_cut_owner())

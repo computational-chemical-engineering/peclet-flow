@@ -200,6 +200,7 @@ def run(theta_deg, ca, sdf, klo, khi, steps, probe=False, after=0.25, sample_eve
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
     s.set_dt(0.05)
+    s.set_advection(False)
     s.set_domain_bc("-z", "inflow", (0.0, 0.0, U))     # -z inflow (liquid)
     s.set_domain_bc("+z", "outflow", (0.0, 0.0, 0.0))   # +z outflow
     s.diagnostics.set_velocity_solver_params(60)

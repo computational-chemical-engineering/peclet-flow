@@ -40,7 +40,7 @@ import peclet.flow as pf
 import test_scalar_cutcell_gates as g
 n = int(os.environ.get("N", "128"))
 s = pf.Solver((n, n, n), extent=(1.0, 1.0, 1.0))
-s.set_rho(1.0); s.set_mu(1.0); dt = 0.01; s.set_dt(dt)
+s.set_rho(1.0); s.set_mu(1.0); dt = 0.01; s.set_dt(dt); s.set_advection(False)
 R = (0.3 * 3.0 / (4.0 * math.pi)) ** (1.0 / 3.0)
 X, Y, Z = g.grid(s)
 s.set_solid(np.asfortranarray(np.sqrt((X - 0.513) ** 2 + (Y - 0.479) ** 2 + (Z - 0.507) ** 2) - R), cutcell_pressure=True)

@@ -28,7 +28,7 @@ def cavity_width(slab_half):
     ii = np.zeros((1, KI_I), dtype=np.int32); ir = np.zeros((1, KI_R))
     ii[0] = (node, -1); ir[0, 0:3] = (x0, 0.5 * NY, x0); ir[0, 6] = 1.0; ir[0, 7] = 1.0
     s = sdflow.Solver(L, NY, L)
-    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(1.0)
+    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(1.0); s.set_advection(False)
     s.set_scene(np.asarray(ni, np.int32), np.asarray(nr, float), ii.ravel(), ir.ravel(),
                 periodic=True)
     s.set_solid_from_scene(True)

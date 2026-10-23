@@ -160,6 +160,7 @@ def make_solver(n, C, rho_g, rho_l, mu, dt, U, momentum, rho0=None):
     s.set_rho(rho0 if rho0 is not None else rho_l)
     s.set_mu(mu)
     s.set_dt(dt)
+    s.set_advection(False)
     s.set_pressure_geometry(all_fluid(n))
     s.set_pressure_chebyshev(True, PRESS_MAXIT, PRESS_RTOL)
     s.enable_vof()
@@ -372,6 +373,7 @@ def gate_falling_drop(n=48, D=15, R=800.0, mu_ratio=100.0, steps=500, quiet=Fals
         dt0 = 2.0
         dt = dt0
         s.set_dt(dt)
+        s.set_advection(False)
         s.set_pressure_geometry(all_fluid(n))
         s.set_pressure_chebyshev(True, PRESS_MAXIT, 1e-11)
         s.enable_vof()

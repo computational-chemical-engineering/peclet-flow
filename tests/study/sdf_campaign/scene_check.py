@@ -45,7 +45,7 @@ def run(setup):
     s = sdflow.Solver(N, N, N)
     # rho/mu/dt BEFORE the geometry: set_solid builds the momentum operator from them. Setting
     # them afterwards leaves it built on defaults and the run diverges (~1e35).
-    s.set_rho(1.0); s.set_mu(1.0); s.set_dt(50.0)
+    s.set_rho(1.0); s.set_mu(1.0); s.set_dt(50.0); s.set_advection(False)
     setup(s)
     s.set_body_force(1.0, 0.0, 0.0)
     for _ in range(40): s.step()

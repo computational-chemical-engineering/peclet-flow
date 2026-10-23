@@ -52,6 +52,7 @@ def solver(n, seeds, blocks=True, csf=True):
     s = pf.Solver(nx, ny, nz)
     s.set_rho(RHO_L)
     s.set_mu(MU)
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 800, 1e-12)
     s.enable_vof()
@@ -177,6 +178,7 @@ def gate_shear():
     s.set_rho(RHO_L)
     s.set_mu(MU)
     s.set_domain_bc("-y", "wall", (-U, 0, 0))
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_domain_bc("+y", "wall", (U, 0, 0))
     s.set_pressure_geometry(np.full(n, 10.0, order="F"))
     s.set_pressure_chebyshev(True, 800, 1e-12)

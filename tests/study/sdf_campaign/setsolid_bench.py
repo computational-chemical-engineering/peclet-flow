@@ -23,7 +23,7 @@ for (cx,cy,cz) in CEN:
 refF = np.asfortranarray(ref)
 
 s = sdflow.Solver(N,N,N)
-s.set_rho(1.0); s.set_mu(1.0); s.set_dt(50.0)
+s.set_rho(1.0); s.set_mu(1.0); s.set_dt(50.0); s.set_advection(False)
 s.set_scene(node_ints,node_reals,bi.ravel(),br.ravel(),periodic=True)
 s.set_solid_from_scene(True)  # warm-up (allocations, MG first build)
 for name, fn in [("set_solid(array)  incl. numpy-free upload", lambda: s.set_solid(refF, cutcell_pressure=True)),

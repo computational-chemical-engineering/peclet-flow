@@ -147,7 +147,7 @@ def cmd_mem(args):
         base = gpu_mem_mb()
         sdf, _ = sdf_random_spheres(N)
         s = make_solver(sdflow, solver, N)
-        s.set_rho(1.0); s.set_mu(0.1); s.set_dt(60.0); s.set_body_force((1e-3, 0, 0))
+        s.set_rho(1.0); s.set_mu(0.1); s.set_dt(60.0); s.set_body_force((1e-3, 0, 0)); s.set_advection(False)
         s.set_pressure_pcg(True, 300, 1e-8); s.set_solid(sdf, cutcell_pressure=True)
         s.step()
         peak = gpu_mem_mb()

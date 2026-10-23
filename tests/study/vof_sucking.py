@@ -81,6 +81,7 @@ def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
     s = pf.Solver(n, ny, nz)
     s.set_rho(rho_l)          # reference density = the OUTLET phase; see the module docstring
     s.set_mu(1e-3)
+    s.set_advection(False)
     s.set_domain_bc("-x", "wall")     # -x wall (the vapour side)
     s.set_domain_bc("+x", "outflow")     # +x outflow (the liquid leaves)
     s.set_pressure_geometry(np.full((n, ny, nz), 1.0, order="F"))

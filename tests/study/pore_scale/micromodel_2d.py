@@ -181,6 +181,7 @@ def run(theta_deg, ca, sdf, steps, budget=None, npy_dir=""):
     s.set_rho(RHO_L)
     s.set_mu(MU_L)
     s.set_dt(0.05)
+    s.set_advection(False)
     s.set_domain_bc("-x", "inflow", (U, 0.0, 0.0))
     s.set_domain_bc("+x", "outflow", (0.0, 0.0, 0.0))
     s.diagnostics.set_velocity_solver_params(VEL_SWEEPS)

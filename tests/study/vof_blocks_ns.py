@@ -67,6 +67,7 @@ def build_hysing(nx, blocks):
     s = pf.Solver(nx, ny, nz)
     s.set_rho(p["rho1"])
     s.set_mu(sc.mu(p["mu1"]))
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_domain_bc("-z", "wall", (0, 0, 0))
     s.set_domain_bc("+z", "wall", (0, 0, 0))
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
@@ -222,6 +223,7 @@ def gate_grace():
     s = pf.Solver(nx, ny, nz)
     s.set_rho(rho_l)
     s.set_mu(mu_l)
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_domain_bc("-z", "wall", (0, 0, 0))
     s.set_domain_bc("+z", "wall", (0, 0, 0))
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
@@ -311,6 +313,7 @@ def gate_pair():
         s = pf.Solver(nx, ny, nz)
         s.set_rho(rho_l)
         s.set_mu(mu_l)
+        s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
         s.set_domain_bc("-z", "wall", (0, 0, 0))
         s.set_domain_bc("+z", "wall", (0, 0, 0))
         s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
@@ -432,6 +435,7 @@ def gate_contact():
         s = pf.Solver(nx, ny, nz)
         s.set_rho(rho_l)
         s.set_mu(mu_l)
+        s.set_advection(False)
         s.set_domain_bc("-z", "wall", (0, 0, 0))
         s.set_domain_bc("+z", "wall", (0, 0, 0))
         s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
@@ -511,6 +515,7 @@ def gate_swarm():
     s = pf.Solver(n, n, n)
     s.set_rho(1.0)
     s.set_mu(0.01)
+    s.set_advection(False)
     s.set_pressure_geometry(np.full((n, n, n), 10.0, order="F"))
     s.enable_vof()
     s.set_vof(np.zeros((n, n, n), order="F"))

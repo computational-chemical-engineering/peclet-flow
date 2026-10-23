@@ -22,7 +22,7 @@ def run(half):
     ii = np.zeros((1, KI_I), dtype=np.int32); ir = np.zeros((1, KI_R))
     ii[0] = (plate, -1); ir[0, 0:3] = (0.5 * N, 8.0, 0.5 * N); ir[0, 6] = 1.0; ir[0, 7] = 1.0
     s = sdflow.Solver(N, N, N)
-    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(2.0)
+    s.set_rho(1.0); s.set_mu(0.1); s.set_dt(2.0); s.set_advection(False)
     s.set_velocity_solver_params(60); s.set_pressure_solver_params(20)
     s.set_pressure_multigrid(True, levels=3)
     s.set_scene(np.asarray(ni, np.int32), np.asarray(nr, float), ii.ravel(), ir.ravel(),

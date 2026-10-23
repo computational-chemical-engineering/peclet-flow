@@ -132,6 +132,7 @@ def main():
     s.set_pressure_bottom(a.bottom)
     s.set_body_force((1e-4, 0.0, 0.0))
     s.set_dt(1.0)
+    s.set_advection(False)
     s.set_solid(sphere_sdf(o, sz, n), True)
     if comm.rank == 0:
         print(f"[probe] n={n}^3 np={comm.size} levels={a.levels} graph_amg={a.graph_amg} "

@@ -64,6 +64,7 @@ def stokes_state(n, steps=60, mu=0.2, force=(2e-3, 1e-3, 5e-4)):
     s.set_rho(1.0)
     s.set_mu(mu)
     s.set_dt(1.0)
+    s.set_advection(False)
     s.set_body_force(force)
     s.set_solid(packing(n), cutcell_pressure=True)
     it = 0
@@ -117,6 +118,7 @@ def g4(n=48, steps=400, ratio=10.0, grav=2e-3, momentum=True):
     s.set_rho(1.0)
     s.set_mu(0.05)
     s.set_dt(0.5)
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_solid(packing(n), cutcell_pressure=True)
     s.enable_vof()
     c0 = np.zeros((n, n, n), order="F")
@@ -186,6 +188,7 @@ def g5(diam=24, steps=200, sigma=1.0, mu=0.05, cfl=0.5):
     s = pf.Solver(nx, ny, nz)
     s.set_rho(1.0)
     s.set_mu(mu)
+    s.set_advection(False)
     s.set_solid(sdf, cutcell_pressure=True)
     s.enable_vof()
     s.set_vof(c0)

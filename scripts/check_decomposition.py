@@ -76,6 +76,7 @@ def child(args):
         s.set_rho(1.0)
         s.set_mu(0.1)
         s.set_dt(0.02)
+        s.set_advection(False)
         s.set_pressure_multigrid(True, args.levels)
         s.set_pressure_pcg(True, 200, 1e-6)
         if args.walls:

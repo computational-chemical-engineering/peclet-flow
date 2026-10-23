@@ -121,6 +121,7 @@ std::unique_ptr<IbmSolver> makeScene(int n, bool solid, bool timing, bool workli
   s->setPropertyModel("force_z", ClosureKind::LinearMix, "C", "", {-0.01, -0.09});
   s->setPressureChebyshev(true, 300, 1e-12);
   s->setDt(0.4 * s->capillaryDt());
+  s->setAdvection(false);
   if (timing)
     s->setVofTiming(true);
   return s;

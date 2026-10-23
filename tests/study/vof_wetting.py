@@ -130,6 +130,7 @@ def g1(thetas=(30.0, 60.0, 90.0, 120.0, 150.0), ratio=1.0, steps=600, R=12.0, nx
         s = pf.Solver(nx, nx, nz)
         s.set_rho(1.0)
         s.set_mu(mu)
+        s.set_advection(False)
         s.set_solid(sdf, cutcell_pressure=True)
         s.enable_vof()
         if ratio != 1.0:
@@ -192,6 +193,7 @@ def g1_domain(thetas=(60.0, 90.0, 120.0), ratio=1.0, steps=500, R=12.0, nx=64, n
         s = pf.Solver(nx, nx, nz)
         s.set_rho(1.0)
         s.set_mu(mu)
+        s.set_advection(False)
         s.set_domain_bc("-z", "wall")    # -z: the wetting wall
         s.set_domain_bc("+z", "wall")    # +z: a lid, far from the drop
         s.set_pressure_geometry(np.full((nx, nx, nz), 1e30, order="F"))
@@ -330,6 +332,7 @@ def g2(thetas=(60.0, 90.0, 120.0), steps=600, Rs=12.0, Rd=8.0, n=64, sigma=1.0, 
         s = pf.Solver(n, n, n)
         s.set_rho(1.0)
         s.set_mu(mu)
+        s.set_advection(False)
         s.set_solid(sdf, cutcell_pressure=True)
         s.enable_vof()
         s.set_vof(c0)
@@ -393,6 +396,7 @@ def g4(theta=30.0, steps=4000, nx=80, ny=4, nz=96, gap=24, plate=4, sigma=1.0, r
     s = pf.Solver(nx, ny, nz)
     s.set_rho(1.0)
     s.set_mu(mu)
+    s.set_advection(False)
     s.set_solid(sdf, cutcell_pressure=True)
     s.enable_vof()
     s.set_property_model("rho", "linear", "C", [1.0 / ratio, 1.0 - 1.0 / ratio])

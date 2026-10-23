@@ -26,6 +26,7 @@ def build(n, seeds, device, pool):
     s.set_vof(np.zeros((n, n, n), order="F"))
     # a solenoidal cellular field, so the kinematic advection is admissible
     s.set_dt(0.05)
+    s.set_advection(False)
     s.enable_vof_blocks(seeds)
     s.diagnostics.set_vof_block_device_staging(device)
     s.diagnostics.set_vof_block_pool(pool)

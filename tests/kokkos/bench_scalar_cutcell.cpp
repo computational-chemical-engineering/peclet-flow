@@ -113,6 +113,7 @@ int main(int argc, char** argv) {
     s.setRho(1.0);
     s.setMu(1.0);
     s.setDt(1.0);
+    s.setAdvection(false);
     s.setSolid(sphereSdf(n), true);
     Kokkos::fence();
     const double cells = (double)n * n * n;

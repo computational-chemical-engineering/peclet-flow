@@ -99,6 +99,7 @@ def gate_budget():
     s.set_rho(1.0)
     s.set_mu(0.5)
     s.set_dt(dt)
+    s.set_advection(False)
     for f in ("-x", "+x", "-y", "+y"):
         s.set_domain_bc(f, "wall", (0, 0, 0))
     s.set_domain_bc("-z", "inflow", (0.0, 0.0, W))
@@ -180,6 +181,7 @@ def gate_nusselt(ratio=100, steps=None, outflow_rho=True):
     s.set_rho(p["rho_l"])
     s.set_mu(p["mu_l"])
     s.set_dt(p["dt"])
+    s.set_advection(False)
     s.set_domain_bc("-x", "wall", (0, 0, 0))
     s.set_domain_bc("+x", "wall", (0, 0, 0))  # walls +-x (the film wall and the far wall)
     s.set_domain_bc("-z", "outflow", (0, 0, 0))  # outflow at the BOTTOM
@@ -286,6 +288,7 @@ def gate_pool():
     s.set_rho(rho_l)
     s.set_mu(mu_l)
     s.set_dt(0.2)
+    s.set_advection(False)
     s.set_domain_bc("-z", "wall", (0, 0, 0))
     s.set_domain_bc("+z", "wall", (0, 0, 0))  # walls +-z (the pool floor and the lid)
     s.set_domain_bc("+x", "outflow", (0, 0, 0))  # outflow at +x

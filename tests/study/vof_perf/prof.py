@@ -68,6 +68,7 @@ t_b = time.time()
 if "--dummy" in A:
     import peclet.flow as _pf
     _dummy = _pf.Solver(arg("--dummy", 17, int), 13, 11)
+    _dummy.set_advection(False)
     _dummy.set_pressure_geometry(np.full((arg("--dummy", 17, int), 13, 11), 10.0, order="F"))
 if "--levels" in A:
     _L = arg("--levels", 4, int)

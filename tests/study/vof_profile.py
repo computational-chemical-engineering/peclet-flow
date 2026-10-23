@@ -222,6 +222,7 @@ def case_hysing1(nx=64, momentum=True, worklist=True):
     s = flow.Solver(nx, ny, nz)
     s.set_rho(p["rho1"])
     s.set_mu(sc.mu(p["mu1"]))
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_domain_bc("-z", "wall", (0, 0, 0))
     s.set_domain_bc("+z", "wall", (0, 0, 0))
     s.set_pressure_geometry(np.full((nx, ny, nz), 10.0, order="F"))
@@ -341,6 +342,7 @@ def case_droplet(n=128, worklist=True):
     s = flow.Solver(n, n, n)
     s.set_rho(1.0)
     s.set_mu(MU)
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     s.set_pressure_geometry(np.full((n, n, n), 10.0, order="F"))
     s.set_pressure_chebyshev(True, 500, 1e-14)
     s.enable_vof()
@@ -377,6 +379,7 @@ def case_scriven(n=96, ja=0.5, ratio=10.0, r0=6.0, worklist=True):
     s = flow.Solver(n, n, n)
     s.set_rho(rho_l)
     s.set_mu(1e-3)
+    s.set_advection(False)  # the pre-flip default (Stokes) kept; NS physics: CHANGELOG "advection default"
     for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
         s.set_domain_bc(f, "outflow")
     s.set_pressure_geometry(np.full((n, n, n), 1.0, order="F"))

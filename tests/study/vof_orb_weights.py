@@ -99,6 +99,7 @@ def build(n, Cglob, ratio=100.0):
     s.diagnostics.set_vof_curvature_worklist(os.environ.get("V9_CURV_WL", "1") == "1")
     s.diagnostics.set_vof_worklist(os.environ.get("V9_ADV_WL", "1") == "1")
     s.set_dt(0.4 * s.capillary_dt())
+    s.set_advection(False)
     return s, o, sz
 
 
