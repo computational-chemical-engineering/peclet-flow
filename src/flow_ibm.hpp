@@ -1524,6 +1524,13 @@ class Solver {
   // discretization. The all-fluid domain-BC velocity MG (folded const-coefficient operator) keeps
   // explicit advection, as before.
   bool implicitAdv() const;
+  // Whether the solver's OWN momentum-advection operator runs: set_advection, unless
+  // enable_vof_momentum is on -- there the VoF fluxes already carry rho*u (buildRhsVarMom reads
+  // uAdv_, never advRhs_), so a second advection would double-count it. Every advect_ read goes
+  // through here. Under VoF momentum this reproduces the advection-off binary bit for bit, which
+  // was ALSO what advection-on gave on the periodic path (probe 2026-10-23); on a domain-BC box
+  // advection-on used to throw in advectVofMomentum.
+  bool advectsMomentum() const { return !vofMomEnabled_ && advect_; }
 
 
   // Domain-BC momentum solved via the Robust-Scaled cut-cell / FOU stencil smoother

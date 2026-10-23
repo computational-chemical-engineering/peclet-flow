@@ -1012,7 +1012,7 @@ int Solver<Grid>::nz() const {
 
 template <class Grid>
 bool Solver<Grid>::implicitAdv() const {
-  return advect_ && (implicitFou_ || (hasBc_ && (!useVelocityMg_ || hasSolid_)));
+  return advectsMomentum() && (implicitFou_ || (hasBc_ && (!useVelocityMg_ || hasSolid_)));
 }
 
 template <class Grid>
@@ -1283,7 +1283,7 @@ void Solver<Grid>::fillDomainPeriodic(CCField f) {
 
 template <class Grid>
 bool Solver<Grid>::advWallInputs() const {
-  return advWallVel_ && !Grid::collocated && hasScene_ && hasMotion_ && advect_ &&
+  return advWallVel_ && !Grid::collocated && hasScene_ && hasMotion_ && advectsMomentum() &&
          uBc_[0].extent(0) == n_ && C[0].mask.extent(0) == n_;
 }
 
@@ -1850,7 +1850,7 @@ void Solver<Grid>::smoothComp(int c) {
                          // regime.
     vmg_.setFineStencil(FPC(C[c].AC), FPC(C[c].AW), FPC(C[c].AE), FPC(C[c].AS), FPC(C[c].AN),
                         FPC(C[c].AB), FPC(C[c].AT));
-    if (implicitFou_ && advect_) {
+    if (implicitFou_ && advectsMomentum()) {
       // UPWIND-CONVECTIVE coarse op (advection-dominated): aniso const-coeff diffusion + dt*FOU
       // from the restricted advecting velocity (restrictAdvVelocities ran once in step()). No pin
       // / no exclude mask.

@@ -359,7 +359,7 @@ typename Solver<Grid>::MarchState Solver<Grid>::marchState() {
   ms.roles.push_back(AndersonRole::Carried);
   if constexpr (Grid::collocated) {
     // §3.1 row 3, decided from the CONFIGURATION, not from faceFieldValid_.
-    if (advect_ && ufAdvect_)
+    if (advectsMomentum() && ufAdvect_)
       for (CCField f : {uf_, vf_, wf_}) {
         ms.fields.push_back(f);
         ms.roles.push_back(AndersonRole::Carried);
@@ -373,7 +373,7 @@ typename Solver<Grid>::MarchState Solver<Grid>::marchState() {
                   f_[0],
                   f_[1],
                   f_[2],
-                  advect_ ? 1.0 : 0.0,
+                  advectsMomentum() ? 1.0 : 0.0,
                   static_cast<double>(advScheme_),
                   implicitFou_ ? 1.0 : 0.0};
 #ifdef PECLET_FLOW_MPI

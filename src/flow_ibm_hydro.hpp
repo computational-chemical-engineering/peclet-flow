@@ -177,7 +177,7 @@ std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
     throw std::runtime_error(
         "hydro_force_torque_reaction: call step() first (u* is stashed "
         "during the step)");
-  if (advect_ && (!haveAdvRhs_ || advRhs_[0].extent(0) != n_))
+  if (advectsMomentum() && (!haveAdvRhs_ || advRhs_[0].extent(0) != n_))
     throw std::runtime_error(
         "hydro_force_torque_reaction: the advective RHS term was not "
         "stashed -- set_advection was enabled after the last step()");
@@ -206,7 +206,7 @@ std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
     CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), us = CCConst(uStar_[c]),
             mk = CCConst(C[c].mask);
     CCConst fb = hasFb ? CCConst(cellForce_[c]) : CCConst();
-    CCConst av = advect_ ? CCConst(advRhs_[c]) : CCConst();
+    CCConst av = advectsMomentum() ? CCConst(advRhs_[c]) : CCConst();
     const double fc = f_[c];
     const auto po = Grid::offset(c);
     const double offx = po.x, offy = po.y, offz = po.z;
@@ -443,7 +443,7 @@ std::vector<double> Solver<Grid>::reactionBudgetTerms() {
   CCExec space;
   const C3 e = e_;
   const double idt = rho_ / dt_;
-  const bool haveA = advect_ && haveAdvRhs_ && advRhs_[0].extent(0) == n_;
+  const bool haveA = advectsMomentum() && haveAdvRhs_ && advRhs_[0].extent(0) == n_;
   for (int c = 0; c < 3; ++c) {
     CCConst un = CCConst(old_[c]), uc = CCConst(C[c].u), mk = CCConst(C[c].mask);
     CCConst av = haveA ? CCConst(advRhs_[c]) : CCConst();

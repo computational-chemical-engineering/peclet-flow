@@ -2327,11 +2327,8 @@ void Solver<Grid>::advectVofMomentum() {
   if (!vofMomEnabled_)
     return;
   requireVofGeometry("enable_vof_momentum");
-  if (implicitAdv())
-    throw std::runtime_error(
-        "enable_vof_momentum is incompatible with implicit advection (set_implicit_advection / a "
-        "domain-BC stencil path): the momentum advection is already done conservatively by the "
-        "VoF fluxes, and the implicit-FOU operator would add a second one.");
+  // No implicit-advection guard: advectsMomentum() is false under VoF momentum, so implicitAdv()
+  // is too -- the VoF fluxes carry the momentum advection, the solver's own operator never runs.
   if (!effVarRho())
     throw std::runtime_error(
         "enable_vof_momentum requires the variable-density momentum/projection path: register a "

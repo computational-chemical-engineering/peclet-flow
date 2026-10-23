@@ -160,7 +160,7 @@ void Solver<Grid>::step() {
     if (outerTol_ > 0)
       for (int c = 0; c < 3; ++c)
         Kokkos::deep_copy(prev_[c], C[c].u);
-    if (advect_ || hasBc_ || (Grid::collocated && faceInterp_ >= 5 && faceInterp_ <= 7))
+    if (advectsMomentum() || hasBc_ || (Grid::collocated && faceInterp_ >= 5 && faceInterp_ <= 7))
       for (int c = 0; c < 3; ++c)
         fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect / embed defect matvec
     // A0 (advective cut-wall flux): build the advection's wall-aware velocity inputs. AFTER the
@@ -177,7 +177,7 @@ void Solver<Grid>::step() {
     // the clustering plateau). Compensate by subtracting u_f·div(u)_f from the advection in the
     // RHS (the exact identity u·∇u = ∇·(uu) − u∇·u; div(u) at the face = mean of the two cell
     // divergences). Gated on porous_ so every other path is byte-identical.
-    if (porous_ && advect_)
+    if (porous_ && advectsMomentum())
       computeDivAdv();
     // Rung V8: on the collocated grid with variable density and/or surface tension the pressure
     // and every force go INSIDE this implicit predictor through the mass-adjoint face integral —
@@ -219,7 +219,7 @@ void Solver<Grid>::step() {
     // upwind-convective velocity-MG: restrict the (frozen u^k) advecting velocity to the coarse
     // levels ONCE, before the per-component solves update it (shared across the 3 momentum
     // components).
-    if (useVelocityMg_ && advect_ &&
+    if (useVelocityMg_ && advectsMomentum() &&
         ((implicitFou_ && !hasBc_) || (mixedVelocityMg() && implicitAdv())))
       vmg_.restrictAdvVelocities(  // A0: same inputs as the fine operator -- including the
                                    // collocated projected face field, so the coarse FOU
@@ -801,7 +801,7 @@ void Solver<Grid>::buildRhs(int c) {
   // operator, no explicit high-order term in the RHS -- maximally dissipative/stable (diffuses
   // sharp shear layers). Only meaningful on an implicit-advection path.
   const bool pureFou = implicitAdv() && !deferredCorr_;
-  const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
+  const bool incr = cutcellPressure_ && incremental_, adv = advectsMomentum() && !pureFou,
              bc = hasBc_ && !bcStencilPath();  // fold RHS only on the const-coeff domain-BC path;
   // on the stencil path (solid and/or implicit advection) the walls enter via reflection ghosts
   // (smoothComp) and the RHS carries the IBM inhom (=0 for no-slip) + the deferred correction.
@@ -852,7 +852,7 @@ void Solver<Grid>::buildRhs(int c) {
   // Stokes only (advection folds into the IBM matrix, not yet into L_FV).
   // Porous advection-form compensation (+rho*u_f*div(u)_f): see the step() comment. Off (and the
   // view untouched) on every non-porous path.
-  const bool pc = porous_ && advect_;
+  const bool pc = porous_ && advectsMomentum();
   CCConst dv = CCConst(divAdv_);
   const bool wd = Grid::collocated && faceInterp_ >= 5 && faceInterp_ <= 7;
   if constexpr (Grid::collocated)
@@ -922,14 +922,14 @@ void Solver<Grid>::buildRhsForced(int c) {
           un = CCConst(old_[c]);
   const long strd = (c == 0) ? 1 : (c == 1) ? e_.x : (long)e_.x * e_.y;
   const bool pureFou = implicitAdv() && !deferredCorr_;
-  const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
+  const bool incr = cutcellPressure_ && incremental_, adv = advectsMomentum() && !pureFou,
              bc = hasBc_ && !bcStencilPath();
   const bool ifou = implicitAdv() && deferredCorr_;
   const int sch = advScheme_;
   const bool sa = ensureAdvStash(c, adv);  // R0: see buildRhs
   CCField ar = advRhs_[c];
   // Porous advection-form compensation (+rho*u_f*div(u)_f): see the step() comment.
-  const bool pc = porous_ && advect_;
+  const bool pc = porous_ && advectsMomentum();
   CCConst dv = CCConst(divAdv_);
   const bool tg = Grid::collocated && faceInterp_ == 5 && incr;  // wall-aware -grad(P)
   const bool gg = Grid::collocated && (ghostProjection_ || faceInterp_ == 9) &&
@@ -993,14 +993,14 @@ void Solver<Grid>::buildRhsVar(int c) {
           un = CCConst(old_[c]);
   const long strd = strideOf(c);
   const bool pureFou = implicitAdv() && !deferredCorr_;
-  const bool incr = cutcellPressure_ && incremental_, adv = advect_ && !pureFou,
+  const bool incr = cutcellPressure_ && incremental_, adv = advectsMomentum() && !pureFou,
              bc = hasBc_ && !bcStencilPath();
   const bool ifou = implicitAdv() && deferredCorr_;
   const int sch = advScheme_;
   // Porous advective-form compensation, weighted by the face density (rho_eff = eps*rho): the
   // eps-weighted ADVECTIVE form eps*rho*(du/dt + u.grad u) IS the conservative volume-averaged
   // momentum given the enforced continuity (the u*[d(eps)/dt + div(eps u)] bracket vanishes).
-  const bool pc = porous_ && advect_;
+  const bool pc = porous_ && advectsMomentum();
   CCConst dv = CCConst(divAdv_);
   // rule H (§4.5; §14 H-3c): host pencil, device MDRange; the body is verbatim. Each cell writes
   // only bb(i), which nothing in the body reads (ccFor3's simd contract).
@@ -1093,7 +1093,7 @@ void Solver<Grid>::buildRhsColoVar(int c) {
   CCConst U = ufa ? openFaceView(0) : advVelView(0), V = ufa ? openFaceView(1) : advVelView(1),
           W = ufa ? openFaceView(2) : advVelView(2), aP = advVelView(c), un = CCConst(old_[c]);
   const bool pureFou = implicitAdv() && !deferredCorr_;
-  const bool adv = advect_ && !pureFou, bc = hasBc_ && !bcStencilPath();
+  const bool adv = advectsMomentum() && !pureFou, bc = hasBc_ && !bcStencilPath();
   const bool ifou = implicitAdv() && deferredCorr_;
   const int sch = advScheme_;
   using MD = MDRange3<CCExec>;
