@@ -29,7 +29,9 @@ Usage:
   --backend {host,cuda}      checked against the imported module's Kokkos execution space (the
                              backend is chosen by PYTHONPATH, i.e. by which build is imported)
   --t-end T                  end time in units of sqrt(d/g) (default 20)
-  --out DIR                  writes DIR/case_a.csv (one row per sample) and DIR/summary.txt
+  --out DIR                  writes DIR/case_a.csv (one row per sample) and DIR/summary.txt;
+                             a_closure_g = the superficial-velocity closure's acceleration
+                             (last_superficial_velocity_shift / dt) in units of g
   --dt-out T                 sample interval in sqrt(d/g) (default 0.05)
   --max-steps N, --wall S    stop early (timing / smoke runs)
   --dt-safety F              fraction of the CFL and capillary limits (default 0.25, the driver's)
@@ -231,7 +233,7 @@ def main():
     re_of = lambda U: RHO_L * U * D / MU_L
     cols = ["t", "t_star", "step", "dt", "binding", "u_abs", "u_mix", "u_liq", "u_zm", "u_drift",
             "u_slip", "u_rel_zm", "u_cent", "Re_drift", "Re_abs", "Re_slip", "Re_rel_zm",
-            "v_mean", "w_mean", "gas_vol", "vol_err", "block_vol", "x_cent"]
+            "v_mean", "w_mean", "gas_vol", "vol_err", "block_vol", "x_cent", "a_closure_g"]
     f = open(os.path.join(a.out, "case_a.csv") if root else os.devnull, "w")  # noqa: SIM115
     f.write(f"# case A d/h={a.d_over_h} n={n} L={L_OVER_D * D} d={D} rho_l={RHO_L} "
             f"rho_g={RHO_G} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
@@ -247,7 +249,7 @@ def main():
     t_end = a.t_end * T_REF
     next_out = a.dt_out * T_REF
     last = None
-    hist = []                                  # (t_star, Re_drift, Re_rel_zm, x_cent)
+    hist = []                                  # (t_star, Re_drift, Re_rel_zm, x_cent, a_closure_g)
     t_loop = time.perf_counter()
     stop = "t_end"
     while t < t_end * (1 - 1e-12):
@@ -269,10 +271,11 @@ def main():
             r.update(t=t, t_star=t / T_REF, step=step, dt=dt, binding=binding,
                      Re_drift=re_of(r["u_drift"]), Re_abs=re_of(r["u_abs"]),
                      Re_slip=re_of(r["u_slip"]), Re_rel_zm=re_of(r["u_rel_zm"]),
-                     vol_err=r["gas_vol"] / vol0 - 1.0)
+                     vol_err=r["gas_vol"] / vol0 - 1.0,
+                     a_closure_g=s.diagnostics.last_superficial_velocity_shift() / dt / G)
             f.write(",".join(str(r[c]) for c in cols) + "\n")
             f.flush()
-            hist.append((r["t_star"], r["Re_drift"], r["Re_rel_zm"], r["x_cent"]))
+            hist.append((r["t_star"], r["Re_drift"], r["Re_rel_zm"], r["x_cent"], r["a_closure_g"]))
             last = r
             while next_out <= t:
                 next_out += a.dt_out * T_REF
@@ -302,6 +305,7 @@ def main():
     re_a = window_mean(1, xe, xe - 2 * Lb) if xe - H[0, 3] >= 2 * Lb else float("nan")
     re_b = window_mean(1, xe - 2 * Lb, xe - 4 * Lb) if xe - H[0, 3] >= 4 * Lb else float("nan")
     zm_a = window_mean(2, xe, xe - 2 * Lb) if xe - H[0, 3] >= 2 * Lb else float("nan")
+    acc_a = window_mean(4, xe, xe - 2 * Lb) if xe - H[0, 3] >= 2 * Lb else float("nan")
     wa = (H[:, 3] > xe - 2 * Lb)
     re_lo, re_hi = float(H[wa, 1].min()), float(H[wa, 1].max())
     drel = abs(re_a - re_b) / abs(re_a)
@@ -315,7 +319,8 @@ def main():
             f"vol_err={last['vol_err']:.2e} <u>={last['u_mix']:.1e} <v>={last['v_mean']:.1e} "
             f"<w>={last['w_mean']:.1e} u_cent/u_abs={last['u_cent'] / last['u_abs']:.4f} "
             f"setup={t_setup:.1f}s ms/step={1e3 * wall_loop / max(step, 1):.2f} "
-            f"maxrss={rss:.0f}MB" + (f" np={nranks}" if comm is not None else ""))
+            f"maxrss={rss:.0f}MB a_closure/g(2L-mean)={acc_a:.4e}"
+            + (f" np={nranks}" if comm is not None else ""))
     if root:
         with open(os.path.join(a.out, "summary.txt"), "w") as g:
             g.write(line + "\n")
