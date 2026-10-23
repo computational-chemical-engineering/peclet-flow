@@ -53,6 +53,9 @@ Usage:
                              bubble seeded as 8x8x8 sub-sampled sphere fractions)
   --vof-momentum             ablation: enable_vof_momentum(rho_g, rho_l) (implies --single-vof:
                              the momentum-consistent transport is refused with the blocks)
+  --vof-mom-muscl            ablation (with --vof-momentum): MinMod-limited donor velocity in the
+                             momentum flux (diagnostics.set_vof_momentum_muscl) instead of the
+                             default first-order donor cell
   --mpi                      distributed run under mpirun (mpi4py; needs a PECLET_FLOW_MPI build):
                              mpi_block + init_mpi before the geometry; the fields are gathered for
                              the samples, rank 0 writes. At one rank the single-rank solver runs (no
@@ -103,6 +106,7 @@ def parse():
                    help="momentum advection (default on; --no-advection: unsteady Stokes)")
     p.add_argument("--single-vof", action="store_true")
     p.add_argument("--vof-momentum", action="store_true")
+    p.add_argument("--vof-mom-muscl", action="store_true")
     p.add_argument("--mpi", action="store_true")
     p.add_argument("--dump", default=None)
     return p.parse_args()
@@ -155,7 +159,7 @@ class Dist:
 
 
 def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, vof_mom=False,
-          dist=None, advection=True, rho_g_in=RHO_G):
+          dist=None, advection=True, rho_g_in=RHO_G, vof_mom_muscl=False):
     L = L_OVER_D * D
     dist = dist or Dist(n)
     if dist.comm is None:
@@ -185,6 +189,8 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, 
         s.set_vof(np.asfortranarray(sphere_fractions(n, 0.5 * L / h, 0.5 * D / h)[dist.sl]))
         if vof_mom:
             s.enable_vof_momentum(RHO_G, RHO_L)
+            if vof_mom_muscl:
+                s.diagnostics.set_vof_momentum_muscl(True)
     else:
         s.enable_vof_blocks([(0.5 * L / h, 0.5 * L / h, 0.5 * L / h, 0.5 * D / h)])
         s.enable_vof_block_csf()
@@ -244,8 +250,10 @@ def main():
     t0 = time.perf_counter()
     if a.vof_momentum and a.rho_ratio != RHO_RATIO:
         sys.exit("--rho-ratio is refused with --vof-momentum")
+    if a.vof_mom_muscl and not a.vof_momentum:
+        sys.exit("--vof-mom-muscl needs --vof-momentum")
     s, h, alpha = build(n, a.mu_ratio * MU_L, a.face_mu, a.viscous_stress, a.single_vof,
-                        a.vof_momentum, dist, a.advection, a.rho_ratio * RHO_L)
+                        a.vof_momentum, dist, a.advection, a.rho_ratio * RHO_L, a.vof_mom_muscl)
     t_setup = time.perf_counter() - t0
     re_of = lambda U: RHO_L * U * D / MU_L
     cols = ["t", "t_star", "step", "dt", "binding", "u_abs", "u_mix", "u_liq", "u_zm", "u_drift",
@@ -256,7 +264,7 @@ def main():
             f"rho_g={RHO_G} rho_g_inertial={a.rho_ratio * RHO_L} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
             f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e} dt_safety={a.dt_safety} "
             f"face_mu={a.face_mu} viscous_stress={a.viscous_stress} single_vof={a.single_vof} "
-            f"vof_momentum={a.vof_momentum} advection={a.advection}" + (f" np={nranks}" if comm is not None else "") + "\n")
+            f"vof_momentum={a.vof_momentum} vof_mom_muscl={a.vof_mom_muscl} advection={a.advection}" + (f" np={nranks}" if comm is not None else "") + "\n")
     f.write(",".join(cols) + "\n")
 
     t, step, binding, dt = 0.0, 0, "-", 0.0
@@ -330,7 +338,7 @@ def main():
     steady = bool(drel < 1e-3)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
     line = (f"CASE_A d/h={a.d_over_h} n={n} mu_ratio={a.mu_ratio:g} rho_ratio={a.rho_ratio:g} face_mu={a.face_mu} "
-            f"stress={a.viscous_stress} adv={'on' if a.advection else 'off'} vof={'mom' if a.vof_momentum else ('single' if a.single_vof else 'blocks')} "
+            f"stress={a.viscous_stress} adv={'on' if a.advection else 'off'} vof={('mom+muscl' if a.vof_mom_muscl else 'mom') if a.vof_momentum else ('single' if a.single_vof else 'blocks')} "
             f"dt_safety={a.dt_safety:g} space={space} stop={stop} t*={last['t_star']:.3f} "
             f"steps={step} Re_drift(2L-mean)={re_a:.4f} [min {re_lo:.3f} max {re_hi:.3f}] "
             f"Re_rel_zm(2L-mean)={zm_a:.4f} dRe/Re(2L vs prev 2L)={drel:.2e} steady={steady} "
