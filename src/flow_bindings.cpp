@@ -2579,7 +2579,8 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "set_pressure_multigrid", [](S& s, bool, int levels) { s.setPressureLevels(levels); },
           nb::arg("on"), nb::arg("levels") = 4,
-          "Set the pressure multigrid depth (levels=1 => pure RB-GS, no coarse grid).")
+          "Set the pressure multigrid depth (levels=1 => pure RB-GS, no coarse grid; levels=0 => "
+          "the automatic depth of doc/mg_depth_policy.md, fixed at the next geometry build).")
       .def("set_pressure_chebyshev", &S::setPressureChebyshev, nb::arg("on"),
            nb::arg("max_iter") = 120, nb::arg("rtol") = 1e-9,
            "Use the communication-light Chebyshev pressure accelerator. Mutually exclusive with the "
@@ -4081,7 +4082,9 @@ NB_MODULE(_flow, m) {
       "(pass what you will pass to Solver.set_decomposition) and with or "
       "without coarse-level telescoping -- a pure function, no MPI, no allocation, any rank "
       "count. Returns one row per level: (global dims, ranks holding the level, block-0 dims, "
-      "ratio to the next level, telescopes-out). Pre-flight any job with it.\n\n"
+      "ratio to the next level, telescopes-out). Pre-flight any job with it. levels=0 forecasts "
+      "the automatic depth (doc/mg_depth_policy.md) for the singular operator (periodic / "
+      "all-Neumann / immersed solid; no outflow face), at the default bottom extent 4.\n\n"
       "weights: per-cell weights, exactly what diagnostics.rebalance_by_weights takes (global "
       "x-fastest, gnx*gny*gnz values). Given, the forecast is the hierarchy AFTER that rebalance: "
       "level 0 is its aligned weighted ORB (split planes on multiples of 2^a, a the largest "

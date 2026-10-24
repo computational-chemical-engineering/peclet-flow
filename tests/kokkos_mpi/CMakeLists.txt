@@ -122,6 +122,18 @@ foreach(np 2 4)
   set_tests_properties(bottom_direct_mpi_np${np} PROPERTIES SKIP_RETURN_CODE 77)
 endforeach()
 
+# doc/mg_depth_policy.md WO-1: the AUTO pressure-MG depth under MPI -- D and every level's global
+# dims equal single rank's with telescoping ON; predict(levels=0) == built; telescoping OFF stops
+# at the in-place end (np 8: D < single rank). Hierarchy only, no solve.
+add_executable(test_mg_depth_policy_mpi test_mg_depth_policy_mpi.cpp)
+target_include_directories(test_mg_depth_policy_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_mg_depth_policy_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+foreach(np 1 2 4 8)
+  add_test(NAME mg_depth_policy_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mg_depth_policy_mpi>)
+endforeach()
+
 # doc/vof_projection_distributed_design.md §5 (WO-D1 onwards): the distributed FP32 V-cycle --
 # its data and FP32 ghost exchange (G-K2); shares the FP32 test problems with tests/kokkos.
 add_executable(test_mg_fp32_vcycle_mpi test_mg_fp32_vcycle_mpi.cpp)

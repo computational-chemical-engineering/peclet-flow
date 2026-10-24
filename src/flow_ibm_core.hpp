@@ -587,7 +587,7 @@ void Solver<Grid>::setPressureGraphAmg(bool on) {
 
 template <class Grid>
 void Solver<Grid>::setPressureLevels(int levels) {
-  nLevels_ = levels < 1 ? 1 : levels;
+  nLevels_ = levels < 0 ? 1 : levels;  // 0 = AUTO (doc/mg_depth_policy.md §4.3)
 }
 
 template <class Grid>

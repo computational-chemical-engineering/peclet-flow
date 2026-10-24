@@ -857,6 +857,10 @@ void Solver<Grid>::setSolidInitPressureMg() {
   // than the finest coarsenable one.  Exactly (1,1,1) on the isotropic path, where the rule
   // returns today's decision verbatim.
   mg_.setMetric(u_.hp);
+  // Coarse-solve policy: an explicit set_pressure_graph_amg(True) forces agglomeration,
+  // otherwise the mode set by set_pressure_bottom (default auto) decides. BEFORE the hierarchy:
+  // the AUTO depth reads it (doc/mg_depth_policy.md §4.2); it only assigns the mode.
+  mg_.setAgglomerationMode(pressGraphAmg_ ? 1 : pressAgglomMode_);
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {  // share the level-0 decomposition so the MG block matches this rank's
                        // block; a weighted one (rebalanceByWeights) gets Repartition stages
@@ -879,9 +883,6 @@ void Solver<Grid>::setSolidInitPressureMg() {
   // ablation back to the literal 1.0; a bed clear of the open faces is byte-identical either way.
   mg_.setOutflowCoefficient(hasOutflow_ && outflowOpCoeff_);
   mg_.setOpenness(CCConst(ox1_), CCConst(oy1_), CCConst(oz1_), u_.w[0], u_.w[1], u_.w[2]);
-  // Coarse-solve policy: an explicit set_pressure_graph_amg(True) forces agglomeration,
-  // otherwise the mode set by set_pressure_bottom (default auto) decides.
-  mg_.setAgglomerationMode(pressGraphAmg_ ? 1 : pressAgglomMode_);
   Kokkos::deep_copy(phi_, 0.0);
   Kokkos::deep_copy(P_, 0.0);
 }

@@ -414,6 +414,15 @@ target_include_directories(test_bottom_direct PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test_bottom_direct PRIVATE Kokkos::kokkos)
 add_test(NAME bottom_direct COMMAND test_bottom_direct)
 set_tests_properties(bottom_direct PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
+
+# doc/mg_depth_policy.md WO-1: the AUTO pressure-MG depth (init with nLevels == 0), hierarchy only --
+# every row of the note's §4.4 that fits a test, the natural end, 'smoother' forced, anchored.
+add_executable(test_mg_depth_policy test_mg_depth_policy.cpp)
+target_include_directories(test_mg_depth_policy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_mg_depth_policy PRIVATE Kokkos::kokkos)
+add_test(NAME mg_depth_policy COMMAND test_mg_depth_policy)
+set_tests_properties(mg_depth_policy PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
 # doc/vof_projection_cost_design.md §4 (WO-D1..D3): the FP32 V-cycle preconditioner -- its face
 # weights (rounding, symmetry, the decoupled set), eligibility, and bitwise FP64 fallback (G-D1).
 add_executable(test_mg_fp32_vcycle test_mg_fp32_vcycle.cpp)

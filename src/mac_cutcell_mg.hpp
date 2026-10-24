@@ -653,6 +653,14 @@ namespace peclet::flow {
 // setters. Ghost width 1 (single rank). B1's V-cycle preconditioner over a geometric sub-hierarchy
 // (§5.7) was retired by §13 D-4; its code is in the history (the WO-6 / WO-11 commits).
 inline constexpr long kBottomMaxCells = 8192;
+// doc/mg_depth_policy.md §4.1-§4.2: nLevels == 0 is the AUTO pressure-MG depth -- the shallowest
+// D >= kAutoMinLevels whose GLOBAL coarsest grid the bottom engine admits (bottomAdmissible), else
+// the natural end of coarsening; the level loops then run with the cap kAutoMaxLevels.
+// kAnchoredFollowsGrid: false until the note's WO-5 -- an anchored (outflow) operator is then
+// "admitted" at depth kAutoMinLevels, i.e. it keeps the explicit default's hierarchy.
+inline constexpr int kAutoMinLevels = 4;
+inline constexpr int kAutoMaxLevels = 30;
+inline constexpr bool kAnchoredFollowsGrid = false;
 // tau: 1e-5 since E3 (§7 WO-6, Q2): 1e-8, 1e-6 and 1e-5 give the SAME outer iteration count on
 // every one of the 50 bubble-column steps (653 total).
 inline constexpr double kBottomTau = 1e-5;
@@ -1250,7 +1258,11 @@ class CutcellMG {
     gnyF_ = ny;
     gnzF_ = nz;
     C3 inner{nx, ny, nz}, cf{1, 1, 1};
-    for (int L = 0; L < nLevels; ++L) {
+    // doc/mg_depth_policy.md §4.2: nLevels == 0 = AUTO (the first admissible level at depth >= 4
+    // is the bottom); an explicit nLevels >= 1 takes the loop verbatim (autoStop never set).
+    const bool autoDepth = nLevels == 0;
+    const int nLevelsCap = autoDepth ? kAutoMaxLevels : nLevels;
+    for (int L = 0; L < nLevelsCap; ++L) {
       Level v;
       v.inner = inner;
       v.gdim = inner;  // single-rank: the block IS the global grid
@@ -1260,7 +1272,8 @@ class CutcellMG {
       auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
       C3 next = inner;
       C3 ratio{1, 1, 1};
-      if (L + 1 < nLevels) {
+      const bool autoStop = autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissibleHere(inner);
+      if (L + 1 < nLevelsCap && !autoStop) {
         // §5.1: the candidate set is today's `can()` per axis; the aspect rule then defers an axis
         // that is already >= theta times coarser than the finest candidate.  Inert when !aniso_.
         const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
@@ -1296,8 +1309,12 @@ class CutcellMG {
     buildBottomStore();     // the direct bottom's storage (single rank, every backend)
     computeFp32Last();
     if (mgDebugLevel()) {
-      printf("[mg] init %dx%dx%d single-rank -> %d levels (requested %d)\n", nx, ny, nz,
-             (int)lv_.size(), nLevels);
+      const C3 lb = lv_.back().inner;
+      const bool more = (lb.x % 2 == 0 && lb.x / 2 >= 2) || (lb.y % 2 == 0 && lb.y / 2 >= 2) ||
+                        (lb.z % 2 == 0 && lb.z / 2 >= 2);
+      printf("[mg] init %dx%dx%d single-rank -> %d levels (requested %s)\n", nx, ny, nz,
+             (int)lv_.size(), depthRequestLabel(nLevels).c_str());
+      printDepthCensus(nLevels, more);
       for (int L = 0; L < (int)lv_.size(); ++L)
         printf("[mg]  L%d dims %4dx%4dx%4d  ratio(%d,%d,%d)\n", L, lv_[L].inner.x, lv_[L].inner.y,
                lv_[L].inner.z, lv_[L].ratio.x, lv_[L].ratio.y, lv_[L].ratio.z);
@@ -1680,7 +1697,12 @@ class CutcellMG {
           m = std::min(m, (long)s[k]);
       return m;
     };
-    for (int L = 0; L < nLevels; ++L) {
+    // doc/mg_depth_policy.md §4.2: as init() -- nLevels == 0 = AUTO on the GLOBAL dims gs, which
+    // are replicated with the bc, the mode and the extent, so every rank resolves the same depth
+    // without a collective; the bottom level is the last, so no telescope is evaluated there.
+    const bool autoDepth = nLevels == 0;
+    const int nLevelsCap = autoDepth ? kAutoMaxLevels : nLevels;
+    for (int L = 0; L < nLevelsCap; ++L) {
       Level v;
       v.halo = std::make_shared<GridHaloTopology<3>>();
       const peclet::core::decomp::BlockDecomposer<3>& dec = curDec;
@@ -1734,7 +1756,8 @@ class CutcellMG {
       v.n = idx.numCellsInclGhost();
       C3 next = gs, ratio{1, 1, 1};
       bool idleBelow = false;
-      if (L + 1 < nLevels) {
+      const bool autoStop = autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissibleHere(gs);
+      if (L + 1 < nLevelsCap && !autoStop) {
         // Coarsen an axis only if the GLOBAL dim can (can()) AND every rank's block is even on that
         // axis, so coarsened() nests exactly. Alignment (coarsenAlignment) makes this hold for the
         // full natural depth; on an unaligned/awkward decomposition it used to simply stop
@@ -1880,8 +1903,17 @@ class CutcellMG {
     computeFp32Last();   // D-dist (§5.2): after the hierarchy, before any operator build
     buildBottomStore();  // §14 H-6: the host global bottom gb_ (none on a device backend)
     if (mgDebugLevel() && rank == 0) {
-      printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %d)%s\n", gnx, gny, gnz, size,
-             (int)lv_.size(), nLevels, telescope_ ? "  [telescope ON]" : "");
+      printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %s)%s\n", gnx, gny, gnz, size,
+             (int)lv_.size(), depthRequestLabel(nLevels).c_str(),
+             telescope_ ? "  [telescope ON]" : "");
+      {  // rank 0 roots every stage: gs / curDec are the last level's
+        bool more = false;
+        for (int a = 0; a < 3; ++a) {
+          const int d = a == 0 ? gs.x : (a == 1 ? gs.y : gs.z);
+          more = more || (can(d) && (telescope_ || evenOn(curDec, a)));
+        }
+        printDepthCensus(nLevels, more);
+      }
       C3 g{gnx, gny, gnz};
       int ranks = size;
       for (int L = 0; L < (int)lv_.size(); ++L) {
@@ -4766,6 +4798,52 @@ class CutcellMG {
     return gx > thresh || gy > thresh || gz > thresh;
   }
 
+  // doc/mg_depth_policy.md §4.1: may a level of GLOBAL inner dims g be the AUTO depth's bottom?
+  // Every axis <= the bottom extent (a smoothed bottom suffices), or -- for the singular operator
+  // with agglomeration not forced off -- the direct engine's own admission (n <= kBottomMaxCells
+  // and an axis with planes of <= kBottomMaxPlane cells): one source of truth, a cap moves both.
+  // Not here: the 1..64 fluid components (runtime; a bottom failing it takes GraphAMG, as today).
+  // Pure and static, so predict() runs the same code; host, once per level per hierarchy build.
+  static bool bottomAdmissible(C3 g, int extent, bool anchored, int agglomMode, const int bc[6]) {
+    const int e = extent > 0 ? extent : 4;  // set_pressure_bottom_extent
+    if (g.x <= e && g.y <= e && g.z <= e)
+      return true;
+    if (anchored)
+      return !kAnchoredFollowsGrid;
+    if (agglomMode == 0)  // 'smoother' forced: only a small bottom
+      return false;
+    const long n = (long)g.x * g.y * g.z;
+    return n <= kBottomMaxCells && bottomChoosePlanes(g, bc).valid();
+  }
+  // bottomAdmissible on this hierarchy's live settings (all set before init / initMpi).
+  bool bottomAdmissibleHere(C3 g) const {
+    return bottomAdmissible(g, agglomExtent_, !removeMean_ || hasOutflow_, agglomMode_, bc_);
+  }
+  static std::string depthRequestLabel(int nLevels) {
+    return nLevels == 0 ? std::string("auto") : std::to_string(nLevels);
+  }
+  // Debug output only (mgDebugLevel, §4.2 census): the depth AUTO resolves to on the hierarchy just
+  // built, read off its levels' global dims (no second hierarchy). `more`: the last built level
+  // could still coarsen, so an AUTO depth beyond it reads ">D". Under AUTO also the legacy depth-4
+  // count.
+  void printDepthCensus(int nLevels, bool more) const {
+    const int D = (int)lv_.size();
+    int a = -1;
+    for (int L = kAutoMinLevels - 1; L < D && a < 0; ++L)
+      if (bottomAdmissibleHere(lv_[L].gdim))
+        a = L + 1;
+    if (a < 0 && !more)
+      a = D;
+    const C3 b = lv_.back().gdim;
+    if (a > 0)
+      printf("[mg-census] depth requested %s -> %d levels, bottom %dx%dx%d; auto -> %d%s\n",
+             depthRequestLabel(nLevels).c_str(), D, b.x, b.y, b.z, a,
+             nLevels == 0 ? (" (legacy 4 -> " + std::to_string(std::min(D, 4)) + ")").c_str() : "");
+    else
+      printf("[mg-census] depth requested %s -> %d levels, bottom %dx%dx%d; auto -> >%d\n",
+             depthRequestLabel(nLevels).c_str(), D, b.x, b.y, b.z, D);
+  }
+
   // --- The direct bottom solve (doc/vof_step_performance_design.md §5.7, §5.14, §13, §14 H-1) ---
   static constexpr bool kHostMemory =
       std::is_same_v<typename CCExec::memory_space, Kokkos::HostSpace>;
@@ -6969,7 +7047,12 @@ class CutcellMG {
         *align = 1;
     }
     C3 gs{gnx, gny, gnz};
-    for (int L = 0; L < nLevels; ++L) {
+    // doc/mg_depth_policy.md §4.3: nLevels == 0 forecasts the AUTO depth for the SINGULAR operator
+    // (extent 4, mode auto, all-periodic), as initMpi resolves it.
+    const bool autoDepth = nLevels == 0;
+    const int nLevelsCap = autoDepth ? kAutoMaxLevels : nLevels;
+    const int perBc[6] = {0, 0, 0, 0, 0, 0};
+    for (int L = 0; L < nLevelsCap; ++L) {
       PlanRow r;
       r.global = gs;
       r.ranks = (int)cur.numBlocks();
@@ -6977,7 +7060,9 @@ class CutcellMG {
       r.tele = false;
       r.ratio = C3{1, 1, 1};
       C3 next = gs;
-      if (L + 1 < nLevels) {
+      const bool autoStop =
+          autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissible(gs, 4, false, -1, perBc);
+      if (L + 1 < nLevelsCap && !autoStop) {
         const bool canAny = can(gs.x) || can(gs.y) || can(gs.z);
         auto liftable = [&](const Dec& d) { return teleLiftable(d, gs); };
         const bool blocked = !liftable(cur);
