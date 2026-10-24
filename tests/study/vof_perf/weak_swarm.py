@@ -5,7 +5,7 @@ on, the case-A groups): a fixed box of cells per rank, tiled along x, then y, th
     PYTHONPATH=<PECLET_FLOW_MPI build> \\
         srun --mpi=pmix --ntasks=P --gpus-per-task=1 --gpu-bind=per_task:1 \\
             python tests/study/vof_perf/weak_swarm.py N [--warm W] [--cells n] [--d-over-h D]
-                [--bubbles-per-axis B] [--rtol R] [--single] [--out FILE.json] [--tag T]
+                [--bubbles-per-axis B] [--rtol R] [--levels L] [--single] [--out FILE.json] [--tag T]
 
 The case is case A of the bubble-swarm validation (tests/study/case_a on branch case-a: Ar 29.9,
 Bo 2, rho_b/rho_l = mu_b/mu_l = 0.1, buoyancy with the mixture weight removed, the volume mean u_x
@@ -19,6 +19,10 @@ Per rank: an n^3 box (default 256^3) carrying B^3 bubbles (default 2^3 = 8) of d
 gap with the fixed seed SEED. The rank box is tiled (TX, TY, TZ) times, doubling x, then y, then z
 (P = 1, 2, 4, 8, 16, 32 -> (1,1,1), (2,1,1), (2,2,1), (2,2,2), (4,2,2), (4,4,2)); every tile carries
 the SAME perturbed bubble set, so every rank has the same work when the ORB blocks are the tiles.
+
+--levels L sets the pressure multigrid depth (set_pressure_multigrid(True, L), before the geometry);
+without it the solver default (4) is used. At 4 levels a 256^3 box keeps a 32^3-per-rank coarsest
+level, which goes to the host GraphAMG bottom (rebuilt every step under variable density).
 
 At P = 1 the default is the DISTRIBUTED path (init_mpi at size 1, as prof_mpi.py); --single runs the
 single-rank solver instead (no mpi_block/init_mpi, as run_mpi.py), the honest one-GPU reference.
@@ -61,6 +65,7 @@ CELLS = arg("--cells", 256, int)
 S = arg("--d-over-h", 20.0, float)
 B = arg("--bubbles-per-axis", 2, int)
 RTOL = arg("--rtol", 1e-8, float)
+LEVELS = arg("--levels", None, int)
 OUT = arg("--out", None)
 TAG = arg("--tag", "")
 comm = MPI.COMM_WORLD
@@ -119,6 +124,8 @@ else:
 s = pf.Solver(*siz)
 if not SINGLE:
     s.init_mpi(NX, NY, NZ)
+if LEVELS is not None:
+    s.set_pressure_multigrid(True, LEVELS)  # before the geometry builds the hierarchy
 s.set_rho(RHO_L)
 s.set_mu(S * S * MU_L)
 s.set_pressure_geometry(np.full(tuple(siz), 10.0, order="F"))       # all fluid (SDF > 0)
@@ -196,6 +203,7 @@ if rank == 0:
         "flow_module": os.path.dirname(pf.__file__), "space": str(getattr(pf, "execution_space", "?")),
         "grid": [NX, NY, NZ], "tiles": [TX, TY, TZ], "cells_per_rank": CELLS ** 3,
         "blocks": ub, "d_over_h": S, "bubbles": len(seeds), "alpha": alpha, "rtol": RTOL,
+        "levels": LEVELS if LEVELS is not None else "default",
         "warm": WARM, "steps": N, "setup_s": t_setup, "wall_ms": 1000.0 * wall / N,
         "step_ms": float(mean_ms[0]), "timer_step_ms": float(mean_ms[1]),
         "proj_ms": float(mean_ms[2]), "momentum_ms": float(mean_ms[3]),
