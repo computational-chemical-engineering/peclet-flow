@@ -2409,10 +2409,13 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "numbers). The Laplacian form imposes the wrong tangential stress condition at a viscosity jump (an "
            "h-independent interface force: +19.5 % rise velocity for a drop at viscosity ratio "
            "0.1). 'auto' resolves at each step to 'full' on the staggered Solver with the "
-           "arithmetic face viscosity, no porous momentum and no moving scene instances, else to "
-           "'laplacian' with a one-time stderr notice. Inert for a constant mu. An explicit 'full' "
-           "is staggered-only (SolverColocated raises) and is refused at step() with the harmonic "
-           "face viscosity, porous momentum or moving scene instances.")
+           "arithmetic face viscosity, no porous momentum, no moving scene instances and no "
+           "immersed solid, else to 'laplacian' with a one-time stderr notice. Inert for a "
+           "constant mu. An explicit 'full' is staggered-only (SolverColocated raises) and is "
+           "refused at step() with the harmonic face viscosity, porous momentum or moving scene "
+           "instances. With solids it stays allowed, but it drops the transpose flux across the "
+           "staircase face: an O(gamma h) near-wall error on oblique walls (gamma the wall shear "
+           "rate), present for any non-uniform mu; the repair is open.")
       .def("set_dt", &S::setDt, nb::arg("dt"),
            "Set the time step dt (the caller's time unit); the momentum solve is scaled by 1/dt "
            "(well-conditioned at large dt). Under a physical domain the FIRST call pins the "

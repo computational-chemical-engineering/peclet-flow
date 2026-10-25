@@ -1,7 +1,8 @@
 # Full deviatoric viscous stress for variable μ in `peclet.flow` — design note
 
 Status: DESIGN (architect, 2026-10-22). It is to be committed to flow as `doc/full_viscous_stress.md`.
-WO-7 (2026-10-23, USER: "yes: full stress becomes default."): AUTO = full is the default.
+WO-7 (2026-10-23, USER: "yes: full stress becomes default."): AUTO = full is the default, except with
+immersed solids (Amendment A4, review B1).
 Brief: `bubble_column_perf/validation/ARCH_BRIEF_FULLSTRESS.md`. Evidence: `CASE_A_SETUP.md`,
 `CASE_A_ABLATE.md`. Current operator: flow `doc/variable_viscosity_projection.md`, cited below as VVP.
 
@@ -631,3 +632,11 @@ Other risks:
   1.881699 % for both, with differences of 3e-13 and 2e-9.
 - **Smoke (not a gate):** case A, d/h 10, host, full stress gives Re 21.3588. The Laplacian form gives 24.08;
   Basilisk 23.05 at d/h 10 and 21.275 at d/h 40.
+- **A4 — review B1 (2026-10-25): AUTO excludes immersed solids.** §5.4's premise "(∇u)ᵀn = 0" uses the true wall
+  normal; the regular-node rule drops the transpose flux across the STAIRCASE face (normal e_a), where it is
+  μγ t_a n ≠ 0 on an oblique wall. Decisive check (G3(iii) sphere array, N = 32, dt 20, μ = μ0(1 + ε cos 2πx/N)):
+  K_full/K_lap − 1 = −4.743e-2 and max|u_full − u_lap|/U = 4.110e-2 at ε = 1e-9 AND at ε = 1e-6 (identical
+  digits); ε = 0 gives 0 (the uniform skip). The defect is ε-independent: O(γh), not O(Δμ). AUTO therefore
+  resolves to laplacian (with the notice) whenever an immersed solid is present; an explicit `"full"` stays
+  allowed with solids. The repair (e.g. near-wall elements on μ_e − local μ, so the defect scales with Δμ) is open
+  and is the architect's.

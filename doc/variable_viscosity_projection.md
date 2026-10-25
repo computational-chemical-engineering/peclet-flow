@@ -46,7 +46,7 @@ property closure targets `"mu"`); internal flag `varProps_`.
 
 > **Stress form.** This section describes the Laplacian form `∇·(μ∇u)`. On the staggered `Solver` the default
 > `set_viscous_stress("auto")` (WO-7, 2026-10-23) resolves to `"full"` (arithmetic face μ, not porous, not
-> moving; else `"laplacian"` with a one-time notice), which adds the transpose term `∇·(μ(∇u)ᵀ)`, so the
+> moving, no immersed solid; else `"laplacian"` with a one-time notice), which adds the transpose term `∇·(μ(∇u)ᵀ)`, so the
 > predictor approximates the full deviatoric stress `∇·(2μD)`. The term is built from conservative MAC
 > stress elements with the same face μ as the bands below, and is explicit on uⁿ. The design, the gates and
 > the rejected alternatives are in [`full_viscous_stress.md`](full_viscous_stress.md). The bands, the

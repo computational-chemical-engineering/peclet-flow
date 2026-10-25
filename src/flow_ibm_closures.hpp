@@ -134,9 +134,12 @@ bool Solver<Grid>::fullStressActive() const {
 template <class Grid>
 void Solver<Grid>::resolveViscousStressAuto() {
   // WO-7 (doc/full_viscous_stress.md §12): AUTO = full on the staggered grid when mu is variable,
-  // arithmetic, not porous and not moving; otherwise laplacian with a one-time stderr notice. A
-  // constant mu has nothing to resolve (the two forms coincide). Re-decided every step: the flags
-  // it reads are final at the step head, as for the explicit "full" refusals.
+  // arithmetic, not porous, not moving and free of immersed solids (review B1: the regular-node
+  // rule drops the transpose flux across the STAIRCASE face, not the wall -- an O(gamma h)
+  // near-wall error on oblique walls that does not scale with the mu variation; the repair is
+  // open); otherwise laplacian with a one-time stderr notice. A constant mu has nothing to resolve
+  // (the two forms coincide). Re-decided every step: the flags it reads are final at the step head,
+  // as for the explicit "full" refusals.
   fullStressAuto_ = false;
   if (!varProps_)
     return;
@@ -149,6 +152,10 @@ void Solver<Grid>::resolveViscousStressAuto() {
     why = "porous (eps-weighted) momentum";
   else if (hasMotion_)
     why = "moving scene instances";
+  else if (hasSolid_)
+    why =
+        "an immersed solid (the staircase drops the transpose flux, an O(gamma h) near-wall error "
+        "on oblique walls; repair open)";
   if (why == nullptr) {
     fullStressAuto_ = true;
     return;

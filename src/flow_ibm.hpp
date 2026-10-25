@@ -1909,7 +1909,7 @@ class Solver {
   // conservative MAC stress elements with the Laplacian bands' own beta (src/full_stress.hpp).
   // `set_viscous_stress("auto" | "full" | "laplacian")`; default "auto" (WO-7, USER 2026-10-23):
   // resolved at each step head to full on the staggered grid when mu is variable, arithmetic, not
-  // porous and not moving, else to laplacian with a one-time stderr notice. Raises on
+  // porous, not moving and free of immersed solids (review B1), else to laplacian with a one-time stderr notice. Raises on
   // SolverColocated for an explicit "full" (planned, §9).
   void setViscousStress(const std::string& form);
   // (explicit full || AUTO resolved full) && varProps_ && staggered: the term is evaluated this
