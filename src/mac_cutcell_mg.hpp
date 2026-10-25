@@ -1035,7 +1035,8 @@ struct BottomKernel {
 
 // Env-gated MG diagnostics (host printf only, off unless PECLET_FLOW_MG_DEBUG is set):
 //   1 = level table (per-level global/local dims + coarsening ratio) at build time
-//   2 = + PCG/V-cycle residual history for the first PECLET_FLOW_MG_DEBUG_SOLVES (default 3) solves
+//   2 = + PCG/V-cycle residual history (Chebyshev: r0, final |r|inf, V-cycles) for the first
+//       PECLET_FLOW_MG_DEBUG_SOLVES (default 3) solves
 // Used to diagnose decomposition-dependent iteration counts; no effect on the solve itself.
 inline int mgDebugLevel() {
   static const int lv = [] {
@@ -6227,6 +6228,7 @@ class CutcellMG {
     // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
     const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
     int nvc = 0;
+    double rnLast = r0;  // final |r|inf, for the trace below only
     if (r0 > 0.0) {
       precond(z, r);
       ++nvc;  // z = M^{-1} r
@@ -6237,6 +6239,7 @@ class CutcellMG {
         axpy(r, -1.0, w);
         removeMean(l0, r);  // r -= A d
         const double rn = maxabs(l0, r);
+        rnLast = rn;
         if (rn < rtol * rref)
           break;
         if (guard3 && i == 3 && !(rn <= r0)) {  // growing after 3 iterations: bounds gone stale
@@ -6251,6 +6254,25 @@ class CutcellMG {
         rho = rho_new;
       }
     }
+    // Env-gated stop-test trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the first
+    // PECLET_FLOW_MG_DEBUG_SOLVES solves, rank 0), the Chebyshev counterpart of the PCG trace: r0,
+    // the stop reference, the final |r|inf the stop test saw and the V-cycle count. It prints
+    // values the solve already computed (no extra reduction), so the solve is unchanged with it on
+    // or off.
+    if (mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves()) {
+      int dbgRank = 0;
+#ifdef PECLET_FLOW_MPI
+      if (distributed_)
+        MPI_Comm_rank(comm_, &dbgRank);
+#endif
+      if (dbgRank == 0)
+        printf(
+            "[mg] cheb solve %d: r0=%.6e rref=%.6e rtol=%.1e |r|inf=%.6e r/rref=%.4e vcycles=%d "
+            "maxit=%d guard=%d\n",
+            dbgSolve_, r0, rref, rtol, rnLast, rref > 0.0 ? rnLast / rref : 0.0, nvc, maxit,
+            chebGuardTripped_ ? 1 : 0);
+    }
+    ++dbgSolve_;
     removeMean(l0, x);
     return nvc;
   }
