@@ -1,0 +1,134 @@
+# MG-depth policy — measurement log (append-only)
+
+Companion of `doc/mg_depth_policy.md`. Dated entries, newest last; never rewritten.
+
+## 2026-10-24/25 — WO-0: the depth matrix on the unmodified base (flow 246541f)
+
+**Modules** (MPI builds of 246541f, unmodified): CUDA
+`/home/frankp/Codes/bubble_column_perf/gpu_diag/mgd/ref/mod_base_cuda` (RTX 5080, Kokkos CUDA +
+OpenMP host), host `/home/frankp/Codes/bubble_column_perf/gpu_diag/mgd/ref/mod_base_host`
+(OpenMP, znver3). Raw output (logs, per-run JSON, probe logs, the M3s dumps):
+`/home/frankp/Codes/bubble_column_perf/gpu_diag/mgd/wo0/`.
+
+**Command** (one session, 2026-10-24 22:08 → 2026-10-25 04:35, each row under one hold of
+`gpu_diag/mgd/heavy.lock`):
+
+```bash
+M=/home/frankp/Codes/bubble_column_perf/gpu_diag/mgd
+tests/study/mg_depth/run_matrix.sh $M/ref/mod_base_cuda $M/ref/mod_base_host $M/wo0 \
+    M6 M1 M2 M3z M3r M3s M4 M5 M7a M7b M7c M8
+python tests/study/mg_depth/summarize.py $M/wo0 <row> [--md]      # the table below
+```
+
+Protocol: per row, one 2-step probe per depth with `PECLET_FLOW_MG_DEBUG=1
+PECLET_FLOW_AGMG_DEBUG=1` (debug printing only; read for the bottom engine: `[mg] direct bottom`
+→ direct, `[agmg-build]` → GraphAMG, neither → smoothed), then 3 interleaved rounds
+(L_a L_b … L_a L_b …), 5 warm-up + 30 timed steps (M2: 10 warm-up), ms/step = mean of the timed
+`step()` walls, median over rounds. `OMP_NUM_THREADS=4 OMP_PROC_BIND=false` (M5: 6; M8: 2 per
+rank). Load average ≤ 17.2 on every run (all judged); no other GPU process during any timed run
+(nvidia-smi before/after). Every (row, depth) state hash is identical across its 3 rounds.
+Explicit depth = `set_pressure_multigrid(True, L)` before the geometry; L = 0 = no call.
+
+**Case definitions** (`tests/study/mg_depth/mgd_case.py`; the choices the note does not fix are
+marked *measurement choice*):
+- M1 / M7a swarm 192³: `weak_swarm.py --single --cells 192` code for code (case A, d/h 20,
+  2³ bubbles); M1 MG-PCG cap 800 rtol 1e-8 (as weak_swarm), M7a no driver call (Chebyshev).
+- M2 bubble column 256×192×128 = `run_peclet.build()` at `BUBBLE_COLUMN_CELLS_PER_D=32`;
+  *measurement choice*: FRESH start from the seeded spheres at rest (the t43 checkpoint exists only
+  at 128×96×64), 10 warm-up steps; MG-PCG rtol 1e-8 as built, device superficial-velocity constraint.
+- M3 `zh_sphere` / `random_spheres`: `sdflow_regression.py`'s geometry, CFG and march (stop test,
+  ≤ 400 steps); ms/step over the whole march.
+- M4 / M8 channel 2048×64×64: *measurement choice* (the §2.7 case's setup is not recorded):
+  periodic x, walls ±y ±z, μ 0.05, dt 1, body force 1e-5, plus a fixed-seed non-solenoidal
+  8-mode perturbation of amplitude 1e-2 at global coordinates (without it the channel is
+  unidirectional and the projection is trivial: smoke run, div 6.6e-21). Default driver.
+- M6 anchored 128×32×32: *measurement choice* (the 2026-08 sweep's setup is not recorded):
+  uniform inflow U 0.05 at −x, outflow +x, walls ±y ±z, μ 0.1, dt 1, MG-PCG cap 300 rtol 1e-12
+  (the identical budget at every depth).
+- M7b porous bed 128³: *measurement choice*: fixed bed ε = 0.45 ± 0.1 (smoothed fixed-seed noise)
+  for x < 0.6 N, 1 above (4-cell tanh), `enable_drag` + `set_porous_continuity(True)`,
+  drag_beta = 150 μ (1−ε)²/(ε d_p²) with d_p 4, advection + implicit advection ON, periodic,
+  body force 1e-4 along x; default driver. M7c the same without `enable_drag`.
+
+**Results** (iterations: round 1, identical in all rounds; div = max over the timed steps of
+`max_open_divergence_projected()`; FP32 restarts = the solver's stderr warning, summed over rounds;
+failed = `pressure_solve_failed()` steps):
+
+| row | L | levels | bottom (cells) | engine | ms/step median (rounds) | iters mean [min,max] | div max | FP32 restarts | failed | load max | extra |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| M1 | 4 | 4 | 24x24x24 (13824) | GraphAMG | 155.57 (155.6, 155.9, 155.6) | 8.00 [8,8] | 7.10e-11 | 0 | 0 | 6.3 |  |
+| M1 | 5 | 5 | 12x12x12 (1728) | direct | 81.12 (81.2, 81.1, 81.0) | 9.00 [9,9] | 4.23e-11 | 0 | 0 | 6.0 |  |
+| M1 | 6 | 6 | 6x6x6 (216) | direct | 79.36 (79.4, 79.3, 79.4) | 9.00 [9,9] | 5.77e-11 | 0 | 0 | 5.6 |  |
+| M1 | 7 | 7 | 3x3x3 (27) | smoothed | 79.70 (79.6, 79.7, 79.7) | 9.00 [9,9] | 5.80e-11 | 0 | 0 | 5.2 |  |
+| M2 | 4 | 4 | 32x24x16 (12288) | GraphAMG | 203.31 (203.0, 203.3, 205.4) | 10.03 [9,12] | 6.56e-10 | 0 | 0 | 3.7 |  |
+| M2 | 5 | 5 | 16x12x8 (1536) | direct | 91.25 (91.3, 91.3, 91.2) | 11.70 [11,13] | 4.00e-10 | 0 | 0 | 3.5 |  |
+| M2 | 6 | 6 | 8x6x4 (192) | direct | 97.22 (97.2, 97.3, 97.2) | 13.77 [12,16] | 7.27e-10 | 0 | 0 | 3.3 |  |
+| M3z | 4 | 4 | 16x16x16 (4096) | GraphAMG | 65.00 (65.0, 65.2, 64.9) | 7.00 [7,8] | 4.42e-11 | 0 | 0 | 9.2 | K=7.554169743 steps=400 itmed2=7 umaxsolid=0.000e+00 |
+| M3z | 5 | 5 | 8x8x8 (512) | direct | 52.80 (52.8, 52.9, 52.8) | 7.00 [7,8] | 4.21e-11 | 0 | 0 | 8.2 | K=7.554169743 steps=400 itmed2=7 umaxsolid=0.000e+00 |
+| M3z | 6 | 6 | 4x4x4 (64) | smoothed | 52.59 (52.6, 52.6, 52.6) | 7.01 [7,8] | 6.49e-11 | 0 | 0 | 8.2 | K=7.554169743 steps=400 itmed2=7 umaxsolid=0.000e+00 |
+| M3r | 4 | 4 | 16x16x16 (4096) | GraphAMG | 65.12 (65.1, 65.1, 65.1) | 7.09 [7,9] | 5.86e-11 | 0 | 0 | 3.4 | k_star=0.006245475062 steps=340 itmed2=7 umaxsolid=0.000e+00 |
+| M3r | 5 | 5 | 8x8x8 (512) | direct | 51.10 (51.0, 51.1, 51.1) | 7.09 [7,8] | 1.00e-10 | 0 | 0 | 3.0 | k_star=0.006245475062 steps=340 itmed2=7 umaxsolid=0.000e+00 |
+| M3r | 6 | 6 | 4x4x4 (64) | smoothed | 50.84 (50.8, 50.8, 50.8) | 7.11 [7,8] | 1.58e-10 | 0 | 0 | 2.5 | k_star=0.006245475062 steps=340 itmed2=7 umaxsolid=0.000e+00 |
+| M3s_0 | 0 | 4 | 6x6x6 (216) | direct | 8.24 (8.3, 8.2, 8.2) | 6.51 [6,7] | 1.28e-10 | 0 | 0 | 8.5 | K=7.436078194 steps=150 itmed2=6 umaxsolid=0.000e+00 |
+| M3s_1 | 0 | 4 | 6x6x6 (216) | direct | 9.54 (9.5, 9.6, 9.5) | 7.32 [7,8] | 1.53e-10 | 0 | 0 | 8.2 | k_star=0.006282103323 steps=60 itmed2=7 umaxsolid=0.000e+00 |
+| M4 | 4 | 4 | 256x8x8 (16384) | GraphAMG | 175.91 (175.8, 176.1, 175.9) | 8.00 [8,8] | 4.44e-16 | 0 | 0 | 6.5 |  |
+| M4 | 5 | 5 | 128x4x4 (2048) | direct | 109.11 (109.1, 109.1, 109.1) | 8.00 [8,8] | 7.10e-16 | 0 | 0 | 5.6 |  |
+| M4 | 6 | 6 | 64x2x2 (256) | direct | 107.25 (107.3, 107.2, 107.2) | 8.00 [8,8] | 7.45e-16 | 0 | 0 | 4.9 |  |
+| M5 | 4 | 4 | 16x16x16 (4096) | GraphAMG | 607.26 (606.4, 607.3, 608.6) | 7.90 [7,8] | 1.41e-10 | 0 | 0 | 17.2 |  |
+| M5 | 5 | 5 | 8x8x8 (512) | direct | 615.09 (617.5, 614.6, 615.1) | 8.90 [8,9] | 1.94e-10 | 0 | 0 | 14.0 |  |
+| M5 | 6 | 6 | 4x4x4 (64) | smoothed | 617.27 (617.4, 616.5, 617.3) | 9.00 [9,9] | 6.67e-11 | 0 | 0 | 11.3 |  |
+| M6 | 4 | 4 | 16x4x4 (256) | smoothed | 16.02 (16.0, 16.1, 15.9) | 29.53 [28,31] | 1.11e-16 | 0 | 0 | 8.2 |  |
+| M6 | 5 | 5 | 8x2x2 (32) | smoothed | 14.88 (14.8, 14.9, 14.9) | 23.00 [23,23] | 3.81e-17 | 0 | 0 | 7.6 |  |
+| M6 | 6 | 6 | 4x2x2 (16) | smoothed | 59.08 (59.1, 58.8, 59.2) | 90.37 [60,113] | 1.02e-16 | 0 | 0 | 7.6 |  |
+| M7a | 4 | 4 | 24x24x24 (13824) | GraphAMG | 358.07 (357.8, 358.1, 358.2) | 11.00 [11,11] | 2.72e-12 | 0 | 0 | 3.6 |  |
+| M7a | 5 | 5 | 12x12x12 (1728) | direct | 225.72 (225.6, 225.8, 225.7) | 11.97 [11,12] | 1.89e-11 | 0 | 0 | 3.2 |  |
+| M7a | 6 | 6 | 6x6x6 (216) | direct | 214.83 (214.8, 214.7, 214.8) | 12.00 [12,12] | 6.48e-12 | 0 | 0 | 2.9 |  |
+| M7b | 4 | 4 | 16x16x16 (4096) | GraphAMG | 54.55 (54.5, 54.6, 54.6) | 9.00 [9,9] | 2.69e-04 | 0 | 0 | 1.6 |  |
+| M7b | 5 | 5 | 8x8x8 (512) | direct | 30.06 (30.1, 30.1, 30.1) | 9.00 [9,9] | 2.69e-04 | 0 | 0 | 1.6 |  |
+| M7b | 6 | 6 | 4x4x4 (64) | direct | 28.92 (28.9, 28.9, 28.9) | 9.00 [9,9] | 2.69e-04 | 0 | 0 | 1.7 |  |
+| M7c | 4 | 4 | 16x16x16 (4096) | GraphAMG | 101.62 (101.4, 101.7, 101.6) | 9.00 [9,9] | 4.29e-03 | 0 | 0 | 1.3 |  |
+| M7c | 5 | 5 | 8x8x8 (512) | direct | 60.53 (60.5, 60.5, 60.5) | 9.00 [9,9] | 4.29e-03 | 0 | 0 | 1.4 |  |
+| M7c | 6 | 6 | 4x4x4 (64) | smoothed | 59.03 (59.0, 59.0, 59.0) | 9.00 [9,9] | 4.29e-03 | 0 | 0 | 1.4 |  |
+| M8 | 4 | 4 | 256x8x8 (16384) | GraphAMG | 282.14 (282.4, 282.1, 282.1) | 8.00 [8,8] | 4.44e-16 | 0 | 0 | 2.0 |  |
+| M8 | 5 | 5 | 128x4x4 (2048) | GraphAMG | 245.70 (245.9, 245.4, 245.7) | 8.00 [8,8] | 7.10e-16 | 0 | 0 | 2.0 |  |
+| M8 | 6 | 6 | 64x2x2 (256) | GraphAMG | 266.85 (266.8, 266.8, 267.2) | 8.00 [8,8] | 7.45e-16 | 0 | 0 | 2.0 |  |
+
+M7b / M7c: `max_open_divergence_projected()` is not the porous constraint (2.7e-4 / 4.3e-3 at every
+depth, the ε-gradient term); `max_porous_residual()` max over the timed steps: M7b 1.86e-16 /
+1.95e-16 / 1.98e-16, M7c 1.85e-15 / 7.89e-16 / 5.96e-16 (L4/L5/L6). M3s state hashes (for G-IBM's
+byte-identity at N = 48): zh_sphere `4e5493f4b8fe5bf7…`, random_spheres `ee7970632d20eedd…`
+(full hashes in the JSON).
+
+**Checkpoint G-PERF-WS (a)–(c) on M1, AUTO = L5** (§4.4):
+- (a) t(L5) 81.12 ≤ 1.08 × min(t(L6) 79.36, t(L7) 79.70) = 85.71: **PASS** (L5 is +2.2 % on L6;
+  the Q1 fallback is not triggered).
+- (b) t(L5) 81.12 ≤ 0.20 × t(L4) 155.57 = 31.11: **MISS** (ratio 0.52). L4 measured 155.6 ms/step
+  here, not the pilot's 558: the pilot's L4 ran its host GraphAMG bottom on a loaded host (load
+  90–190, `gpu_diag/HANDOFF_WEAK.md`); on this quiet host (load ≤ 6.3) the host bottom is 3.6×
+  cheaper while L5–L7 (on-device bottoms) moved 87.4/90.1 → 79.4/79.7. The threshold was derived
+  from the pilot's L4; the miss is reported, not re-thresholded (§7 header).
+- (c) iterations(L5) 9.00 ≤ iterations(L6) 9.00: **PASS**.
+
+**Findings against the note's premises** (for the coordinator):
+1. **No standalone V-cycle on the cut-cell path.** On the CutcellMG path (`set_pressure_geometry` /
+   `set_solid`), `solvePressureSystem` (`src/flow_ibm_project.hpp:1482-1585`) dispatches
+   Chebyshev / BiCGStab (ghost) / FCG / else MG-PCG — MG-PCG is the terminal default at every np
+   (`setPressurePcg`'s own message). M8 (np 2, no driver selected) therefore ran MG-PCG
+   (`pressure_vcycle_precision()` = fp32, iterations identical to M4). §2's "standalone V-cycle
+   (multi-rank, constant ρ)" and G-ITER's "standalone V-cycle (M8)" coverage have no CutcellMG
+   instance on this base.
+2. **The CFD-DEM porous default is MG-PCG, not Chebyshev.** `set_porous_continuity` selects
+   Chebyshev, but with drag on `configurePorousDragSolver()` (`src/flow_ibm_closures.hpp:394-406`)
+   switches to MG-PCG and forces agglomeration (mode 1). M7b (CFD-DEM style, drag) = MG-PCG; M7c
+   (no drag) = Chebyshev; M7a (variable-ρ swarm) = Chebyshev.
+3. **M8 at np 2 on device: GraphAMG at every depth** (the distributed device bottom is never
+   direct, as §1 states); the best depth there is L5 (245.7 vs 282.1 ms at L4, 266.9 at L6).
+4. **M6 anchored, smoothed bottom at every depth:** L5 23.0 iterations vs L4 29.5, but L6
+   90.4 [60, 113] (×3.1, 59 ms/step vs 16) — relevant to WO-5 (`kAnchoredFollowsGrid`, D 4 → 6 for
+   this grid in §4.4). No divergence floor appeared at rtol 1e-12 (≤ 1.1e-16 at every depth).
+5. **M5 host 128³ (G-PERF-H shape):** L5 615.1 vs L4 607.3 ms/step = 1.013 (≤ 1.03); iterations
+   8.90 vs 7.90 (G-ITER bound 1.15 × 7.90 + 0.5 = 9.59).
+6. M2 (G-PERF-BC shape): L5 91.25 vs L4 203.31 = 0.449 (≤ 0.8); iterations 11.70 vs 10.03 (bound
+   12.03). M3: K and k* identical to 10 digits at L4/L5/L6 (N = 128).
+
+**H100 job 28551969 (L7):** no report in `gpu_diag/weak/results/` (pilot1–pilot4 only); not added.
