@@ -640,3 +640,6 @@ Other risks:
   resolves to laplacian (with the notice) whenever an immersed solid is present; an explicit `"full"` stays
   allowed with solids. The repair (e.g. near-wall elements on μ_e − local μ, so the defect scales with Δμ) is open
   and is the architect's.
+- **TODO (review N2, not in the B1/S1/S2 package):** fuse the prelude's two μ reductions (`muRangeInner` and
+  `minMuInner`, one 3-double MIN allreduce) and the three `old_` exchanges (one 3-field exchange, as §10 budgets;
+  plus the one extra exchange `faceEdges` adds with an outflow face); measure at scale before and after.
