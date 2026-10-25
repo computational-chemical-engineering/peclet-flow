@@ -170,7 +170,8 @@ entry already rejected "GraphAMG setup reuse" in favour of the direct engine.
   one-time warning naming the remedy (dimensions with more factors of two; `predict_hierarchy`).
   Factor-3 coarsening is out of scope (rejected for the bubble column in the §13 register entry).
 - Semi-coarsening and the anisotropic aspect rule are respected automatically: the test reads the
-  actual g_ℓ the level loop produces.
+  actual g_ℓ the level loop produces. **Not for an axis that stops coarsening: its coarse cells grow
+  2^ℓ:1 and the point smoother fails there — Amendment A2.**
 
 ## 4. The design
 
@@ -498,6 +499,127 @@ M7a 30/30 steps). A gate a correct change cannot pass is no gate. Rejected: the 
 case to 1e-13 in production. The original wording above is kept, struck through, and the WO-2 MISSes
 against it stay on record in the log. G-IBM is judged on the same two conditions. The other gates that
 carry a divergence ratio (G-NUM-D, G-ANCH) are not amended by this decision.
+
+### Amendment A2 (2026-10-25) — an axis that stops coarsening: the depth rule stands, the point smoother is the defect
+
+Provenance: row M10 (log S2; raw `gpu_diag/mgd/fix/m10/`), G-ITER **MISS** 15.967 vs 11.923 (explicit 4: 9.933), swarm
+128×128×25, RTX 5080 — stays on record. Brief `gpu_diag/mgd/BRIEF_ARCH_ASPECT.md`. A2 changes no result before WO-7.
+
+**A2.1 What §3.4 got wrong.** Nothing bounds the coarse-cell aspect along an axis that stops coarsening:
+`mgChooseRatio` (`mac_cutcell_mg.hpp:1184-1228`) defers only among *coarsenable* axes, only on an anisotropic metric.
+An axis s blocked from level β keeps H_s while the others double; with H_a = hp_a·cfac_a the **strong-axis aspect**
+A'_ℓ = min_{b≠s} H_b / H_s (= 2^(ℓ−β), isotropic metric), and the rediscretized coarse operator (per-axis 1/cfac²,
+`:2237-2239`) is A'² anisotropic. M10 (β = 0): L1 2, L2 4, L3 8 smoothed, L4 16 direct; explicit 4 already smooths
+L2 at 4. An error smooth along s and oscillatory across it is invisible to the coarse grid (it coarsens only across
+s), and point Jacobi damps it by 1 − 2/(2 + A'²) per sweep: 0.67 at A' = 2, 0.89 at 4, 0.97 at 8 (red-black GS no
+better in order). That is the +61 %. It is `doc/anisotropic_metric.md` §5.2's own bound (coefficient ratio ≤ θ² = 4,
+A' ≤ θ = 2) and its named remedy (line relaxation, `../docs/DECOMPOSITION_AND_MULTIGRID.md` open item 11).
+
+**A2.2 Decisions.**
+- **(a) No blocked-axis term in D_auto or `mgChooseRatio`; no flag; §5.4 untouched.** Counting s only defers and
+  freezes the hierarchy above the admission: on M10 a cap A' ≤ 2 / 4 / 8 stops at 64²×25 (102 400 cells) / 32²×25
+  (25 600) / 16²×25 (6400, plane 256 > 192), all host GraphAMG; cap 16 is today's D 5. An admitted bottom over a
+  blocked extent m needs n_a·n_b ≤ 8192/m, so its aspect is set by the grid, not a rule. The shallowest admitted
+  depth is also the best on this class (each deeper level adds a smoothed level of larger A'): **the depth rule
+  stands**; G-ASP (3) tests that.
+- **(b) The remedy is the smoother: zebra line relaxation (LR) along s where A' > θ** (A2.3, A2.4, WO-7). Rejected:
+  an aspect cap ((a)); the plane cap as the remedy (Q5 stays open on its own: 256 admits M10's 16²×25 at D 4, but
+  1024²×100 still smooths A' = 4, 8 — it moves the class boundary one level); depth 4 for the class (the host bottom
+  this package removes: M10 55.4 vs 16.6 ms; 1024²×100 keeps a 409 600-cell GraphAMG bottom); more sweeps (O(A'²));
+  periodic lines with the wrap lagged (a boundary layer of ≈ A' cells loses the very modes LR is for); Galerkin
+  coarse operators (same anisotropy); odd-grid coarsening, padding (D&M items 12, 8: larger than the need); plane
+  relaxation (only for two strong axes, which the deferral rule removes within two levels).
+- **(c) On this class G-ITER measures the smoother, not the depth.** No depth passes it: D 4 is the baseline, D ≥ 5
+  adds anisotropic smoothed levels, shallower bottoms are inadmissible; the GraphAMG baseline is not the defect (all
+  M1–M9 baselines had one). **USER decision U-A2, recommended P1.** *P1:* hierarchies with a triggered smoothed
+  level (A2.3) are judged on G-ASP instead of G-ITER for WO-2; G-ITER, threshold and baseline unchanged, becomes
+  WO-7's acceptance gate. *P2:* WO-2 waits for WO-7 and G-ITER as written. Why P1: AUTO ran 3.3× faster than depth 4
+  on M10 (loaded; G-ASP judges it quiet), LR does not depend on the depth rule, and P2 holds AUTO back on every grid
+  for a class with no known production case. A failed G-ASP row takes P1 off the table. **Default until the user
+  answers: P2's state** — WO-2 not merged to main; WO-A2a, WO-A2b, WO-7, WO-3, WO-4 proceed.
+- **(d) No known production case; build LR anyway** (Q-A3). A grep of the gallery's literal sizes finds two
+  early-blocked grids (fluidized bed 34×34×116, 8×8×18), both anchored (D 4 until WO-5), A' ≤ 2 everywhere; the
+  benchmark grids are rich in factors of two. The class is a thin slab or quasi-2-D column at a decimal n_s (25, 50,
+  100): "pick factors of two" is a leak in the physical-domain API, which LR closes for the pressure.
+
+**A2.3 Trigger (host, at hierarchy build, global quantities only: no collective, np-independent).** s = the unique
+axis with H_s < H_b for both b ≠ s (none: no trigger). T(ℓ) ⇔ ℓ ≥ 1 ∧ `!can(g_ℓ[s])` (globally blocked) ∧
+A'_ℓ > θ (`aspectTheta_`, default 2: same knob, same bound) ∧ no `outflow` face on s. Stored as `Level::lineAxis`
+∈ {−1, 0, 1, 2}, printed in the `mgDebugLevel()` table and census line. A *triggered smoothed level* has T(ℓ) and is
+smoothed by the V-cycle (a smoothed bottom included). An s only deferred, or blocked only by `evenOn` (§5.4), is
+not globally blocked: isotropic cubes, every §4.4 row and the anisotropic-metric gate grid have no trigger.
+
+**A2.4 The line smoother (WO-7).** On a triggered smoothed level with LR on and s whole on every rank (the level
+decomposition has one block along s), every point-smoothing call — FP64 `smooth`, FP32 `smoothFp32` /
+`smoothFp32Dist` — sweeps two **column colours** instead of two cell colours. Nothing else in the V-cycle changes.
+- Column = the line along s at fixed inner (a, b) (a < b the other axes, x-y-z order). Colour = (og_a + l_a + og_b
+  + l_b) & 1, og = `parityOg(lv)`, l local storage indices (the point parity minus the s term). Colour 0 then 1;
+  the caller's `reverse` gives 1 then 0 (post-smoothing passes `sym` as today: the V-cycle stays symmetric).
+- Before each colour: what that level's point path does before a colour in its non-CA form (single rank `fill` +
+  `applyOutflowGhost` or the fused-wrap reads; MPI the per-colour stencil-halo exchange + `applyOutflowGhost`); no
+  `caSmooth`. Neighbours via the point kernel's own index helper and wrap arguments. No new communication.
+- Per column, one thread, k = 0 … m−1 (m = inner extent along s, i_k the cell, t the s-stride), FP64 | FP32:
+  r_k = b_k − (A x)_k, the level's full operator at the current x (`cutcellApplyFaceCell` | `fp32Flux` form: in
+  FP32, x = c·1 and b = 0 give δ = 0 exactly); d_k = AC(i_k) | `fp32Diag`(i_k); l_k = AF_s(i_k) | −W_s(i_k);
+  u_k = AF_s(i_k + t) | −W_s(i_k + t). Decoupled cell (AC < 1e-30 | D = 0): d_k = 1, l_k = u_k = r_k = 0.
+  s non-periodic: l_0 = u_{m−1} := 0, Thomas. s periodic: β = l_0, α = u_{m−1} (the wrap face); α = β = 0 → Thomas;
+  else Sherman–Morrison, γ = −d_0, d'_0 = d_0 − γ, d'_{m−1} = d_{m−1} − αβ/γ (else d'_k = d_k): solve T'y = r and
+  T'z = (γ, 0, …, 0, α)ᵀ in the same passes, f = (y_0 + β y_{m−1}/γ)/(1 + z_0 + β z_{m−1}/γ) (f := 0 if that
+  denominator's magnitude < ε_p), δ = y − f z. Thomas: p_0 = d'_0; p_k = d'_k − l_k c_{k−1}, p_k := d'_k if
+  p_k < ε_p·d'_k (sealed Neumann segment); c_k = u_k/p_k; y_k = (r_k − l_k y_{k−1})/p_k (z alike); back
+  y_k −= c_k y_{k+1}, k = m−2 … 0. ε_p = 64·ε_mach (1.42e-14 | 7.63e-6); FP32 literals `f`, no double in the FP32
+  body. x_k += δ_k. The order is as written, so where c, y, z live (global scratch or registers) changes no bit.
+- Storage: c, y, z per triggered level in its precision, allocated with that level's data at hierarchy build (never
+  per step; `device_sync_budget` unchanged). Launch: one `parallel_for` per colour (device `MDRange2<CCExec>` over
+  (a, b), x fastest, colour filter; host `RangePolicy` over b-rows behind the point kernel's `hostRunSerial`).
+- s split across ranks on a triggered level: that level keeps point RB-GS (np-dependent there only); WO-4 warns.
+- `CutcellMG::setLineRelaxation(bool)` / `s.diagnostics.set_pressure_line_relaxation(enabled)`, default true, read
+  at smoothing time; a change sets `eigWarm_ = false`. Off is today's code bit for bit.
+
+**A2.5 Gates (pre-registered 2026-10-25, before any run).** Quiet host (load ≤ 24); 3 interleaved rounds of 5
+warm-up + 30 timed steps, medians; arms AUTO, explicit 4, explicit D_auto + 1, and LR on/off for G-LR. Rows:
+**M10** device RTX 5080, `mgd_case.py --case swarm --dims 128 128 25` (MG-PCG; s = z periodic; triggered smoothed
+L2 L3). **M10h** host 1 × 6 threads, the same with `--driver default` (Chebyshev). **M10v** host np 2 × 3 threads,
+`--bind-to none`, `--case channel --nx 512 --ny 64 --nz 25` (standalone V-cycle; s = z between walls; D 5, bottom
+32×4×25 direct, triggered smoothed L2 L3; explicit 4's bottom 64×8×25 is GraphAMG).
+- **G-ASP** (WO-2 under P1, no LR): (1) G-CONV (a), (b) vs explicit 4 and A1 (1), (2) for D_auto vs 4; (2) M10
+  t(AUTO) ≤ t(L4) (pre-registered in S2), M10h and M10v t(AUTO) ≤ 1.03 × t(L4) (G-PERF-H's bound);
+  (3) iterations(AUTO) ≤ iterations(D_auto + 1) and t(AUTO) ≤ 1.03 × t(D_auto + 1).
+- **G-LR** (WO-7): (1) G-ITER unchanged, iterations(AUTO, LR) ≤ 1.15 × iterations(explicit 4, LR off) + 0.5 per row
+  (M10 ≤ 11.92 at 9.933; V-cycles per step on M10v); (2) t(AUTO, LR) ≤ t(AUTO, LR off) on M10, ≤ 1.03 × on M10h,
+  M10v; (3) G-ASP (1) with LR on; (4) LR on ≡ LR off ≡ the pre-WO-7 build wherever no smoothed level triggers: 14
+  `state_hash` hashes host and CUDA, `-LE bench` host and CUDA (count recorded, ≈ 262 with the branch tests) with
+  identical printed values outside WO-7's census list; M10 host np 1 `init_mpi` memcmp-equal to single rank, LR on;
+  (5) ctest `mg_line_relax` (host, CUDA): 32×32×25 levels, s = z periodic and between walls, openness uniform in
+  [0.05, 1], 5 % closed faces, one sealed column: one colour pass equals a dense solve of each column's (cyclic)
+  system to 1e-12 (FP64) / 1e-4 (FP32) relative; FP32 x = c·1, b = 0 bitwise unchanged; all finite; wall weights 0.
+
+**A2.6 Work orders.**
+- **WO-A2a (inert).** A2.3 stored, printed (A', T). ctest `mg_depth_policy` rows (triggered smoothed levels): 128×128×25
+  → D 5, {2, 3}; its explicit 4 → {2}; 512×512×100 (M10b, OOM on 16 GB) → D 7, {4, 5}; 512×64×25 → D 5, {2, 3};
+  34×34×116, 8×8×18 → none; every §4.4 row → none. Gate G-BIT. **WO-4** gains one line, once per hierarchy: a triggered
+  smoothed level LR does not run on ("level ℓ: coarse cells A':1 along <axis> (n does not halve), point-smoothed").
+- **WO-A2b (measurement, no `src/`).** G-ASP on the three rows; log; verdicts.
+- **WO-7 (LR; recorded change on triggered smoothed levels only).** A2.4, setter, binding, `mg_line_relax`; the
+  WO-A2a census over the battery lists the tests that move (old → new table in the commit); register N5; CHANGELOG;
+  `flow/CLAUDE.md` pressure bullets, `doc/anisotropic_metric.md` §5.2 "out of scope" → A2, D&M item 11 status.
+  Gates G-LR, G-BIT. If G-LR (2) fails on latency (M10 L2: 512 columns per colour, 25 dependent steps), hold c, y, z
+  in registers for m ≤ 64 (bitwise by A2.4) and re-judge once.
+- **WO-2 lands** under P1 after WO-A2b passes; under P2 after WO-7 passes G-LR.
+
+**A2.7 Register text.** N1 += "A blocked axis enters neither the depth rule nor the aspect rule (A2)." New **N5**
+(WO-7): "Pressure-MG levels whose unique strong axis is blocked with A' > θ get zebra line relaxation along it.
+Rejected: aspect cap on the depth, plane cap as remedy, depth 4 for the class, more sweeps, lagged periodic wraps,
+Galerkin coarse operators, odd-grid coarsening/padding. Evidence: M10, A2." The coordinator records U-A2's answer.
+
+**A2.8 Open questions (work proceeds on each default).**
+- Q-A1 [pref, USER] P1 or P2 (A2.2 (c)): recommended P1; default P2's state until answered.
+- Q-A2 [fact] does LR reach G-ITER on M10? G-LR (1). If not, the rest is coefficient coarsening across the bubbles
+  (E1/S3, out of scope): stop and escalate; P1 is then the only landing route.
+- Q-A3 [pref] build WO-7 for a class with no known production case? Default yes.
+- Q-A4 [pref] the name `diagnostics.set_pressure_line_relaxation(enabled)` (NAMING.md one-setter form): default.
+- Q-A5 [fact] a split s under MPI keeps point RB-GS there; no case known (ORB cuts long axes first); next: lagged ends.
+- Q-A6 [fact] the velocity MG keeps point smoothing on this class (κ ≥ 1 bounds the damage); unmeasured, out of scope.
 
 ## 8. Risks and open questions
 
