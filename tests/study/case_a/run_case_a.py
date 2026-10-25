@@ -42,8 +42,8 @@ Usage:
                              with rho_b = 0.1 rho_l, so at R = 1 the buoyancy is Boussinesq and Ar,
                              Bo, mu_l, sigma are unchanged (refused with --vof-momentum)
   --face-mu {arithmetic,harmonic}  ablation: face-viscosity mean (default arithmetic, the driver's)
-  --viscous-stress {laplacian,full}  the viscous stress form (set_viscous_stress; default laplacian,
-                             the solver's default; doc/full_viscous_stress.md)
+  --viscous-stress {laplacian,full}  the viscous stress form (set_viscous_stress). Absent: no setter
+                             call, the solver's own default (doc/full_viscous_stress.md)
   --no-advection             momentum advection off (unsteady Stokes momentum). The default is ON
                              (set_advection(True), explicit SOU): case A is Navier-Stokes. The
                              solver's own default is OFF, and every case-A run before 2026-10-23
@@ -101,7 +101,7 @@ def parse():
     p.add_argument("--mu-ratio", type=float, default=MU_RATIO)
     p.add_argument("--rho-ratio", type=float, default=RHO_RATIO)
     p.add_argument("--face-mu", choices=("arithmetic", "harmonic"), default="arithmetic")
-    p.add_argument("--viscous-stress", choices=("laplacian", "full"), default="laplacian")
+    p.add_argument("--viscous-stress", choices=("laplacian", "full"), default=None)
     p.add_argument("--advection", action=argparse.BooleanOptionalAction, default=True,
                    help="momentum advection (default on; --no-advection: unsteady Stokes)")
     p.add_argument("--single-vof", action="store_true")
@@ -158,7 +158,7 @@ class Dist:
         return flag if self.comm is None else bool(self.comm.allreduce(bool(flag)))
 
 
-def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, vof_mom=False,
+def build(n, mu_g=MU_G, face_mu="arithmetic", stress=None, single=False, vof_mom=False,
           dist=None, advection=True, rho_g_in=RHO_G, vof_mom_muscl=False):
     L = L_OVER_D * D
     dist = dist or Dist(n)
@@ -177,7 +177,8 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress="laplacian", single=False, 
     s.set_property_model("mu", "linear", "C", [MU_L, mu_g - MU_L])
     if face_mu == "harmonic":
         s.diagnostics.set_property_mode("variable", True)
-    s.set_viscous_stress(stress)
+    if stress is not None:                    # None: the solver's default form
+        s.set_viscous_stress(stress)
     if advection:
         s.set_advection(True)
     s.set_surface_tension(SIGMA)
@@ -267,7 +268,7 @@ def main():
     f.write(f"# case A d/h={a.d_over_h} n={n} L={L_OVER_D * D} d={D} rho_l={RHO_L} "
             f"rho_g={RHO_G} rho_g_inertial={a.rho_ratio * RHO_L} mu_l={MU_L:.6e} mu_g={a.mu_ratio * MU_L:.6e} sigma={SIGMA:.6e} g={G} "
             f"alpha={alpha:.6f} space={space} t_ref={T_REF:.6e} dt_safety={a.dt_safety} "
-            f"face_mu={a.face_mu} viscous_stress={a.viscous_stress} single_vof={a.single_vof} "
+            f"face_mu={a.face_mu} viscous_stress={a.viscous_stress or 'default'} single_vof={a.single_vof} "
             f"vof_momentum={a.vof_momentum} vof_mom_muscl={a.vof_mom_muscl} advection={a.advection}" + (f" np={nranks}" if comm is not None else "") + "\n")
     f.write(",".join(cols) + "\n")
 
@@ -342,7 +343,7 @@ def main():
     steady = bool(drel < 1e-3)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
     line = (f"CASE_A d/h={a.d_over_h} n={n} mu_ratio={a.mu_ratio:g} rho_ratio={a.rho_ratio:g} face_mu={a.face_mu} "
-            f"stress={a.viscous_stress} adv={'on' if a.advection else 'off'} vof={('mom+muscl' if a.vof_mom_muscl else 'mom') if a.vof_momentum else ('single' if a.single_vof else 'blocks')} "
+            f"stress={a.viscous_stress or 'default'} adv={'on' if a.advection else 'off'} vof={('mom+muscl' if a.vof_mom_muscl else 'mom') if a.vof_momentum else ('single' if a.single_vof else 'blocks')} "
             f"dt_safety={a.dt_safety:g} space={space} stop={stop} t*={last['t_star']:.3f} "
             f"steps={step} Re_drift(2L-mean)={re_a:.4f} [min {re_lo:.3f} max {re_hi:.3f}] "
             f"Re_rel_zm(2L-mean)={zm_a:.4f} dRe/Re(2L vs prev 2L)={drel:.2e} steady={steady} "
