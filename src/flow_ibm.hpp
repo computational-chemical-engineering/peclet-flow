@@ -1907,12 +1907,16 @@ class Solver {
   // FULL VISCOUS STRESS (doc/full_viscous_stress.md). With variable mu the momentum predictor
   // gains the transpose term T = div(mu (grad u)^T), explicit on the time base u^n (`old_`), as
   // conservative MAC stress elements with the Laplacian bands' own beta (src/full_stress.hpp).
-  // `set_viscous_stress("full" | "laplacian")`; default "laplacian" (opt-in until the user decides
-  // the default, Q1). Raises on SolverColocated for "full" (planned, §9).
+  // `set_viscous_stress("auto" | "full" | "laplacian")`; default "auto" (WO-7, USER 2026-10-23):
+  // resolved at each step head to full on the staggered grid when mu is variable, arithmetic, not
+  // porous and not moving, else to laplacian with a one-time stderr notice. Raises on
+  // SolverColocated for an explicit "full" (planned, §9).
   void setViscousStress(const std::string& form);
-  // fullStress_ && varProps_ && staggered: the term is evaluated this step (constant mu: inactive,
-  // no error -- the term is identically zero).
+  // (explicit full || AUTO resolved full) && varProps_ && staggered: the term is evaluated this
+  // step (constant mu: inactive, no error -- the term is identically zero).
   bool fullStressActive() const;
+  // WO-7: the AUTO resolution at the head of step() (sets fullStressAuto_; notice on fallback).
+  void resolveViscousStressAuto();
   // §5.6 refusals (harmonic face mu, porous momentum, moving scene instances), raised at the head
   // of step() when "full" is requested under variable mu, before the first mutator.
   void requireFullStressScope(const char* who) const;
@@ -5336,6 +5340,9 @@ class Solver {
   bool varProps_ = false;    // variable-coefficient momentum (variable viscosity)
   bool harmonicMu_ = false;  // harmonic vs arithmetic face-viscosity mean
   bool fullStress_ = false;  // set_viscous_stress("full"): add the transpose term (staggered)
+  bool viscousStressAuto_ = true;      // set_viscous_stress("auto"), the DEFAULT (WO-7)
+  bool fullStressAuto_ = false;        // AUTO resolved to full at this step's head
+  bool fullStressAutoNotice_ = false;  // the one-time AUTO-fallback notice was printed
   bool muUniform_ = true;    // this step's exact global test min mu == max mu (full stress skips)
   bool regDirty_ = true;     // the full-stress regular-node masks need a rebuild (geometry built)
   RegMask fsReg_[3];         // full-stress regular-node masks, 1 B/cell each (solids only)

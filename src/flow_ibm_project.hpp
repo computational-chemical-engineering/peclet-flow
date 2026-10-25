@@ -31,7 +31,12 @@ void Solver<Grid>::step() {
     requireCollocatedFaceForceScope("step");
   if (balancedForceActive())
     requireBalancedForceScope("step", true);
-  if (fullStress_ && varProps_)  // §5.6 refusals of the full viscous stress (constant mu: inert)
+  // The viscous stress form: AUTO (the default, WO-7) resolves here -- no refusal, laplacian plus a
+  // one-time notice off the full stress's scope; an explicit "full" gets the §5.6 refusals
+  // (constant mu: inert either way).
+  if (viscousStressAuto_)
+    resolveViscousStressAuto();
+  else if (fullStress_ && varProps_)
     requireFullStressScope("step");
 
   // The momentum-solver choice, for a configuration that never calls set_solid. set_solid is the

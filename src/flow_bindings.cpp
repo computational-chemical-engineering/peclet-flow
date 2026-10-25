@@ -2402,13 +2402,17 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "Set the dynamic viscosity mu (the caller's units); a change after the geometry "
            "rebuilds the momentum operator at the next step.")
       .def("set_viscous_stress", &S::setViscousStress, nb::arg("form"),
-           "Viscous stress form under variable viscosity: 'laplacian' (default) = div(mu grad u); "
-           "'full' = div(mu (grad u + grad u^T)), the transpose term explicit on u^n as "
-           "conservative MAC stress elements (doc/full_viscous_stress.md). The Laplacian form "
-           "imposes the wrong tangential stress condition at a viscosity jump (an h-independent "
-           "interface force: +19.5 % rise velocity for a drop at viscosity ratio 0.1). Inert for a "
-           "constant mu. 'full' is staggered-only (SolverColocated raises) and is refused at "
-           "step() with the harmonic face viscosity, porous momentum or moving scene instances.")
+           "Viscous stress form under variable viscosity: 'auto' (default), 'full' or "
+           "'laplacian'. 'full' = div(mu (grad u + grad u^T)), the transpose term explicit on u^n "
+           "as conservative MAC stress elements (doc/full_viscous_stress.md); 'laplacian' = "
+           "div(mu grad u), the form before the AUTO default (it reproduces earlier variable-mu "
+           "numbers). The Laplacian form imposes the wrong tangential stress condition at a viscosity jump (an "
+           "h-independent interface force: +19.5 % rise velocity for a drop at viscosity ratio "
+           "0.1). 'auto' resolves at each step to 'full' on the staggered Solver with the "
+           "arithmetic face viscosity, no porous momentum and no moving scene instances, else to "
+           "'laplacian' with a one-time stderr notice. Inert for a constant mu. An explicit 'full' "
+           "is staggered-only (SolverColocated raises) and is refused at step() with the harmonic "
+           "face viscosity, porous momentum or moving scene instances.")
       .def("set_dt", &S::setDt, nb::arg("dt"),
            "Set the time step dt (the caller's time unit); the momentum solve is scaled by 1/dt "
            "(well-conditioned at large dt). Under a physical domain the FIRST call pins the "

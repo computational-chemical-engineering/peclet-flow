@@ -1,6 +1,7 @@
 # Full deviatoric viscous stress for variable μ in `peclet.flow` — design note
 
 Status: DESIGN (architect, 2026-10-22). It is to be committed to flow as `doc/full_viscous_stress.md`.
+WO-7 (2026-10-23, USER: "yes: full stress becomes default."): AUTO = full is the default.
 Brief: `bubble_column_perf/validation/ARCH_BRIEF_FULLSTRESS.md`. Evidence: `CASE_A_SETUP.md`,
 `CASE_A_ABLATE.md`. Current operator: flow `doc/variable_viscosity_projection.md`, cited below as VVP.
 

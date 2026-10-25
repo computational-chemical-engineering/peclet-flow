@@ -103,23 +103,64 @@ VarFaceProps Solver<Grid>::makeFaceProps(int c) {
 
 template <class Grid>
 void Solver<Grid>::setViscousStress(const std::string& form) {
-  if (form == "laplacian") {
+  if (form == "auto") {
+    viscousStressAuto_ = true;
     fullStress_ = false;
     return;
   }
+  if (form == "laplacian") {
+    viscousStressAuto_ = false;
+    fullStress_ = false;
+    fullStressAuto_ = false;
+    return;
+  }
   if (form != "full")
-    throw std::invalid_argument("set_viscous_stress: form must be 'full' or 'laplacian', got '" +
-                                form + "'");
+    throw std::invalid_argument(
+        "set_viscous_stress: form must be 'auto', 'full' or 'laplacian', got '" + form + "'");
   if constexpr (Grid::collocated)
     throw std::runtime_error(
         "SolverColocated.set_viscous_stress('full'): the full viscous stress is staggered-only in "
         "v1 (doc/full_viscous_stress.md §9); use peclet.flow.Solver");
+  viscousStressAuto_ = false;
+  fullStressAuto_ = false;
   fullStress_ = true;
 }
 
 template <class Grid>
 bool Solver<Grid>::fullStressActive() const {
-  return fullStress_ && varProps_ && !Grid::collocated;
+  return (fullStress_ || fullStressAuto_) && varProps_ && !Grid::collocated;
+}
+
+template <class Grid>
+void Solver<Grid>::resolveViscousStressAuto() {
+  // WO-7 (doc/full_viscous_stress.md §12): AUTO = full on the staggered grid when mu is variable,
+  // arithmetic, not porous and not moving; otherwise laplacian with a one-time stderr notice. A
+  // constant mu has nothing to resolve (the two forms coincide). Re-decided every step: the flags
+  // it reads are final at the step head, as for the explicit "full" refusals.
+  fullStressAuto_ = false;
+  if (!varProps_)
+    return;
+  const char* why = nullptr;
+  if constexpr (Grid::collocated)
+    why = "the collocated grid (staggered-only in v1, §9)";
+  else if (harmonicMu_)
+    why = "the harmonic face viscosity";
+  else if (porous_)
+    why = "porous (eps-weighted) momentum";
+  else if (hasMotion_)
+    why = "moving scene instances";
+  if (why == nullptr) {
+    fullStressAuto_ = true;
+    return;
+  }
+  if (!fullStressAutoNotice_) {
+    fullStressAutoNotice_ = true;
+    fprintf(stderr,
+            "peclet::flow %s: AUTO viscous stress fell back to the Laplacian form div(mu grad u) "
+            "(%s is outside the full stress's v1 scope, doc/full_viscous_stress.md §5.6). Select "
+            "explicitly with set_viscous_stress to silence this notice.\n",
+            Grid::collocated ? "SolverColocated" : "Solver", why);
+  }
 }
 
 template <class Grid>

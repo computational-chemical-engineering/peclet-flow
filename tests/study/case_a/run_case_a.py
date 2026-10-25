@@ -43,7 +43,8 @@ Usage:
                              Bo, mu_l, sigma are unchanged (refused with --vof-momentum)
   --face-mu {arithmetic,harmonic}  ablation: face-viscosity mean (default arithmetic, the driver's)
   --viscous-stress {laplacian,full}  the viscous stress form (set_viscous_stress). Absent: no setter
-                             call, the solver's own default (doc/full_viscous_stress.md)
+                             call, the solver's own default (AUTO = full for case A since WO-7;
+                             doc/full_viscous_stress.md)
   --no-advection             momentum advection off (unsteady Stokes momentum). The default is ON
                              (set_advection(True), explicit SOU): case A is Navier-Stokes. The
                              solver's own default is OFF, and every case-A run before 2026-10-23

@@ -44,8 +44,9 @@ The solver advances the momentum equation in the *divided-by-dt* convention (ope
 Enabled by `diagnostics.set_property_mode("variable", harmonic=…)` on the Python side (or automatically when a
 property closure targets `"mu"`); internal flag `varProps_`.
 
-> **Stress form.** This section describes the Laplacian form `∇·(μ∇u)`, which is still the default. On the
-> staggered `Solver`, `set_viscous_stress("full")` (opt-in) adds the transpose term `∇·(μ(∇u)ᵀ)`, so the
+> **Stress form.** This section describes the Laplacian form `∇·(μ∇u)`. On the staggered `Solver` the default
+> `set_viscous_stress("auto")` (WO-7, 2026-10-23) resolves to `"full"` (arithmetic face μ, not porous, not
+> moving; else `"laplacian"` with a one-time notice), which adds the transpose term `∇·(μ(∇u)ᵀ)`, so the
 > predictor approximates the full deviatoric stress `∇·(2μD)`. The term is built from conservative MAC
 > stress elements with the same face μ as the bands below, and is explicit on uⁿ. The design, the gates and
 > the rejected alternatives are in [`full_viscous_stress.md`](full_viscous_stress.md). The bands, the
@@ -211,7 +212,7 @@ analytic steady profile piecewise linear with interface velocity `u_i/U = μ₂/
    μ-gradients. At a sharp jump it imposes the wrong tangential stress condition, an h-independent
    interface force: case A (bubble array, μ ratio 0.1) rose about 20 % too fast.
    `Solver.set_viscous_stress("full")` adds the term on the staggered grid, as conservative stress
-   elements explicit on uⁿ. It is opt-in, and making it the default is a user decision (design Q1).
+   elements explicit on uⁿ. It is the default (AUTO, WO-7; user decision Q1, 2026-10-23).
    SRP is **not** required for it (design §7); a later SRP can reuse its kernel. The collocated solver
    remains Laplacian-only (design §9).
 2. **Shear-rate projection (SRP)** [4, 5]: the fully consistent pressure correction (extra ψ
