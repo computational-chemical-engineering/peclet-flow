@@ -27,6 +27,11 @@ THE EXACT SOLUTION (derived in the docstring of `exact_b`, checked against Welch
 
 Usage:
     PYTHONPATH=$PWD/build_cuda python tests/study/vof_sucking.py [--ratio 10] [--ns 64,128,256]
+
+`--mu-ratio R` (default: none = the constant mu 1e-3) adds the closure mu = mu_l (R + (1 - R) C),
+mu_v/mu_l = R; `--viscous-stress auto|full|laplacian` then selects the form (default: the solver's
+AUTO, no setter call). Review S2 (validation/REVIEW_FULLSTRESS.md): phase change makes div u^n =
+mdot [1/rho] != 0, outside the full stress's §4.2/§7 premises, so it is gated at R = 0.1.
 """
 import argparse
 import math
@@ -55,7 +60,7 @@ def exact_b(ja, rr):
 
 def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
         kratio=None, rcpratio=None, consistent=True, plane=True, quad=False, muscl=False,
-        verbose=True, energy_order=1, deposit=None):
+        verbose=True, energy_order=1, deposit=None, mu_ratio=None, stress=None):
     """One resolution.  The PHYSICAL problem is fixed (domain length 1, alpha_l = 1, the vapour
     layer growing from x0p to xep of the domain) and only h = 1/n changes.  `nt` is the transverse
     extent: the problem is 1-D so 4 is enough physically, but it decides how far the pressure
@@ -91,6 +96,10 @@ def run(n, ratio, ja, x0p=0.10, xep=0.25, alpha_l=1.0, cfl=0.2, fo=0.5, nt=4,
         c[i, :, :] = min(1.0, max(0.0, (i + 1) - X0))       # liquid on the HIGH side
     s.set_vof(c)
     s.set_property_model("rho", "linear", "C", [rho_v, rho_l - rho_v])
+    if mu_ratio is not None:                                # review S2: a mu jump at the interface
+        s.set_property_model("mu", "linear", "C", [1e-3 * mu_ratio, 1e-3 * (1.0 - mu_ratio)])
+    if stress is not None:
+        s.set_viscous_stress(stress)
     s.set_pressure_fcg(True, 4000, 1e-10)                   # AFTER the rho closure (CLAUDE.md)
 
     # temperature: T_sat = 0 at the wall, the similarity profile in the liquid
@@ -189,6 +198,8 @@ def main():
     ap.add_argument("--fo", type=float, default=0.5)
     ap.add_argument("--muscl", action="store_true")
     ap.add_argument("--nt", type=int, default=4)
+    ap.add_argument("--mu-ratio", type=float, default=None)
+    ap.add_argument("--viscous-stress", type=str, default=None)
     ap.add_argument("--energy-order", type=int, default=1,
                     help="WO-P3g: 2 = the second-order interfacial energy operator")
     ap.add_argument("--deposit-fallback", type=int, default=None,
@@ -199,13 +210,15 @@ def main():
           f"k ratio {a.kratio or a.ratio:g}, rho*c_p ratio {a.rcpratio or a.ratio:g}, "
           f"consistent energy {not a.no_consistent}, plane Dirichlet {not a.no_plane}, "
           f"quadratic fit {not a.no_quad}, Fo {a.fo:g}, WO-P3g energy order {a.energy_order}, "
-          f"deposit fallback {a.deposit_fallback}")
+          f"deposit fallback {a.deposit_fallback}, mu ratio {a.mu_ratio}, viscous stress "
+          f"{a.viscous_stress or 'solver default'}")
     errs, terrs = [], []
     for n in ns:
         e, te_, capped, itmax = run(n, a.ratio, a.ja, kratio=a.kratio, rcpratio=a.rcpratio,
                                     consistent=not a.no_consistent, plane=not a.no_plane,
                                     quad=not a.no_quad, fo=a.fo, muscl=a.muscl, nt=a.nt,
-                                    energy_order=a.energy_order, deposit=a.deposit_fallback)
+                                    energy_order=a.energy_order, deposit=a.deposit_fallback,
+                                    mu_ratio=a.mu_ratio, stress=a.viscous_stress)
         errs.append(e)
         terrs.append(te_)
         if capped:

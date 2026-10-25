@@ -13,6 +13,13 @@
                    smooth 10x mu(x) = mu0 10^((1 - cos 2 pi x/L)/2): dt = 20 and dt = 100 give the
                    same steady K = mu0 <u>/F to 1e-6; steps to steady (max|du| <= 1e-10 max|u|),
                    full against laplacian (target <= 2x, else Q3).
+  outflow  S2      an OPEN face (review S2, outside the §6 proof): a 32 x 16 x 4 channel, plug inflow
+                   -x, outflow +x, no-slip walls in y, periodic z, mu = mu0 10^((x/Lx + y/Ly)/2)
+                   (10x, gradients in x and y up to the outflow face), steady Stokes marched at
+                   dt = 20 and 1000 (D = mu dt/h^2 up to 1000). Pass: both forms reach steady
+                   (max|du| <= 1e-10 max|u|) with no growth (max|u| never above 2x its final
+                   value) and give the same steady field at the two dt to 1e-6 (max|u_20 -
+                   u_1000| / max|u|); full against laplacian is info.
   ctest            the short ctest `full_stress_large_dt`: rotating core N = 32, ratio 100, D = 1e4,
                    500 steps, full stress: the A3 no-growth test against u^500.
 
@@ -154,8 +161,8 @@ def spheres(full, dt, N=32, mu0=0.1, Fb=1e-3, max_steps=20000, tol=1e-10):
     s.set_solid(F(sdf), cutcell_pressure=True)
     s.diagnostics.set_property_mode("variable", False)
     s.set_field("mu", F(mu))
-    if full:
-        s.set_viscous_stress("full")
+    # explicit both ways: with a solid AUTO resolves to laplacian (review B1, Amendment A4)
+    s.set_viscous_stress("full" if full else "laplacian")
     prev = np.array(s.get_u())
     for n in range(1, max_steps + 1):
         s.step()
@@ -188,6 +195,61 @@ def cmd_spheres():
     print(f"  (info) K full vs laplacian at dt=100: rel diff {dK:.3e}")
 
 
+def channel_outflow(full, dt, nx=32, ny=16, nz=4, mu0=0.1, U=1e-3, max_steps=20000, tol=1e-10):
+    xs = np.arange(nx) + 0.5
+    ys = np.arange(ny) + 0.5
+    X, Y, _ = np.meshgrid(xs, ys, np.arange(nz) + 0.5, indexing="ij")
+    mu = mu0 * 10.0 ** ((X / nx + Y / ny) / 2.0)
+    s = pf.Solver(nx, ny, nz)
+    s.set_rho(1.0)
+    s.set_mu(mu0)
+    s.set_dt(dt)
+    s.set_advection(False)
+    s.set_domain_bc("-x", "inflow", (U, 0.0, 0.0))
+    s.set_domain_bc("+x", "outflow")
+    s.set_domain_bc("-y", "wall")
+    s.set_domain_bc("+y", "wall")
+    s.set_pressure_geometry(F(np.ones((nx, ny, nz))))
+    s.set_pressure_pcg(True, 400, 1e-12)
+    s.diagnostics.set_property_mode("variable", False)
+    s.set_field("mu", F(mu))
+    s.set_viscous_stress("full" if full else "laplacian")
+    prev = np.array(s.get_u())
+    peak = 0.0
+    for n in range(1, max_steps + 1):
+        s.step()
+        u = np.array(s.get_u())
+        if not np.isfinite(u).all():
+            return None, n, float("inf"), float("inf")
+        m = np.abs(u).max()
+        peak = max(peak, m)
+        d = np.abs(u - prev).max() / max(m, 1e-300)
+        prev = u
+        if d <= tol:
+            break
+    return u, n, d, peak / m
+
+
+def cmd_outflow():
+    res = {}
+    for full in (False, True):
+        for dt in (20.0, 1000.0):
+            res[(full, dt)] = channel_outflow(full, dt)
+            u, n, d, pk = res[(full, dt)]
+            ok = u is not None and d <= 1e-10 and pk <= 2.0
+            verdict(f"S2 outflow {'full' if full else 'laplacian'} dt={dt:g} steady", ok,
+                    f"{n} steps, last rel du {d:.1e} (<= 1e-10), peak/final max|u| {pk:.4f} (<= 2)")
+    for full in (False, True):
+        a, b = res[(full, 20.0)][0], res[(full, 1000.0)][0]
+        rel = float("inf") if a is None or b is None else np.abs(a - b).max() / np.abs(b).max()
+        verdict(f"S2 outflow {'full' if full else 'laplacian'} u(dt=20)==u(1000)", rel <= 1e-6,
+                f"rel {rel:.2e} (<= 1e-6)")
+    a, b = res[(True, 1000.0)][0], res[(False, 1000.0)][0]
+    if a is not None and b is not None:
+        print(f"  (info) outflow full vs laplacian at dt=1000: max|du|/max|u| "
+              f"{np.abs(a - b).max() / np.abs(b).max():.3e}", flush=True)
+
+
 def cmd_ctest():
     _, mx, d = march_rotcore(32, 100.0, 1e4, 1000)
     good, peak, last = no_growth(d)
@@ -198,7 +260,7 @@ def cmd_ctest():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", nargs="*", default=["couette", "rotcore", "spheres"])
+    ap.add_argument("cmd", nargs="*", default=["couette", "rotcore", "spheres", "outflow"])
     ap.add_argument("--n", type=int, default=64)
     a = ap.parse_args()
     for c in a.cmd:

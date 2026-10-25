@@ -344,6 +344,14 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(full_stress_large_dt PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # Review S2: an OPEN face (plug inflow -x, outflow +x, walls in y, 10x mu(x, y)) is outside the
+  # §6 stability proof; steady Stokes at dt 20 and 1000 (D up to 1000), full and laplacian.
+  add_test(NAME full_stress_large_dt_outflow
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/study/full_stress_large_dt.py outflow
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(full_stress_large_dt_outflow PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The guard against the collocated face-acceleration kick (doc/collocated_varrho_forces.md §7.6;
   # suite-wide register "Collocated forces stay in the implicit predictor"): every collocated
   # density path is stable at mu*dt/(rho h^2) up to 100 (seeded-checkerboard growth, G2) and has a
