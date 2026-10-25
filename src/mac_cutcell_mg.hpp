@@ -1035,7 +1035,8 @@ struct BottomKernel {
 
 // Env-gated MG diagnostics (host printf only, off unless PECLET_FLOW_MG_DEBUG is set):
 //   1 = level table (per-level global/local dims + coarsening ratio) at build time
-//   2 = + PCG/V-cycle residual history (Chebyshev: r0, final |r|inf, V-cycles) for the first
+//   2 = + PCG/V-cycle residual history (Chebyshev: r0, final |r|inf, V-cycles; BiCGStab: the exit
+//       reason and running breakdown/stagnation counts) for the first
 //       PECLET_FLOW_MG_DEBUG_SOLVES (default 3) solves
 // Used to diagnose decomposition-dependent iteration counts; no effect on the solve itself.
 inline int mgDebugLevel() {
@@ -3498,6 +3499,11 @@ class CutcellMG {
     Kokkos::deep_copy(CCExec(), rh, r);  // shadow residual r^ = r_0
     const double r0n = maxabs(l0, r);
     int it = 0;
+    // Exit reason, for the debug trace below only (values the solve computes anyway): 0 stop test
+    // met, 1 (rh,r) breakdown, 2 (rh,v) breakdown, 3 non-finite residual, 4 (t,t) breakdown,
+    // 5 omega breakdown, 6 compatibility-floor stagnation, 7 iteration cap.
+    int exitCode = r0n > 0.0 ? (std::isfinite(r0n) ? 7 : 3) : 0;
+    double rnLast = r0n;
     if (r0n > 0.0 && std::isfinite(r0n)) {
       double rho = 1.0, alpha = 1.0, omega = 1.0;
       double best = r0n;
@@ -3506,8 +3512,10 @@ class CutcellMG {
       Kokkos::deep_copy(CCExec(), v, 0.0);
       for (; it < maxit; ++it) {
         const double rhoNew = dot(l0, rh, r);
-        if (!std::isfinite(rhoNew) || std::fabs(rhoNew) < 1e-300)
+        if (!std::isfinite(rhoNew) || std::fabs(rhoNew) < 1e-300) {
+          exitCode = 1;
           break;  // (rh, r) breakdown: keep the last finite iterate
+        }
         const double beta = (rhoNew / rho) * (alpha / omega);
         rho = rhoNew;
         axpy(p, -omega, v);  // p = r + beta (p - omega v)
@@ -3516,17 +3524,23 @@ class CutcellMG {
         matvec(v, z);
         removeMean(l0, v);
         const double rhv = dot(l0, rh, v);
-        if (!std::isfinite(rhv) || std::fabs(rhv) < 1e-300)
+        if (!std::isfinite(rhv) || std::fabs(rhv) < 1e-300) {
+          exitCode = 2;
           break;
+        }
         alpha = rho / rhv;
         axpy(r, -alpha, v);  // r <- s = r - alpha v
         removeMean(l0, r);
         double rn = maxabs(l0, r);
-        if (!std::isfinite(rn))
+        rnLast = rn;
+        if (!std::isfinite(rn)) {
+          exitCode = 3;
           break;
+        }
         if (rn < rtol * r0n) {
           axpy(x, alpha, z);
           ++it;
+          exitCode = 0;
           break;
         }
         precond(z2, r);
@@ -3535,11 +3549,13 @@ class CutcellMG {
         const double tt = dot(l0, t, t);
         if (!std::isfinite(tt) || tt < 1e-300) {
           axpy(x, alpha, z);  // omega breakdown: take the alpha half-step and stop
+          exitCode = 4;
           break;
         }
         omega = dot(l0, t, r) / tt;
         if (!std::isfinite(omega) || std::fabs(omega) < 1e-300) {
           axpy(x, alpha, z);
+          exitCode = 5;
           break;
         }
         axpy(x, alpha, z);
@@ -3547,10 +3563,14 @@ class CutcellMG {
         axpy(r, -omega, t);
         removeMean(l0, r);
         rn = maxabs(l0, r);
-        if (!std::isfinite(rn))
+        rnLast = rn;
+        if (!std::isfinite(rn)) {
+          exitCode = 3;
           break;
+        }
         if (rn < rtol * r0n) {
           ++it;
+          exitCode = 0;
           break;
         }
         if (rn < 0.999 * best) {
@@ -3558,10 +3578,34 @@ class CutcellMG {
           lastImprove = it;
         } else if (it - lastImprove > 30) {
           ++it;  // compatibility-floor stagnation: accept the best-so-far level
+          exitCode = 6;
           break;
         }
       }
     }
+    // Env-gated exit trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the first
+    // PECLET_FLOW_MG_DEBUG_SOLVES solves, rank 0): the exit reason, r0, the last |r|inf the stop
+    // test saw, and running counts of breakdown (1-5) and stagnation (6) exits. Host integers and
+    // values the solve already computed (no extra reduction), so the solve is unchanged with it on
+    // or off.
+    if (exitCode >= 1 && exitCode <= 5)
+      ++dbgBicgBreakdowns_;
+    else if (exitCode == 6)
+      ++dbgBicgStagnations_;
+    if (mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves()) {
+      int dbgRank = 0;
+#ifdef PECLET_FLOW_MPI
+      if (distributed_)
+        MPI_Comm_rank(comm_, &dbgRank);
+#endif
+      if (dbgRank == 0)
+        printf(
+            "[mg] bicgstab solve %d: exit=%d it=%d maxit=%d r0=%.6e |r|inf=%.6e rtol=%.1e "
+            "r/r0=%.4e breakdowns=%d stagnations=%d\n",
+            dbgSolve_, exitCode, it, maxit, r0n, rnLast, rtol, r0n > 0.0 ? rnLast / r0n : 0.0,
+            dbgBicgBreakdowns_, dbgBicgStagnations_);
+    }
+    ++dbgSolve_;
     Kokkos::deep_copy(CCExec(), l0.x, x);
     removeMean(l0, l0.x);
     Kokkos::deep_copy(CCExec(), x, l0.x);
@@ -6786,6 +6830,8 @@ class CutcellMG {
   bool overlaySolve_ = false;              // A3: the current solve has an overlay (OverlayScope)
   int dbgBrkWhich_ = 0, dbgBrkIter_ = -1;  // setDebugBreakdown (test hook)
   int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)
+  int dbgBicgBreakdowns_ = 0;   // solveBiCGStab breakdown exits (1-5), for its debug trace only
+  int dbgBicgStagnations_ = 0;  // solveBiCGStab compatibility-floor exits, for its debug trace only
   // ISSUES sweep item 6: did the LAST Krylov solve give up on a non-finite recurrence
   // scalar (a preconditioner or operator that produced NaN/Inf)? Reset at the head of
   // every solve. See `lastSolveFailed()`.
