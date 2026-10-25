@@ -298,6 +298,15 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(vof_blocks_physical_units PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # enable_vof_momentum(rho_c0, rho_c1): positional, canonical-keyword and former-keyword
+  # (rho_gas/rho_liquid) calls are bitwise identical; mixed keywords raise TypeError; the swapped-pair
+  # error names rho_c0 / rho_c1 (NAMING.md 0.1; the old names misled a C = 1 = gas caller).
+  add_test(NAME vof_momentum_rho_names
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_vof_momentum_rho_names.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(vof_momentum_rho_names PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The same face plane under MPI: an x-only split at np = 3, so the +x face has one owning rank
   # and the middle rank touches neither open face; distributed == serial to 1e-12 for the outlet
   # scalar, the backflow census and a high-side inflow, both grids (doc/uf_outlet_fix.md).
