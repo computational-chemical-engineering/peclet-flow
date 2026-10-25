@@ -2092,7 +2092,7 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "set_vof_rho_floor", [](D& diag, double f) { diag.s->setVofRhoFloorFrac(f); },
           nb::arg("fraction"),
           "Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of "
-          "min(rho_gas, rho_liquid). Default 1e-6. rho^c leaves [rho_gas, rho_liquid] only through "
+          "min(rho_c0, rho_c1). Default 1e-6. rho^c leaves [rho_c0, rho_c1] only through "
           "a wisp in the half-shifted colour and reaching zero would need C^c ~ -1/(ratio-1), so "
           "this is a guard, not a model — vof_momentum_diagnostics()['floored'] reports how many "
           "control volumes it actually touched.")
@@ -3779,19 +3779,19 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       // --- Momentum-consistent VoF transport (rung V2b, WO-K) ----------------------------------
       .def(
           "enable_vof_momentum",
-          [](S& s, double rg, double rl) { s.enableVofMomentum(rg, rl); }, nb::arg("rho_gas"),
-          nb::arg("rho_liquid"),
+          [](S& s, double rg, double rl) { s.enableVofMomentum(rg, rl); }, nb::arg("rho_c0"),
+          nb::arg("rho_c1"),
           "Advect rho*u on the HALF-SHIFTED momentum control volumes with the SAME geometric "
           "fluxes, the same sweep order and one frozen dilation flag as the colour field, then "
           "recover u = (rho^c u)/rho^c. This is what makes the scheme usable above density ratio "
           "~100 (Rudman 1998; Arrufat 2021: a raindrop accurate within 15% at 15 cells/diameter "
           "instead of ~200).\n\n"
-          "The two phase densities are REQUIRED, and must be the ones the rho closure produces at "
-          "C=0 and C=1 — the momentum flux is rho_gas*(a-F) + rho_liquid*F with F the geometric "
-          "liquid flux, so the scheme has to know which density each phase carries. ORDER: "
-          "rho_gas is the density at C = 0 and rho_liquid the density at C = 1, whichever phase "
-          "that is -- the names assume C = 1 marks the liquid; when C = 1 marks the gas (a bubble "
-          "colour), pass (rho_liquid_value, rho_gas_value). When a 'rho' closure on 'C' is already "
+          "The two densities are REQUIRED, and must be the ones the rho closure produces at "
+          "C=0 and C=1 — the momentum flux is rho_c0*(a-F) + rho_c1*F with F the geometric "
+          "flux of the C = 1 phase, so the scheme has to know which density each side carries. "
+          "ORDER: rho_c0 is the density at C = 0 and rho_c1 the density at C = 1, whichever "
+          "phase that is (when C = 1 marks the gas, a bubble colour, rho_c1 is the gas density). "
+          "When a 'rho' closure on 'C' is already "
           "registered (set_property_model / set_property_table), the pair is checked against it "
           "at C = 0 and C = 1 and a mismatch raises, naming both; registered after this call, it "
           "is not checked.\n\n"
@@ -3802,6 +3802,13 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "staggered layout, explicit advection, no immersed solid and no porous continuity, and is "
           "refused together with the per-bubble block container (enable_vof_blocks*, in either "
           "order): the momentum rides the structured colour's fluxes, not the markers'.")
+      .def(
+          "enable_vof_momentum",
+          [](S& s, double rg, double rl) { s.enableVofMomentum(rg, rl); }, nb::arg("rho_gas"),
+          nb::arg("rho_liquid"),
+          "Former keyword names of enable_vof_momentum(rho_c0, rho_c1), the canonical spelling: "
+          "rho_gas = rho_c0 (density at C = 0), rho_liquid = rho_c1 (density at C = 1), whichever "
+          "phase each is. Deprecated in the next release, removed at 2.0.0.")
       .def(
           "vof_momentum_enabled", [](S& s) { return s.vofMomentumEnabled(); },
           "Whether momentum-consistent transport is on.")

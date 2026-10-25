@@ -2276,9 +2276,9 @@ void Solver<Grid>::enableVofMomentum(double rhoGasPhys, double rhoLiquidPhys) {
       char msg[640];
       std::snprintf(
           msg, sizeof(msg),
-          "enable_vof_momentum(rho_gas=%.10g, rho_liquid=%.10g): the pair must be the density at "
-          "C = 0, then the density at C = 1 (the names assume C = 1 is the liquid; when C = 1 is "
-          "the gas, rho_gas is the liquid density). The 'rho' closure gives rho(C=0) = %.10g, "
+          "enable_vof_momentum(rho_c0=%.10g, rho_c1=%.10g): the pair must be the density at "
+          "C = 0, then the density at C = 1, whichever phase each is. The 'rho' closure gives "
+          "rho(C=0) = %.10g, "
           "rho(C=1) = %.10g%s",
           rhoGasPhys, rhoLiquidPhys, rho0Phys, rho1Phys,
           (!differs(rhoGasPhys, rho1Phys) && !differs(rhoLiquidPhys, rho0Phys))

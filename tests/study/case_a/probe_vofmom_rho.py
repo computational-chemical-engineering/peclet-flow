@@ -114,7 +114,7 @@ def main():
         # Replay for the face-wise C^e.
         d = os.path.join(a.out, "replay")
         os.makedirs(d, exist_ok=True)
-        # the advector's (rho_gas, rho_liquid) = rho(C=0), rho(C=1); C = 1 is the gas here
+        # the advector's (rho_c0, rho_c1) = rho(C=0), rho(C=1); C = 1 is the gas here
         with open(os.path.join(d, "meta.txt"), "w") as f:
             f.write(f"{n} {dt / h!r} {parity} {ca.RHO_L!r} {ca.RHO_G!r} {weps!r} 0.25 {int(a.muscl)}\n")
         put(os.path.join(d, "C.bin"), C0)

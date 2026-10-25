@@ -190,8 +190,8 @@ def build(n, mu_g=MU_G, face_mu="arithmetic", stress=None, single=False, vof_mom
     if single or vof_mom:
         s.set_vof(np.asfortranarray(sphere_fractions(n, 0.5 * L / h, 0.5 * D / h)[dist.sl]))
         if vof_mom:
-            # enable_vof_momentum(rho_gas, rho_liquid) takes the closure's densities at C = 0 and
-            # C = 1 (the advector's rho(C) = rho_gas (1 - C) + rho_liquid C). Here C = 1 is the GAS,
+            # enable_vof_momentum(rho_c0, rho_c1) takes the closure's densities at C = 0 and
+            # C = 1 (the advector's rho(C) = rho_c0 (1 - C) + rho_c1 C). Here C = 1 is the GAS,
             # so rho(C=0) = RHO_L goes first. Passing (RHO_G, RHO_L) swapped the phases in the
             # momentum transport (the Q6 runs before 2026-10-23; validation/Q6_DIAG.md).
             s.enable_vof_momentum(RHO_L, RHO_G)
