@@ -225,3 +225,12 @@ Inertness of a5dcc9a against the WO-2 build: `state_hash.py` 13 + np2 1 hashes i
 dumps bitwise (host 4, CUDA 2); `ctest -LE bench` 258 / 258 pass host and CUDA (same 2 SKIPs each); printed
 values identical (CUDA: only the prterun PID in the two SKIP banners differs); Chebyshev on CUDA, `--dump` vs the
 WO-2 matrix, `np.array_equal` on every field: M7a L0 / L4 and M7c L0 / L4 switch off, M7c L0 switch on.
+
+## 2026-10-25 — review fixes (REVIEW_MGDEPTH.md S1–S3; coordinator decisions in DECISIONS_GPU.log)
+
+**S3 — G-PERF-H verdict, from the quiet WO-0 numbers.** AUTO on M5 (host swarm 128³, 1 × 6 threads) resolves
+to depth 5 and is bitwise the explicit depth-5 run (WO-2 matrix: "In every row the L0 (AUTO) state hash equals
+the explicit depth AUTO resolves to (L5 …)"). The WO-0 reading (this log, WO-0 note 5: "M5 host 128³ (G-PERF-H
+shape): L5 615.1 vs L4 607.3 ms/step = 1.013 (≤ 1.03); iterations 8.90 vs 7.90 (G-ITER bound … 9.59)", load
+≤ 17.2) therefore is the AUTO reading: t(AUTO) / t(L4) = 615.09 / 607.26 = 1.013 ≤ 1.03 → **G-PERF-H PASS**;
+G-ITER 8.90 ≤ 9.59 PASS. The WO-2 rerun at load 33.6 stays NOT JUDGED.
