@@ -444,8 +444,8 @@ fails, do not land; record N4 as "anchored keeps 4" with the numbers.
 - **G-CONV** (every moved case, at its own settings, plus a rerun at rtol 1e-10 where it is a
   time-dependent case): (a) every outer solve meets its stop test (never the cap); FP32 restarts do
   not increase (0 stays 0); (b) max relative difference over u, v, w, p (and C) at the case's end
-  ≤ 100 × rtol, against the same case at explicit depth 4; (c) `max_open_divergence_projected()`
-  new/old ≤ 2 on every step; (d) the case's physics metric (K, k*, static drop, Hysing rise) within
+  ≤ 100 × rtol, against the same case at explicit depth 4; (c) ~~`max_open_divergence_projected()`
+  new/old ≤ 2 on every step~~ — **superseded 2026-10-25 by Amendment A1 below**; (d) the case's physics metric (K, k*, static drop, Hysing rise) within
   1e-6 relative or its own gate tolerance, whichever is looser.
 - **G-ITER** (moved cases): mean pressure iterations/step ≤ 1.15 × (explicit depth 4) + 0.5.
   G-CONV and G-ITER must each be exercised on at least one moved case per default driver: MG-PCG
@@ -458,8 +458,9 @@ fails, do not land; record N4 as "anchored keeps 4" with the numbers.
 - **G-PERF-BC** (bubble column 256×192×128, device np1): t(AUTO) ≤ 0.8 × t(L4); G-ITER.
 - **G-PERF-H** (host, swarm 128³, 1×6): t(AUTO) ≤ 1.03 × t(L4); G-ITER.
 - **G-IBM** (`zh_sphere`, `random_spheres`): N = 48 byte-identical (D = 4); N = 128 (4 → 5):
-  K / k* within 1e-6 relative of L4; median iterations/step ≤ 1.15 × min(L4, L6) + 0.5; flux
-  divergence and deep-solid velocity ≤ 2 × L4's.
+  K / k* within 1e-6 relative of L4; median iterations/step ≤ 1.15 × min(L4, L6) + 0.5; ~~flux
+  divergence and~~ deep-solid velocity ≤ 2 × L4's. (The flux-divergence clause is **superseded
+  2026-10-25 by Amendment A1 below**; the deep-solid clause stands.)
 - **G-NUM-D** (WO-3; device; swarm 64³ per rank at np 2 (128×64×64) and np 4 (128×128×64), and the
   bubble column 128×96×64 at np 2 and 4; 'direct' vs 'algebraic' on the same build): 50 steps at
   rtol 1e-10 max relative difference over u v w p C ≤ 1.499e-11; outer iterations identical every
@@ -473,6 +474,30 @@ fails, do not land; record N4 as "anchored keeps 4" with the numbers.
   ≤ 9.5 (pilot 7.93); np1 single SHA == np1 `init_mpi` SHA; np4 2×2 host-staged: no GraphAMG frames
   in the profile, bottom (kernels + gather) ≤ 3 % of the step; E(4) recorded, not gated (the halo
   pathology is out of scope).
+
+### Amendment A1 (2026-10-25, USER) — the divergence gates judge the projection's contract
+
+Provenance: USER decision of 2026-10-25 ("I go with your recommendation"; corrected version: "Yes, that
+is fine"), registered in the umbrella `docs/decisions/flow.md`, entry "A pressure-solver change is judged
+on the divergence contract, not on a per-step divergence ratio" (umbrella 7c569d6; index line in
+`docs/DECISIONS.md`). Evidence: the WO-2 gate record in `doc/mg_depth_policy_log.md` (25929ec) and the
+diagnosis `bubble_column_perf/gpu_diag/mgd/WO2_DIAG.md`.
+
+G-CONV (c) and G-IBM's "flux divergence ≤ 2 × L4's" are REPLACED by two conditions:
+
+1. **At the production tolerance:** every step's post-projection max|div u| ≤ rtol · r0 of that step,
+   for both depths. This is the stop test of PCG and Chebyshev (`src/mac_cutcell_mg.hpp:3204` resident
+   PCG, `:6240` Chebyshev; `|r|inf < rtol · rref`, rref = r0 = |r0|inf unless a stop reference is set).
+2. **At a fixed tight tolerance (rtol 1e-13):** the worst divergence over the run, depth 5 / depth 4, ≤ 2.
+
+Why: the post-projection max divergence IS the final max-norm residual, and a correct solve stops
+anywhere in (ρ · rtol, rtol] · r0 (ρ = per-iteration contraction, 0.06–0.2), so two correct depths differ
+per step by up to 1/ρ; non-flip depth pairs fail "≤ 2 per step" as often as 5/4 (L6/L5 M3z 9.98, L6/L4
+M7a 30/30 steps). A gate a correct change cannot pass is no gate. Rejected: the per-step max-norm ratio
+≤ 2; a worst-over-run ratio at the production tolerance (still a stopping-point draw); solving every gate
+case to 1e-13 in production. The original wording above is kept, struck through, and the WO-2 MISSes
+against it stay on record in the log. G-IBM is judged on the same two conditions. The other gates that
+carry a divergence ratio (G-NUM-D, G-ANCH) are not amended by this decision.
 
 ## 8. Risks and open questions
 
