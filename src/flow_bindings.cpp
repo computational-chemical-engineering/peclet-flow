@@ -2551,7 +2551,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "The threshold set_pressure_bottom('auto') applies: agglomerate the coarsest level "
            "onto a global operator once the coarsest GLOBAL grid exceeds this many cells on any "
            "AXIS (not cell count -- what a few smoother sweeps cannot fix is a mode spanning many "
-           "cells along one axis). DEFAULT 4.")
+           "cells along one axis). DEFAULT 4. Under the automatic depth (set_pressure_multigrid "
+           "levels=0) it also enters the depth, at the geometry build: a later call changes the "
+           "agglomeration but not the depth already resolved.")
       .def_prop_ro("pressure_bottom_extent", &S::pressureBottomExtent,
                    "The agglomerated-bottom extent threshold (see set_pressure_bottom_extent).")
       .def("set_implicit_advection", &S::setImplicitAdvection, nb::arg("on"),
@@ -2578,9 +2580,14 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "Set the pressure smoother iteration count.")
       .def(
           "set_pressure_multigrid", [](S& s, bool, int levels) { s.setPressureLevels(levels); },
-          nb::arg("on"), nb::arg("levels") = 4,
-          "Set the pressure multigrid depth (levels=1 => pure RB-GS, no coarse grid; levels=0 => "
-          "the automatic depth of doc/mg_depth_policy.md, fixed at the next geometry build).")
+          nb::arg("on"), nb::arg("levels") = 0,
+          "Set the pressure multigrid depth, fixed at the next geometry build. levels=0 (the "
+          "default) derives it: the shallowest depth >= 4 whose global coarsest grid the exact "
+          "bottom solver admits (<= 8192 cells, a plane of <= 192; an operator with an outflow "
+          "face keeps depth 4), or where coarsening ends by itself. levels=1 => pure RB-GS, no "
+          "coarse grid; levels >= 2 => exactly that depth. The resolved depth is "
+          "len(diagnostics.pressure_mg_level_ratios()). set_pressure_bottom_extent must precede "
+          "the geometry to enter the depth (doc/mg_depth_policy.md).")
       .def("set_pressure_chebyshev", &S::setPressureChebyshev, nb::arg("on"),
            nb::arg("max_iter") = 120, nb::arg("rtol") = 1e-9,
            "Use the communication-light Chebyshev pressure accelerator. Mutually exclusive with the "

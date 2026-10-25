@@ -278,9 +278,10 @@ smaller `cfac` than its neighbours (an *operator* anisotropy on isotropic cells 
   **same** hierarchy, so the gate cannot separate them; `theta = 2` is the cheaper default and
   `diagnostics.set_multigrid_aspect_threshold(1.4142)` is one run away if a stretched production case ever shows the
   iteration count drifting with aspect ratio. Record that run in this note if it is made.
-- **Levels.** `nLevels_` (default 4, `set_pressure_multigrid(on, levels)`) keeps its meaning (a count
-  of levels); the deferred axes consume levels, so a stretched hierarchy bottoms out on a finer grid
-  for the same `levels`. The auto agglomerated / GraphAMG bottom absorbs that; the gate of §8.5 runs at
+- **Levels.** `nLevels_` (`set_pressure_multigrid(on, levels)`; default 4 until 2026-10-25, now 0 =
+  the derived depth of `doc/mg_depth_policy.md`, which reads the actual per-level dims and so follows
+  the deferred axes) keeps its meaning (a count of levels); the deferred axes consume levels, so a
+  stretched hierarchy bottoms out on a finer grid for the same explicit `levels`. The auto agglomerated / GraphAMG bottom absorbs that; the gate of §8.5 runs at
   `levels = 6`.
 
 ### 5.3 Where it enters

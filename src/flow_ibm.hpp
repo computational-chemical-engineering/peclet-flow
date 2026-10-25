@@ -4971,7 +4971,7 @@ class Solver {
   bool chebWarmOk_ = false;
   long chebColdRestarts_ = 0;  // guard firings (numPressureChebyshevRestarts)
   CCField chebX0_;             // the solve's starting iterate under the pressure warm start
-  int nLevels_ = 4;             // multigrid depth (CUDA default; set_pressure_multigrid)
+  int nLevels_ = 0;             // pressure-MG depth, 0 = AUTO (doc/mg_depth_policy.md §3.1)
   bool pressGraphAmg_ = false;
   // Coarse-solve policy: -1 auto (DEFAULT — agglomerate when the coarsest grid exceeds
   // setPressureBottomExtent cells on any axis; identical to the smoothed bottom otherwise),

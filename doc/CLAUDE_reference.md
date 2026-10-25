@@ -269,6 +269,16 @@ anisotropic box (its *particle model* has no single length to form `Re_p` — no
   `diagnostics.set_pressure_bottom_solver('auto' | 'direct' | 'algebraic')` A/Bs them on one build;
   `'direct'` raises where ineligible. Host results are untouched by it; on the GPU it is a recorded
   numerics change. B1's V-cycle-preconditioned engine (`'geometric'`) is retired (history: the WO-6 / WO-11 commits).
+- **The depth is derived** (default `levels=0` since 2026-10-25; `doc/mg_depth_policy.md`, register
+  N1): the shallowest D ≥ 4 whose global coarsest grid the direct engine admits (≤ 8192 cells, an axis
+  whose planes hold ≤ 192), or every axis ≤ the bottom extent; else D where coarsening ends by itself.
+  The global hierarchy is a function of the global grid, the operator class and the bottom setters —
+  never of np, partition, threads or backend. 128³ → 5 (8³), 192³ → 5 (12³), 256³ → 6 (8³),
+  2048×64×64 → 5 (128×4×4); every grid whose depth-4 bottom was admissible keeps 4 bit for bit. An
+  operator with an outflow face keeps 4 (WO-5 deferred: M6 at depth 6 took 3× the iterations).
+  `set_pressure_bottom_extent` enters the depth only if called before the geometry. Rejected: fixed 4
+  (the bottom grows as N: 84 % of the step at 192³), a per-rank coarsest extent, the deepest
+  coarsening (E1 penalty), a cost model, backend-specific depths.
 - **Depth follows the factors of two, per axis.** An axis coarsens only while it stays even, so an
   **odd dimension never coarsens at all** (384×128×256 → 5.0 pressure iterations/step, ×255 →
   16.2), and under MPI only if *every rank's block* is even on it. **Telescoping is the default**

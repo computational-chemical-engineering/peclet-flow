@@ -269,9 +269,11 @@ you want). Detail and numbers for every bullet: ref §6.
   `mg_stencil_halo_np*`).
 - `set_pressure_bottom("auto")` (default) agglomerates the coarsest level into a global operator solved
   exactly when it exceeds `set_pressure_bottom_extent` (4) cells on an axis; porous and variable-ρ
-  rebuild it every step — avoid `auto` with a badly-factored grid there. Engines: the exact `'direct'`
-  factor (`src/mg_bottom_direct.hpp`, design `doc/vof_step_performance_design.md` §13, H-1, H-6) on
-  host — single-rank, and since 2026-10-18 distributed, redundantly on every rank from the allgathered
+  rebuild it every step — avoid `auto` with a badly-factored grid there (the derived depth keeps
+  the bottom inside the direct engine's admission, so wherever that engine is eligible the GraphAMG
+  rebuild is a fallback only). Engines: the exact `'direct'` factor (`src/mg_bottom_direct.hpp`,
+  design `doc/vof_step_performance_design.md` §13, H-1, H-6) on host — single-rank, and since
+  2026-10-18 distributed, redundantly on every rank from the allgathered
   bottom openness (np 1 bitwise to single-rank; np > 1 within G-NUM-H) — and on an eligible
   single-rank GPU; GraphAMG (`'algebraic'`) otherwise (outflow, above the size caps, distributed GPU).
   The host solve (B1, `doc/vof_distributed_partition_design.md` §5.3) runs on ONE thread
@@ -290,6 +292,14 @@ you want). Detail and numbers for every bullet: ref §6.
   instance right after `updateProperties()`, joined before the first bottom solve (`joinPrefactor()` also before
   any `lv_.clear()`); `prefactor_hoist_bitwise` proves hoist on = off. Consequence: a driver that writes
   `field_view` arrays from its own non-blocking stream must sync that stream before `step()`.
+- **The depth is derived** (`set_pressure_multigrid(on, levels=0)`, the default since 2026-10-25,
+  `doc/mg_depth_policy.md`): the shallowest D ≥ 4 whose GLOBAL coarsest grid the exact bottom admits
+  (≤ 8192 cells and a plane ≤ 192; or every axis ≤ the bottom extent), else where coarsening ends.
+  Global dims only, so the hierarchy does not depend on np or backend. Grids whose depth-4 bottom was
+  already admissible (≤ 96³, the bubble column 128×96×64, every `state_hash` case) keep 4 bit for
+  bit; an operator with an outflow face keeps 4. `levels ≥ 1` is exact; the resolved depth is
+  `len(diagnostics.pressure_mg_level_ratios())`. Never "deeper is safer": past the first admitted
+  level high-contrast iterations grow (+65 % on the bubble column, register N1).
 - **Depth follows the factors of two, per axis**: an odd dimension never coarsens; under MPI only if
   every rank's block is even. **Telescoping is the default** (`set_pressure_telescope`); the in-place
   requirement on intermediate levels is the top open item at scale
