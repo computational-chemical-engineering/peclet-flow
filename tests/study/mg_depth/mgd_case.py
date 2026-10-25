@@ -26,6 +26,11 @@ Cases (--case):
                the cut-cell Stokes geometries of tests/regression/sdflow_regression.py at --n N
                with its CFG (MG-PCG cap 300 rtol 1e-8; --rtol overrides), marched to steady with
                its stop test (--max-steps, default 400; --steps is ignored, --warm 0). Records K / k*.
+               --solver colocated: SolverColocated with NO scheme call, i.e. the AUTO default
+               ('ghost': BiCGStab preconditioned by the V-cycle, at the MG-PCG cap / rtol above);
+               --dump then also writes the fluid-cell mask `fluid` (sdf > 0 at the cell centres,
+               where every colocated field lives). Row M9 (doc/mg_depth_policy_log.md); its exit
+               trace is the solver's PECLET_FLOW_MG_DEBUG=2 line (debug output only).
     channel    single-phase all-fluid channel --nx x --ny x --nz (default 2048 x 64 x 64):
                periodic x, walls on +-y and +-z, body force along x, from rest plus a fixed-seed
                non-solenoidal low-mode perturbation (--perturb, default 1e-2). Single rank:
@@ -87,6 +92,7 @@ else:
     comm, rank, size = None, 0, 1
 
 info = {}            # case-specific end-of-run numbers
+FLUID_MASK = None    # colocated IBM: dumped beside the fields (G-CONV (b) on fluid cells)
 fields_C = False     # dump C too
 
 
@@ -221,7 +227,10 @@ def build_ibm():
     CFG = dict(rho=1.0, mu=0.1, dt=60.0, F=1e-3, vel_sweeps=80, pcg_maxit=300, pcg_rtol=1e-8)
     rtol = RTOL if RTOL is not None else CFG["pcg_rtol"]
     sdf, R = _ibm_sdf(CASE, N)
-    s = pf.Solver(N, N, N)
+    solver = arg("--solver", "staggered")
+    if solver not in ("staggered", "colocated"):
+        sys.exit("mgd_case: --solver staggered|colocated")
+    s = (pf.SolverColocated if solver == "colocated" else pf.Solver)(N, N, N)
     s.set_rho(CFG["rho"]); s.set_mu(CFG["mu"]); s.set_dt(CFG["dt"])
     s.set_body_force((CFG["F"], 0.0, 0.0))
     s.set_advection(False)  # creeping Stokes
@@ -229,7 +238,7 @@ def build_ibm():
     depth(s)
     s.set_pressure_pcg(True, CFG["pcg_maxit"], rtol)
     s.set_solid(sdf, cutcell_pressure=True)
-    info.update(n=N, R=R, rtol=rtol, cfg=CFG, _sdf=sdf)
+    info.update(n=N, R=R, rtol=rtol, cfg=CFG, solver=solver, _sdf=sdf)
     return s, (N, N, N), None, CFG
 
 
@@ -393,6 +402,8 @@ else:   # sdflow_regression.run_case's march and stop test (check every 5, min 1
     u = s.get_u()
     umean = float(u.mean())
     sdf = info.pop("_sdf")
+    if info.get("solver") == "colocated":
+        FLUID_MASK = sdf > 0.0
     deep = sdf < -2.0
     if CASE == "zh_sphere":
         info["K"] = IBM["F"] * GRID[0] ** 3 / (6.0 * np.pi * IBM["mu"] * info["R"] * umean)
@@ -421,7 +432,7 @@ for k in arrs:
     h.update(arrs[k].tobytes())
 if DUMP:
     if comm is None:
-        np.savez(DUMP, **arrs)
+        np.savez(DUMP, **arrs, **({} if FLUID_MASK is None else {"fluid": FLUID_MASK}))
     else:
         allv = comm.gather((list(info.get("origin", [0, 0, 0])), arrs), root=0)
         if rank == 0:

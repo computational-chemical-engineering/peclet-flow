@@ -234,3 +234,22 @@ the explicit depth AUTO resolves to (L5 …)"). The WO-0 reading (this log, WO-0
 shape): L5 615.1 vs L4 607.3 ms/step = 1.013 (≤ 1.03); iterations 8.90 vs 7.90 (G-ITER bound … 9.59)", load
 ≤ 17.2) therefore is the AUTO reading: t(AUTO) / t(L4) = 615.09 / 607.26 = 1.013 ≤ 1.03 → **G-PERF-H PASS**;
 G-ITER 8.90 ≤ 9.59 PASS. The WO-2 rerun at load 33.6 stays NOT JUDGED.
+
+**S1 — gate row M9: SolverColocated + solid, the ghost projection's BiCGStab driver** (thresholds pre-registered
+by the coordinator, 2026-10-25). `mgd_case.py --case zh_sphere|random_spheres --n 128 --solver colocated` (no
+scheme call: the AUTO default 'ghost'; BiCGStab at the case's MG-PCG cap 300, rtol 1e-8), the steady march of
+`sdflow_regression.py`; one run per depth on the CUDA module of 8796951 (`gpu_diag/mgd/ref/mod_s1_cuda`) with
+`PECLET_FLOW_MG_DEBUG=2 PECLET_FLOW_MG_DEBUG_SOLVES=1000000` (the 8796951 exit trace, every solve; debug output
+only — off vs on bitwise at N = 48). Raw: `gpu_diag/mgd/fix/m9/`; judge `gpu_diag/mgd/fix/m9_judge.py`.
+G-CONV (b) = max over u, v, w, p of max_fluid|a − b| / max_fluid|a| (fluid = sdf > 0 at the cell centres).
+
+| case | AUTO depth, bottom (L4 bottom) | steps L0 / L4 | exits L0 / L4 | breakdowns L0 / L4 | G-CONV (b) fluid (all cells) | iters L0 / L4 (bound) | metric L0 / L4, rel |
+|---|---|---|---|---|---|---|---|
+| zh_sphere | 5, 8³ direct (16³ GraphAMG) | 400 / 400 | 400 × stop test / 400 × stop test | 0 / 0 | p 2.43e-14, v w 2.30e-14, u 2.50e-15 (same) | 11.990 / 12.023 (14.326) | K 7.557283136435 / …435, 2.4e-16 |
+| random_spheres | 5, 8³ direct (16³ GraphAMG) | 340 / 340 | 340 × stop test / 340 × stop test | 0 / 0 | p 1.16e-13, v 3.44e-15 (same) | 18.015 / 18.012 (21.214) | k* 0.006247594073822 both, 0 |
+
+Stagnation exits 0 at both depths; deep-solid |u| 0 / 0; end-state `max_open_divergence()` zh 3.44e-14 / 1.16e-14,
+random 1.704e-6 / 1.704e-6 (equal). Load 24–29 during the runs (another job outside the lock; iteration counts
+and fields are load-independent, no timing is judged in M9). **Verdicts:** G-CONV (a) PASS (every solve exits on
+its stop test; breakdowns 0 = 0), G-CONV (b) PASS (≤ 1.2e-13 against 1e-6), G-ITER PASS, physics PASS (K, k*
+within 2.4e-16).

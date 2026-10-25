@@ -16,6 +16,8 @@
 #   M7b porous bed 128^3 device, CFD-DEM style (drag), the default driver   L 4 5 6
 #   M7c porous bed 128^3 device without drag, the default driver            L 4 5 6
 #   M8  channel 2048x64x64 device, np 2 (standalone V-cycle)                L 4 5 6
+#   M9z zh_sphere N=128 device, SolverColocated AUTO ('ghost': BiCGStab)    L 4 5
+#   M9r random_spheres N=128 device, SolverColocated AUTO ('ghost')         L 4 5
 # Environment (runner settings only; none reaches the solver):
 #   EXTRA_LEVELS="0"  depths prepended to every row's list (0 = the solver default: the WO-2 column)
 #   ROUNDS=3          interleaved A/B rounds per row (median over rounds)
@@ -42,6 +44,8 @@ if [ "${1:-}" = "__row" ]; then   # inner: one row, called under flock
     M3z) args="--case zh_sphere --n 128"; lv="4 5 6" ;;
     M3r) args="--case random_spheres --n 128"; lv="4 5 6" ;;
     M3s) args=""; lv="0" ;;
+    M9z) args="--case zh_sphere --n 128 --solver colocated"; lv="4 5" ;;
+    M9r) args="--case random_spheres --n 128 --solver colocated"; lv="4 5" ;;
     M4)  args="--case channel"; lv="4 5 6" ;;
     M5)  args="--case swarm --cells 128"; lv="4 5 6"; mod=$MH; thr=6 ;;
     M6)  args="--case anchored"; lv="4 5 6" ;;
