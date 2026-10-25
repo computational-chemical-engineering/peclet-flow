@@ -253,3 +253,20 @@ random 1.704e-6 / 1.704e-6 (equal). Load 24–29 during the runs (another job ou
 and fields are load-independent, no timing is judged in M9). **Verdicts:** G-CONV (a) PASS (every solve exits on
 its stop test; breakdowns 0 = 0), G-CONV (b) PASS (≤ 1.2e-13 against 1e-6), G-ITER PASS, physics PASS (K, k*
 within 2.4e-16).
+
+**S2 — probe row M10: an axis that stops coarsening early** (thresholds pre-registered by the coordinator).
+`run_matrix.sh … M10 M10b` on the CUDA module of 8796951 (+ the inert follow-ups), 3 interleaved rounds, 5 warm-up
++ 30 timed steps; `mgd_case.py --case swarm --dims 128 128 25`: case A's swarm (d/h 20, MG-PCG rtol 1e-8) on the
+anisotropic box; *measurement choice*: a bubble lattice of max(1, N_axis // 64) per axis = 2 × 2 × 1, 4 bubbles,
+α 0.0409. Raw: `gpu_diag/mgd/fix/m10/`; judge `gpu_diag/mgd/fix/m10_judge.py`.
+
+| row | AUTO depth, levels (global) | bottom AUTO / L4 | iters AUTO / L4 (bound) | ms/step AUTO / L4 (rounds) | load max |
+|---|---|---|---|---|---|
+| M10 128×128×25 | 5: 128×128×25, 64×64×25, 32×32×25, 16×16×25, 8×8×25 | 8×8×25 direct / 16×16×25 GraphAMG | 15.967 [max 17] / 9.933 [max 10] (11.923) | 16.57 (16.6, 16.6, 16.6) / 55.37 (50.7, 59.9, 55.4) | 26.0 |
+| M10b 512×512×100 | not run: CUDA out of memory at construction (211 MiB "AT", RTX 5080 16 GB) | | | | |
+
+z (25) never coarsens, so level ℓ has cells 2^ℓ : 2^ℓ : 1 — the last smoothed level (3) at 8:1, the bottom at
+16:1, as the review predicted. Iterations identical in all rounds; 0 failed solves, 0 FP32 restarts.
+**Verdicts:** G-ITER **MISS** (15.967 > 11.923; +61 % over depth 4); t(AUTO) ≤ t(L4) NOT JUDGED (load 26.0 > 24;
+AUTO 3.3× faster in the loaded reading). Stopped on the MISS as the brief requires: a coarse-cell aspect bound for
+AUTO is a design decision for the architect. Not run: the rebase onto flow main and its re-gate.

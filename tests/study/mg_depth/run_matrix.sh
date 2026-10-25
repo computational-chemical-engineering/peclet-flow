@@ -18,6 +18,8 @@
 #   M8  channel 2048x64x64 device, np 2 (standalone V-cycle)                L 4 5 6
 #   M9z zh_sphere N=128 device, SolverColocated AUTO ('ghost': BiCGStab)    L 4 5
 #   M9r random_spheres N=128 device, SolverColocated AUTO ('ghost')         L 4 5
+#   M10  swarm 128x128x25 device (z stops coarsening at once), MG-PCG       L 0 4
+#   M10b swarm 512x512x100 device (z stops at 25)                           L 0 4
 # Environment (runner settings only; none reaches the solver):
 #   EXTRA_LEVELS="0"  depths prepended to every row's list (0 = the solver default: the WO-2 column)
 #   ROUNDS=3          interleaved A/B rounds per row (median over rounds)
@@ -46,6 +48,8 @@ if [ "${1:-}" = "__row" ]; then   # inner: one row, called under flock
     M3s) args=""; lv="0" ;;
     M9z) args="--case zh_sphere --n 128 --solver colocated"; lv="4 5" ;;
     M9r) args="--case random_spheres --n 128 --solver colocated"; lv="4 5" ;;
+    M10) args="--case swarm --dims 128 128 25"; lv="0 4" ;;
+    M10b) args="--case swarm --dims 512 512 100"; lv="0 4" ;;
     M4)  args="--case channel"; lv="4 5 6" ;;
     M5)  args="--case swarm --cells 128"; lv="4 5 6"; mod=$MH; thr=6 ;;
     M6)  args="--case anchored"; lv="4 5 6" ;;

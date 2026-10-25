@@ -18,6 +18,10 @@ Cases (--case):
                --d-over-h 20, --bubbles-per-axis 2). --driver pcg (default; MG-PCG cap 800 at
                --rtol, default 1e-8, as weak_swarm) or --driver default (no driver call: the
                variable-density default, Chebyshev).
+               --dims NX NY NZ: an anisotropic box instead of --cells^3 (row M10: an axis that
+               stops coarsening early, doc/mg_depth_policy_log.md); the bubble lattice then has
+               max(1, N_axis // 64) bubbles along each axis (measurement choice) unless
+               --bubbles-per-axis is given, which stays one count for every axis.
     bc         the peclet-examples bubble column (run_peclet.build(), MG-PCG rtol 1e-8 as built)
                at --cells-per-d S (default 32: 256 x 192 x 128), FRESH START from the seeded
                spheres at rest (the 128 x 96 x 64 checkpoint does not exist at other
@@ -116,20 +120,25 @@ def build_swarm():
     SEED, PERTURB = 20261024, 0.25
     CELLS = arg("--cells", 192, int)
     S = arg("--d-over-h", 20.0, float)
-    B = arg("--bubbles-per-axis", 2, int)
     DRIVER = arg("--driver", "pcg")
     rtol = RTOL if RTOL is not None else 1e-8
-    NX = NY = NZ = CELLS
+    if "--dims" in A:   # anisotropic box (M10); default lattice max(1, N // 64) per axis
+        k0 = A.index("--dims")
+        NX, NY, NZ = (int(v) for v in A[k0 + 1:k0 + 4])
+        Bv = np.array([arg("--bubbles-per-axis", max(1, n // 64), int) for n in (NX, NY, NZ)])
+    else:               # the cube, code for code as before
+        NX = NY = NZ = CELLS
+        Bv = np.full(3, arg("--bubbles-per-axis", 2, int))
     rng = np.random.default_rng(SEED)
-    sp = CELLS / B
-    gap = sp - S
-    if gap <= 0:
-        sys.exit(f"swarm: bubbles (d/h {S}) do not fit a lattice spacing of {sp} cells")
+    spv = np.array([NX, NY, NZ]) / Bv
+    gapv = spv - S
+    if (gapv <= 0).any():
+        sys.exit(f"swarm: bubbles (d/h {S}) do not fit a lattice spacing of {spv} cells")
     seeds = []
-    for k in range(B):
-        for j in range(B):
-            for i in range(B):
-                c = (np.array([i, j, k]) + 0.5) * sp + (rng.random(3) - 0.5) * PERTURB * gap
+    for k in range(Bv[2]):
+        for j in range(Bv[1]):
+            for i in range(Bv[0]):
+                c = (np.array([i, j, k]) + 0.5) * spv + (rng.random(3) - 0.5) * PERTURB * gapv
                 seeds.append((float(c[0]), float(c[1]), float(c[2]), 0.5 * S))
     siz = (NX, NY, NZ)
     s = pf.Solver(*siz)
@@ -156,7 +165,8 @@ def build_swarm():
         sys.exit("swarm: --driver pcg|default")
     s.update_properties()
     fields_C = True
-    info.update(cells=CELLS, d_over_h=S, bubbles=len(seeds), alpha=alpha, driver=DRIVER,
+    info.update(cells=CELLS if "--dims" not in A else [NX, NY, NZ], d_over_h=S, bubbles=len(seeds),
+                alpha=alpha, driver=DRIVER,
                 rtol=rtol if DRIVER == "pcg" else "solver default")
 
     def dt_of():
