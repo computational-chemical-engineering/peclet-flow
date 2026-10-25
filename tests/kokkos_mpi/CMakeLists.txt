@@ -77,12 +77,13 @@ endforeach()
 
 # doc/full_viscous_stress.md WO-0 (gate G0): the width-1 ghost ring incl. EDGES and corners of the mu
 # property fill and the time-base velocity fill, exact against the periodic-wrapped global field.
-# np 4 must be a 2x2 split (two cut axes).
+# np 4 must be a 2x2 split (two cut axes). Second case (review S1): outflow +z, distributed (np 1
+# included) vs the single-rank fill, memcmp on the shell.
 add_executable(test_ghost_edges_mpi test_ghost_edges_mpi.cpp)
 target_include_directories(test_ghost_edges_mpi PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_ghost_edges_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
-foreach(np 2 4)
+foreach(np 1 2 4)
   add_test(NAME ghost_edges_mpi_np${np}
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_ghost_edges_mpi>)
 endforeach()
