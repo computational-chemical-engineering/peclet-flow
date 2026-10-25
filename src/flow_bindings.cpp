@@ -4082,14 +4082,17 @@ NB_MODULE(_flow, m) {
         return nb::make_tuple(nb::cast(out), align);
       },
       nb::arg("gnx"), nb::arg("gny"), nb::arg("gnz"), nb::arg("np"), nb::arg("levels"),
-      nb::arg("telescope") = false, nb::arg("min_extent") = 4, nb::arg("decomposition_levels") = 0,
+      nb::arg("telescope") = true, nb::arg("min_extent") = 4, nb::arg("decomposition_levels") = 0,
       nb::arg("max_imbalance") = 1.05, nb::arg("weights") = nb::none(),
       "The pressure-multigrid hierarchy init_mpi WOULD build for this grid / rank count / level "
       "request, for the level-0 decomposition that decomposition_levels / max_imbalance describe "
       "(pass what you will pass to Solver.set_decomposition) and with or "
       "without coarse-level telescoping -- a pure function, no MPI, no allocation, any rank "
       "count. Returns one row per level: (global dims, ranks holding the level, block-0 dims, "
-      "ratio to the next level, telescopes-out). Pre-flight any job with it. levels=0 forecasts "
+      "ratio to the next level, telescopes-out). Pre-flight any job with it. telescope defaults to "
+      "True, the Solver's own default (set_pressure_telescope), so the forecast is the hierarchy "
+      "the solver builds; telescope=False forecasts the in-place-only hierarchy, which at np > 1 "
+      "can stop coarsening early. levels=0 forecasts "
       "the automatic depth (doc/mg_depth_policy.md) for the singular operator (periodic / "
       "all-Neumann / immersed solid; no outflow face), at the default bottom extent 4.\n\n"
       "weights: per-cell weights, exactly what diagnostics.rebalance_by_weights takes (global "
