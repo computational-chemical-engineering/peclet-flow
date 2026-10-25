@@ -14,8 +14,9 @@ src/face_props.hpp). Two checks:
      driving rho, the body force and (or not) mu, arithmetic and harmonic viscosity means; the
      structured VoF with CSF; the block container with its per-marker CSF. The blob touches the
      LOW wall (the mirror touches the high one) and straddles the periodic x seam.
-     The three variable-mu variants also run with set_viscous_stress('full') (WO-2 of
-     doc/full_viscous_stress.md: the transpose term keeps the mirror symmetry to the same bound).
+     The three variable-mu variants run with set_viscous_stress('laplacian') and again with 'full'
+     (WO-2 of doc/full_viscous_stress.md: the transpose term keeps the mirror symmetry to the same
+     bound). The placement gate (2.) pins 'laplacian': its forcing is the Laplacian form.
   2. placement -- steady variable-viscosity Stokes, u = A (sin kx cos ky, -cos kx sin ky, 0),
      mu = 1 + sin(kx + 0.3) cos(ky + 0.7) / 2, forced by -div(mu grad u_c): second order in h
      (the shifted viscosity was first order: 1.39 then 1.05).
@@ -94,8 +95,10 @@ def build(mode, mirror, variable_mu=True, harmonic=False, full=False):
         s.set_property_model("force_x", "linear", "C", [0.0, -0.02])
     if harmonic:
         s.diagnostics.set_property_mode("variable", True)
-    if full:  # the full viscous stress (doc/full_viscous_stress.md WO-2): same tolerance as off
-        s.set_viscous_stress("full")
+    # The viscous stress form, explicit both ways: the plain variants keep the Laplacian form they
+    # were written for (the default is AUTO = full since WO-7); the full-stress variants
+    # (doc/full_viscous_stress.md WO-2) must hold the same tolerance.
+    s.set_viscous_stress("full" if full else "laplacian")
     s.set_pressure_pcg(True, 800, 1e-12)
     s.set_superficial_velocity(True, "x", 0.0)
     rng = np.random.default_rng(1)
@@ -146,6 +149,10 @@ def steady_varmu_error(N, A=1e-3, nz=4):
     s.set_pressure_geometry(np.asfortranarray(np.full((N, N, nz), 10.0)))
     s.enable_cell_force()
     s.diagnostics.set_property_mode("variable", False)
+    # The forcing above is -div(mu grad u): this gate is the placement of the Laplacian bands, so
+    # it pins that form (the default is AUTO = full since WO-7; the full stress's own smooth-mu
+    # order is gated by ctest full_stress_operator, G1(e)).
+    s.set_viscous_stress("laplacian")
     # plain incremental pressure: its fixed point is the steady Stokes solution exactly (the
     # rotational correction with a variable mu is not -- see set_variable_rotational)
     s.diagnostics.set_variable_rotational("off", 1.0)
