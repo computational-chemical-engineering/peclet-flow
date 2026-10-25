@@ -189,3 +189,39 @@ coordinator ruling); G-PERF-WS (a) PASS 80.89 ≤ 85.62, (b) MISS 0.52 (on recor
 (bitwise), N = 128 K / k* PASS, iterations PASS, deep-solid PASS, flux divergence **MISS** on M3z if read as
 the end-state `max_open_divergence()` (3.68), PASS if read as the per-step projected maximum (0.95).
 Stopped on the misses for the coordinator; nothing re-thresholded.
+
+## 2026-10-25 — WO-2 re-gate under Amendment A1 (flow 7d37fdc amendment, a5dcc9a Chebyshev trace)
+
+The divergence gates as amended (§7 Amendment A1, USER 2026-10-25; register umbrella `docs/decisions/flow.md`
+7c569d6). The WO-2 MISSes above stand on record against the old wording. Host module at a5dcc9a (inert:
+below), the matrix steps, `PECLET_FLOW_MG_DEBUG=2` traces; L0 = AUTO (5), L4 = explicit depth 4. Condition (1):
+max over steps of div_k / (rtol·r0_k), div_k = `max_open_divergence_projected()`, r0_k and rtol from the trace of
+that step's solve (one solve per step on every row); div_k / final |r|inf = 1 within 1e-4 on every judged run.
+Condition (2): max_k div_k (L0) / max_k div_k (L4) at rtol 1e-13. Instruments: `bubble_column_perf/gpu_diag/mgd/
+wo2c/{cond1,cond2}.py`; M1, M2, M3z, M5 and M7a's 1e-13 runs are the diagnosis runs (`mgd/wo2diag/out`, d2558a2,
+whose result equals a5dcc9a's — M7a traced hashes equal); M7a at its rtol and M3r are new runs on a5dcc9a.
+
+| row (driver) | rtol | cond (1) L0 | cond (1) L4 | steps | cond (2) at 1e-13 | verdict |
+|---|---|---|---|---|---|---|
+| M1 (PCG) | 1e-8 | 0.636 | 0.449 | 30 | 0.756 | PASS |
+| M1 | 1e-10 | 0.749 | 0.966 | 30 | — | PASS |
+| M2 (PCG) | 1e-8 | 0.937 | 0.991 | 30 | 1.243 | PASS |
+| M2 | 1e-10 | 0.966 | 0.991 | 30 | — | PASS |
+| M3z (PCG, G-IBM zh_sphere) | 1e-8 | 0.884 | 0.928 | 400 | 1.033 | PASS |
+| M3r (PCG, G-IBM random_spheres) | 1e-8 | 0.979 | 0.977 | 340 | 0.868 | PASS |
+| M5 (PCG, host) | 1e-8 | 0.978 | 0.845 | 30 | 1.048 | PASS |
+| M5 | 1e-10 | 0.825 | 0.756 | 30 | — | PASS |
+| M7a (Chebyshev) | 1e-9 | 0.971 | 0.140 | 30 | 1.193 | PASS |
+
+**Verdicts:** G-CONV (c) as amended PASS on every judged row (M1, M2, M3z, M3r, M5, M7a, and the 1e-10 reruns);
+the rows the brief did not list (M4, M7b, M7c, M8; per-step ratio ≤ 2 under the old wording, every solve met its
+stop test per G-CONV (a)) were not re-traced: condition (1) NOT JUDGED there. G-IBM as amended PASS (zh_sphere
+0.884 / 0.928, 1.033; random_spheres 0.979 / 0.977, 0.868); its other clauses as recorded above. Information, not
+a gate: at rtol 1e-13 the true divergence decouples from the recurrence residual (M3r: div / |r| up to 95,
+div/(rtol·r0) 9.0 / 9.3 at L0 / L4, worst div 3.0e-15 / 3.5e-15 — the round-off floor at both depths), which is
+why condition (1) is set at the production tolerance only.
+
+Inertness of a5dcc9a against the WO-2 build: `state_hash.py` 13 + np2 1 hashes identical host and CUDA; prof.py
+dumps bitwise (host 4, CUDA 2); `ctest -LE bench` 258 / 258 pass host and CUDA (same 2 SKIPs each); printed
+values identical (CUDA: only the prterun PID in the two SKIP banners differs); Chebyshev on CUDA, `--dump` vs the
+WO-2 matrix, `np.array_equal` on every field: M7a L0 / L4 and M7c L0 / L4 switch off, M7c L0 switch on.
