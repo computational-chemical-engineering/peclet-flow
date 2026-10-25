@@ -134,6 +134,9 @@ mistake. Full entries with quotes and provenance:
   reintroduce a default off.** NS drivers rely on it (an off default silently ran case A and the
   bubble-column benchmark as unsteady Stokes); Stokes scripts call `set_advection(False)`. Under
   `enable_vof_momentum` the VoF fluxes own the advection: every read goes through `advectsMomentum()`.
+- **Variable μ uses the full stress: explicit conservative MAC elements on uⁿ, never the product form,
+  never on the Picard iterate.** Guard: ctest `full_stress_operator` and case A. (Default AUTO = full
+  since WO-7, USER 2026-10-23; `doc/full_viscous_stress.md`.)
 - **Momentum advection uses the actual wall velocity field**, not `maskVelocity`'s solid zeros.
 - **COLLOCATED momentum advection uses the PROJECTED face field** `uf_/vf_/wf_` — never the
   un-projected ½(u_i+u_j) (ablation `diagnostics.set_uf_advection(False)` only). Implicit FOU and the
