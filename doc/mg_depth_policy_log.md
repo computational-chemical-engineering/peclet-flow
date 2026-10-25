@@ -132,3 +132,60 @@ byte-identity at N = 48): zh_sphere `4e5493f4b8fe5bf7…`, random_spheres `ee797
    12.03). M3: K and k* identical to 10 digits at L4/L5/L6 (N = 128).
 
 **H100 job 28551969 (L7):** no report in `gpu_diag/weak/results/` (pilot1–pilot4 only); not added.
+
+## 2026-10-25 — WO-2: gates of the AUTO-default flip (flow d2558a2)
+
+**Modules** `gpu_diag/mgd/ref/mod_wo2_{cuda,host}` (d2558a2). Raw output: `gpu_diag/mgd/logs/wo2/` (census,
+battery, grun), `gpu_diag/mgd/wo2/matrix/` (the WO-0 matrix rerun with the `0` column, DUMP=1, 3 rounds,
+2026-10-25 09:06 → 11:08), `gpu_diag/mgd/wo2/rtol/` (rtol 1e-10 reruns, L0 vs L4, one run each).
+Judging script `gpu_diag/mgd/wo2/judge.py <matrix dir>`. In every row the L0 (AUTO) state hash equals the
+explicit depth AUTO resolves to (L5; M6 anchored: L4), all rounds stable.
+
+**G-CENSUS** (PECLET_FLOW_MG_DEBUG=1 battery pre 05c43f6 / post d2558a2, outputs diffed after normalising the
+request wording and MPI line order, `wo2/outdiff.py`): moved = {scalar_cutcell_gadv, units_vof_aniso} on host
+and CUDA = the census list; coupling 3/3 outputs identical; no state_hash case. Five more tests differ in the
+last digits of printed force/torque reductions (hydro_force_units, movingscene_advect_mpi_np{1,2,4},
+units_anisotropic_sphere; explicit depth 3 or auto == 4): they differ between two runs of the SAME build
+(`logs/wo2/rr3*`), i.e. run-to-run reduction order, not the flip. CUDA scalar_cutcell_g4/g6_* failed only in the
+parallel pass (GPU contention, pre and post); serial reruns identical.
+Movers (no stored baseline; threshold tests, both pass, nothing re-baselined): gadv 128³ pressure depth 4 → 5,
+bottom 16³ → 8³, scalar iterations identical (R/h=32: 10/17/33), budget identity host 9.4e-13 → 9.3e-13 (gate
+1e-11); units_vof_aniso 32×64×128 depth 4 → 5, 16³ → 8³, exactness max|u| host 1.244e-17 → 1.145e-17, CUDA
+2.018e-17 → 1.540e-17 (gate 8e-13), Young–Laplace rel 0.
+
+**G-BIT** (`wo_gate.sh wo2`): -LE bench 105 + 153 = 258 pass host and CUDA (= WO-1's 258 = base 253 + the 5
+WO-1 tests; skips as base); state_hash 14/14 + case_mpi + prof dumps bitwise vs base on both; printed values
+identical (diffs = ctest numbering, MPI PIDs only).
+
+**Matrix, L0 vs L4** (ms/step medians; load ≤ 13.1 except M5):
+
+| row | AUTO | ms L0 / L4 / L5 / L6 | iters L0 / L4 (bound) | relcmp L0 vs L4 (tol) | div ratio per step max (steps > 2) | max-over-steps ratio |
+|---|---|---|---|---|---|---|
+| M1 | 5, 12³ direct | 80.89 / 155.94 / 80.90 / 79.28 (L7 79.68) | 9.00 / 8.00 (9.70) | 6.4e-11 (1e-6) | 1.76 (0/30) | 0.60 |
+| M2 | 5, 16×12×8 | 91.14 / 203.99 / 91.22 / 97.11 | 11.70 / 10.03 (12.04) | 2.7e-10 (1e-6) | 3.78 (1/30) | 0.61 |
+| M3z | 5, 8³ | 52.82 / 65.13 / 52.89 / 52.58 | 7.00 / 7.00 (8.56) | u,v,w 1.0e-12; p 0.127 all in solid cells, fluid 1.2e-10 | 3.71 (378/400) | 0.95 |
+| M3r | 5, 8³ | 51.03 / 65.20 / 51.10 / 50.83 | 7.09 / 7.09 (8.65) | u,v,w 1.0e-13; p 0.121 solid only, fluid 9.7e-11 | 8.06 (1/340) | 1.71 |
+| M4 | 5, 128×4×4 | 109.13 / 176.11 / 109.21 / 107.27 | 8 / 8 (9.70) | 4.3e-14 (1e-8) | 1.79 (0/30) | 1.60 |
+| M5 host | 5, 8³ | 556.2 / 495.3 / 505.9 / 532.8 — load 33.6 | 8.90 / 7.90 (9.58) | 8.5e-11 (1e-6) | 6.10 (2/30) | 1.38 |
+| M6 anch. | 4 (= L4 bitwise) | 16.10 / 16.08 | 29.53 / 29.53 | 0 | 1.00 | 1.00 |
+| M7a Cheb | 5, 12³ | 225.84 / 359.17 / 225.71 / 214.93 | 11.97 / 11.00 (13.15) | 1.8e-11 (1e-7) | 30.6 (1/30) | 6.95 |
+| M7b | 5, 8³ | 30.07 / 54.80 / 30.07 / 28.89 | 9 / 9 (10.85) | 6.2e-14 (1e-8) | 1.00 | 1.00 |
+| M7c Cheb | 5, 8³ | 60.53 / 101.80 / 60.53 / 59.14 | 9 / 9 (10.85) | 1.1e-13 (1e-7) | 1.00 | 1.00 |
+| M8 np2 | 5, GraphAMG | 245.61 / 282.13 / 245.68 / 267.04 | 8 / 8 (9.70) | 4.2e-14 (1e-8) | 1.79 (0/30) | 1.60 |
+
+rtol 1e-10 reruns (L0 vs L4, tol 1e-8): M1 6.2e-13, iters 11.2 / 10.07 (bound 12.08), div ratio max 6.91 (4/30
+steps > 2); M2 2.4e-12, 15.3 / 13.5 (16.03), 3.87 (7/30); M4 4.3e-14, 8 / 8, 1.79 (0/30); M5 9.5e-13, 11.2 / 9.97
+(11.96), 3.50 (3/30). Every outer solve met its stop test (0 failed, max iterations far below the caps), FP32
+restarts 0 / 0, Chebyshev restarts 0. M3: K 7.5541697434796 (L0) vs …638 (L4), k* identical to 15 digits;
+deep-solid |u| 0 / 0; end-state `max_open_divergence()` M3z 1.110e-12 vs 3.013e-13 (ratio 3.68; L6 4.38e-13),
+M3r 7.24e-13 vs 7.30e-13. M3s (N = 48) hashes = WO-0's (4e5493f4…, ee797063…). G-PERF-WS (d): M1 L0 probe has
+no `[agmg-build]` (L4: 6).
+
+**Verdicts** (§7 thresholds as registered): G-BIT PASS; G-CENSUS PASS; G-CONV (a) PASS, (b) PASS (M3 on fluid
+cells — solid-cell p is outside the system), (c) **MISS** (per-step ratio > 2 on M2, M3z, M3r, M5, M7a and the
+1e-10 reruns of M1, M2, M5; worst M7a 30.6), (d) PASS; G-ITER PASS on every row (standalone V-cycle line N/A,
+coordinator ruling); G-PERF-WS (a) PASS 80.89 ≤ 85.62, (b) MISS 0.52 (on record, non-blocking), (c) PASS
+9.00 ≤ 9.00, (d) PASS; G-PERF-BC PASS 0.447 ≤ 0.8; G-PERF-H NOT JUDGED (load 33.6 / 26.4); G-IBM N = 48 PASS
+(bitwise), N = 128 K / k* PASS, iterations PASS, deep-solid PASS, flux divergence **MISS** on M3z if read as
+the end-state `max_open_divergence()` (3.68), PASS if read as the per-step projected maximum (0.95).
+Stopped on the misses for the coordinator; nothing re-thresholded.
