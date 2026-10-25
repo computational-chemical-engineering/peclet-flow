@@ -5,7 +5,8 @@ on, the case-A groups): a fixed box of cells per rank, tiled along x, then y, th
     PYTHONPATH=<PECLET_FLOW_MPI build> \\
         srun --mpi=pmix --ntasks=P --gpus-per-task=1 --gpu-bind=per_task:1 \\
             python tests/study/vof_perf/weak_swarm.py N [--warm W] [--cells n] [--d-over-h D]
-                [--bubbles-per-axis B] [--rtol R] [--levels L] [--single] [--out FILE.json] [--tag T]
+                [--bubbles-per-axis B] [--rtol R] [--levels L] [--comm-avoiding MODE] [--single]
+                [--out FILE.json] [--tag T]
 
 The case is case A of the bubble-swarm validation (tests/study/case_a on branch case-a: Ar 29.9,
 Bo 2, rho_b/rho_l = mu_b/mu_l = 0.1, buoyancy with the mixture weight removed, the volume mean u_x
@@ -23,6 +24,10 @@ the SAME perturbed bubble set, so every rank has the same work when the ORB bloc
 --levels L sets the pressure multigrid depth (set_pressure_multigrid(True, L), before the geometry);
 without it the solver default (4) is used. At 4 levels a 256^3 box keeps a 32^3-per-rank coarsest
 level, which goes to the host GraphAMG bottom (rebuilt every step under variable density).
+
+--comm-avoiding MODE sets diagnostics.set_comm_avoiding(MODE) ('both' | 'off' | 'momentum' |
+'pressure') before init_mpi; without it the solver default ('both') is used. The modes are
+bit-identical by construction: a measurement of the halo-exchange cost, not of the physics.
 
 At P = 1 the default is the DISTRIBUTED path (init_mpi at size 1, as prof_mpi.py); --single runs the
 single-rank solver instead (no mpi_block/init_mpi, as run_mpi.py), the honest one-GPU reference.
@@ -66,6 +71,7 @@ S = arg("--d-over-h", 20.0, float)
 B = arg("--bubbles-per-axis", 2, int)
 RTOL = arg("--rtol", 1e-8, float)
 LEVELS = arg("--levels", None, int)
+CA = arg("--comm-avoiding", None)
 OUT = arg("--out", None)
 TAG = arg("--tag", "")
 comm = MPI.COMM_WORLD
@@ -122,6 +128,8 @@ if SINGLE:
 else:
     org, siz = pf.mpi_block(NX, NY, NZ)
 s = pf.Solver(*siz)
+if CA is not None:
+    s.diagnostics.set_comm_avoiding(CA)  # before init_mpi: the momentum half is latched there
 if not SINGLE:
     s.init_mpi(NX, NY, NZ)
 if LEVELS is not None:
@@ -204,6 +212,7 @@ if rank == 0:
         "grid": [NX, NY, NZ], "tiles": [TX, TY, TZ], "cells_per_rank": CELLS ** 3,
         "blocks": ub, "d_over_h": S, "bubbles": len(seeds), "alpha": alpha, "rtol": RTOL,
         "levels": LEVELS if LEVELS is not None else "default",
+        "comm_avoiding": s.diagnostics.comm_avoiding,
         "warm": WARM, "steps": N, "setup_s": t_setup, "wall_ms": 1000.0 * wall / N,
         "step_ms": float(mean_ms[0]), "timer_step_ms": float(mean_ms[1]),
         "proj_ms": float(mean_ms[2]), "momentum_ms": float(mean_ms[3]),
