@@ -148,6 +148,16 @@ int main(int argc, char** argv) {
       expect((int)p.size() == b.D && same(p.back().global, b.bottom),
              "T2 %dx%dx%d predict(levels=0): D %d, bottom 16x16x8", b.G.x, b.G.y, b.G.z,
              (int)p.size());
+      // The same global per-level dims at the rank counts these grids are run at (np 4: 2x2 at
+      // 256^3/rank; np 32), telescoping ON: the depth does not depend on np.
+      for (const int np : {4, 32}) {
+        const auto q = CutcellMG::predict(b.G.x, b.G.y, b.G.z, np, 0, true);
+        bool qOk = q.size() == p.size();
+        for (std::size_t L = 0; qOk && L < p.size(); ++L)
+          qOk = same(q[L].global, p[L].global);
+        expect(qOk, "T2 %dx%dx%d predict(levels=0, np=%d): every level's global dims == np 1's",
+               b.G.x, b.G.y, b.G.z, np);
+      }
     }
     // T3: telescoping OFF.
     {
