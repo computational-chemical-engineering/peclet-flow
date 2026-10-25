@@ -213,9 +213,10 @@ void Solver<Grid>::fullStressPrelude() {
   if (muUniform_)
     return;
   // 3. The u^n ghosts incl. the (a, c) edges, written into old_ only (C[c].u is untouched);
-  //    doOutflow = false keeps the projected outflow face.
+  //    doOutflow = false keeps the projected outflow face, faceEdges its transverse ghost ring
+  //    (the edge T reads at the last inner row; distributed only, review S1).
   for (int c = 0; c < 3; ++c)
-    fillVelGhostsTo(old_[c], c, 0, /*doOutflow=*/false);
+    fillVelGhostsTo(old_[c], c, 0, /*doOutflow=*/false, /*faceEdges=*/true);
   // 4. The regular-node masks of a static solid geometry, rebuilt after every geometry build.
   if (hasSolid_ && regDirty_)
     buildFullStressRegMasks();

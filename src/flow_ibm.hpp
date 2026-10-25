@@ -2578,7 +2578,14 @@ class Solver {
   //
   // Inert for everything that existed: `bridgeVelocityToVof` runs only under `enable_vof`, and no
   // VoF configuration before this rung combined VoF with an outflow face.
-  void fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow = true);
+  //
+  // `faceEdges` (distributed, `doOutflow = false` only; the full-stress prelude passes it): also
+  // give the TRANSVERSE ghost ring of the kept outflow face plane its single-rank value, the
+  // periodic image of that plane, at the cost of one more exchange (review S1; mac_bc.hpp
+  // bcHighFacePlaneToLastInner). The domain BCs are then applied AFTER the restore, as the
+  // single-rank fill applies them after its periodic fill. Off, the fill is the one it always was.
+  void fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow = true,
+                       bool faceEdges = false);
   // Ghost-fill a MAC FACE field whose normal axis is `a` (collocated uf_/vf_/wf_, or a staggered
   // C[a].u handed to a face-velocity consumer) WITHOUT losing its high-side domain-boundary face.
   // That face is the first GHOST index along `a`, and fillGhosts wraps every axis periodically
@@ -5405,6 +5412,7 @@ class Solver {
   // plane across the distributed halo exchange, one per axis, allocated on first use. Shared
   // with fillFaceGhostsKeepBoundary (the two never overlap: each restores before returning).
   CCField outflowPlane_[3];
+  CCField outflowEdgeScratch_;  // fillVelGhostsTo(faceEdges): the scratch of the one extra exchange
   double vofBcVol_[6] = {0, 0, 0, 0, 0, 0};       // signed liquid volume of the LAST step, + = in
   double vofBcVolTotal_[6] = {0, 0, 0, 0, 0, 0};  // running total since enable_vof
   // --- curvature (rung V3, WO-O) ---

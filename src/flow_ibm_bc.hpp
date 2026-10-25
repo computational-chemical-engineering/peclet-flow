@@ -177,7 +177,7 @@ void Solver<Grid>::applyVelocityBcComp(int comp, int fold, bool doOutflow) {
 }
 
 template <class Grid>
-void Solver<Grid>::fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow) {
+void Solver<Grid>::fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow, bool faceEdges) {
 #ifdef PECLET_FLOW_MPI
   if (distributed_) {
     // `doOutflow = false` asks for the mass-conserving outflow face the projection wrote to
@@ -214,13 +214,33 @@ void Solver<Grid>::fillVelGhostsTo(CCField f, int comp, int fold, bool doOutflow
             np);
       bcSaveHighFacePlaneInner(outflowPlane_[a], f, eb, G, a);
     }
+    // faceEdges: decided from GLOBAL state only (the extra exchange is collective over the
+    // neighbours, so every rank must take it or none); `keep` adds the local face test.
+    const bool edges = faceEdges && !Grid::collocated && !doOutflow && hasOutflow_ && a >= 0 &&
+                       a < 3 && bc_[2 * a + 1] == 3;
     velDev_->exchange(f);
+    if (edges) {
+      if (keep)
+        bcRestoreHighFacePlaneInner(f, outflowPlane_[a], eb, G, a);
+      if (outflowEdgeScratch_.extent(0) != f.extent(0))
+        outflowEdgeScratch_ = CCField(
+            Kokkos::view_alloc("peclet::flow::outflow_edge_scratch", Kokkos::WithoutInitializing),
+            f.extent(0));
+      if (keep)
+        bcHighFacePlaneToLastInner(outflowEdgeScratch_, f, eb, G, a);
+      velDev_->exchange(outflowEdgeScratch_);
+      if (keep)
+        bcHighFacePlaneEdgesFromLastInner(f, outflowEdgeScratch_, eb, G, a);
+      applyVelocityBcCompTo(f, comp, fold, doOutflow);
+      return;
+    }
     applyVelocityBcCompTo(f, comp, fold, doOutflow);
     if (keep)
       bcRestoreHighFacePlaneInner(f, outflowPlane_[a], eb, G, a);
     return;
   }
 #endif
+  (void)faceEdges;        // single rank: the periodic fill already gives the face plane's image
   fillDomainPeriodic(f);  // the periodic axes (§14 H-3(d): one launch when there are two or three)
   applyVelocityBcCompTo(f, comp, fold, doOutflow);
 }

@@ -400,9 +400,10 @@ inline void bcCorrectOutflowVar(BField f, BField phi, BField rho, double rho0, B
 // boundary's value -- which destroys the mass-conserving outflow correction the projection wrote
 // there and that `fillVelGhostsTo(..., doOutflow = false)` exists to preserve.
 //
-// INNER transverse range ONLY, and that is the point: the plane's transverse ghost rows are
-// legitimately the NEIGHBOUR's inner values, which the exchange has just delivered correctly.
-// Putting stale local values back over them would trade one wrong plane for another.
+// INNER transverse range ONLY: the plane's transverse ghost rows are not this rank's to restore
+// (the saved plane has no values for them). They are NOT right after the exchange either: they are
+// edge ghosts, wrapped along `a` too (review S1) -- bcHighFacePlaneToLastInner below repairs them
+// for the one caller that reads them, the full-stress prelude.
 inline void bcSaveHighFacePlaneInner(BField dst, BField src, B3 ext, int g, int a) {
   BExec space;
   int dims[3];
@@ -433,6 +434,51 @@ inline void bcRestoreHighFacePlaneInner(BField dst, BField src, B3 ext, int g, i
       KOKKOS_LAMBDA(int p0, int p1) {
         dst((long)(p0 + g) * sb + (long)(p1 + g) * sc + (long)bf * sa) =
             src((long)p0 + (long)p1 * nb);
+      });
+}
+
+// The TRANSVERSE ghost ring of that face plane (review S1, validation/REVIEW_FULLSTRESS.md): it is
+// an EDGE ghost, and the exchange fills an edge from the DIAGONAL neighbour's inner cells, wrapped
+// along `a` too -- so it carries the opposite boundary's value as well, and the restore above
+// (inner range only) does not reach it. The single-rank fill gives the periodic image of the face
+// plane there. The fix rides on one more exchange of a scratch field: copy the face plane (inner
+// transverse range) into the scratch's LAST INNER plane along `a`, exchange the scratch on every
+// rank, and copy the scratch's transverse ghost ring of that plane back onto the face plane's.
+// Both halves run only on a rank whose block touches the high `a` face; the neighbour that
+// supplies a transverse ghost of that plane owns the same global last inner plane, so it touches
+// the face too.
+inline void bcHighFacePlaneToLastInner(BField scratch, BField src, B3 ext, int g, int a) {
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int bf = dims[a] - g, nb = dims[b] - 2 * g, nc = dims[c] - 2 * g;
+  using MD = MDRange2<BExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_face_to_last_inner", MD(space, {0, 0}, {nb, nc}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        const long t = (long)(p0 + g) * sb + (long)(p1 + g) * sc;
+        scratch(t + (long)(bf - 1) * sa) = src(t + (long)bf * sa);
+      });
+}
+inline void bcHighFacePlaneEdgesFromLastInner(BField dst, BField scratch, B3 ext, int g, int a) {
+  BExec space;
+  int dims[3];
+  long strides[3];
+  bcdetail::axisDims(ext, dims, strides);
+  const int b = (a + 1) % 3, c = (a + 2) % 3;
+  const long sa = strides[a], sb = strides[b], sc = strides[c];
+  const int bf = dims[a] - g, db = dims[b], dc = dims[c];
+  using MD = MDRange2<BExec>;
+  Kokkos::parallel_for(
+      "peclet::flow::bc_face_edges_from_last_inner", MD(space, {0, 0}, {db, dc}),
+      KOKKOS_LAMBDA(int p0, int p1) {
+        if (p0 >= g && p0 < db - g && p1 >= g && p1 < dc - g)
+          return;  // the inner transverse range: the restored face itself
+        const long t = (long)p0 * sb + (long)p1 * sc;
+        dst(t + (long)bf * sa) = scratch(t + (long)(bf - 1) * sa);
       });
 }
 
