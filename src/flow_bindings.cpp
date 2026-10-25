@@ -2638,7 +2638,10 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "channel): a smoothed bottom needs 13.5 pressure iterations/step at 4 levels and 6.0 at "
           "6, against 4.4 at full geometric depth; agglomerated it is 4.0 at BOTH depths, and "
           "faster in wall-clock than the deep hierarchy. Works on the cut-cell IBM and "
-          "ghost-projection paths (per-fluid-component null-space projection, 2026-08-13).")
+          "ghost-projection paths (per-fluid-component null-space projection, 2026-08-13). Under "
+          "the automatic depth (set_pressure_multigrid levels=0) the mode also enters the depth, at "
+          "the geometry build: a later call changes the bottom solve but not the depth already "
+          "resolved.")
       .def("set_pressure_pcg", &S::setPressurePcg, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
            "Use the MG-PCG pressure accelerator (single-GPU default) and set its iteration cap and "
