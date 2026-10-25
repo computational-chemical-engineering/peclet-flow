@@ -544,3 +544,13 @@ Open questions (each with a default; work proceeds on the default):
 - **Q9 [pref] — GraphAMG numeric-only refresh for the fallback.** Default: no (N3).
 - **Q10 [fact] — heterogeneous GPUs among bottom ranks.** Default: no check; it affects bitwise
   reproducibility across such a partition only, not convergence (§4.5 item 8).
+
+Open items from the review of 2026-10-25 (`bubble_column_perf/gpu_diag/mgd/REVIEW_MGDEPTH.md`; notes only):
+- **Closed-cell pressure differs between depths** (M3: 12.7 % in solid cells, K equal to 15 digits). It is
+  not part of the solved system, but `get_p`/VTI show it, and it is the initial guess when a moving scene
+  opens a cell.
+- **Amendment A1 condition (1) at the production tolerance restates the stop test** (div/|r|inf = 1 within
+  1e-4); the checks that bite are G-CONV (b) and condition (2).
+- **M7b/M7c (porous) would want `max_porous_residual()`** for the divergence contract, not
+  `max_open_divergence_projected()`.
+- **Weak scaling: iterations at depth 6/7 are to be recorded on Snellius** (WO-6, coordinator-owned).
