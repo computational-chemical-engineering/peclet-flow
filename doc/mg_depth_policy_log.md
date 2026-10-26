@@ -537,3 +537,21 @@ The miss reproduces (rerun 80 / 83); the V-cycle on that hierarchy is symmetric,
 **Verdict: G-SYMCONV MISS on (c), row 128³ swarm D6** (all else PASS). Per the brief, WO-S2 stops here: G-ITER-S,
 G-PERF-S, G-CONV-S, G-NP and G-CONTRAST NOT RUN (tooling ready: `ONLY_LEVELS=0 SYM_LEVELS=0 ROUNDS=3 DUMP=1
 run_matrix.sh … M1 M2 M3s M5 M7a M7b M8 M10 M10h M10v`). Nothing re-thresholded; escalated.
+
+**(c) diagnosis** (coordinator ruling 2026-10-26: the MISS stays on record, WO-S3 blocked; `symconv <case> <D> 1 <bottom> 1`,
+host loop MG-CG with the production symmetric V-cycle as M, Fletcher–Reeves β (solvePCG's) vs single-direction
+Polak–Ribière β (solveFCG's), same M, from x = 0; `sym/symconv/diag_b{12,40}.txt`). 128³ swarm D6:
+- bottom 12 (6 + 6, production): FR 80, PR 83 (= production 80 / 83). |β_PR − β_FR| / β_FR ≤ 1.5e-12 on every iteration
+  (typically 1e-13: round-off, ~eps·κ level, no O(1e-6) structure); residual histories agree to 3 digits through it 72
+  (|r|/r0 1.5e-8), first > 1 % split at it 77 (|r|/r0 8.4e-10 vs 8.5e-10), i.e. at the stop level, where |r|inf
+  oscillates in 1e-10…4e-9 (non-monotone max norm); FR lands below 1e-10 at 80, PR at 83.
+- bottom 40 (20 + 20, the replica's): FR 82, PR 82; |Δβ|/β ≤ 2.2e-12; split at it 66 (|r|/r0 2e-8), both stop at 82.
+Reading (for the architect, not a verdict): the 3-iteration gap is where two round-off-separated recurrences cross a
+non-monotone max-norm stop level, a stopping draw like A3.6's, not a defect of M (a(on) 2.6e-18).
+
+**Remaining WO-S2 gates (measurement only, ruling above):** data running detached, `sym/s2_campaign.sh` (after
+`s1_gate.sh`): A matrix rows M1 M2 M3s M5 M7a M7b M8 M10 M10h M10v, L0 off vs L0sym, 3 rounds, dumps (G-ITER-S,
+G-PERF-S, G-CONV-S (b), K / k*); B traced runs (MG_DEBUG=2) at the production rtol, 1e-13 and 1e-17, off and on
+(A1 (1), (2), (2′)); C G-NP + `device_sync_budget` + `mg_vcycle_symmetry*` on a local default-on build
+(`suite/flow-mgsym-on`, never committed); D G-CONTRAST (bubble column 256×192×128, PCG, switch on, 50 steps). Verdicts:
+NOT YET JUDGED (HANDOFF_MGSYM.md).

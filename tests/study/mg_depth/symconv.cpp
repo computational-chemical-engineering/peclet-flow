@@ -97,6 +97,8 @@ int main(int argc, char** argv) {
     const std::string nm = argc > 1 ? argv[1] : "thinW";
     const int levels = argc > 2 ? std::atoi(argv[2]) : 0;
     const int lr = argc > 3 ? std::atoi(argv[3]) : 1;
+    const int bot = argc > 4 ? std::atoi(argv[4]) : 12;
+    const int diag = argc > 5 ? std::atoi(argv[5]) : 0;
     const Problem P = preset(nm, levels);
     CutcellMG mg;
     setUp(mg, P, CutcellMG::kVcycleFp64);
@@ -114,10 +116,10 @@ int main(int argc, char** argv) {
       mg.setSymmetricVcycle(sym != 0);
       CCField b = toDevice(hb, "b"), x("x", n), r("r", n), p("p", n), z("z", n), zp("zp", n),
               Ap("Ap", n);
-      const int ip = mg.solvePCG(b, x, r, p, z, Ap, kCap, 1e-10, 2, 2, 12);
+      const int ip = mg.solvePCG(b, x, r, p, z, Ap, kCap, 1e-10, 2, 2, bot);
       const bool fp = mg.lastSolveFailed() || ip >= kCap;
       Kokkos::deep_copy(x, 0.0);
-      const int ifc = mg.solveFCG(b, x, r, p, z, zp, Ap, kCap, 1e-10, 2, 2, 12);
+      const int ifc = mg.solveFCG(b, x, r, p, z, zp, Ap, kCap, 1e-10, 2, 2, bot);
       const bool ff = mg.lastSolveFailed() || ifc >= kCap;
       char buf[160];
       std::snprintf(buf, sizeof buf, " | %s PCG %d%s FCG %d%s", sym ? "on" : "off", ip,
@@ -151,9 +153,53 @@ int main(int argc, char** argv) {
           std::abs(a1 - b1) / (std::sqrt(mg.dot(l0, x, x)) * std::sqrt(mg.dot(l0, My, My))));
       out += buf;
     }
+    if (diag) {  // FR vs PR with the same (symmetric) preconditioner
+      mg.setSymmetricVcycle(true);
+      std::vector<std::vector<double>> hist(2), rel(2);
+      for (int pr = 0; pr < 2; ++pr) {
+        CCField x("x", n), r = toDevice(hb, "r"), z("z", n), zo("zo", n), p("p", n), Ap("Ap", n);
+        mg.removeMean(l0, r);
+        const double r0 = mg.maxabs(l0, r);
+        mg.precondVcycle(z, r);
+        Kokkos::deep_copy(p, z);
+        double rz = mg.dot(l0, r, z);
+        for (int k = 0; k < kCap; ++k) {
+          mg.matvecOverlap(l0, Ap, p);
+          const double alpha = rz / mg.dot(l0, p, Ap);
+          mg.axpy(x, alpha, p);
+          mg.axpy(r, -alpha, Ap);
+          mg.removeMean(l0, r);
+          const double rn = mg.maxabs(l0, r) / r0;
+          hist[pr].push_back(rn);
+          if (rn < 1e-10)
+            break;
+          Kokkos::deep_copy(zo, z);
+          mg.precondVcycle(z, r);
+          const double rzn = mg.dot(l0, r, z), rzo = mg.dot(l0, r, zo);
+          const double bFR = rzn / rz, bPR = (rzn - rzo) / rz;
+          rel[pr].push_back((bPR - bFR) / bFR);
+          Kokkos::deep_copy(Ap, z);
+          mg.axpy(Ap, pr ? bPR : bFR, p);
+          Kokkos::deep_copy(p, Ap);
+          rz = rzn;
+        }
+      }
+      int sep = -1;
+      const std::size_t m = std::min(hist[0].size(), hist[1].size());
+      for (std::size_t k = 0; k < m && sep < 0; ++k)
+        if (std::abs(hist[0][k] / hist[1][k] - 1.0) > 0.01)
+          sep = (int)k + 1;
+      std::printf(
+          "DIAG %s D%d bottom %d: FR its %zu, PR its %zu, first >1%% residual split at it %d\n",
+          nm.c_str(), levels, bot, hist[0].size(), hist[1].size(), sep);
+      for (std::size_t k = 0; k < std::max(hist[0].size(), hist[1].size()); ++k)
+        std::printf("DIAG it %3zu |r|/r0 FR %.3e PR %.3e | (bPR-bFR)/bFR on FR %+.3e\n", k + 1,
+                    k < hist[0].size() ? hist[0][k] : 0.0, k < hist[1].size() ? hist[1][k] : 0.0,
+                    k < rel[0].size() ? rel[0][k] : 0.0);
+    }
     const Level& bl = mg.level(mg.nLevels() - 1);
-    std::printf("SYMCONV %s D%d LR%d levels %d bottom %dx%dx%d %s%s\n", nm.c_str(), levels, lr,
-                mg.nLevels(), bl.inner.x, bl.inner.y, bl.inner.z,
+    std::printf("SYMCONV %s D%d LR%d bot %d levels %d bottom %dx%dx%d %s%s\n", nm.c_str(), levels,
+                lr, bot, mg.nLevels(), bl.inner.x, bl.inner.y, bl.inner.z,
                 mg.agglomerateBottom() ? "agglomerated" : "smoothed", out.c_str());
   }
   Kokkos::finalize();
