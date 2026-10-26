@@ -431,6 +431,14 @@ target_include_directories(test_mg_line_relax PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 target_link_libraries(test_mg_line_relax PRIVATE Kokkos::kokkos)
 add_test(NAME mg_line_relax COMMAND test_mg_line_relax)
 set_tests_properties(mg_line_relax PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
+# doc/mg_depth_policy.md Amendment A3 (WO-S1) gate G-SYM: the symmetric pressure V-cycle -- the
+# asymmetry measure a on smoothed and agglomerated bottoms, FP32, and the thin-slab PCG guard.
+add_executable(test_mg_vcycle_symmetry test_mg_vcycle_symmetry.cpp)
+target_include_directories(test_mg_vcycle_symmetry PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_mg_vcycle_symmetry PRIVATE Kokkos::kokkos)
+add_test(NAME mg_vcycle_symmetry COMMAND test_mg_vcycle_symmetry)
+set_tests_properties(mg_vcycle_symmetry PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
 # doc/vof_projection_cost_design.md §4 (WO-D1..D3): the FP32 V-cycle preconditioner -- its face
 # weights (rounding, symmetry, the decoupled set), eligibility, and bitwise FP64 fallback (G-D1).
 add_executable(test_mg_fp32_vcycle test_mg_fp32_vcycle.cpp)

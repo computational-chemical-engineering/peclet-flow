@@ -238,6 +238,38 @@ inline void prolongFp32FromD(VField fine, CCConst coarse, C3 fext, C3 cext, int 
         fine(fi) = (VReal)((double)fine(fi) + (c0 * (1 - wz) + c1 * wz));
       });
 }
+// doc/mg_depth_policy.md A3.3 item 1, the piecewise-constant prolongation P = (prod ratio) R^T on
+// the FP32 data (prolongConstAddCell's parent index): FP32 <- FP32, fine = fine + coarse in FP32.
+KOKKOS_INLINE_FUNCTION int fp32ProlongParent(int ratio, int i, int gc) {
+  return ((ratio == 2) ? (i >> 1) : i) + gc;
+}
+inline void prolongConstFp32(VField fine, VConst coarse, C3 fext, C3 cext, int gf, int gc,
+                             C3 finner, C3 ratio) {
+  ccFor3(
+      "peclet::flow::prolong_const_f32", C3{0, 0, 0}, C3{finner.x, finner.y, finner.z},
+      KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
+        const long ci = (long)fp32ProlongParent(ratio.x, ifx, gc) +
+                        (long)fp32ProlongParent(ratio.y, ify, gc) * cext.x +
+                        (long)fp32ProlongParent(ratio.z, ifz, gc) * (long)cext.x * cext.y;
+        const long fi =
+            (long)(ifx + gf) + (long)(ify + gf) * fext.x + (long)(ifz + gf) * (long)fext.x * fext.y;
+        fine(fi) = fine(fi) + coarse(ci);
+      });
+}
+// ... and the bottom interface up, FP32 <- FP64: xf = fl32((double)xf + coarse).
+inline void prolongConstFp32FromD(VField fine, CCConst coarse, C3 fext, C3 cext, int gf, int gc,
+                                  C3 finner, C3 ratio) {
+  ccFor3(
+      "peclet::flow::prolong_const_f32d", C3{0, 0, 0}, C3{finner.x, finner.y, finner.z},
+      KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
+        const long ci = (long)fp32ProlongParent(ratio.x, ifx, gc) +
+                        (long)fp32ProlongParent(ratio.y, ify, gc) * cext.x +
+                        (long)fp32ProlongParent(ratio.z, ifz, gc) * (long)cext.x * cext.y;
+        const long fi =
+            (long)(ifx + gf) + (long)(ify + gf) * fext.x + (long)(ifz + gf) * (long)fext.x * fext.y;
+        fine(fi) = (VReal)((double)fine(fi) + coarse(ci));
+      });
+}
 
 // --- Distributed launch forms (doc/vof_projection_distributed_design.md §5.3, WO-D1) -----------
 // The distributed FP32 V-cycle's box kernels: the launch forms of the FP64 box kernels

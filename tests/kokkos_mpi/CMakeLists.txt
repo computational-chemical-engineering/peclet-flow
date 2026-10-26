@@ -145,6 +145,17 @@ foreach(np 1 2 4 8)
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mg_fp32_vcycle_mpi>)
 endforeach()
 
+# doc/mg_depth_policy.md Amendment A3 (WO-S1) gate G-SYM, distributed: the symmetric V-cycle's
+# asymmetry measure at np 1, 2, 4 and np 1 init_mpi memcmp-equal to single rank.
+add_executable(test_mg_vcycle_symmetry_mpi test_mg_vcycle_symmetry_mpi.cpp)
+target_include_directories(test_mg_vcycle_symmetry_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${CMAKE_CURRENT_SOURCE_DIR}/../kokkos ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_mg_vcycle_symmetry_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+foreach(np 1 2 4)
+  add_test(NAME mg_vcycle_symmetry_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mg_vcycle_symmetry_mpi>)
+endforeach()
+
 # doc/vof_distributed_host_comm_design.md §5.2 (WO-K3): the pressure MG's stencil halo (faces only,
 # rank-local periodic axes read in-kernel) against the full halo (debugSetStencilHaloOff), bitwise.
 add_executable(test_mg_stencil_halo_mpi test_mg_stencil_halo_mpi.cpp)

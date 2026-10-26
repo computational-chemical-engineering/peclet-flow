@@ -533,6 +533,11 @@ void Solver<Grid>::setPressureLineRelaxation(bool enabled) {
 }
 
 template <class Grid>
+void Solver<Grid>::setPressureVcycleSymmetric(bool enabled) {
+  mg_.setSymmetricVcycle(enabled);
+}
+
+template <class Grid>
 void Solver<Grid>::setPressureVcyclePrecision(int mode) {
   mg_.setVcyclePrecision(mode);
 }

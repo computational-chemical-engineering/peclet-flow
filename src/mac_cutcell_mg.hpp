@@ -553,6 +553,21 @@ KOKKOS_INLINE_FUNCTION void prolongAddCell(const FV& fine, const CV& coarse, C3 
       (long)(ifx + gf) + (long)(ify + gf) * fext.x + (long)(ifz + gf) * (long)fext.x * fext.y;
   fine(fi) += c0 * (1 - wz) + c1 * wz;
 }
+// doc/mg_depth_policy.md A3.3 item 1: the piecewise-constant prolongation P = (prod ratio) R^T of
+// the average restriction (added to fine) -- every fine inner cell adds its coarse parent's value,
+// parent index i >> 1 on a ratio-2 axis, i on a kept one. Reads no coarse ghost.
+template <class FV, class CV>
+KOKKOS_INLINE_FUNCTION void prolongConstAddCell(const FV& fine, const CV& coarse, C3 fext, C3 cext,
+                                                int gf, int gc, C3 ratio, int ifx, int ify,
+                                                int ifz) {
+  const int cx = ((ratio.x == 2) ? (ifx >> 1) : ifx) + gc;
+  const int cy = ((ratio.y == 2) ? (ify >> 1) : ify) + gc;
+  const int cz = ((ratio.z == 2) ? (ifz >> 1) : ifz) + gc;
+  const long ci = (long)cx + (long)cy * cext.x + (long)cz * (long)cext.x * cext.y;
+  const long fi =
+      (long)(ifx + gf) + (long)(ify + gf) * fext.x + (long)(ifz + gf) * (long)fext.x * fext.y;
+  fine(fi) += coarse(ci);
+}
 // The subtract half of CutcellMG::removeMean (A0 cell body).
 template <class FV, class AV>
 KOKKOS_INLINE_FUNCTION void meanSubtractCell(const FV& f, const AV& ac, long i, double mean) {
@@ -635,6 +650,15 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, i
       "peclet::flow::prolong", C3{0, 0, 0}, C3{finner.x, finner.y, finner.z},
       KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
         prolongAddCell(fine, coarse, fext, cext, gf, gc, ratio, ifx, ify, ifz);
+      });
+}
+// A3.3 item 1: prolongAdd's piecewise-constant form (the symmetric pressure V-cycle).
+inline void prolongConstAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, int gc,
+                            C3 finner, C3 ratio) {
+  ccFor3(
+      "peclet::flow::prolong_const", C3{0, 0, 0}, C3{finner.x, finner.y, finner.z},
+      KOKKOS_LAMBDA(int ifx, int ify, int ifz) {
+        prolongConstAddCell(fine, coarse, fext, cext, gf, gc, ratio, ifx, ify, ifz);
       });
 }
 
@@ -3968,6 +3992,11 @@ class CutcellMG {
         else
           graphAmgSolveBottom(
               lv);  // agglomerated mesh-agnostic coarse solve (decomposition-agnostic)
+      } else if (symVcycle_ && bottom_ > 0) {
+        // A3.3 item 3: the palindromic smoothed bottom, a forward run then a reverse run (the
+        // alternating colour sequence R B ... R, A-self-adjoint); 12 -> 6 + 6.
+        smooth(lv, std::max(1, bottom_ / 2), false);
+        smooth(lv, std::max(1, bottom_ - bottom_ / 2), true);
       } else
         smooth(lv, bottom_, false);
       if (meanRemovalAll_)
@@ -4035,13 +4064,20 @@ class CutcellMG {
         Kokkos::deep_copy(CCExec(), cs.x, 0.0);
       }
       vcycle(L + 1, sym);
-      fill(cs, cs.x);
-      applyOutflowGhost(cs, cs.x, cs.g);
-      // The trilinear prolongation reads the coarse ghost with weight 1/4 regardless of openness,
-      // so a domain-BC face needs its real ghost policy here (Dirichlet 0 above, Neumann
-      // zero-gradient below) instead of the periodic wrap fill() just wrote. See applyNeumannGhost.
-      applyNeumannGhost(cs, cs.x, cs.g);
-      prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      if (symVcycle_) {
+        // A3.3 item 2: P = c R^T reads no coarse ghost, so no refresh (every consumer of cs.x's
+        // ghosts fills, wrap-reads or overwrites them first: the A5 contract).
+        prolongConstAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      } else {
+        fill(cs, cs.x);
+        applyOutflowGhost(cs, cs.x, cs.g);
+        // The trilinear prolongation reads the coarse ghost with weight 1/4 regardless of
+        // openness, so a domain-BC face needs its real ghost policy here (Dirichlet 0 above,
+        // Neumann zero-gradient below) instead of the periodic wrap fill() just wrote. See
+        // applyNeumannGhost.
+        applyNeumannGhost(cs, cs.x, cs.g);
+        prolongAdd(lv.x, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      }
     }
     smooth(lv, post_, /*reverse=*/sym);
     if (L == 0 && exitDot_.k >= 0) {  // C4: the exit subtract also forms r^T z (solvePCGResident)
@@ -4073,11 +4109,16 @@ class CutcellMG {
       restrictAvg(cs.rhs, CCConst(T.res), cs.ext, T.mExt, cs.g, T.g, cs.inner, lv.ratio);
       Kokkos::deep_copy(CCExec(), cs.x, 0.0);
       vcycle(L + 1, sym);
-      fill(cs, cs.x);
-      applyOutflowGhost(cs, cs.x, cs.g);
-      applyNeumannGhost(cs, cs.x, cs.g);
-      Kokkos::deep_copy(CCExec(), T.x, 0.0);
-      prolongAdd(T.x, CCConst(cs.x), T.mExt, cs.ext, T.g, cs.g, T.mInner, lv.ratio);
+      if (symVcycle_) {  // A3.3 item 2: the constant form, no coarse-ghost refresh
+        Kokkos::deep_copy(CCExec(), T.x, 0.0);
+        prolongConstAdd(T.x, CCConst(cs.x), T.mExt, cs.ext, T.g, cs.g, T.mInner, lv.ratio);
+      } else {
+        fill(cs, cs.x);
+        applyOutflowGhost(cs, cs.x, cs.g);
+        applyNeumannGhost(cs, cs.x, cs.g);
+        Kokkos::deep_copy(CCExec(), T.x, 0.0);
+        prolongAdd(T.x, CCConst(cs.x), T.mExt, cs.ext, T.g, cs.g, T.mInner, lv.ratio);
+      }
     }
     teleScatterAdd(lv, T.x, target);
   }
@@ -4438,17 +4479,25 @@ class CutcellMG {
       restrictFp32ToDZeroX(cs.rhs, cs.x, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
                            lv.ratio);
       vcycle(L + 1, sym);
-      fill(cs, cs.x);
-      applyOutflowGhost(cs, cs.x, cs.g);
-      applyNeumannGhost(cs, cs.x, cs.g);
-      prolongFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      if (symVcycle_) {  // A3.3 item 2: the constant form, no coarse-ghost refresh
+        prolongConstFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      } else {
+        fill(cs, cs.x);
+        applyOutflowGhost(cs, cs.x, cs.g);
+        applyNeumannGhost(cs, cs.x, cs.g);
+        prolongFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      }
     } else {
       restrictFp32ZeroX(cs.rhsf, cs.xf, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
                         lv.ratio);
       vcycleFp32Impl(L + 1, sym);
-      fillWrap(cs, cs.xf);  // fill()'s single-rank periodic copy (no outflow face: eligibility)
-      applyNeumannGhost(cs, cs.xf, cs.g);
-      prolongFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      if (symVcycle_) {
+        prolongConstFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      } else {
+        fillWrap(cs, cs.xf);  // fill()'s single-rank periodic copy (no outflow face: eligibility)
+        applyNeumannGhost(cs, cs.xf, cs.g);
+        prolongFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      }
     }
     smoothFp32(lv, post_, /*reverse=*/sym, false);
   }
@@ -4475,19 +4524,27 @@ class CutcellMG {
                            lv.ratio);
       Kokkos::deep_copy(CCExec(), cs.x, 0.0);
       vcycle(L + 1, sym);
-      fill(cs, cs.x);
-      applyOutflowGhost(cs, cs.x, cs.g);
-      applyNeumannGhost(cs, cs.x, cs.g);
-      prolongFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      if (symVcycle_) {  // A3.3 item 2: the constant form, no coarse-ghost refresh
+        prolongConstFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      } else {
+        fill(cs, cs.x);
+        applyOutflowGhost(cs, cs.x, cs.g);
+        applyNeumannGhost(cs, cs.x, cs.g);
+        prolongFp32FromD(lv.xf, CCConst(cs.x), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      }
     } else {
       Level& cs = lv_[L + 1];
       restrictFp32ZeroX(cs.rhsf, cs.xf, VConst(lv.resf), cs.ext, lv.ext, cs.g, lv.g, cs.inner,
                         lv.ratio);
       Kokkos::deep_copy(CCExec(), cs.xf, 0.0f);
       vcycleFp32Dist(L + 1, sym);
-      fill(cs, cs.xf);  // the level's FP32 ghost exchange (devf)
-      applyNeumannGhost(cs, cs.xf, cs.g);
-      prolongFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      if (symVcycle_) {
+        prolongConstFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      } else {
+        fill(cs, cs.xf);  // the level's FP32 ghost exchange (devf)
+        applyNeumannGhost(cs, cs.xf, cs.g);
+        prolongFp32(lv.xf, VConst(cs.xf), lv.ext, cs.ext, lv.g, cs.g, lv.inner, lv.ratio);
+      }
     }
     smoothFp32Dist(lv, post_, /*reverse=*/sym, false);
   }
@@ -5045,6 +5102,8 @@ class CutcellMG {
         line += (i ? "," : "") + std::to_string(ls[i]);
       line += std::string("} along ") + "xyz"[lv_[ls[0]].lineAxis];
     }
+    // A3.3 item 4: the transfer pair and the smoothed bottom's sweep order.
+    line += symVcycle_ ? "; P const, bottom palindromic" : "; P trilinear, bottom forward";
     if (a > 0)
       printf("[mg-census] depth requested %s -> %d levels, bottom %dx%dx%d; auto -> %d%s%s\n",
              depthRequestLabel(nLevels).c_str(), D, b.x, b.y, b.z, a,
@@ -7094,6 +7153,7 @@ class CutcellMG {
   double aspectTheta_ = 2.0;
   bool lineRelax_ =
       true;  // A2.4: the line smoother on triggered smoothed levels (setLineRelaxation)
+  bool symVcycle_ = false;  // A3: P = c R^T + the palindromic bottom (setSymmetricVcycle)
   // Communication-avoiding smoothing (see the kCa* enum): both subsystems on by default. Only
   // kCaMg is read here; the momentum half lives in IbmSolver.
   int caMode_ = kCaBoth;
@@ -7216,6 +7276,18 @@ class CutcellMG {
     lineRelax_ = on;
   }
   bool lineRelaxation() const { return lineRelax_; }
+  /// A3 (doc/mg_depth_policy.md Amendment A3, WO-S1): the symmetric pressure V-cycle --
+  /// piecewise-constant prolongation P = c R^T of the average restriction on every transfer
+  /// (FP64, FP32, the FP32 <- FP64 bottom interface, the telescope transition; no coarse-ghost
+  /// refresh before it) and the palindromic smoothed bottom. Off (the default until WO-S3) is the
+  /// trilinear prolongation and the forward bottom bit for bit. Read at V-cycle time; a change
+  /// invalidates the kept Chebyshev eigenvalue vectors.
+  void setSymmetricVcycle(bool on) {
+    if (on != symVcycle_)
+      eigWarm_ = false;
+    symVcycle_ = on;
+  }
+  bool symmetricVcycle() const { return symVcycle_; }
   double aspectThreshold() const { return aspectTheta_; }
   /// Communication-avoiding smoothing mask (kCaMomentum | kCaMg); only kCaMg is read here.
   void setCommAvoiding(int mask) { caMode_ = mask; }
