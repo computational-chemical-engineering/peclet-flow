@@ -473,3 +473,67 @@ runs are bitwise equal to attempt 2's round-1 dumps (u v w p C, every row, AUTO 
 
 **WO-7 gate summary on `mglr` (rebased): G-LR (1) PASS, (2) PASS (attempt 2, after the A2.6 remedy), (3) PASS under
 (2′), (4) PASS (np 1 included), (5) PASS (`mg_line_relax` green in both batteries).** Not pushed, not merged.
+
+## 2026-10-26 — Amendment A3: WO-S1 (symmetric V-cycle, switch off) and WO-S2 (stopped at G-SYMCONV)
+
+Branch `mgsym` from `mglr` cb981c9 (worktree `suite/flow-mgsym`). WO-S1 = f81ecbd: A3.3 items 1–5 behind
+`CutcellMG::setSymmetricVcycle` / `s.diagnostics.set_pressure_vcycle_symmetric` (default off), ctests
+`mg_vcycle_symmetry` and `mg_vcycle_symmetry_mpi_np{1,2,4}`. Tools and raw output: `bubble_column_perf/gpu_diag/mgd/sym/`
+(build/gate scripts, `logs/`, `symconv/`); study tools here: `tests/study/mg_depth/symconv.cpp` (G-SYMCONV),
+`mgd_case.py --vcycle-symmetric on|off`, `run_matrix.sh` tokens `<L>sym` (`SYM_LEVELS`, `ONLY_LEVELS`), `summarize.py`
+accepting depth tokens.
+
+**G-SYM** (switch on; host, f81ecbd): a = |xᵀMy − yᵀMx| / (|x||My|) of the production V-cycle (schedule 2/2/12):
+
+| case | a trilinear/forward (switch off, recorded) | a symmetric | bound | np 2 / np 4 |
+|---|---|---|---|---|
+| thinW 64×64×4 z walls, ρ×100 blob, D5 | 8.12e-5 | 1.45e-17 | 1e-14 | 2.9e-17 / 2.2e-17 |
+| thinW, LR off | 4.51e-5 | 2.28e-17 | 1e-14 | 1.1e-17 / 3.3e-17 |
+| thin periodic slab, D5 | 1.90e-4 | 2.52e-17 | 1e-14 | 8.1e-18 / 1.3e-17 |
+| `scalar` 16×16×4 (x/y walls, D4, bottom 2×2×2) | 1.27e-4 | 1.15e-17 | 1e-14 | 0 / 3.8e-18 |
+| 64³ periodic ρ×100 blob, D5 | 2.87e-5 | 5.7e-19 | 1e-14 | 4.5e-18 / 2.3e-18 |
+| 64³ walls ρ×100 blob, D5 | 2.17e-5 | 4.9e-19 | 1e-14 | 4.0e-18 / 0 |
+| `cylProblem` 32³, D4 | 1.32e-5 | 6.7e-18 | 1e-14 | 1.1e-17 / 1.3e-17 |
+| outflow-anchored channel 32×16×16 (−x inflow, +x outflow, y/z walls), D4 | 8.39e-5 | 3.42e-17 | 1e-14 | 4.4e-17 / 3.1e-17 |
+| 64³ periodic blob D4, agglomerated bottom (forced) | 3.01e-5 | 2.35e-11 | 1e-8 | 2.3e-11 / 2.3e-11 |
+
+np 1 `initMpi` one V-cycle memcmp-equal to single rank on every case. FP32 V-cycle (forced 'fp32', host; the CUDA
+row comes with the CUDA battery log): thinW a 3.6e-10, PCG 10 (not capped). Guard (production PCG, rhsOf, rtol 1e-10):
+thinW 10 (LR off 13; bound 16), slab 11 (bound 14); trilinear 126 / 89 / cap 500. Host verdict: **PASS**.
+The channel case (sizes, BCs) is this package's choice; G-SYM names only "an outflow-anchored channel".
+
+**G-BIT** (switch off ≡ mglr): PENDING — `gpu_diag/mgd/sym/s1_gate.sh` (detached, under the heavy lock): per backend
+`gbit.sh` (ctest -LE bench -V -j4; state_hash np1+np2 twice, digest as `validation/wo7/gate.sh`; printed values of
+`bottom_direct_mpi`, `graphamg_mpi`, `telescope*_mpi`, `decomposition_policy`, `pcg_breakdown` vs mglr's gate log)
+and prof.py dumps of the unmodified build (cb981c9, `sym/ref/mod_base_*`) vs f81ecbd (`mod_s1_*`), `gcmp.sh`.
+Pass = battery green (272 = mglr's 268 + 4), digests host 51fec031a160c88b / CUDA 8337752781faf71b both runs,
+printed identical, `GBIT PASS` from gcmp. Verdict lines: `sym/logs/s1_gate.out`.
+
+**WO-S2, G-SYMCONV** (production `solvePCG` / `solveFCG`, rtol 1e-10, zero guess, rhsOf, closed cells zero, cap 500,
+host single rank, one hierarchy per row, switch off then on; `sym/symconv/judge.out`; (d) bound = 1.25 C + 1 with
+C the matrix's constant-P PCG):
+
+| row | off PCG / FCG | on PCG / FCG | (a) no cap | (b) on ≤ min(off)+1 | (c) \|FCG−PCG\| ≤ 1 | (d) |
+|---|---|---|---|---|---|---|
+| thinW D5 LR off | 89 / 17 | 13 / 13 | PASS | PASS | PASS | 13 ≤ 16 PASS |
+| thinW D5 LR on | 126 / 12 | 10 / 10 | PASS | PASS | PASS | 10 ≤ 13.5 PASS |
+| slab D5 | cap / 14 | 11 / 11 | PASS | PASS | PASS | 11 ≤ 14.75 PASS |
+| 64³ blob ×100 D4 | 30 / 12 | 10 / 10 | PASS | PASS | PASS | 10 ≤ 13.5 PASS |
+| 64³ blob ×100 D5 | 30 / 12 | 10 / 10 | PASS | PASS | PASS | PASS |
+| 64³ walls blob ×100 D5 | 27 / 12 | 10 / 10 | PASS | PASS | PASS | PASS |
+| 64³ blob ×10⁴ D5 | cap / 143 | 10 / 10 | PASS | PASS | PASS | PASS |
+| cylinder D4 / D5 | 9 / 9 | 9 / 9 | PASS | PASS | PASS | 9 ≤ 12.25 PASS |
+| staircase sphere D5 | 9 / 9 | 10 / 10 | PASS | 10 ≤ 10 PASS | PASS | 10 ≤ 13.5 PASS |
+| 128×128×25 D5 | cap / 57 | 29 / 29 | PASS | PASS | PASS | 29 ≤ 32.25 PASS |
+| 128×128×25 D6 | cap / 71 | 28 / 28 | PASS | PASS | PASS | 28 ≤ 34.75 PASS |
+| 128³ swarm D5 | cap / 247 | 85 / 85 | PASS | PASS | PASS | 85 ≤ 101 PASS |
+| **128³ swarm D6** | cap / 249 | **80 / 83** | PASS | PASS | **MISS (3)** | 80 ≤ 103.5 PASS |
+| uniform 128³ D5 / D6 | 8 / 8 | 8 / 8 | PASS | PASS | PASS | 8 ≤ 11 PASS |
+| uniform 256³ D6 / D7 | 8 / 8 | 8 / 8 | PASS | PASS | PASS | 8 ≤ 11 PASS |
+| uniform 256³ walls D7 | 9 / 9 | 9 / 9 | PASS | PASS | PASS | 9 ≤ 12.25 PASS |
+
+The miss reproduces (rerun 80 / 83); the V-cycle on that hierarchy is symmetric, a(on) = 2.6e-18 (D5: 5.5e-18,
+85 / 85). The matrix's replica (40-sweep symmetric bottom) had 82 / 82 there; the production bottom is 6 + 6.
+**Verdict: G-SYMCONV MISS on (c), row 128³ swarm D6** (all else PASS). Per the brief, WO-S2 stops here: G-ITER-S,
+G-PERF-S, G-CONV-S, G-NP and G-CONTRAST NOT RUN (tooling ready: `ONLY_LEVELS=0 SYM_LEVELS=0 ROUNDS=3 DUMP=1
+run_matrix.sh … M1 M2 M3s M5 M7a M7b M8 M10 M10h M10v`). Nothing re-thresholded; escalated.

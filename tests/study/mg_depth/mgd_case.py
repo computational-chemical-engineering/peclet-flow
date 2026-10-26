@@ -14,6 +14,9 @@ One process = one case at one pressure-multigrid depth. Every case takes
     --line-relaxation on|off
                  diagnostics.set_pressure_line_relaxation (doc/mg_depth_policy.md A2.4) before the
                  geometry; absent: no call (the solver default, on since WO-7)
+    --vcycle-symmetric on|off
+                 diagnostics.set_pressure_vcycle_symmetric (doc/mg_depth_policy.md A3) before the
+                 geometry; absent: no call (the solver default)
 
 Cases (--case):
     swarm      periodic bubble swarm, case A groups, single rank: the --single path of
@@ -90,6 +93,9 @@ TAG = arg("--tag", "")
 LINE = arg("--line-relaxation", None)
 if LINE not in (None, "on", "off"):
     sys.exit("mgd_case: --line-relaxation on|off")
+SYM = arg("--vcycle-symmetric", None)
+if SYM not in (None, "on", "off"):
+    sys.exit("mgd_case: --vcycle-symmetric on|off")
 load0 = os.getloadavg()
 
 # MPI only when launched under mpirun (the channel at np > 1)
@@ -108,11 +114,14 @@ fields_C = False     # dump C too
 
 def depth(s):
     """--levels L >= 1: an exact depth, before the geometry; 0: leave the solver default.
-    --line-relaxation on|off: the A2.4 line smoother switch (absent: the default)."""
+    --line-relaxation on|off: the A2.4 line smoother switch (absent: the default).
+    --vcycle-symmetric on|off: the A3 symmetric V-cycle switch (absent: the default)."""
     if LEVELS >= 1:
         s.set_pressure_multigrid(True, LEVELS)
     if LINE is not None:
         s.diagnostics.set_pressure_line_relaxation(LINE == "on")
+    if SYM is not None:
+        s.diagnostics.set_pressure_vcycle_symmetric(SYM == "on")
 
 
 # ------------------------------------------------------------------------------------- swarm
@@ -204,6 +213,8 @@ def build_bc():
                 return o
         rp.pf.Solver = _Shim
     s = rp.build(None)
+    if SYM is not None:  # the A3 switch is live (read at V-cycle time): after the build
+        s.diagnostics.set_pressure_vcycle_symmetric(SYM == "on")
     if RTOL is not None:
         s.set_pressure_pcg(True, 800, RTOL)
     fields_C = True
@@ -476,7 +487,7 @@ if rank == 0:
     prec_flips = sum(1 for a, b in zip(prec, prec[1:]) if a == "fp32" and b == "fp64")
     res = {
         "case": CASE, "tag": TAG, "np": size, "grid": list(GRID), "levels_req": LEVELS,
-        "line_relaxation": LINE or "default",
+        "line_relaxation": LINE or "default", "vcycle_symmetric": SYM or "default",
         "levels": len(ratios), "ratios": [list(r) for r in ratios], "bottom": list(bottom),
         "bottom_cells": int(np.prod(bottom)), "dims": [list(d) for d in dims],
         "space": str(getattr(pf, "execution_space", "?")),

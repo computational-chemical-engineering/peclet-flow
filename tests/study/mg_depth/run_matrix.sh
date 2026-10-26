@@ -28,6 +28,9 @@
 #   DUMP=1            also --dump every run (large at 192^3); M3s always dumps
 #   LR_OFF_LEVELS="0 4"  extra arms at these depths with --line-relaxation off (doc/mg_depth_policy.md
 #                     A2.5 G-LR), run and labelled as depth tokens "<L>off" (files *_L<L>off_*)
+#   SYM_LEVELS="0"    extra arms at these depths with --vcycle-symmetric on (doc/mg_depth_policy.md A3,
+#                     WO-S2), labelled "<L>sym" (combines with LR_OFF_LEVELS' tokens as "<L>offsym")
+#   ONLY_LEVELS="0"   replaces the row's own depth list (before EXTRA/LR_OFF/SYM arms are added)
 #   LOCK=<file>       the heavy-job lock (default bubble_column_perf/gpu_diag/mgd/heavy.lock)
 # Each row = one probe per depth (2 steps, PECLET_FLOW_MG_DEBUG=1 PECLET_FLOW_AGMG_DEBUG=1: debug
 # output only, read for the bottom engine) and ROUNDS timed rounds L_a L_b ... L_a L_b ..., all
@@ -39,6 +42,15 @@ ROUNDS=${ROUNDS:-3}
 EXTRA_LEVELS=${EXTRA_LEVELS:-}
 LR_OFF_LEVELS=${LR_OFF_LEVELS:-}
 DUMP=${DUMP:-0}
+SYM_LEVELS=${SYM_LEVELS:-}
+ONLY_LEVELS=${ONLY_LEVELS:-}
+# depth token -> mgd_case.py arguments: "<L>[off][sym]"
+targs() {
+  local t=$1 a=""
+  [[ $t == *sym ]] && { a="--vcycle-symmetric on"; t=${t%sym}; }
+  [[ $t == *off ]] && { a="$a --line-relaxation off"; t=${t%off}; }
+  echo "--levels $t $a"
+}
 
 if [ "${1:-}" = "__row" ]; then   # inner: one row, called under flock
   shift; MC=$1; MH=$2; OUT=$3; ROW=$4
@@ -68,8 +80,10 @@ if [ "${1:-}" = "__row" ]; then   # inner: one row, called under flock
          launch="mpirun -np 2 --bind-to none -x OMP_NUM_THREADS -x OMP_PROC_BIND -x PYTHONPATH python" ;;
     *) echo "ROW $ROW unknown"; exit 2 ;;
   esac
+  [ -n "$ONLY_LEVELS" ] && lv="$ONLY_LEVELS"
   [ -n "$EXTRA_LEVELS" ] && lv="$EXTRA_LEVELS $lv"
   for L in $LR_OFF_LEVELS; do lv="$lv ${L}off"; done
+  for L in $SYM_LEVELS; do lv="$lv ${L}sym"; done
   export OMP_NUM_THREADS=$thr OMP_PROC_BIND=false PYTHONPATH=$mod
   export PATH=/usr/local/cuda-13.4/bin:$PATH
   subcases=("$args")
@@ -79,7 +93,7 @@ if [ "${1:-}" = "__row" ]; then   # inner: one row, called under flock
   for sa in "${subcases[@]}"; do
     sub=$ROW; [ ${#subcases[@]} -gt 1 ] && sub=${ROW}_$si
     for L in $lv; do   # probes: the bottom engine from the debug lines
-      PECLET_FLOW_MG_DEBUG=1 PECLET_FLOW_AGMG_DEBUG=1 $launch "$HERE/mgd_case.py" $sa --levels ${L%off} $([[ $L == *off ]] && echo --line-relaxation off) \
+      PECLET_FLOW_MG_DEBUG=1 PECLET_FLOW_AGMG_DEBUG=1 $launch "$HERE/mgd_case.py" $sa $(targs $L) \
         --steps 2 --warm 0 --max-steps 2 --tag probe > "$D/${sub}_L${L}_probe.log" 2>&1
       echo "probe rc $?" >> "$D/${sub}_L${L}_probe.log"
     done
@@ -87,7 +101,7 @@ if [ "${1:-}" = "__row" ]; then   # inner: one row, called under flock
       for L in $lv; do
         ex=""; { [ "$DUMP" = 1 ] || [ "$ROW" = M3s ]; } && [ "$r" = 1 ] && ex="--dump $D/${sub}_L${L}.npz"
         gb=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l)
-        $launch "$HERE/mgd_case.py" $sa --levels ${L%off} $([[ $L == *off ]] && echo --line-relaxation off) --steps $steps --warm $warm --tag "${sub}_r$r" \
+        $launch "$HERE/mgd_case.py" $sa $(targs $L) --steps $steps --warm $warm --tag "${sub}_r$r" \
           --json "$D/${sub}_L${L}_r$r.json" $ex > "$D/${sub}_L${L}_r$r.log" 2>&1
         echo "rc $? gpu_apps_before $gb gpu_apps_after $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l) load_after $(cut -d" " -f1 /proc/loadavg)" >> "$D/${sub}_L${L}_r$r.log"
       done

@@ -37,8 +37,8 @@ def engine(probe):
 
 rows = {}
 for js in sorted(glob.glob(os.path.join(D, "*_r[0-9]*.json"))):
-    m = re.match(r"(.*)_L(\d+)_r(\d+)\.json$", os.path.basename(js))
-    sub, L, r = m.group(1), int(m.group(2)), int(m.group(3))
+    m = re.match(r"(.*)_L(\d+(?:off)?(?:sym)?)_r(\d+)\.json$", os.path.basename(js))
+    sub, L, r = m.group(1), m.group(2), int(m.group(3))  # L: the depth token ("4", "0off", "0sym")
     res = json.load(open(js))
     log = js[:-5] + ".log"
     txt = open(log, errors="replace").read() if os.path.exists(log) else ""
@@ -75,7 +75,7 @@ for (sub, L), rr in sorted(rows.items()):
         extra += f" steps={r1['steps']} itmed2={r1['iters_median_2nd_half']:g} umaxsolid={r1['max_u_solid']:.3e}"
     out[(sub, L)] = dict(ms=med, iters=r1["iters_mean"], bottom=r1["bottom"], eng=eng, lmax=lmax)
     b = "x".join(map(str, r1["bottom"]))
-    line = (f"{sub} L{L}{'(default)' if L == 0 else ''}: levels {r1['levels']} bottom {b} ({r1['bottom_cells']}) "
+    line = (f"{sub} L{L}{'(default)' if L == '0' else ''}: levels {r1['levels']} bottom {b} ({r1['bottom_cells']}) "
             f"{eng} | {med:.2f} ms/step (rounds {', '.join(f'{x:.1f}' for x in ms)}) | iters "
             f"{r1['iters_mean']:.2f} [{r1['iters_min']},{r1['iters_max']}]{' VAR' if len(its) > 1 else ''}"
             f" | div max {r1['div_max']:.3e} | fp32 {r1['prec_last']} restarts {fr} | failed {capped}"
@@ -95,15 +95,15 @@ if MD:
 for f in fails:
     print(f"ROW {ROW} FAILED-RUN {f}")
 
-if ROW == "M1" and all((ROW, L) in out for L in (4, 5, 6, 7)):
-    t = {L: out[(ROW, L)]["ms"] for L in (4, 5, 6, 7)}
-    it = {L: out[(ROW, L)]["iters"] for L in (4, 5, 6, 7)}
-    nj = max(out[(ROW, L)]["lmax"] for L in (4, 5, 6, 7)) > LOADMAX
-    a = t[5] <= 1.08 * min(t[6], t[7])
-    b = t[5] <= 0.20 * t[4]
-    c = it[5] <= it[6]
+if ROW == "M1" and all((ROW, L) in out for L in ("4", "5", "6", "7")):
+    t = {L: out[(ROW, L)]["ms"] for L in ("4", "5", "6", "7")}
+    it = {L: out[(ROW, L)]["iters"] for L in ("4", "5", "6", "7")}
+    nj = max(out[(ROW, L)]["lmax"] for L in ("4", "5", "6", "7")) > LOADMAX
+    a = t["5"] <= 1.08 * min(t["6"], t["7"])
+    b = t["5"] <= 0.20 * t["4"]
+    c = it["5"] <= it["6"]
     v = lambda ok: ("NOT JUDGED" if nj else ("PASS" if ok else "MISS"))
-    print(f"CHECKPOINT G-PERF-WS(M1, AUTO=L5): (a) t5 {t[5]:.2f} <= 1.08*min(t6 {t[6]:.2f}, t7 {t[7]:.2f})"
-          f" = {1.08 * min(t[6], t[7]):.2f}: {v(a)}; (b) t5 <= 0.20*t4 {t[4]:.2f} = {0.2 * t[4]:.2f}: {v(b)};"
-          f" (c) it5 {it[5]:.2f} <= it6 {it[6]:.2f}: {'PASS' if c else 'MISS'}"
-          f"; L5 vs L6 {100 * (t[5] / t[6] - 1):+.1f} %")
+    print(f"CHECKPOINT G-PERF-WS(M1, AUTO=L5): (a) t5 {t['5']:.2f} <= 1.08*min(t6 {t['6']:.2f}, t7 {t['7']:.2f})"
+          f" = {1.08 * min(t['6'], t['7']):.2f}: {v(a)}; (b) t5 <= 0.20*t4 {t['4']:.2f} = {0.2 * t['4']:.2f}: {v(b)};"
+          f" (c) it5 {it['5']:.2f} <= it6 {it['6']:.2f}: {'PASS' if c else 'MISS'}"
+          f"; L5 vs L6 {100 * (t['5'] / t['6'] - 1):+.1f} %")
