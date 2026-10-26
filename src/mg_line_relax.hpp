@@ -97,23 +97,34 @@ struct LineRowFp32 {
   }
 };
 
-// One column (la, lb) along s: the A2.4 solve and the update x_k += delta_k. c, y, z: scratch of
-// the level's extent, indexed by cell.
-template <class Row, class SV>
-KOKKOS_INLINE_FUNCTION void lineColumn(const Row& R, const SV& c, const SV& y, const SV& z, int la,
-                                       int lb, C3 n, int g, int wrapMask, bool periodic) {
+// The column's c, y, z by k: the level-extent scratch (indexed by cell) or, for m <= kLineRegs,
+// thread-local arrays (A2.6: "hold c, y, z in registers for m <= 64"). The arithmetic and its
+// order are the same in both, so the result is bitwise the same (A2.4).
+constexpr int kLineRegs = 64;
+template <class SV>
+struct LineScratchGlobal {
+  SV cv, yv, zv;
+  long i0, t;
+  KOKKOS_INLINE_FUNCTION typename SV::reference_type c(int k) const { return cv(i0 + (long)k * t); }
+  KOKKOS_INLINE_FUNCTION typename SV::reference_type y(int k) const { return yv(i0 + (long)k * t); }
+  KOKKOS_INLINE_FUNCTION typename SV::reference_type z(int k) const { return zv(i0 + (long)k * t); }
+};
+template <class Real>
+struct LineScratchLocal {
+  Real cv[kLineRegs], yv[kLineRegs], zv[kLineRegs];
+  KOKKOS_INLINE_FUNCTION Real& c(int k) { return cv[k]; }
+  KOKKOS_INLINE_FUNCTION Real& y(int k) { return yv[k]; }
+  KOKKOS_INLINE_FUNCTION Real& z(int k) { return zv[k]; }
+};
+
+// One column along s from its first cell i0 (local coordinates l3 with l3[s] = g): the A2.4 solve
+// and the update x_k += delta_k, with the column's c, y, z in S.
+template <class Row, class Store>
+KOKKOS_INLINE_FUNCTION void lineColumnSolve(const Row& R, Store& S, long i0, int m, int l3[3], C3 n,
+                                            int g, int wrapMask, bool periodic) {
   using Real = typename Row::Real;
   const Real eps = Row::kEps;
-  int a = 0, bb = 0;
-  lineAxesOf(R.s, a, bb);
-  const int ns = R.s == 0 ? n.x : (R.s == 1 ? n.y : n.z);
-  int l3[3];
-  l3[a] = la;
-  l3[bb] = lb;
-  l3[R.s] = g;
-  const long i0 = (long)l3[0] + (long)l3[1] * R.sy + (long)l3[2] * R.sz;
   const long t = R.t;
-  const int m = ns;
   // s periodic: beta = l_0, alpha = u_{m-1} (after the decoupled-cell zeroing); both zero ->
   // Thomas.
   Real alpha = Real(0), beta = Real(0);
@@ -166,33 +177,53 @@ KOKKOS_INLINE_FUNCTION void lineColumn(const Row& R, const SV& c, const SV& y, c
       zk = (zr - l * zPrev) / p;
     }
     const Real ck = u / p;
-    c(i) = ck;
-    y(i) = yk;
+    S.c(k) = ck;
+    S.y(k) = yk;
     if (sm)
-      z(i) = zk;
+      S.z(k) = zk;
     cPrev = ck;
     yPrev = yk;
     zPrev = zk;
   }
   for (int k = m - 2; k >= 0; --k) {
-    const long i = i0 + (long)k * t;
-    y(i) -= c(i) * y(i + t);
+    S.y(k) -= S.c(k) * S.y(k + 1);
     if (sm)
-      z(i) -= c(i) * z(i + t);
+      S.z(k) -= S.c(k) * S.z(k + 1);
   }
   Real f = Real(0);
   if (sm) {
-    const long iL = i0 + (long)(m - 1) * t;
-    const Real den = Real(1) + z(i0) + beta * z(iL) / gamma;
+    const Real den = Real(1) + S.z(0) + beta * S.z(m - 1) / gamma;
     if (!(Kokkos::fabs(den) < eps))
-      f = (y(i0) + beta * y(iL) / gamma) / den;
+      f = (S.y(0) + beta * S.y(m - 1) / gamma) / den;
   }
   for (int k = 0; k < m; ++k) {
     const long i = i0 + (long)k * t;
     if (sm)
-      R.x(i) = R.x(i) + (y(i) - f * z(i));
+      R.x(i) = R.x(i) + (S.y(k) - f * S.z(k));
     else
-      R.x(i) = R.x(i) + y(i);
+      R.x(i) = R.x(i) + S.y(k);
+  }
+}
+
+// One column (la, lb) along s. c, y, z: the level-extent scratch, used when m > kLineRegs.
+template <class Row, class SV>
+KOKKOS_INLINE_FUNCTION void lineColumn(const Row& R, const SV& c, const SV& y, const SV& z, int la,
+                                       int lb, C3 n, int g, int wrapMask, bool periodic) {
+  using Real = typename Row::Real;
+  int a = 0, bb = 0;
+  lineAxesOf(R.s, a, bb);
+  const int m = R.s == 0 ? n.x : (R.s == 1 ? n.y : n.z);
+  int l3[3];
+  l3[a] = la;
+  l3[bb] = lb;
+  l3[R.s] = g;
+  const long i0 = (long)l3[0] + (long)l3[1] * R.sy + (long)l3[2] * R.sz;
+  if (m <= kLineRegs) {
+    LineScratchLocal<Real> S;
+    lineColumnSolve(R, S, i0, m, l3, n, g, wrapMask, periodic);
+  } else {
+    LineScratchGlobal<SV> S{c, y, z, i0, R.t};
+    lineColumnSolve(R, S, i0, m, l3, n, g, wrapMask, periodic);
   }
 }
 
