@@ -792,6 +792,19 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "forces GraphAMG (the A/B instrument). doc/vof_step_performance_design.md §13, §14 "
           "H-1.")
       .def(
+          "set_pressure_line_relaxation",
+          [](D& diag, bool enabled) { diag.s->setPressureLineRelaxation(enabled); },
+          nb::arg("enabled"),
+          "Zebra line relaxation in the pressure multigrid (DEFAULT True). On a level whose "
+          "finest axis has stopped coarsening (its extent no longer halves) while the other two "
+          "keep coarsening, so that the coarse cells are more than 2:1 elongated across it, the "
+          "smoother solves each line along that axis exactly (tridiagonal; cyclic for a periodic "
+          "axis) instead of relaxing point by point, which damps the error modes the coarse grid "
+          "cannot see. Every other level, and every grid without such a level, is unchanged; "
+          "False restores the point red-black smoother everywhere, bit for bit. Under MPI a level "
+          "whose line axis is split across ranks keeps the point smoother. Live. "
+          "doc/mg_depth_policy.md Amendment A2.")
+      .def(
           "set_pressure_vcycle_precision",
           [](D& diag, const std::string& mode) {
             if (mode == "auto")

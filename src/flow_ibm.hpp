@@ -516,6 +516,9 @@ class Solver {
   // bottom solve, naming the failed condition, where ineligible), 2 "algebraic" (GraphAMG always).
   // Live; independent of the geometry.
   void setPressureBottomSolver(int engine);
+  // Zebra line relaxation on the pressure-MG levels whose unique strong axis stops coarsening
+  // (doc/mg_depth_policy.md Amendment A2.4): DEFAULT on; off = point RB-GS everywhere. Live.
+  void setPressureLineRelaxation(bool enabled);
   // Precision of the pressure V-cycle preconditioner (doc/vof_projection_cost_design.md §4.4.6):
   // 1 "fp64" (DEFAULT), 2 "fp32" (opt-in, single-rank; raises at the solve, naming the failed
   // condition, where CutcellMG::fp32VcycleIneligible does not hold), 0 "auto" (opt-in; FP32 where

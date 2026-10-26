@@ -640,6 +640,7 @@ inline void prolongAdd(CCField fine, CCConst coarse, C3 fext, C3 cext, int gf, i
 
 }  // namespace peclet::flow
 #include "mg_fp32_vcycle.hpp"  // D: the FP32 V-cycle kernels (doc/vof_projection_cost_design.md §4)
+#include "mg_line_relax.hpp"   // A2.4: the zebra line smoother (doc/mg_depth_policy.md, WO-7)
 namespace peclet::flow {
 
 // --- The direct bottom solve (doc/vof_step_performance_design.md §5.7, §5.14, §13, §14 H-1) -----
@@ -1078,9 +1079,18 @@ class CutcellMG {
     // GLOBAL quantities only (gdim, cfac, the metric, theta, the domain BCs: no collective,
     // np-independent). strongAspect = A' = min_{b != s} H_b / H_s for the unique strong axis s
     // (H_a = hp_a * cfac_a; 0 when no axis is strictly finest); lineAxis = s when the trigger T
-    // holds on this level, else -1. Stored and printed only: nothing reads it yet (WO-7 will).
+    // holds on this level, else -1. Read by the line smoother (A2.4, lineRelaxOn).
     double strongAspect = 0.0;
     int lineAxis = -1;
+    // A2.4: bit a set iff the level decomposition has ONE block along a (every axis single-rank;
+    // set from the replicated decomposition in initMpi). The line smoother runs along s only where
+    // bit s is set; a split s keeps point RB-GS on that level.
+    int wholeAxes = 7;
+    // A2.4: the line smoother's scratch c, y, z on a triggered level (lineAxis >= 0), level extent,
+    // FP64 (allocated with the level's FP64 data, allocLine) and FP32 (with its FP32 data,
+    // fp32Build); empty elsewhere.
+    CCField lnc, lny, lnz;
+    Kokkos::View<VReal*, CCMem> lncf, lnyf, lnzf;
     std::size_t n = 0;
     // Ghost width of this level's block (1 default; 2 on distributed coarse levels eligible for
     // communication-avoiding smoothing — see initMpi). Single-rank always 1 (byte-identical).
@@ -1347,7 +1357,7 @@ class CutcellMG {
       inner = next;
       cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
     }
-    assignLineAxes();       // A2.3: stored and printed only
+    assignLineAxes();       // A2.3
     allocFp64(lv_.back());  // the bottom level is whole in every precision
     buildBottomStore();     // the direct bottom's storage (single rank, every backend)
     computeFp32Last();
@@ -1778,11 +1788,14 @@ class CutcellMG {
       {
         std::array<bool, 3> sper = per;
         v.wrapAxes = 0;
+        v.wholeAxes = 0;
         for (int a = 0; a < 3; ++a) {
           bool oneBlock = true;
           for (std::size_t b = 0; b < dec.sizes().size(); ++b)
             oneBlock =
                 oneBlock && dec.origins()[b][a] == 0 && dec.sizes()[b][a] == dec.globalSize()[a];
+          if (oneBlock)
+            v.wholeAxes |= 1 << a;  // A2.4
           const bool outflow = bc_[2 * a] == 3 || bc_[2 * a + 1] == 3;
           if (oneBlock && !outflow && dec.globalSize()[a] % 2 == 0) {
             v.wrapAxes |= 1 << a;
@@ -1952,7 +1965,9 @@ class CutcellMG {
       // order).
       curDec = curDec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
     }
-    assignLineAxes();    // A2.3: stored and printed only
+    assignLineAxes();  // A2.3
+    for (Level& v : lv_)
+      allocLine(v);      // A2.4: this path allocates every level's FP64 data in the loop above
     computeFp32Last();   // D-dist (§5.2): after the hierarchy, before any operator build
     buildBottomStore();  // §14 H-6: the host global bottom gb_ (none on a device backend)
     if (mgDebugLevel() && rank == 0) {
@@ -4170,6 +4185,11 @@ class CutcellMG {
       lv.rhsf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_rhsf", lv.n);
       lv.resf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_resf", lv.n);
     }
+    if (lv.lineAxis >= 0 && lv.lncf.extent(0) != lv.n) {  // A2.4: the FP32 line scratch
+      lv.lncf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_line_f", lv.n);
+      lv.lnyf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_line_f", lv.n);
+      lv.lnzf = Kokkos::View<VReal*, CCMem>("peclet::flow::mg_line_f", lv.n);
+    }
 #ifdef PECLET_FLOW_MPI
     // §5.1: the FP32 ghost exchange on the level's existing topology (same g, same neighbours).
     // Created inside the collective operator build on a global decision.
@@ -4203,6 +4223,15 @@ class CutcellMG {
     for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
       if (need(*p))
         *p = FPV("mg_A", v.n);
+    allocLine(v);
+  }
+  // A2.4: the FP64 line-smoother scratch of a triggered level, with the level's FP64 data.
+  static void allocLine(Level& v) {
+    if (v.lineAxis < 0)
+      return;
+    for (CCField* p : {&v.lnc, &v.lny, &v.lnz})
+      if (p->extent(0) != v.n)
+        *p = CCField("mg_line", v.n);
   }
   // D5: may an operator build leave out the non-bottom levels' FP64 V-cycle data? When the FP32
   // V-cycle data are built (fp32Build's conditions) and the outer operator is exact (the level-0
@@ -4300,6 +4329,9 @@ class CutcellMG {
       v.AFX = FPV();
       v.AFY = FPV();
       v.AFZ = FPV();
+      v.lnc = CCField();  // A2.4 scratch follows the level's FP64 data (allocFp64 rebuilds it)
+      v.lny = CCField();
+      v.lnz = CCField();
       if (L > 0) {
         v.x = CCField();
         v.AC = FPV();
@@ -4378,6 +4410,7 @@ class CutcellMG {
   // fusedWrapSmooth by eligibility). skipFirst: the entry pass already did the first colour.
   void smoothFp32(Level& lv, int sweeps, bool reverse, bool skipFirst) {
     const C3 og = parityOg(lv);
+    const bool line = lineRelaxOn(lv);  // A2.4: column colours on a triggered level
     for (int k = 0; k < sweeps; ++k)
       for (int s = 0; s < 2; ++s) {
         if (skipFirst) {
@@ -4385,6 +4418,10 @@ class CutcellMG {
           continue;
         }
         const int color = reverse ? (1 - s) : s;
+        if (line) {
+          lineSmoothColorFp32(lv, lv.lineAxis, color);
+          continue;
+        }
         cutcellSmoothColorFp32Wrap(lv.xf, VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY),
                                    VConst(lv.WZ), lv.ext, lv.inner, og, lv.g, color);
       }
@@ -4458,6 +4495,17 @@ class CutcellMG {
   // level (never level 0, so never skipFirst), else the per-colour exchange overlapped with the
   // interior sweep. skipFirst: the level-0 entry already did the first colour.
   void smoothFp32Dist(Level& lv, int sweeps, bool reverse, bool skipFirst) {
+    if (lineRelaxOn(lv)) {  // A2.4: column colours, the per-colour exchange (no CA pair)
+      for (int k = 0; k < sweeps; ++k)
+        for (int s = 0; s < 2; ++s) {
+          if (skipFirst) {
+            skipFirst = false;
+            continue;
+          }
+          lineSmoothColorFp32(lv, lv.lineAxis, reverse ? (1 - s) : s);
+        }
+      return;
+    }
     const C3 og = parityOg(lv);
     const int g = lv.g;
     const C3 e = lv.ext;
@@ -4752,6 +4800,55 @@ class CutcellMG {
     return nullptr;
   }
 #endif
+  // ---- A2.4: the zebra line smoother (doc/mg_depth_policy.md Amendment A2.4, WO-7) -------------
+  // On a triggered smoothed level (lineAxis = s >= 0) with LR on and s whole on every rank (the
+  // level decomposition has one block along s), every point-smoothing call sweeps two COLUMN
+  // colours instead of two cell colours; a split s keeps point RB-GS there. Read at smoothing time.
+  bool lineRelaxOn(const Level& lv) const {
+    return lineRelax_ && lv.lineAxis >= 0 && ((lv.wholeAxes >> lv.lineAxis) & 1);
+  }
+  // s periodic: both domain faces on s periodic (the cyclic column system, Sherman-Morrison).
+  bool linePeriodic(int s) const { return bc_[2 * s] == 0 && bc_[2 * s + 1] == 0; }
+  // One FP64 column colour on level lv along s. Before it, what the level's point path does before
+  // a colour in its non-CA form: single rank the fill + applyOutflowGhost, or the fused-wrap reads;
+  // distributed the stencil-halo exchange + applyOutflowGhost (no exchange when every axis wraps).
+  void lineSmoothColor(Level& lv, int s, int color) {
+    int m = 0;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      m = stencilWrap(lv);
+      if (m != 7) {
+        stencilHalo(lv).exchange(lv.x);
+        applyOutflowGhost(lv, lv.x, lv.g);
+      }
+    } else
+#endif
+    {
+      if (fusedWrapSmooth(lv)) {
+        m = 7;
+      } else {
+        fill(lv, lv.x);
+        applyOutflowGhost(lv, lv.x, lv.g);
+      }
+    }
+    lineRelaxColorFace(lv.x, CCConst(lv.rhs), FPC(lv.AC), FPC(lv.AFX), FPC(lv.AFY), FPC(lv.AFZ),
+                       lv.lnc, lv.lny, lv.lnz, lv.ext, parityOg(lv), lv.g, s, linePeriodic(s), m,
+                       color);
+  }
+  // One FP32 column colour: single rank the in-kernel wrap (smoothFp32's reads); distributed the
+  // FP32 stencil-halo exchange (no outflow face on the FP32 path: eligibility).
+  void lineSmoothColorFp32(Level& lv, int s, int color) {
+    int m = 7;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      m = stencilWrap(lv);
+      if (m != 7)
+        stencilHaloF(lv).exchange(lv.xf);
+    }
+#endif
+    lineRelaxColorFp32(lv.xf, VConst(lv.rhsf), VConst(lv.WX), VConst(lv.WY), VConst(lv.WZ), lv.lncf,
+                       lv.lnyf, lv.lnzf, lv.ext, parityOg(lv), lv.g, s, linePeriodic(s), m, color);
+  }
   // Marks a solve that carries an overlay (star couplings / the ghost-projection BiCGStab) for its
   // whole duration, every exit path included.
   struct OverlayScope {
@@ -4760,6 +4857,12 @@ class CutcellMG {
     ~OverlayScope() { flag = false; }
   };
   void smooth(Level& lv, int sweeps, bool reverse) {
+    if (lineRelaxOn(lv)) {  // A2.4: column colours on a triggered level (no CA pair)
+      for (int k = 0; k < sweeps; ++k)
+        for (int s = 0; s < 2; ++s)
+          lineSmoothColor(lv, lv.lineAxis, reverse ? (1 - s) : s);
+      return;
+    }
     const C3 og = parityOg(lv);  // red-black parity origin ({0,0,0} single-rank)
 #ifdef PECLET_FLOW_MPI
     if (caSmooth(lv)) {
@@ -4951,7 +5054,7 @@ class CutcellMG {
       printf("[mg-census] depth requested %s -> %d levels, bottom %dx%dx%d; auto -> >%d%s\n",
              depthRequestLabel(nLevels).c_str(), D, b.x, b.y, b.z, D, line.c_str());
   }
-  // A2.3 accessors (stored and printed only; nothing in the solve reads them yet). lineAxes():
+  // A2.3 accessors (lineRelaxOn reads lineAxis: the A2.4 line smoother). lineAxes():
   // every level's lineAxis (T holds: the strong axis s; else -1). lineSmoothedLevels(): the
   // TRIGGERED SMOOTHED levels -- T holds and the V-cycle smooths the level: every level above the
   // bottom, and the bottom when it is the smoothed bottom (not agglomerated into an exact solve).
@@ -6989,6 +7092,8 @@ class CutcellMG {
   // (`setAspectThreshold`; only ever consulted on an ANISOTROPIC metric). 1e9 restores full
   // coarsening (the §8.5 item (c) ablation), 1.4142 is the sqrt(2) variant §5.2 weighs against 2.0.
   double aspectTheta_ = 2.0;
+  bool lineRelax_ =
+      true;  // A2.4: the line smoother on triggered smoothed levels (setLineRelaxation)
   // Communication-avoiding smoothing (see the kCa* enum): both subsystems on by default. Only
   // kCaMg is read here; the momentum half lives in IbmSolver.
   int caMode_ = kCaBoth;
@@ -7102,6 +7207,15 @@ class CutcellMG {
   bool coarseGhost() const { return bcGhost_; }
   /// Anisotropic-coarsening aspect threshold theta (see aspectTheta_).
   void setAspectThreshold(double theta) { aspectTheta_ = theta; }
+  /// A2.4 (doc/mg_depth_policy.md, WO-7): zebra line relaxation along the blocked strong axis on
+  /// the triggered smoothed levels (A2.3); default on. Off is the point RB-GS smoother bit for bit.
+  /// Read at smoothing time; a change invalidates the kept Chebyshev eigenvalue vectors.
+  void setLineRelaxation(bool on) {
+    if (on != lineRelax_)
+      eigWarm_ = false;
+    lineRelax_ = on;
+  }
+  bool lineRelaxation() const { return lineRelax_; }
   double aspectThreshold() const { return aspectTheta_; }
   /// Communication-avoiding smoothing mask (kCaMomentum | kCaMg); only kCaMg is read here.
   void setCommAvoiding(int mask) { caMode_ = mask; }
