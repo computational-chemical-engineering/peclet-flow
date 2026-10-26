@@ -318,3 +318,9 @@ prof dumps PASS host and CUDA vs `ref/a2base_*`; printed identical (CUDA: PIDs o
 Every solve met its stop test (0 failed), FP32 flips and Chebyshev restarts 0, iterations identical across rounds
 and attempts. M10v G-ASP (1) PASS (A1(1) 0.728 / 0.377, A1(2) 1.143). **Verdicts:** M10h and M10v G-ASP (1)–(3)
 PASS. M10 timing still NOT JUDGED (load 26.7 > 24; loaded AUTO 0.34 × L4, 0.79 × L6, rounds within 0.2 %).
+
+**WO-A2b attempt 3 (M10 only; `a2/b_attempt_m10.sh 3`, `judge_a3.txt`; 07:44, load max 0.3).** ms L0 / L4 / L6
+16.40 / 47.70 / 20.80 (rounds within 1.5 %), iters 15.967 / 9.933 / 27.333 (identical to attempts 1–2), 0 failed.
+G-ASP (1) PASS; (2) 16.40 ≤ 1.00 × 47.70 PASS; (3) iters PASS, t 16.40 ≤ 1.03 × 20.80 PASS. **WO-A2b: G-ASP (1)–(3)
+PASS on M10, M10h and M10v.** (The judge's GASP_ALL line reads M10h/M10v NOT RUN in this matrix; they are judged in
+attempt 2.)
