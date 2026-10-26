@@ -298,3 +298,23 @@ iterations identical across rounds. **Verdicts:** G-ASP (1) PASS M10, M10h; M10v
 (1b) NOT RUN. G-ASP (3) iterations PASS M10 (15.967 ≤ 27.333), M10h (21.967 ≤ 45.533). G-ASP (2) and (3) timing
 NOT JUDGED (load 36.4 / 29.5 > 24; loaded readings AUTO 0.34 × L4 on M10, 0.77 × on M10h). M10v matrix not run
 (queued behind another job's lock; cancelled at the context cap).
+
+## 2026-10-26 — WO-A2a committed (coordinator ruling); WO-A2b timing attempt 2
+
+**WO-A2a committed (d2e525f).** Coordinator ruling 2026-10-26: A2.3's rule stands (a smoothed bottom included),
+its claim is corrected — 16×16×4 triggers {3}, so WO-7 moves the `scalar` state_hash (recorded change); rejected:
+exempt the smoothed bottom from T. Ctest expects {3} on that row. G-BIT on the final diff: state_hash 14 + np2 +
+prof dumps PASS host and CUDA vs `ref/a2base_*`; printed identical (CUDA: PIDs only); `mg_depth_policy*` 5/5 both
+(8/8 line rows); battery 105/105 + 153/153 both (CUDA `scalar_cutcell_g4` failed in the parallel pass only).
+
+**WO-A2b attempt 2** (`a2/b/attempt2.out`, `judge_a2.txt`; 04:08–07:12, rows M10 M10h M10v, mod_a2a).
+
+| row | ms L0 / L4 / L6 | iters L0 / L4 / L6 | (1b) prod vs L4 | load max | (2) AUTO ≤ L4 | (3) AUTO ≤ 1.03 × L6 |
+|---|---|---|---|---|---|---|
+| M10 | 16.37 / 47.64 / 20.77 | 15.967 / 9.933 / 27.333 | — (as attempt 1) | 26.7 | NOT JUDGED | iters PASS; t NOT JUDGED |
+| M10h | 199.66 / 230.41 / 282.61 | 21.967 / 13.000 / 45.533 | PASS | 20.1 | PASS (≤ 1.03 × 230.41) | PASS |
+| M10v (np 2) | 356.22 / 396.16 / 458.94 | 20.000 / 13.000 / 32.800 | PASS 3.1e-13 (tol 1e-8) | 10.2 | PASS (≤ 1.03 × 396.16) | PASS |
+
+Every solve met its stop test (0 failed), FP32 flips and Chebyshev restarts 0, iterations identical across rounds
+and attempts. M10v G-ASP (1) PASS (A1(1) 0.728 / 0.377, A1(2) 1.143). **Verdicts:** M10h and M10v G-ASP (1)–(3)
+PASS. M10 timing still NOT JUDGED (load 26.7 > 24; loaded AUTO 0.34 × L4, 0.79 × L6, rounds within 0.2 %).
