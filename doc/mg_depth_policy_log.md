@@ -270,3 +270,31 @@ z (25) never coarsens, so level ℓ has cells 2^ℓ : 2^ℓ : 1 — the last smo
 **Verdicts:** G-ITER **MISS** (15.967 > 11.923; +61 % over depth 4); t(AUTO) ≤ t(L4) NOT JUDGED (load 26.0 > 24;
 AUTO 3.3× faster in the loaded reading). Stopped on the MISS as the brief requires: a coarse-cell aspect bound for
 AUTO is a design decision for the architect. Not run: the rebase onto flow main and its re-gate.
+
+## 2026-10-26 — WO-A2a stopped on a fact; WO-A2b G-ASP partial (Amendment A2.5)
+
+**WO-A2a (not committed: MISS).** A2.3 implemented as written (`Level::lineAxis`, `strongAspect`, census/table
+print; diff `gpu_diag/mgd/a2/woa2a.patch`). G-BIT on that build: `state_hash` 14 (13 + np2) and prof dumps bitwise
+vs the unmodified a5b6552 (= the s1 refs) host and CUDA; printed values identical (CUDA: prterun PIDs only).
+`mg_depth_policy` FAILS one row: **16×16×4 (§4.4, the `state_hash` `scalar` case) triggers** — L1 8×8×2 blocks z,
+L3 2×2×2 has A' = 4 > θ and is the SMOOTHED bottom (2 ≤ extent 4, not agglomerated), so {3} is a triggered smoothed
+level. A2.3 says every §4.4 row has none; the rule and the claim disagree. All 8 A2.3 rows pass (128×128×25 → D 5
+{2,3}; its explicit 4 → {2}; 512×512×100 → D 7 {4,5}; 512×64×25 → D 5 {2,3}; 34×34×116, 8×8×18 → none).
+Stopped for the architect (WO-7 would move that hash).
+
+**WO-A2b** on the WO-A2a build (bitwise the unmodified one), `mgd_case.py` via `a2/tdiag.py` (traced, MG_DEBUG=2,
+debug output only) and `run_matrix.sh` rows M10, M10h (3 rounds, 5 + 30, L 0 4 6). Raw `gpu_diag/mgd/a2/b/`;
+judge `a2/asp_judge.py`. D_auto = 5 on all three rows (bottoms 8×8×25, 8×8×25, 32×4×25 direct; L4 16×16×25,
+16×16×25, 64×8×25 GraphAMG).
+
+| row | ms L0 / L4 / L6 | iters L0 / L4 / L6 | (1b) vs L4 prod; 1e-10 | A1 (1) L0 / L4 prod; 1e-10 | A1 (2) 1e-13 | load |
+|---|---|---|---|---|---|---|
+| M10 (PCG 1e-8) | 16.41 / 47.71 / 20.79 | 15.967 / 9.933 / 27.333 | 2.2e-10 (1e-6); 1.6e-12 (1e-8) | 0.982 / 0.859; 0.962 / 0.669 | 0.774 | 36.4 |
+| M10h (Cheb 1e-9) | 179.73 / 232.25 / 280.29 | 21.967 / 13.000 / 45.533 | 1.6e-11 (1e-7); 1.6e-12 (1e-8) | 0.789 / 0.732; 0.973 / 0.980 | 1.390 | 29.5 |
+| M10v (PCG 1e-10, np 2) | not run | 20.0 / 13.0 (traced) | not run | 0.728 / 0.377 | 1.143 | — |
+
+Every solve met its stop test (0 failed, max 17 / 22 / 20 ≪ caps), FP32 and Chebyshev restarts 0 everywhere,
+iterations identical across rounds. **Verdicts:** G-ASP (1) PASS M10, M10h; M10v (1a) (traced) and A1 (1), (2) PASS,
+(1b) NOT RUN. G-ASP (3) iterations PASS M10 (15.967 ≤ 27.333), M10h (21.967 ≤ 45.533). G-ASP (2) and (3) timing
+NOT JUDGED (load 36.4 / 29.5 > 24; loaded readings AUTO 0.34 × L4 on M10, 0.77 × on M10h). M10v matrix not run
+(queued behind another job's lock; cancelled at the context cap).
