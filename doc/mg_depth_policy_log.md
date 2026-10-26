@@ -324,3 +324,23 @@ PASS. M10 timing still NOT JUDGED (load 26.7 > 24; loaded AUTO 0.34 × L4, 0.79 
 G-ASP (1) PASS; (2) 16.40 ≤ 1.00 × 47.70 PASS; (3) iters PASS, t 16.40 ≤ 1.03 × 20.80 PASS. **WO-A2b: G-ASP (1)–(3)
 PASS on M10, M10h and M10v.** (The judge's GASP_ALL line reads M10h/M10v NOT RUN in this matrix; they are judged in
 attempt 2.)
+
+## 2026-10-26 — rebase onto f4ec2ef (flow origin/main 661eee6 = f4ec2ef + a study-script commit)
+
+`mgdepth` (21 commits, old HEAD 04517fb on 89e5fa7) rebased onto origin/main 661eee6 without conflicts; new tip
+8a7616e (the WO-A2b attempt-3 log commit). 661eee6 touches only `tests/study/vof_perf/weak_swarm.py` (outside ctest
+and state_hash), so main's f4ec2ef references stand: logs `bubble_column_perf/validation/wo7/{host,cuda}_mgdmain.*`.
+Gate `validation/wo7/gate.sh <host|cuda> mgdrebase` (incremental rebuild, `-LE bench -V -j 4`, OMP 4, under the
+heavy lock); census `compare_name.py` (by test name, worktree paths normalised).
+
+| gate | host | CUDA | verdict |
+|---|---|---|---|
+| -LE bench battery | 267/267 (= main 262 + 5 mg_depth_policy*) | 267/267 | PASS (no flake this time) |
+| state_hash np1 14 + np2 digest | 460e6fd14885673e (= main) | 20f528f0c295ca15 (= main) | PASS |
+| census movers vs main | scalar_cutcell_gadv (budget identity 9.4e-13 → 9.3e-13), units_vof_aniso (max\|u\| 1.244e-17 → 1.145e-17) | gadv (Pe_h 0.1 budget 4.9e-16 → 3.5e-17), units_vof_aniso (2.018e-17 → 1.540e-17) | PASS (= WO-2 movers, same values) |
+| other output diffs | hydro_force_units, movingscene_advect_mpi_np{1,2,4}, units_anisotropic_sphere: last digits of force/torque reductions (the WO-2 run-to-run set); scalar_cutcell_solve_mpi_np4: 4-rank stderr interleaving of one warning, no numeric line | same five run-to-run tests; bottom_direct_mpi_np{2,4} (skipped both sides): prterun PIDs | not movers |
+| full stress × depth movers | none | none | — |
+| mg_depth_policy* | 5/5, 8/8 line rows; output = pre-rebase a2a/mgdp_host.txt except test numbers | 5/5, 8/8; = a2a/mgdp_cuda.txt except numbers | PASS |
+| M10 trigger rows | 128×128×25 D5 {2,3}, explicit 4 {2}; 512×512×100 D7 {4,5}; 512×64×25 D5 {2,3} | identical | PASS (unchanged) |
+
+Raw: `validation/wo7/{host,cuda}_mgdrebase.{build,ctest,hash}.*`, `gpu_diag/mgd/rebase_gate.out`.
