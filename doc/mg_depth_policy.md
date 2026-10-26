@@ -625,6 +625,201 @@ Galerkin coarse operators, odd-grid coarsening/padding. Evidence: M10, A2." The 
 - Q-A5 [fact] a split s under MPI keeps point RB-GS there; no case known (ORB cuts long axes first); next: lagged ends.
 - Q-A6 [fact] the velocity MG keeps point smoothing on this class (κ ≥ 1 bounds the damage); unmeasured, out of scope.
 
+### Amendment A3 (2026-10-26) — the pressure V-cycle becomes symmetric: P = c·Rᵀ and a palindromic smoothed bottom
+
+Provenance: brief `gpu_diag/mgd/BRIEF_ARCH_MG_SYM.md`; evidence `gpu_diag/mgd/WO7_DIAG.md` (D2, D3) and the A3
+transfer-pair matrix `gpu_diag/mgd/a3/` (replica `symdiag.cpp`, `build.sh`, logs `run.log`, `run2.log`, `cut.log`;
+host, single rank, flow-mglr 4d745b0). Anchors are `src/mac_cutcell_mg.hpp` lines at 4d745b0. **Reverses part of
+register entry E2** (umbrella `docs/decisions/flow.md:767`, 2026-09-07: "no auto-FCG/symmetric-V-cycle decision
+needed") by a new recorded decision (A3.7); E2's finding (the aspect rule fixes the stretched-grid stall) stands.
+
+**A3.1 What is wrong.** PCG's short recurrence (Fletcher–Reeves β = r_{k+1}ᵀz_{k+1}/r_kᵀz_k) and its A-norm optimality
+need a fixed SPD preconditioner: only then is r_{k+1}ᵀz_k = 0 and the directions stay A-conjugate. The V-cycle is
+linear and has the adjoint smoother pair (pre forward, post reverse, pre = post = 2), but (i) R is the cell average
+(`restrictAvgCell` :513) while P is cell-centred trilinear (`prolongAddCell` :529), P ≠ c·Rᵀ; (ii) the smoothed
+bottom is 12 forward sweeps (:3965; a = 6.8e-3 alone). P − 8Rᵀ is O(1) exactly on the modes the coarse grid must
+correct: the coarse-Nyquist mode of an axis coarsened to 2 cells (thin slabs, D3), and every correction with a kink
+— across a density or aperture jump ∇p/ρ is continuous, so ∇p jumps by the ratio and trilinear P interpolates
+across it as if smooth. The random-vector a (1e-6 … 1e-4) understates this: My is dominated by the smoothest modes,
+the skew part lives on the modes above. **It is not a thin-slab defect** (matrix below: a 64³ periodic box with one
+ρ-ratio-100 blob needs production PCG 30 vs FCG 12; ratio 1e4: PCG cap, FCG 143; a 128³ swarm at 1e3: PCG cap).
+flow/CLAUDE.md's "both CG drivers cap above density ratio ~10³" is largely this defect.
+
+**Why P = c·Rᵀ is the structural fix.** With P = c·Rᵀ, SPD A and coarse operators (the rediscretized face form with
+non-negative weights, on the open mean-free subspace), an A-contractive smoother S with its A-adjoint S* as
+post-smoother and an SPD coarse solve M_c (induction from an SPD bottom), E = I − MA = S*(I − P M_c Pᵀ A/c)S gives
+⟨Ev, v⟩_A = ‖Sv‖²_A − ⟨M_c Pᵀ A Sv, Pᵀ A Sv⟩/c ≤ ‖Sv‖²_A < ‖v‖²_A, so λ(MA) > 0 and **M is SPD for any coarse
+coefficients, any depth, LR on or off**. Coarse-operator quality (E1, S3) then sets κ(MA) — iterations — and can no
+longer make the preconditioner indefinite. For uniform coefficients R A P = 2 A_c exactly (average R, constant P),
+so the rediscretized A_c gives the coarse correction its right amplitude on smooth error.
+
+**Matrix** (host replica, bitwise = `precondVcycle` with the production bottom; here pre/post 2/2, symmetric 40-sweep
+smoothed bottom, LR on unless stated; rtol 1e-10, zero guess, `rhsOf`, closed cells masked. "prod" = production
+`solvePCG`/`solveFCG` on the same hierarchy (12-sweep forward bottom). |E| = power estimate of ρ(I − MA)):
+
+| case (D) | prod PCG / FCG | T trilinear+avg: PCG / FCG / \|E\| | C constant+avg: PCG / FCG / \|E\| | F trilinear+FW: PCG / \|E\| |
+|---|---|---|---|---|
+| thinW 64×64×4 z walls, LR off (5) | 89 / 17 | 102 / 14 / 0.346 | 12 / 12 / 0.263 | 16 / 1.31 |
+| thinW, LR on (5) | 126 / 12 | 126 / 12 / 0.245 | 10 / 10 / 0.222 | 14 / 0.425 |
+| thin periodic slab 64×64×4 (5) | cap / 14 | cap / 14 / 0.267 | 11 / 11 / 0.243 | 16 / 0.655 |
+| 64³ periodic, blob ρ×100 (4; 5) | 30 / 12 | 31 / 12 / 0.262 | 10 / 10 / 0.219 | 15 / 0.395 |
+| 64³ walls, blob ρ×100 (5) | 27 / 12 | 27 / 12 / 0.262 | 10 / 10 / 0.219 | 15 / 0.395 |
+| 64³ periodic, blob ρ×10⁴ (5) | cap / 143 | cap / 143 / 0.267 | 10 / 10 / 0.226 | 73 / 26.0 |
+| 64³ fractional-aperture cylinder (4; 5) | 9 / 9 | 9 / 9 / 0.216 | 9 / 9 / 0.131 | 10 / 0.293 |
+| 64³ staircase solid sphere (5) | 9 / 9 | 9 / 9 / 0.203 | 10 / 10 / 0.156 | 10 / 0.281 |
+| 128×128×25, 12 bubbles ρ/1000 (5; 6) | cap / 57; cap / 71 | cap / 42; 63 / 0.85; 0.94 | 25; 27 / = / 0.82; 0.93 | 83; 90 / 8.5 |
+| 128³ periodic, 40 bubbles ρ/1000 (5; 6) | cap / 247; cap / 249 | cap / 247; 249 / 0.99 | 80; 82 / = / 0.98 | 271; 272 / 8.8 |
+| uniform 128³ periodic (5; 6) | 8 / 8 | 8 / 8 / 0.187 | 8 / 8 / 0.111 | 9 / 0.255 |
+| uniform 256³ periodic (6; 7), walls (7): PCG | 8; 8; 9 (= FCG) | 9; 8; 9 | 8; 8; 9 | — |
+
+Random right-hand sides agree (e.g. thinW LR off T 500, C 11; 128×128×25 D5 T 275, C 24). C: PCG = FCG on every
+row (the symmetry check in practice), PCG(C) ≤ FCG(T) on every row, |E|(C) < |E|(T) on every row (the standalone
+V-cycle and Chebyshev gain too), no growth with depth to D 7 (the textbook worry about first-order P). The
+agglomerated bottom is symmetric to its inner tolerance: bottom-alone a 6e-10 … 3e-9 (64³ D4, forced).
+
+**A3.2 Decision.** The pressure V-cycle uses **piecewise-constant prolongation, P = (Π ratio)·Rᵀ** — every fine cell
+adds its coarse parent's value — with the average restriction unchanged, and **its smoothed bottom is palindromic**.
+Scope: every pressure-MG transfer (FP64, FP32, FP32←FP64 bottom interface, telescope transition), single rank and
+distributed, every driver that applies this V-cycle (PCG, FCG, Chebyshev, standalone V-cycle, the ghost
+projection's BiCGStab). PCG stays the default driver; FCG stays opt-in. Unchanged: restriction kernels, coarse
+operators, smoothers and LR, depth rule, telescoping, bottom engines; `VelocityMG` and `ScalarMG` (own V-cycles, no CG
+premise; the shared `prolongAdd` kernel stays for them).
+Rejected:
+- **(a) FCG as the default, or AUTO-FCG on a detected class.** Treats the symptom: FCG(T) ≥ PCG(C) on every row
+  (12 vs 10 on the 64³ blob, 143 vs 10 at 10⁴, 42 vs 25, 247 vs 80); Chebyshev (the VoF default) and the standalone
+  V-cycle (multi-rank default) gain nothing; FCG has no resident fused device path (`solvePCGResident` :3094 is
+  PCG-only), so device parity needs new code. No class to detect: bulk blob cases fail too.
+- **(b) Trilinear P with full-weighting R = Pᵀ/Π ratio.** Symmetric (a 1e-17), but with rediscretized coarse
+  operators it over-corrects: stationary |E| 1.31 (thinW), 8.5 (128×128×25), 8.8 (128³ swarm), 26 (10⁴) — the
+  standalone V-cycle and Chebyshev would diverge; PCG 15–272. Also a residual halo exchange per level and a 4³-point
+  restriction with boundary folding in four kernel families.
+- **(c) Constant P only on the transfers that coarsen a thin axis.** D3: 18 / 21 vs 13 / 10, still nonsymmetric,
+  and the trigger would be a heuristic.
+- **(d) Symmetrize only the bottom.** D3: 89 → 88. **(e) Galerkin coarse operators** for this purpose: not needed for
+  definiteness once P = c·Rᵀ; S3 remains the separate fix for coefficient coarsening. **(f) Keep E2** (no decision):
+  PCG caps on the rows above.
+Cost: P reads one coarse value instead of eight and **no coarse ghost**, so the refresh before it (`fill` / `fillWrap`
++ `applyOutflowGhost` + `applyNeumannGhost`) goes: per non-bottom level and V-cycle, one to three small launches
+(single rank) or one halo exchange (distributed) fewer. The fine read-modify-write dominates both kernels, so
+t/iteration ≤ today's is expected; iterations ≤ today's on bulk, far fewer on the classes above.
+
+**A3.3 Design.**
+1. **Kernels** (next to their trilinear counterparts; gc, gf as there; parent index per axis c = i / ratio, i.e.
+   `i >> 1` on a ratio-2 axis, `i` on ratio 1):
+   `prolongConstAddCell` / `prolongConstAdd` (FP64): `fine(fi) += coarse(ci)`, fi = (ifx+gf, ify+gf, ifz+gf),
+   ci = (ifx/rx + gc, ify/ry + gc, ifz/rz + gc), over fine inner cells. `prolongConstFp32`:
+   `fine(fi) = fine(fi) + coarse(ci)` in FP32. `prolongConstFp32FromD`: `fine(fi) = (VReal)((double)fine(fi) + coarse(ci))`.
+2. **Call sites, symmetric mode:** `vcycleImpl` :4031–4037, `teleTransition` :4069–4073 (T.x zeroed, then
+   `prolongConstAdd(T.x, cs.x, T.mExt, cs.ext, T.g, cs.g, T.mInner, lv.ratio)`), `vcycleFp32Impl` :4434–4437 and
+   :4442–4444, `vcycleFp32Dist` :4471–4474 and :4481–4483: replace the prolongation by its constant form and **drop
+   the coarse-ghost refresh immediately before it**. Safe by the A5 contract (every consumer of a coarse x's ghosts
+   fills, wrap-reads or overwrites them first); G-SYM's np-equality checks enforce it.
+3. **Palindromic smoothed bottom** (:3965, symmetric mode): a = max(1, ⌊b/2⌋), c = max(1, b − ⌊b/2⌋) for b =
+   `bottom_`; `smooth(lv, a, false); smooth(lv, c, true)` (12 → 6 + 6; b = 0 stays no smoothing). A forward run followed by a reverse run is the
+   alternating colour sequence R B … R (a repeated colour is idempotent), a palindrome, hence A-self-adjoint; point,
+   CA and LR paths honour `reverse` already. The agglomerated bottom (direct / GraphAMG) is unchanged.
+   `levels = 1` (pure RB-GS) is this bottom and moves with it.
+4. **Switch** `CutcellMG::setSymmetricVcycle(bool)` (`symVcycle_`); off = the pre-A3 code bit for bit. A change sets
+   `eigWarm_ = false` (Chebyshev bounds). Python `s.diagnostics.set_pressure_vcycle_symmetric(enabled)` (NAMING
+   one-setter form, as `set_pressure_line_relaxation`). Default **off in WO-S1, on in WO-S3**. The `mgDebugLevel()`
+   census line prints `P const|trilinear, bottom palindromic|forward`.
+5. Symmetry also requires pre = post (the drivers' schedule (2, 2, 12) satisfies it) and a fixed V-cycle (the FP32
+   attempt is symmetric to FP32 rounding; its FP64 restart stays the safety net).
+
+**A3.4 Work orders** (branch `mgsym` from `mglr` after WO-7 lands, worktree `suite/flow-mgsym`; WO-7/WO-2/G-LR/G-ASP
+records stay valid: they compare like with like).
+- **WO-S0 (done, this amendment):** the matrix above; tool and logs in `gpu_diag/mgd/a3/`.
+- **WO-S1 (inert):** A3.3 items 1–5 with the switch default off; binding; ctest `mg_vcycle_symmetry` (host, CUDA; it is
+  also the guard against reintroducing P ≠ c·Rᵀ — a gate, not a grep). Gates G-BIT (switch off) and G-SYM.
+- **WO-S2 (measurement; switch on vs off on one build, interleaved):** G-SYMCONV, G-ITER-S, G-PERF-S, G-CONV-S, G-NP,
+  G-CONTRAST; record in `doc/mg_depth_policy_log.md`.
+- **WO-S3 (recorded change; after U-A3 and a WO-S2 PASS):** default on; census old → new of every moved ctest and
+  `state_hash` case (expected: all 14 — every case runs the pressure V-cycle) in the commit; register entry (A3.7);
+  CHANGELOG; flow/CLAUDE.md pressure section (constant P, the inline prohibition, the FCG row "tolerant of a
+  non-symmetric preconditioner — none by default since A3", the contrast bullet per G-CONTRAST); ref §6.
+
+**A3.5 Gates (pre-registered 2026-10-26, before any implementation run).**
+- **G-BIT** (WO-S1, switch off): as §7 — 14 `state_hash` host and CUDA, `-LE bench` host and CUDA with identical
+  printed values, two runs bitwise.
+- **G-SYM** (WO-S1, switch on; `mg_vcycle_symmetry`): a (D3's measure, random mean-free x, y, closed cells zero) of
+  the FP64 V-cycle ≤ 1e-14 on smoothed-bottom hierarchies — thinW LR on and off, thin periodic slab, the `scalar`
+  16×16×4, 64³ periodic blob D5, 64³ walls D5, `cylProblem`, an outflow-anchored channel; ≤ 1e-8 with the
+  agglomerated bottom (64³ blob D4, forced; measured ≤ 3e-9); host np 2 and 4 the same bounds; np 1 `init_mpi`
+  memcmp-equal to single rank; FP32 V-cycle (CUDA, forced 'fp32') a recorded, PCG on thinW not capped; PCG on thinW
+  ≤ 16 and on the thin periodic slab ≤ 14 (the guard).
+- **G-SYMCONV** (WO-S2, production solvers, rtol 1e-10, zero guess, `rhsOf`, closed cells zero, every matrix row):
+  (a) no cap; (b) PCG(on) ≤ min(PCG(off), FCG(off)) + 1; (c) |FCG(on) − PCG(on)| ≤ 1; (d) PCG(on) ≤ 1.25 × C + 1 of the
+  matrix (thinW 16 / 13, slab 14, 64³ blob ×100 13, ×10⁴ 13, cylinder 12, staircase sphere 13, 128×128×25 D5 32,
+  128³ swarm D5 101,
+  uniform 128³ 11, uniform 256³ D7 11).
+- **G-ITER-S** (rows M1 swarm 192³ RTX 5080 PCG, M7 Chebyshev swarm and porous bed, M8 standalone V-cycle, M10, M10h,
+  M10v, bubble column 256×192×128 device, and G-IBM's `zh_sphere` / `random_spheres` N = 48; each at its own
+  settings): mean iterations (V-cycles for M8/M10v) per step, on ≤ 1.10 × off + 0.5 (the cut-cell rows measured
+  +0…+1 per cold solve); FP32 restarts on ≤ off.
+- **G-PERF-S** (quiet host, load ≤ 24; GPU under the `heavy.lock` flock; 3 interleaved rounds of 5 + 30 steps,
+  medians): t(on) ≤ 1.02 × t(off) on M1 and the bubble column (device); ≤ 1.03 × on G-PERF-H (host 128³ swarm 1 × 6)
+  and M10v (host np 2).
+- **G-CONV-S:** A1 (1) on every step, both arms; G-CONV (b) on vs off ≤ 100 × rtol; physics metrics (`zh_sphere` K,
+  `random_spheres` k*, Hysing rise, static drop) within their own gate tolerances; A1 (2) as the user settles Q2
+  (A3.6; default (2′)).
+- **G-NP:** `mg_stencil_halo_np*`, `telescope*_mpi`, `bottom_direct_mpi`, `mg_fp32_vcycle_mpi` green, switch on;
+  `device_sync_budget` unchanged (0 fences, 0 allocations per step); halo exchanges per V-cycle recorded (expected
+  D − 1 fewer).
+- **G-CONTRAST** (decides the CLAUDE.md contrast bullet only, not the landing): a VoF case at density ratio 10³ with
+  PCG forced, switch on, 50 steps: no capped solve → the bullet is rewritten to the measured result; else unchanged.
+
+**A3.6 Q2 — A1 (2) is a stopping draw; recommended replacement (USER decision U-Q2).** D2: at rtol 1e-13 every solve
+stops on its tolerance with the final residual anywhere in 0.12–0.98 of rtol·r0, so "worst divergence, new/old ≤ 2"
+compares two draws bounded only by 1/ρ (2.965 measured between two correct arms solving the same system). At rtol
+1e-17 the recursive residual reaches 1–2e-19 in 20–57 iterations while the TRUE divergence has stagnated at its
+round-off floor, 5–9e-17 across the five arms (spread 1.8). Recommended wording, replacing A1 (2):
+
+> **(2′) At the attainable floor.** Each arm re-runs the gate case at rtol 1e-17 with the iteration cap raised to 300
+> (reaching it is not a miss here; G-CONV (a) judges caps at the production tolerance). The run is valid only if on
+> every step the post-projection max|div u| ≥ 10 · rtol · r0 (the divergence sits above the stop level, so it is the
+> round-off floor, not a stopping point); otherwise it is re-run at rtol 1e-19. Condition: the worst post-projection
+> max|div u| over the run, new / old ≤ 4. Both arms on the same build with the same smoother settings, differing only
+> in the change under test.
+
+Why 4: twice the measured spread between correct arms; the defect this condition exists for — an inconsistency
+between the operator solved and the divergence measured (a stale ghost, a wrong boundary row, a non-projecting
+update) — moves the floor by decades (the anchored channel: 8e-8 vs 2e-5 between bottoms). Rejected: (α) the
+tolerance-normalised max_k div_k/(rtol·r0_k) ≤ 1 — that is A1 (1) restated (the review's note) and cannot see a
+floor defect below the tolerance; (β) the floor ratio ≤ 2 — 1.1× margin over the measured spread, a coin flip again;
+(γ) more steps or medians at 1e-13 — still a draw bounded by 1/ρ. A1 (1) stays. The WO-2/WO-7 records against A1 (2)
+stay on record as written.
+
+**A3.7 Register text** (new entry; the coordinator commits it to the umbrella): "**The pressure V-cycle is symmetric:
+piecewise-constant prolongation P = c·Rᵀ of the cell-average restriction, palindromic smoothed bottom** (2026-10-26,
+flow `doc/mg_depth_policy.md` A3). Supersedes E2's clause 'no symmetric-V-cycle decision needed' (E2's aspect-rule
+finding stands). Rejected: FCG default / AUTO-FCG (symptom; FCG(trilinear) ≥ PCG(constant) everywhere: 12 vs 10,
+143 vs 10, 247 vs 80); trilinear P + full-weighting R (symmetric, but over-corrects: stationary |E| 1.3–26);
+constant P on thin-axis transfers only; a symmetric bottom only; Galerkin operators for this purpose. Why: CG needs
+an SPD preconditioner; trilinear P ≠ c·Rᵀ broke it (64³ blob ×100 PCG 30 vs 10; ×10⁴ cap vs 10; 128³ swarm cap vs
+80); with P = c·Rᵀ the V-cycle is SPD for any coarse coefficients. Guard: ctest `mg_vcycle_symmetry`. NEVER
+reintroduce a prolongation that is not c·Rᵀ under a CG driver because 'trilinear is more accurate'." flow/CLAUDE.md
+inlines the last sentence.
+
+**A3.8 Open questions (work proceeds on each default).**
+- **U-A3 [pref, USER]** flip the default (WO-S3): every pressure result moves within tolerance, all 14 `state_hash`
+  digests expected. Recommended yes. Default until answered: WO-S1 and WO-S2 proceed; WO-S3 is prepared as one
+  isolated commit on `mgsym`, not merged to main.
+- **U-Q2 [pref, USER]** A1 (2) → (2′) (A3.6). Default until answered: WO-S2 reports both, judges on (2′), and
+  records A1 (2) as written.
+- Q-S1 [pref] keep the trilinear path selectable after the flip: default keep (the A/B lever) through the next family
+  release, then decide its removal.
+- Q-S2 [pref, NAMING] `diagnostics.set_pressure_vcycle_symmetric(enabled)` / `setSymmetricVcycle(bool)`: default these.
+- Q-S3 [fact] depth ≥ 8 (512³ per GPU, Snellius): untested; no degradation to D 7 on host. Default proceed; G-SNEL
+  (iterations ≤ 9.5) at the next billed milestone covers it.
+- Q-S4 [fact] FP32 V-cycle asymmetry and restarts under constant P: measured by G-SYM / G-ITER-S.
+- Q-S5 [fact] Chebyshev bounds on the new spectrum: G-ITER-S M7; a miss escalates, no in-package tuning.
+- Q-S6 [fact] R1 changes meaning: with P = c·Rᵀ coarse coefficients cost iterations (128³ swarm: |E| 0.98, PCG 80)
+  but cannot make the V-cycle indefinite; S3 stays the fix for the iterations.
+- Q-S7 [fact] `VelocityMG` / `ScalarMG` keep trilinear P (standalone V-cycles; no CG premise). A CG driver added there
+  needs A3's change first.
+- Q-S8 [fact] a public schedule with pre ≠ post would break symmetry; none is known. Default: no change; the census
+  line prints the schedule.
+
 ## 8. Risks and open questions
 
 Risks:
