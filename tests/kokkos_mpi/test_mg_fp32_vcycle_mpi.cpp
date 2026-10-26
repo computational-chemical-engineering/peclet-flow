@@ -34,6 +34,9 @@
 /// (a)-(c) as above -- (b) gated where the telescope point is the last non-bottom level (the
 /// single-rank precision split); above it FP64 runs below the point (§3.2), so z is reported
 /// against the single-rank FP32-vs-FP64 V-cycle difference instead.
+/// doc/mg_depth_policy.md A2.4 (WO-7): lineChecks -- the zebra line smoother distributed against
+/// the single-rank reference on hierarchies with triggered smoothed levels (np 1 memcmp where the
+/// LR-off control is memcmp-equal; np > 1 G-DD2 (a)'s bound), FP64 and forced FP32.
 #include <mpi.h>
 
 #include <algorithm>
@@ -221,12 +224,14 @@ std::string itStr(const Run& r) {
              ? std::string("threw")
              : std::to_string(r.it) + (r.failed ? " failed" : "") + (r.fp32 ? " fp32" : " fp64");
 }
+bool gLineRelax = true;  // A2.4: the line smoother switch every solveOn applies (default on)
 // One solve of P on `mg` (driver 0 = PCG, 1 = FCG) from x = 0 with the fault armed for it.
 Run solveOn(CutcellMG& mg, const std::vector<double>& hb, int driver, int kind = 0, int at = 0,
             int maxit = kMaxit, double rtol = kRtol) {
   const std::size_t n = hb.size();
   CCField b = toDevice(hb, "b"), x("x", n), r("r", n), p("p", n), z("z", n), zp("zp", n),
           Ap("Ap", n);
+  mg.setLineRelaxation(gLineRelax);  // A2.4 (default on; lineChecks' control arm turns it off)
   mg.debugSetFp32Fault(kind, at);
   Run out;
   try {
@@ -633,6 +638,84 @@ void teleChecks(const Problem& P, int teleForce) {
           num(dm / zm).c_str());
   }
 }
+
+// doc/mg_depth_policy.md A2.4 / A2.5 G-LR (4), at the CutcellMG level: the zebra line smoother
+// (default on) on hierarchies with triggered smoothed levels, distributed against the single-rank
+// reference -- np 1 memcmp-equal x and equal iterations (MG-PCG, rtol 1e-10), np > 1 G-DD2 (a)'s
+// bound (max|dx| <= 1e-8, iterations within max(1, 5 %)), each with LR off as the control. aniso:
+// 64x64x25 periodic, a heavy blob at 1e2, AUTO depth (s = z periodic, Sherman-Morrison); anisoW:
+// the same between z walls (Thomas); thinW: 64x64x4 between z walls at 5 levels, 'fp64' and forced
+// 'fp32' (every FP32 level even: the FP32 line kernel, distributed through the FP32 stencil halo).
+// The LR-off arm is the control (the point smoother's own np 1 / np > 1 classes on the same
+// problems).
+Problem lineProblem(const std::string& name, int nz, int levels, bool walls) {
+  int bc[6] = {0, 0, 0, 0, 0, 0};
+  if (walls)
+    bc[4] = bc[5] = 1;
+  auto rho = [nz](double x, double y, double z) {
+    const double dx = x - 24, dy = y - 40, dz = (z - 0.5 * nz) * 3.0;
+    return dx * dx + dy * dy + dz * dz < 144.0 ? 1e2 : 1.0;
+  };
+  return makeProblem(name, 64, 64, nz, levels, bc, [](double, double, double) { return 1.0; }, rho);
+}
+void lineChecks(const Problem& P, std::vector<int> modes) {
+  const std::string tag = P.name + " np" + std::to_string(size);
+  std::vector<int> ls;
+  {
+    CutcellMG ms;
+    setUp(ms, P, CutcellMG::kVcycleFp64);
+    ls = ms.lineSmoothedLevels();
+  }
+  check(!ls.empty(),
+        tag + ": the hierarchy has triggered smoothed levels (" + std::to_string(ls.size()) + ")");
+  int held = 0, on = 0;  // the triggered levels this rank holds (telescoping), and how many LR
+  {
+    CutcellMG md;
+    setUpDist(md, P, CutcellMG::kVcycleFp64);
+    for (int L : ls)
+      if (L < md.nLevels()) {
+        ++held;
+        on += md.lineRelaxOn(md.level(L)) ? 1 : 0;
+      }
+  }
+  check(on == held && (size > 1 || held == (int)ls.size()),
+        tag + ": every triggered level a rank holds is line-relaxed (s whole on the blocks)");
+  // LR off first: the point smoother's own np 1 class on the same problem is the control. At np 1
+  // the LR memcmp is a check where the control is memcmp-equal; where it is not (aniso: the odd
+  // periodic z, a pre-existing np 1 difference of the point path) the LR line is printed only.
+  std::vector<bool> ctlEq(modes.size(), false);
+  for (int lr : {0, 1})
+    for (std::size_t k = 0; k < modes.size(); ++k) {
+      const int mode = modes[k];
+      gLineRelax = lr == 1;
+      const std::string t =
+          tag + (mode == CutcellMG::kVcycleFp32 ? " 'fp32'" : " 'fp64'") + (lr ? " LR" : " LR off");
+      const Run ref = single(P, mode, 0);
+      const Run got = dist(P, mode, 0);
+      DistLevel0 D(P);
+      const Diff d = diffInner(P, D.l0(), got.x, ref.x);
+      const bool itEq = allRanks(got.it == ref.it);
+      if (size == 1) {
+        const bool eq = d.bits == 0 && itEq && got.failed == ref.failed;
+        const std::string what = t + ": x memcmp == single rank (" + std::to_string(d.bits) +
+                                 " cells differ), iterations " + itStr(got) + " / " + itStr(ref);
+        if (!lr)
+          ctlEq[k] = eq;
+        if (lr && ctlEq[k])
+          check(eq, what);
+        else if (rank == 0)
+          std::printf(
+              "  %-100s %s\n", what.c_str(),
+              lr ? "n/a (the LR-off control differs too)" : (eq ? "(control) =" : "(control) !="));
+      } else {
+        const bool itOk = allRanks(std::abs(got.it - ref.it) <= within(ref.it));
+        check(ref.converged() && got.converged() && d.maxAbs <= 1e-8 && itOk,
+              t + ": max|dx| " + num(d.maxAbs) + " <= 1e-8, iterations " + itStr(got) + " vs " +
+                  itStr(ref));
+      }
+    }
+  gLineRelax = true;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -649,6 +732,9 @@ int main(int argc, char** argv) {
        {columnProblem(), cylProblem(), packProblem(), slabProblem(1e2), boxProblem()})
     d2aChecks(P);
   restartChecks(columnProblem());
+  lineChecks(lineProblem("aniso", 25, 0, false), {CutcellMG::kVcycleFp64});
+  lineChecks(lineProblem("anisoW", 25, 0, true), {CutcellMG::kVcycleFp64});
+  lineChecks(lineProblem("thinW", 4, 5, true), {CutcellMG::kVcycleFp64, CutcellMG::kVcycleFp32});
   if (size == 4 || size == 8) {  // G-DD2 (f) (WO-D2b1)
     Problem c6 = columnProblem();
     c6.levels = 6;

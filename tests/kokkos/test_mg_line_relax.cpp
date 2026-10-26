@@ -2,7 +2,8 @@
 /// @brief ctest `mg_line_relax`: the zebra line smoother of doc/mg_depth_policy.md Amendment A2.4
 /// (gate G-LR (5), A2.5), single rank, host and device backends.
 ///
-/// Level: 32x32x25 (level 0 of a 2-level hierarchy, s = z: the line kernel takes s explicitly),
+/// Level: 32x32x25 (level 0 of a 2-level hierarchy, s = z: the line kernel takes s explicitly; also
+/// 32x32x2 and 32x32x3, the shortest columns a triggered level can have),
 /// s = z periodic and s = z between walls (x, y periodic). Face openness uniform in [0.05, 1], 5 %
 /// of the faces closed, and one SEALED column (every lateral face of the column (5, 7) closed: its
 /// column system is the singular 1-D Neumann / periodic Laplacian, which exercises the pivot guard
@@ -46,10 +47,10 @@ std::string num(double v) {
   return b;
 }
 
-constexpr int NX = 32, NY = 32, NZ = 25;
+constexpr int NX = 32, NY = 32;
 constexpr int SX = 5, SY = 7;  // the sealed column (0-based inner coordinates)
 
-Problem makeLineProblem(bool walls) {
+Problem makeLineProblem(bool walls, int NZ) {
   Problem P;
   P.name = walls ? "z walls" : "z periodic";
   P.nx = NX;
@@ -200,9 +201,9 @@ double comparePass(const HostOp& H, const std::vector<XT>& b, const std::vector<
   return worst;
 }
 
-void runCase(bool walls) {
-  const Problem P = makeLineProblem(walls);
-  std::printf("%s (32x32x25, s = z)\n", P.name.c_str());
+void runCase(bool walls, int nz) {
+  const Problem P = makeLineProblem(walls, nz);
+  std::printf("%s (32x32x%d, s = z)\n", P.name.c_str(), nz);
   CutcellMG mg;
   mg.init(P.nx, P.ny, P.nz, P.levels);
   mg.setBoundaryConditions(P.bc);
@@ -360,8 +361,10 @@ void runCase(bool walls) {
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   {
-    runCase(false);
-    runCase(true);
+    for (int nz : {25, 2, 3}) {  // the A2.5 level, and the shortest columns (m = 2, 3)
+      runCase(false, nz);
+      runCase(true, nz);
+    }
   }
   Kokkos::finalize();
   std::printf("mg_line_relax: %s (%d failure%s)\n", fails ? "FAIL" : "PASS", fails,
