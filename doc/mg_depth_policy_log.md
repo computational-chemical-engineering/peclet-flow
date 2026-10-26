@@ -352,3 +352,69 @@ attempt 3, 8a7616e) is PASS on all three rows: M10 16.40 / 47.70 / 20.80 ms (AUT
 230.41 / 282.61, M10v 356.22 / 396.16 / 458.94. G-ITER keeps its threshold and baseline and becomes WO-7's acceptance
 gate. The M10 MISS (AUTO D5 15.967 iterations vs bound 11.923) stays on record. Q-A3 is not answered; its default
 applies: LR is built (WO-7, branch `mglr`). WO-2 lands on main with this commit; next are WO-3, WO-4 and WO-7.
+
+## 2026-10-26 — WO-7: zebra line relaxation (Amendment A2.4), gates G-LR / G-BIT
+
+**Implementation** (branch `mglr` from db1468b): 067bb38 (A2.4 kernel `src/mg_line_relax.hpp`, CutcellMG wiring,
+setter `setLineRelaxation`, `Solver::setPressureLineRelaxation`, binding
+`diagnostics.set_pressure_line_relaxation(enabled)`, default True), 7a740b5 + c4f3459 (ctest `mg_line_relax`; line
+checks in `mg_fp32_vcycle_mpi`), 210bdac (A2.6 latency remedy: c, y, z in thread-local arrays for m ≤ 64, bitwise).
+Study tools: `mgd_case.py --line-relaxation on|off`, `run_matrix.sh LR_OFF_LEVELS` (arms `<L>off`). Gate scripts:
+`gpu_diag/mgd/wo7/` (`glr_attempt.sh`, `glr_judge.py`, `trace.sh`, `np1_gate.sh`, `hash_lr_off.py`, `gbit.sh`).
+
+**G-LR (5) `mg_line_relax`** (host, CUDA): one colour pass = the dense (cyclic) column solve, 32×32×{25, 2, 3},
+s = z periodic and walls, 5 % closed faces, one sealed column: FP64 ≤ 6.7e-16, FP32 ≤ 3.0e-7 relative; other colour
+bitwise unchanged; all finite; FP32 x = c·1, b = 0 bitwise unchanged; wall weights 0. **PASS** both.
+
+**G-LR (4) bit identity** (`validation/wo7/{host,cuda}_mglr.*`, vs `*_mgdrebase.*`):
+
+| check | host | CUDA | verdict |
+|---|---|---|---|
+| -LE bench battery | 268/268 (267 + mg_line_relax) | 268/268 | PASS |
+| state_hash 13 np1 + np2 | 12 + np2 equal; `scalar` fc99aa51…c584 → b9fc5744…89f8 | 12 + np2 equal; `scalar` 83554517…5a92 → 27445fd8…63d1 | PASS (ruled mover only) |
+| digest (14 lines) | 460e6fd14885673e → 51fec031a160c88b | 20f528f0c295ca15 → 8337752781faf71b | — |
+| LR off ≡ pre-WO-7 | state_hash 13 with LR off (`hash_lr_off.py`) = main incl. `scalar` | M10 30 steps LR off vs the db1468b module: u v w p C bitwise, iteration + div lists equal | PASS |
+| census movers (old → new) | full_stress_large_dt (d_999/d_0 4.96e-11 → 4.97e-11), open_face_plane_mpi_np3 (B_census 1.6e-14 → 3.8e-14 …), verify_colocated_taylor_green (div 8.445e-16 → 6.545e-16), vof_bc (F2 outflow u 0.091916056118741554 → …742984) | same four (taylor_green 8.397e-16 → 6.464e-16, vof_bc …741582 → …74297, B_census 6.9e-15 → 7.8e-15) | every mover triggers (census) |
+| other diffs | the WO-2 run-to-run set (hydro_force_units, movingscene_advect_mpi_np{1,2,4}, units_anisotropic_sphere, scalar_cutcell_solve_mpi_np4 stderr) | same + mg_fp32_vcycle_mpi_np* (new line checks) | not movers |
+
+Triggered tests (MG_DEBUG=1 census on the unmodified host build, `[mg-census] … A2 line-trigger`): verify_lid_cavity_sdflow,
+verify_colocated_taylor_green, colocated_open_boundary, open_face_plane(_mpi_np3), cell_force_placement, mirror_symmetry,
+full_stress_large_dt(_outflow), collocated_stability_guard, scalar_cutcell_g9, scalar_mg, vof_bc (along y),
+mg_depth_policy (hierarchy only), units_anisotropic_tgv. The rest print identical values.
+
+**np 1 ≡ single rank.** As written (M10 swarm host, init_mpi at np 1 vs single rank, LR on): **NOT JUDGEABLE** — the
+LR-OFF control already differs (host PCG: max|Δp| 7.4e-7 of 820, iteration lists equal; host Chebyshev and CUDA, and
+the M10v channel on CUDA, likewise), a pre-existing solver-level np 1 difference independent of WO-7. At the CutcellMG
+level (`mg_fp32_vcycle_mpi` lineChecks, MG-PCG rtol 1e-10, host and CUDA): anisoW 64×64×25 z walls (AUTO) and thinW
+64×64×4 z walls (5 levels, 'fp64' and forced 'fp32') np 1 memcmp-equal with LR on (and the LR-off control equal);
+aniso 64×64×25 periodic: the LR-off control differs at np 1 (102398 cells), so n/a; np 2, 4 (8 on CUDA): max|dx|
+≤ 1.8e-11, iterations equal. Every triggered level a rank holds is line-relaxed.
+
+**G-LR (1)–(3), attempt 1** (`gpu_diag/mgd/wo7/glr_attempt1.out`, matrix `wo7/matrix_a1`, traces `wo7/trace`; module
+mod_wo7 = 067bb38; 3 interleaved rounds of 5 + 30 steps; arms L0 = AUTO, L0off, L4, L4off, L6; load max 22.7 / 19.3 /
+19.1, no other GPU app; iterations identical across rounds; 0 failed solves, 0 FP32 / Chebyshev restarts). The
+rebased tree (advection + full stress defaults) moved the LR-off baselines: M10 AUTO 16.1 (was 15.967), L4 10.1 (was
+9.933).
+
+| row | iters L0 / L0off / L4 / L4off / L6 | ms L0 / L0off / L4 / L4off / L6 | (1) ≤ 1.15 × L4off + 0.5 | (2) t(L0) ≤ k × t(L0off) | (3) G-ASP (1), LR on |
+|---|---|---|---|---|---|
+| M10 (PCG 1e-8) | 8.100 / 16.100 / 8.067 / 10.100 / 8.200 | 18.22 / 17.17 / 47.64 / 49.74 / 20.29 | 8.100 ≤ 12.115 PASS | 18.22 > 17.17 (k 1.00) **MISS** | **MISS**: A1 (2) r13 worst div L0 2.345e-15 / L4 7.910e-16 = 2.965 > 2; (1a), (1b) (1.8e-10 prod, 1.2e-12 r10), A1 (1) (0.986 / 0.906; 0.886 / 0.687) PASS |
+| M10h (Cheb 1e-9) | 10.033 / 21.967 / 10.000 / 13.000 / 11.000 | 161.45 / 196.31 / 229.84 / 239.81 / 169.51 | 10.033 ≤ 15.450 PASS | 161.45 ≤ 1.03 × 196.31 PASS | PASS (A1 (2) 0.428) |
+| M10v (np 2, V-cycles) | 9.000 / 20.000 / 9.000 / 13.000 / 9.000 | 227.15 / 317.78 / 312.55 / 362.53 / 227.14 | 9.000 ≤ 15.450 PASS | 227.15 ≤ 1.03 × 317.78 PASS | PASS (A1 (2) 0.889) |
+
+G-ASP (2), (3) with LR on (information): M10 18.22 ≤ 47.64, iters 8.100 ≤ 8.200, t ≤ 1.03 × 20.29; M10h, M10v PASS.
+**G-ITER (Q-A2): LR reaches it on every row** — AUTO 8.1 vs depth 4 without LR 10.1 on M10.
+The (2) MISS on M10 is latency (iterations halve, step time +6 %), so A2.6's remedy was applied (210bdac: c, y, z in
+thread-local arrays for m ≤ 64; bitwise — M10 dump vs attempt 1, state_hash digests host 51fec031a160c88b, CUDA
+8337752781faf71b unchanged) and (2) re-judged once: attempt 2 below. (3) is numerics, which 210bdac does not change.
+
+**Observation (not a gate; for the architect): LR hurts MG-PCG where the only triggered level is a SMOOTHED bottom of a
+thin slab.** CutcellMG-level, 64×64×4 between z walls, blob 1e2, CutcellMG's own default agglomeration 'never',
+rtol 1e-10 (host): PCG 125 → 158 iterations (4 levels), 89 → 126 (5 levels) with LR; FCG on the same problems
+17 → 12 and 17 → 12. 64×64×25 (several triggered levels): PCG 32 → 12, 34 → 12; FCG 30 → 10. The smoothed bottom
+runs `bottom_` forward sweeps (colour 0 then 1, never reversed), so the V-cycle is not symmetric there; FCG tolerates
+that, PCG does not, and the stronger LR bottom makes it worse. The `scalar` state_hash case (16×16×4, triggered
+smoothed bottom L3 2×2×2) is of this class. Not tuned; reported.
+
+**G-LR (2) re-judge (attempt 2, mod_wo7r = 210bdac):** PENDING — `gpu_diag/mgd/wo7/glr_attempt.sh 2 wo7r` waits for no
+other GPU compute app and load ≤ 24 (up to 4 h), then the same matrix; verdict in `wo7/glr_attempt2.out` (GLR lines).

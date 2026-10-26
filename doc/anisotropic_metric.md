@@ -257,7 +257,9 @@ smaller `cfac` than its neighbours (an *operator* anisotropy on isotropic cells 
   coarsenable axis coarsens, exactly today's decision. The existing semi-coarsening of odd axes
   (`DECOMPOSITION_AND_MULTIGRID.md` §1) is untouched: an axis that cannot coarsen is simply not in `C`,
   and the rule never waits for it (waiting would freeze the hierarchy on a blocked fine axis; the fix
-  for *that* anisotropy is line relaxation, open item 11 of that document, out of scope).
+  for *that* anisotropy is line relaxation, open item 11 of that document, out of scope here: it is
+  `doc/mg_depth_policy.md` Amendment A2 -- zebra line relaxation along the blocked axis on the
+  levels where the coarse cells pass 2:1, WO-7, default on).
 - **The spread halves per level until it is below 2, then stays there.** Let
   `s^L = max_C H / min_C H`. Axes with `H < 2 H_min` double into `[2 H_min, 4 H_min)`, the others stay
   in `[2 H_min, s H_min]`; the new minimum is `2 H_min`, so `s^{L+1} = max(s^L/2, < 2)`. On the gate

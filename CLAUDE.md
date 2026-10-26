@@ -304,6 +304,15 @@ you want). Detail and numbers for every bullet: ref §6.
   every rank's block is even. **Telescoping is the default** (`set_pressure_telescope`); the in-place
   requirement on intermediate levels is the top open item at scale
   (`../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.8).
+- **An axis that stops coarsening gets zebra LINE relaxation** (`doc/mg_depth_policy.md` A2, WO-7,
+  default on; register N5): on a smoothed level whose unique finest axis s is globally blocked with
+  coarse-cell aspect A' > θ (2) and no outflow face on s, the smoother solves each column along s
+  exactly (Thomas; Sherman–Morrison when s is periodic), FP64 and FP32, instead of point RB-GS,
+  which damps those modes by only 1 − 2/(2 + A'²) per sweep (M10 128×128×25 MG-PCG iterations/step:
+  AUTO 16.1 → 8.1, explicit depth 4 without LR 10.1). The depth rule does NOT count the blocked axis
+  (rejected: an aspect cap, more sweeps, lagged periodic wraps, Galerkin coarse operators). A split
+  s under MPI keeps point RB-GS on that level. `diagnostics.set_pressure_line_relaxation(False)` is
+  the point smoother bit for bit; a grid without a triggered level is bitwise unchanged either way.
 - **The stage machinery is core's** (`chooseStageTarget`, `makeStageComm`, `RedistributeTopology`;
   proved byte-identical): **do not re-inline any of it**. `Telescope`, the scatter's ADD and the WO-R2
   outflow ghost-plane gather stay here.

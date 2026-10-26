@@ -11,6 +11,9 @@ One process = one case at one pressure-multigrid depth. Every case takes
                  origin_r<k>)
     --json F     the per-row metrics below plus the per-step lists
     --rtol R     the case's Krylov tolerance, where the case has a Krylov driver (see each case)
+    --line-relaxation on|off
+                 diagnostics.set_pressure_line_relaxation (doc/mg_depth_policy.md A2.4) before the
+                 geometry; absent: no call (the solver default, on since WO-7)
 
 Cases (--case):
     swarm      periodic bubble swarm, case A groups, single rank: the --single path of
@@ -84,6 +87,9 @@ DUMP = arg("--dump", None)
 JSON = arg("--json", None)
 RTOL = arg("--rtol", None, float)
 TAG = arg("--tag", "")
+LINE = arg("--line-relaxation", None)
+if LINE not in (None, "on", "off"):
+    sys.exit("mgd_case: --line-relaxation on|off")
 load0 = os.getloadavg()
 
 # MPI only when launched under mpirun (the channel at np > 1)
@@ -101,9 +107,12 @@ fields_C = False     # dump C too
 
 
 def depth(s):
-    """--levels L >= 1: an exact depth, before the geometry; 0: leave the solver default."""
+    """--levels L >= 1: an exact depth, before the geometry; 0: leave the solver default.
+    --line-relaxation on|off: the A2.4 line smoother switch (absent: the default)."""
     if LEVELS >= 1:
         s.set_pressure_multigrid(True, LEVELS)
+    if LINE is not None:
+        s.diagnostics.set_pressure_line_relaxation(LINE == "on")
 
 
 # ------------------------------------------------------------------------------------- swarm
@@ -467,6 +476,7 @@ if rank == 0:
     prec_flips = sum(1 for a, b in zip(prec, prec[1:]) if a == "fp32" and b == "fp64")
     res = {
         "case": CASE, "tag": TAG, "np": size, "grid": list(GRID), "levels_req": LEVELS,
+        "line_relaxation": LINE or "default",
         "levels": len(ratios), "ratios": [list(r) for r in ratios], "bottom": list(bottom),
         "bottom_cells": int(np.prod(bottom)), "dims": [list(d) for d in dims],
         "space": str(getattr(pf, "execution_space", "?")),
