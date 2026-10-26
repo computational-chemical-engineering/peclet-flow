@@ -344,3 +344,11 @@ heavy lock); census `compare_name.py` (by test name, worktree paths normalised).
 | M10 trigger rows | 128×128×25 D5 {2,3}, explicit 4 {2}; 512×512×100 D7 {4,5}; 512×64×25 D5 {2,3} | identical | PASS (unchanged) |
 
 Raw: `validation/wo7/{host,cuda}_mgdrebase.{build,ctest,hash}.*`, `gpu_diag/mgd/rebase_gate.out`.
+
+## 2026-10-26 — U-A2 answered: P1 (USER "I agree with P1")
+
+Hierarchies with a triggered smoothed level (A2.3) are judged for WO-2 on G-ASP, not G-ITER. G-ASP (WO-A2b
+attempt 3, 8a7616e) is PASS on all three rows: M10 16.40 / 47.70 / 20.80 ms (AUTO / L4 / L6, load 0.3), M10h 199.66 /
+230.41 / 282.61, M10v 356.22 / 396.16 / 458.94. G-ITER keeps its threshold and baseline and becomes WO-7's acceptance
+gate. The M10 MISS (AUTO D5 15.967 iterations vs bound 11.923) stays on record. Q-A3 is not answered; its default
+applies: LR is built (WO-7, branch `mglr`). WO-2 lands on main with this commit; next are WO-3, WO-4 and WO-7.

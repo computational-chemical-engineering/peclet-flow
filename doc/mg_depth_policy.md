@@ -536,7 +536,7 @@ A' ≤ θ = 2) and its named remedy (line relaxation, `../docs/DECOMPOSITION_AND
   WO-7's acceptance gate. *P2:* WO-2 waits for WO-7 and G-ITER as written. Why P1: AUTO ran 3.3× faster than depth 4
   on M10 (loaded; G-ASP judges it quiet), LR does not depend on the depth rule, and P2 holds AUTO back on every grid
   for a class with no known production case. A failed G-ASP row takes P1 off the table. **Default until the user
-  answers: P2's state** — WO-2 not merged to main; WO-A2a, WO-A2b, WO-7, WO-3, WO-4 proceed.
+  answers: P2's state** — WO-2 not merged to main; WO-A2a, WO-A2b, WO-7, WO-3, WO-4 proceed. **Answered 2026-10-26: P1** (log).
 - **(d) No known production case; build LR anyway** (Q-A3). A grep of the gallery's literal sizes finds two
   early-blocked grids (fluidized bed 34×34×116, 8×8×18), both anchored (D 4 until WO-5), A' ≤ 2 everywhere; the
   benchmark grids are rich in factors of two. The class is a thin slab or quasi-2-D column at a decimal n_s (25, 50,
