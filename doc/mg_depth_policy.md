@@ -547,7 +547,11 @@ axis with H_s < H_b for both b ≠ s (none: no trigger). T(ℓ) ⇔ ℓ ≥ 1 �
 A'_ℓ > θ (`aspectTheta_`, default 2: same knob, same bound) ∧ no `outflow` face on s. Stored as `Level::lineAxis`
 ∈ {−1, 0, 1, 2}, printed in the `mgDebugLevel()` table and census line. A *triggered smoothed level* has T(ℓ) and is
 smoothed by the V-cycle (a smoothed bottom included). An s only deferred, or blocked only by `evenOn` (§5.4), is
-not globally blocked: isotropic cubes, every §4.4 row and the anisotropic-metric gate grid have no trigger.
+not globally blocked: isotropic cubes and the anisotropic-metric gate grid have no trigger; of the §4.4 rows,
+16×16×4 triggers its smoothed bottom (L3, A' = 4), so WO-7 moves the `scalar` state_hash (recorded change) and
+every other row stays bitwise.
+*Coordinator ruling 2026-10-26:* the rule stands as written (a smoothed bottom included) and the claim is
+corrected; rejected alternative: exempt the smoothed bottom from T.
 
 **A2.4 The line smoother (WO-7).** On a triggered smoothed level with LR on and s whole on every rank (the level
 decomposition has one block along s), every point-smoothing call — FP64 `smooth`, FP32 `smoothFp32` /

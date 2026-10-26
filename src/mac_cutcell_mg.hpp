@@ -1074,6 +1074,13 @@ class CutcellMG {
     // This level's GLOBAL inner dims (== inner single-rank). With og it decides which ranks own a
     // global domain face — see touchesGlobalFace(lv, f).
     C3 gdim{0, 0, 0};
+    // doc/mg_depth_policy.md Amendment A2.3, set by assignLineAxes() at the hierarchy build from
+    // GLOBAL quantities only (gdim, cfac, the metric, theta, the domain BCs: no collective,
+    // np-independent). strongAspect = A' = min_{b != s} H_b / H_s for the unique strong axis s
+    // (H_a = hp_a * cfac_a; 0 when no axis is strictly finest); lineAxis = s when the trigger T
+    // holds on this level, else -1. Stored and printed only: nothing reads it yet (WO-7 will).
+    double strongAspect = 0.0;
+    int lineAxis = -1;
     std::size_t n = 0;
     // Ghost width of this level's block (1 default; 2 on distributed coarse levels eligible for
     // communication-avoiding smoothing — see initMpi). Single-rank always 1 (byte-identical).
@@ -1228,6 +1235,39 @@ class CutcellMG {
     return r;
   }
 
+  // ---- the line-relaxation trigger (doc/mg_depth_policy.md Amendment A2.3) --------------------
+  // On level L of GLOBAL inner dims g and coarsening factors cf (H_a = hp_a * cf_a): s = the unique
+  // axis with H_s < H_b for both b != s (none: no trigger); A' = min_{b != s} H_b / H_s;
+  //   T(L) <=> L >= 1 and !can(g[s]) (globally blocked) and A' > theta and no outflow face on s.
+  // Returns s when T(L) holds, else -1; *aspect receives A' (0 when there is no unique s). Global
+  // quantities only (no collective, np-independent). An s only DEFERRED by mgChooseRatio, or
+  // blocked only by evenOn (§5.4), is not globally blocked. Pure and static: host, once per level
+  // per build.
+  static int lineAxisTrigger(int L, C3 g, C3 cf, const double hp[3], double theta, const int bc[6],
+                             double* aspect) {
+    const double H[3] = {hp[0] * (double)cf.x, hp[1] * (double)cf.y, hp[2] * (double)cf.z};
+    const int gd[3] = {g.x, g.y, g.z};
+    int s = -1;
+    for (int a = 0; a < 3; ++a)
+      if (H[a] < H[(a + 1) % 3] && H[a] < H[(a + 2) % 3])
+        s = a;
+    *aspect = 0.0;
+    if (s < 0)
+      return -1;
+    const double A = std::min(H[(s + 1) % 3], H[(s + 2) % 3]) / H[s];
+    *aspect = A;
+    const bool blocked = !((gd[s] % 2 == 0) && (gd[s] / 2 >= 2));  // !can(g[s])
+    const bool outflow = bc[2 * s] == 3 || bc[2 * s + 1] == 3;
+    return (L >= 1 && blocked && A > theta && !outflow) ? s : -1;
+  }
+  // A2.3 on the hierarchy just built (init / initMpi, after the level loop): every level's
+  // lineAxis / strongAspect from its global dims and cfac. Stores only; changes no other state.
+  void assignLineAxes() {
+    for (int L = 0; L < (int)lv_.size(); ++L)
+      lv_[L].lineAxis = lineAxisTrigger(L, lv_[L].gdim, lv_[L].cfac, hp_, aspectTheta_, bc_,
+                                        &lv_[L].strongAspect);
+  }
+
   /// Per-axis cell spacings h_a' = h_a / hRef of the physical domain (doc/anisotropic_metric.md
   /// §1.1).  Call BEFORE init/initMpi (trap 5): the level table is built there, long before
   /// setOpenness, and the aspect rule of §5 needs the metric at that point.  The default
@@ -1307,6 +1347,7 @@ class CutcellMG {
       inner = next;
       cf = C3{cf.x * ratio.x, cf.y * ratio.y, cf.z * ratio.z};
     }
+    assignLineAxes();       // A2.3: stored and printed only
     allocFp64(lv_.back());  // the bottom level is whole in every precision
     buildBottomStore();     // the direct bottom's storage (single rank, every backend)
     computeFp32Last();
@@ -1318,8 +1359,9 @@ class CutcellMG {
              (int)lv_.size(), depthRequestLabel(nLevels).c_str());
       printDepthCensus(nLevels, more);
       for (int L = 0; L < (int)lv_.size(); ++L)
-        printf("[mg]  L%d dims %4dx%4dx%4d  ratio(%d,%d,%d)\n", L, lv_[L].inner.x, lv_[L].inner.y,
-               lv_[L].inner.z, lv_[L].ratio.x, lv_[L].ratio.y, lv_[L].ratio.z);
+        printf("[mg]  L%d dims %4dx%4dx%4d  ratio(%d,%d,%d)%s\n", L, lv_[L].inner.x, lv_[L].inner.y,
+               lv_[L].inner.z, lv_[L].ratio.x, lv_[L].ratio.y, lv_[L].ratio.z,
+               lineAxisLabel(L).c_str());
       fflush(stdout);
     }
   }
@@ -1903,6 +1945,7 @@ class CutcellMG {
       // order).
       curDec = curDec.coarsened(peclet::core::IVec<3>{ratio.x, ratio.y, ratio.z});
     }
+    assignLineAxes();    // A2.3: stored and printed only
     computeFp32Last();   // D-dist (§5.2): after the hierarchy, before any operator build
     buildBottomStore();  // §14 H-6: the host global bottom gb_ (none on a device backend)
     if (mgDebugLevel() && rank == 0) {
@@ -1921,9 +1964,10 @@ class CutcellMG {
       int ranks = size;
       for (int L = 0; L < (int)lv_.size(); ++L) {
         printf(
-            "[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  ratio(%d,%d,%d)%s\n",
+            "[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  "
+            "ratio(%d,%d,%d)%s%s\n",
             L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
-            lv_[L].ratio.y, lv_[L].ratio.z,
+            lv_[L].ratio.y, lv_[L].ratio.z, lineAxisLabel(L).c_str(),
             lv_[L].tele ? (lv_[L].tele->repartition() ? "  -> REPARTITION" : "  -> TELESCOPE")
                         : "");
         if (lv_[L].tele) {
@@ -4881,13 +4925,56 @@ class CutcellMG {
     if (a < 0 && !more)
       a = D;
     const C3 b = lv_.back().gdim;
+    // A2.3: the triggered smoothed levels, appended only where there are any (the line is
+    // unchanged on every other hierarchy).
+    std::string line;
+    const std::vector<int> ls = lineSmoothedLevels();
+    if (!ls.empty()) {
+      line = "; A2 line-trigger smoothed levels {";
+      for (std::size_t i = 0; i < ls.size(); ++i)
+        line += (i ? "," : "") + std::to_string(ls[i]);
+      line += std::string("} along ") + "xyz"[lv_[ls[0]].lineAxis];
+    }
     if (a > 0)
-      printf("[mg-census] depth requested %s -> %d levels, bottom %dx%dx%d; auto -> %d%s\n",
+      printf("[mg-census] depth requested %s -> %d levels, bottom %dx%dx%d; auto -> %d%s%s\n",
              depthRequestLabel(nLevels).c_str(), D, b.x, b.y, b.z, a,
-             nLevels == 0 ? (" (legacy 4 -> " + std::to_string(std::min(D, 4)) + ")").c_str() : "");
+             nLevels == 0 ? (" (legacy 4 -> " + std::to_string(std::min(D, 4)) + ")").c_str() : "",
+             line.c_str());
     else
-      printf("[mg-census] depth requested %s -> %d levels, bottom %dx%dx%d; auto -> >%d\n",
-             depthRequestLabel(nLevels).c_str(), D, b.x, b.y, b.z, D);
+      printf("[mg-census] depth requested %s -> %d levels, bottom %dx%dx%d; auto -> >%d%s\n",
+             depthRequestLabel(nLevels).c_str(), D, b.x, b.y, b.z, D, line.c_str());
+  }
+  // A2.3 accessors (stored and printed only; nothing in the solve reads them yet). lineAxes():
+  // every level's lineAxis (T holds: the strong axis s; else -1). lineSmoothedLevels(): the
+  // TRIGGERED SMOOTHED levels -- T holds and the V-cycle smooths the level: every level above the
+  // bottom, and the bottom when it is the smoothed bottom (not agglomerated into an exact solve).
+  std::vector<int> lineAxes() const {
+    std::vector<int> r;
+    r.reserve(lv_.size());
+    for (const Level& l : lv_)
+      r.push_back(l.lineAxis);
+    return r;
+  }
+  std::vector<int> lineSmoothedLevels() const {
+    std::vector<int> r;
+    const int D = (int)lv_.size();
+    for (int L = 0; L < D; ++L)
+      if (lv_[L].lineAxis >= 0 && (L + 1 < D || !agglomerateBottom()))
+        r.push_back(L);
+    return r;
+  }
+  // The table suffix of level L: "  A' <A'>" where a unique strong axis exists, plus " T <axis>"
+  // when the trigger holds; empty otherwise (the table is unchanged on every isotropic level).
+  std::string lineAxisLabel(int L) const {
+    const Level& l = lv_[L];
+    if (!(l.strongAspect > 0.0))
+      return std::string();
+    char buf[64];
+    if (l.lineAxis >= 0)
+      std::snprintf(buf, sizeof buf, "  A' %g T %c", l.strongAspect, "xyz"[l.lineAxis]);
+    else
+      std::snprintf(buf, sizeof buf, "  A' %g", l.strongAspect);
+    return std::string(buf);
   }
 
   // --- The direct bottom solve (doc/vof_step_performance_design.md §5.7, §5.14, §13, §14 H-1) ---

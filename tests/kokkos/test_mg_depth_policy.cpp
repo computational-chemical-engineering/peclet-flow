@@ -8,6 +8,7 @@
 // compiled with PECLET_FLOW_MPI only, and a 1024x1024x512 level 0 does not fit a test.
 #include <cstdio>
 #include <Kokkos_Core.hpp>
+#include <string>
 #include <vector>
 
 #include "mac_cutcell_mg.hpp"
@@ -26,6 +27,7 @@ struct Row {
   int wantD;
   C3 wantBottom;
   const char* what;
+  std::vector<int> wantLine = {};  // Amendment A2.3: the triggered smoothed levels
 };
 
 void check(const Row& r) {
@@ -41,14 +43,62 @@ void check(const Row& r) {
   for (std::size_t L = 0; L + 1 < ratio.size(); ++L)
     b = C3{b.x / ratio[L].x, b.y / ratio[L].y, b.z / ratio[L].z};
   const int D = mg.nLevels();
+  // Amendment A2.3: of the §4.4 rows only 16x16x4 has a triggered smoothed level, its smoothed
+  // bottom L3 (2x2x2, z blocked at L1, A' 4 > theta; coordinator ruling 2026-10-26).
+  const std::vector<int> line = mg.lineSmoothedLevels();
+  const bool lineOk = line == r.wantLine;
   const bool ok = D == r.wantD && b.x == r.wantBottom.x && b.y == r.wantBottom.y &&
-                  b.z == r.wantBottom.z && D == (int)ratio.size();
+                  b.z == r.wantBottom.z && D == (int)ratio.size() && lineOk;
   if (!ok)
     ++g_fail;
-  std::printf("%s %4dx%4dx%4d levels=%d mode=%2d%s: D %d bottom %dx%dx%d (want %d, %dx%dx%d)  %s\n",
-              ok ? "PASS" : "FAIL", r.grid.x, r.grid.y, r.grid.z, r.levels, r.mode,
-              r.outflow ? " outflow" : "", D, b.x, b.y, b.z, r.wantD, r.wantBottom.x,
-              r.wantBottom.y, r.wantBottom.z, r.what);
+  std::printf(
+      "%s %4dx%4dx%4d levels=%d mode=%2d%s: D %d bottom %dx%dx%d (want %d, %dx%dx%d)%s  %s\n",
+      ok ? "PASS" : "FAIL", r.grid.x, r.grid.y, r.grid.z, r.levels, r.mode,
+      r.outflow ? " outflow" : "", D, b.x, b.y, b.z, r.wantD, r.wantBottom.x, r.wantBottom.y,
+      r.wantBottom.z, line.empty() ? "" : " LINE-TRIGGERED", r.what);
+  std::fflush(stdout);
+}
+
+// Amendment A2.3 / WO-A2a: the triggered smoothed levels (T holds and the V-cycle smooths the
+// level, a smoothed bottom included) of a hierarchy whose strong axis stops coarsening.
+struct LineRow {
+  C3 grid;
+  int levels;  // 0 = AUTO
+  bool outflow;
+  int wantD;
+  std::vector<int> want;  // the triggered smoothed levels
+  const char* what;
+};
+
+void checkLine(const LineRow& r) {
+  CutcellMG mg;
+  if (r.outflow) {
+    const int bc[6] = {2, 3, 1, 1, 1, 1};
+    mg.setBoundaryConditions(bc);
+  }
+  mg.setAgglomerationMode(-1);  // the Solver default
+  mg.init(r.grid.x, r.grid.y, r.grid.z, r.levels);
+  const int D = mg.nLevels();
+  const std::vector<int> got = mg.lineSmoothedLevels();
+  const std::vector<int> ax = mg.lineAxes();
+  bool axisOk = true;  // every triggered level's line axis is the blocked one, z, on these grids
+  for (int L : got)
+    axisOk = axisOk && ax[L] == 2;
+  const bool ok = D == r.wantD && got == r.want && axisOk;
+  if (!ok)
+    ++g_fail;
+  std::string gs = "{", ws = "{", as;
+  for (std::size_t i = 0; i < got.size(); ++i)
+    gs += (i ? "," : "") + std::to_string(got[i]);
+  for (std::size_t i = 0; i < r.want.size(); ++i)
+    ws += (i ? "," : "") + std::to_string(r.want[i]);
+  for (std::size_t L = 0; L < ax.size(); ++L)
+    as += (L ? " " : "") + std::to_string(ax[L]);
+  std::printf(
+      "%s line %4dx%4dx%4d levels=%d%s: D %d triggered smoothed %s} (want %d, %s}) "
+      "lineAxis [%s]  %s\n",
+      ok ? "PASS" : "FAIL", r.grid.x, r.grid.y, r.grid.z, r.levels, r.outflow ? " outflow" : "", D,
+      gs.c_str(), r.wantD, ws.c_str(), as.c_str(), r.what);
   std::fflush(stdout);
 }
 
@@ -87,7 +137,7 @@ int main(int argc, char** argv) {
     const Row rows[] = {
         {{16, 16, 16}, 0, -1, false, 4, {2, 2, 2}, "state_hash N=16"},
         {{16, 16, 8}, 0, -1, false, 4, {2, 2, 2}, "state_hash"},
-        {{16, 16, 4}, 0, -1, false, 4, {2, 2, 2}, "state_hash"},
+        {{16, 16, 4}, 0, -1, false, 4, {2, 2, 2}, "state_hash", {3}},
         {{24, 12, 8}, 0, -1, false, 4, {3, 3, 2}, "state_hash channel"},
         {{48, 48, 48}, 0, -1, false, 4, {6, 6, 6}, "direct at 4"},
         {{64, 64, 64}, 0, -1, false, 4, {8, 8, 8}, "direct at 4"},
@@ -111,6 +161,19 @@ int main(int argc, char** argv) {
     };
     for (const Row& r : rows)
       check(r);
+    // Amendment A2.3: triggered smoothed levels (A' = 2^(L - beta) along the blocked z).
+    const LineRow lines[] = {
+        {{128, 128, 25}, 0, false, 5, {2, 3}, "M10: bottom 8x8x25 direct (A' 16, not smoothed)"},
+        {{128, 128, 25}, 4, false, 4, {2}, "M10 explicit 4: bottom 16x16x25 GraphAMG"},
+        {{512, 512, 100}, 0, false, 7, {4, 5}, "M10b: z stops at 25"},
+        {{512, 64, 25}, 0, false, 5, {2, 3}, "M10v grid: bottom 32x4x25"},
+        {{34, 34, 116}, 0, false, 3, {}, "fluidized bed: no unique strong axis"},
+        {{34, 34, 116}, 0, true, 3, {}, "fluidized bed, anchored"},
+        {{8, 8, 18}, 0, false, 3, {}, "small bed: A' 2 = theta"},
+        {{8, 8, 18}, 0, true, 3, {}, "small bed, anchored"},
+    };
+    for (const LineRow& r : lines)
+      checkLine(r);
   }
   Kokkos::finalize();
   std::printf("mg_depth_policy: %s (%d failures)\n", g_fail ? "FAIL" : "PASS", g_fail);
