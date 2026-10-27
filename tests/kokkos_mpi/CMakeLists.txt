@@ -156,6 +156,18 @@ foreach(np 1 2 4)
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_mg_stencil_halo_mpi>)
 endforeach()
 
+# Communication-avoiding red-black pairs across a periodic axis of ODD global extent (32x32x25):
+# CA is off there (the wrap ring slot has the opposite parity of its image); np 1 memcmp == single
+# rank for the pressure MG-PCG and the IbmSolver step, CA on memcmp == off at every np.
+add_executable(test_ca_odd_periodic_mpi test_ca_odd_periodic_mpi.cpp)
+target_include_directories(test_ca_odd_periodic_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_ca_odd_periodic_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+foreach(np 1 2)
+  add_test(NAME ca_odd_periodic_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_ca_odd_periodic_mpi>)
+endforeach()
+
 # DIAGNOSTIC PROBE (no ctest): the lockstep np vs single-rank colour curve of the packing case.
 add_executable(probe_vof_packing EXCLUDE_FROM_ALL probe_vof_packing.cpp)
 target_include_directories(probe_vof_packing PRIVATE
