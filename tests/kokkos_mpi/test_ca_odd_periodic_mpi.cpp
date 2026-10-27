@@ -20,6 +20,7 @@
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "flow_ibm.hpp"
@@ -210,6 +211,11 @@ static void solverChecks() {
   const std::vector<double> gsdf = sphereSdf();
   IbmSolver ref(NX, NY, NZ);
   configure(ref);
+  // The distributed solve runs the 'direct' bottom on a host backend and GraphAMG on a device,
+  // where the single-rank solver would take the device 'direct' bottom (8.3e-10 in p at np 1);
+  // the np = 1 bit-exact gate pins the reference to the engine the distributed path runs.
+  ref.setPressureBottomSolver(
+      std::is_same_v<peclet::flow::CCExec::memory_space, Kokkos::HostSpace> ? 0 : 2);
   ref.setSolid(gsdf, /*cutcell_pressure=*/true);
   for (int it = 0; it < STEPS; ++it)
     ref.step();
