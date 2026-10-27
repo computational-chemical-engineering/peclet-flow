@@ -502,12 +502,16 @@ row comes with the CUDA battery log): thinW a 3.6e-10, PCG 10 (not capped). Guar
 thinW 10 (LR off 13; bound 16), slab 11 (bound 14); trilinear 126 / 89 / cap 500. Host verdict: **PASS**.
 The channel case (sizes, BCs) is this package's choice; G-SYM names only "an outflow-anchored channel".
 
-**G-BIT** (switch off ≡ mglr): PENDING — `gpu_diag/mgd/sym/s1_gate.sh` (detached, under the heavy lock): per backend
-`gbit.sh` (ctest -LE bench -V -j4; state_hash np1+np2 twice, digest as `validation/wo7/gate.sh`; printed values of
-`bottom_direct_mpi`, `graphamg_mpi`, `telescope*_mpi`, `decomposition_policy`, `pcg_breakdown` vs mglr's gate log)
-and prof.py dumps of the unmodified build (cb981c9, `sym/ref/mod_base_*`) vs f81ecbd (`mod_s1_*`), `gcmp.sh`.
-Pass = battery green (272 = mglr's 268 + 4), digests host 51fec031a160c88b / CUDA 8337752781faf71b both runs,
-printed identical, `GBIT PASS` from gcmp. Verdict lines: `sym/logs/s1_gate.out`.
+**G-BIT** (switch off ≡ mglr; `gpu_diag/mgd/sym/s1_gate.sh`, per backend `gbit.sh` + prof.py dumps of cb981c9
+(`sym/ref/mod_base_*`) vs f81ecbd (`mod_s1_*`) compared by `gcmp.sh`; verdicts `sym/logs/s1_gate.out`):
+host 272/272 (-LE bench), state_hash np1 + np2 rc 0/0 twice, digests 51fec031a160c88b(14) both runs, printed values
+identical, dumps `GBIT PASS` (fail=0 both runs); CUDA 272/272, digests 8337752781faf71b(14) both runs, dumps `GBIT PASS`;
+its printed values differ in 4 lines, all OpenMPI `Process name: [prterun-…@1,k]` lines of a warning block in
+`bottom_direct_mpi_np{2,4}` (a PID), no value. **G-BIT PASS** both backends.
+**G-SYM CUDA** (`sym/logs/cuda_s1.ctest.log`, `mg_vcycle_symmetry`): a symmetric thinW 1.7e-17, LR off 2.1e-17, slab
+2.2e-17, `scalar` 3.8e-18, 64³ blob D5 5.7e-19, walls 0, cyl 2.7e-18, channel 6.8e-18 (bound 1e-14); agglomerated
+1.5e-11 (1e-8); FP32 V-cycle (forced 'fp32') thinW a 1.15e-9, PCG 10 (not capped); guard thinW 10 / LR off 13, slab 11.
+**G-SYM PASS** on CUDA (host above).
 
 **WO-S2, G-SYMCONV** (production `solvePCG` / `solveFCG`, rtol 1e-10, zero guess, rhsOf, closed cells zero, cap 500,
 host single rank, one hierarchy per row, switch off then on; `sym/symconv/judge.out`; (d) bound = 1.25 C + 1 with
@@ -549,9 +553,68 @@ Polak–Ribière β (solveFCG's), same M, from x = 0; `sym/symconv/diag_b{12,40}
 Reading (for the architect, not a verdict): the 3-iteration gap is where two round-off-separated recurrences cross a
 non-monotone max-norm stop level, a stopping draw like A3.6's, not a defect of M (a(on) 2.6e-18).
 
-**Remaining WO-S2 gates (measurement only, ruling above):** data running detached, `sym/s2_campaign.sh` (after
-`s1_gate.sh`): A matrix rows M1 M2 M3s M5 M7a M7b M8 M10 M10h M10v, L0 off vs L0sym, 3 rounds, dumps (G-ITER-S,
-G-PERF-S, G-CONV-S (b), K / k*); B traced runs (MG_DEBUG=2) at the production rtol, 1e-13 and 1e-17, off and on
-(A1 (1), (2), (2′)); C G-NP + `device_sync_budget` + `mg_vcycle_symmetry*` on a local default-on build
-(`suite/flow-mgsym-on`, never committed); D G-CONTRAST (bubble column 256×192×128, PCG, switch on, 50 steps). Verdicts:
-NOT YET JUDGED (HANDOFF_MGSYM.md).
+**Remaining WO-S2 gates (measurement only, ruling above), switch off vs on, one build (f81ecbd).** Data:
+`gpu_diag/mgd/sym/s2_campaign.sh` → `sym/s2/` (A matrix rows, L0 off vs L0sym, 3 interleaved rounds of 5 + 30 steps,
+dumps round 1; B traced runs (MG_DEBUG=2, debug output only) at the production rtol, 1e-13, 1e-17; C G-NP on a local
+default-on worktree `suite/flow-mgsym-on`, removed afterwards; D bubble column 50 steps PCG on) and the corrections
+`sym/s2fix/s2fix.sh` (below). Judge `sym/s2fix/s2_judge.py` → `sym/s2fix/judge.out`. 66/66 timed runs rc 0.
+
+Two campaign defects, corrected before judging: (i) `mgd_case.py --rtol` never reaches the Chebyshev driver of
+`--case swarm --driver default` (M7a, M10h): the campaign's 1e-13 / 1e-17 traces of those rows ran at the default
+rtol, so (2) / (2′) there were re-run through `s2fix_case.py --cheb-rtol R` (set_pressure_chebyshev(True, cap, R)
+after the build; cap 120 at 1e-13, 300 at 1e-17); (ii) the queued G-CONTRAST case, the bubble column, has
+ρ_g/ρ_l = 0.02 (ratio 50), not 10³: re-run as the 128³ swarm with `--rho-ratio 1e-3` (μ ratio, Ar, Bo unchanged),
+MG-PCG cap 800 rtol 1e-8, 50 steps, on and off. The PCG rows' (2′) runs used mgd_case's cap 800, not A3.6's 300:
+no step reached 300 (max 36), so the difference is moot.
+
+| row | iters off → on (≤ 1.10 off + 0.5) | ms off → on (median of 3) | G-PERF-S | G-CONV-S (b) max rel (≤ 100 rtol) |
+|---|---|---|---|---|
+| M1 swarm 192³ PCG, D5 | 9.100 → 8.000 PASS | 83.79 → 78.55 (0.938) | ≤ 1.02 PASS (load ≤ 15.4) | 1.2e-10 PASS |
+| M2 bubble column 256×192×128, D5 | 11.900 → 9.133 PASS | 94.13 → 82.90 (0.881) | ≤ 1.02 PASS (13.5) | 2.4e-10 PASS |
+| M3s zh_sphere N 48, D4 | 6.507 → 6.393 PASS | 8.38 → 8.24 (info) | — | p 0.255 **MISS as written**; u v w 6.6e-12; p on non-solid cells 5.1e-11 |
+| M3s random_spheres N 48, D4 | 7.317 → 7.133 PASS | 9.63 → 9.30 (info) | — | p 0.286 **MISS as written**; u v w 1.9e-11; p non-solid 4.2e-10 |
+| M5 host swarm 128³ 1×6 (G-PERF-H) | 9.000 → 7.900 PASS | 514.11 → 387.45 (0.754) | ≤ 1.03 PASS (17.7) | 1.3e-10 PASS |
+| M7a swarm 192³ Chebyshev | 11.967 → 11.000 PASS | 228.61 → 216.51 (info) | — | 1.1e-11 PASS |
+| M7b porous bed 128³ | 9.000 → 8.100 PASS | 30.15 → 29.14 (info) | — | 8.3e-14 PASS |
+| M8 channel np 2, V-cycles | 8.000 → 8.000 PASS | 247.04 → 239.02 (info) | — | 2.2e-14 PASS |
+| M10 128×128×25 PCG | 8.100 → 8.100 PASS | 16.72 → 16.49 (info) | — | 3.4e-10 PASS |
+| M10h host, Chebyshev | 10.033 → 11.000 PASS (≤ 11.537) | 180.28 → 158.74 (info) | — | 1.2e-11 PASS |
+| M10v host np 2, V-cycles | 9.000 → 10.000 PASS (≤ 10.400) | 246.54 → 230.77 (0.936) | ≤ 1.03 PASS (16.3) | 1.2e-13 PASS |
+
+Iterations identical across rounds on every arm; 0 failed solves, 0 FP32 restarts, 0 Chebyshev restarts, both arms.
+M5's rounds spread (off 503/553/514, on 462/387/365 ms): PASS on the medians, with a margin far beyond the spread.
+K (zh_sphere) 7.436078194 both arms (rel 7.6e-15), k* (random_spheres) 0.006282103323 (rel 7.9e-14): PASS.
+The M3s p MISS lives entirely in solid cells (every face velocity 0; 22272 / 18595 cells, |p| there ≈ 1e-2 in BOTH arms):
+pressure in closed cells is undetermined and the two prolongations put different values there. On cells with an
+open face the difference is 5e-11 / 4e-10. G-CONV (b) as written compares p over all cells; WO-2 never met it (N 48
+was byte-identical). Not re-thresholded: **MISS as written**, for the architect.
+
+**A1** (B traces; per step the last solve's r0 and rtol from the trace, div = `max_open_divergence_projected()`):
+
+| row | (1) max div/(rtol r0), off / on | (2) 1e-13 worst div off / on, ratio (≤ 2) | (2′) 1e-17 worst div off / on, ratio (≤ 4); validity |
+|---|---|---|---|
+| M1 | 0.583 / 0.368 PASS | 1.50e-15 / 1.41e-15, 0.940 PASS | 3.33e-16 / 3.33e-16, 1.000 PASS; 30/30 valid both |
+| M2 | 0.988 / 0.984 PASS | 5.38e-15 / 2.50e-15, 0.464 PASS | 3.89e-16 / 3.89e-16, 1.000 PASS; 30/30 |
+| M5 | 0.836 / 0.745 PASS | 1.30e-15 / 8.76e-16, 0.672 PASS | 3.89e-16 / 3.47e-16, 0.893 PASS; 30/30 |
+| M7a (Chebyshev, s2fix) | 0.967 / 0.502 PASS | 1.87e-15 / 1.73e-15, 0.926 PASS | 3.33e-16 / 3.33e-16, 1.000 PASS; 30/30 |
+| M10 | 0.986 / 0.961 PASS | 2.35e-15 / 1.36e-15, 0.580 PASS | 3.61e-16 / 3.61e-16, 1.000 PASS; 30/30 |
+| M10h (Chebyshev, s2fix) | 0.985 / 0.850 PASS | 5.22e-16 / 8.60e-16, 1.648 PASS | 3.33e-16 / 3.33e-16, 1.000 PASS; 30/30 |
+
+(2′) iterations max 36 (M2 off), no cap. Not traced: M7b, M8, M10v (A1 NOT JUDGED there).
+**G-CONV-S: A1 (1) PASS, (2) PASS as written, (2′) PASS; (b) PASS on 9 rows, MISS as written on M3s (solid-cell p
+only); physics K / k* PASS; Hysing rise and static drop NOT RUN** (no instrument in this campaign).
+
+**G-NP** (default-on build, the one-line flip `symVcycle_ = true`, never committed): host and CUDA 20/20 —
+`mg_stencil_halo_np{1,2,4}`, `telescope_mpi_np{1,2,4}`, `telescope_varrho_mpi_np{1,2,4}`, `bottom_direct_mpi_np{2,4}`,
+`mg_fp32_vcycle_mpi_np{1,2,4,8}`, `mg_vcycle_symmetry(_mpi_np{1,2,4})`, `device_sync_budget` (0 global fences,
+0 allocations per step). **PASS.** Halo exchanges per V-cycle: no counter; D − 1 fewer by construction (ruled).
+
+**G-CONTRAST** (`sym/s2fix/contrast3_{on,off}.json`, swarm 128³ ρ ratio 10³, MG-PCG, 50 steps): switch on 11.76
+iterations/step mean, max 14, 0 capped, div_max 2.1e-8; switch off (control) mean 229.4, 13 of 50 steps capped at
+800, div_max 7.2e-2. **No capped solve with the switch on** → per A3.5 the CLAUDE.md contrast bullet is rewritten
+to the measured result at WO-S3. (The campaign's bubble column, ratio 50: on 9.28, max 12, 0 capped — information.)
+
+**Verdict WO-S2 (measurement):** G-BIT PASS, G-SYM PASS (host, CUDA), G-SYMCONV MISS (c) (on record, diagnosed),
+G-ITER-S PASS (11 rows), G-PERF-S PASS (M1 0.938, M2 0.881, M5 0.754, M10v 0.936), G-CONV-S PASS except (b) on M3s
+as written (solid-cell pressure) and Hysing / static drop not run, G-NP PASS, G-CONTRAST: no cap.
+Not re-thresholded; WO-S3 stays blocked (coordinator).
