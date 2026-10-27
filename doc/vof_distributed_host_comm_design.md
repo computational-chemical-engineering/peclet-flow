@@ -267,6 +267,17 @@ kernels. **Gate:** G-BIT-D plus `mg_stencil_halo_np{1,2,4}`, which compares a te
   solids battery, np 2/4/8, bitwise (new ctest `mg_ca_walls_np{2,4}`), plus G-BIT-D.
   A sign-of-zero difference is possible in principle (0·image summed into a zero). If the gate shows
   any difference, STOP and report.
+- **Odd periodic extent (2026-10-26, in force for every CA path, K2 included).** The bitwise
+  argument above needs each ghost-ring slot to carry its image's red-black parity. Both CA pairs
+  sweep the ring in colour 0 with the slot's OWN parity (`parityOg` / `og_`); across a periodic
+  wrap of ODD global extent the slot (z = −1, image of z = nz − 1) has the opposite parity, so the
+  ring was swept in the wrong colour: np 1 ≠ single rank (M10 128×128×25: max|Δp| 7.37e-7 of 820,
+  CA off bitwise; `~/Codes/bubble_column_perf/gpu_diag/mgd/WO7_DIAG.md` §D1). CA is therefore off on an
+  MG level, and on the velocity decomposition, with any periodic axis of odd GLOBAL extent (global
+  dims only, so np-independent); those take the per-colour exchange, exactly like the domain-BC
+  levels. Even extents are bitwise unchanged. Rejected: correcting the ring parity in the kernels
+  (more code in a hot kernel for a class with no production case; the per-colour path is the
+  validated reference). Gate: ctest `ca_odd_periodic_mpi_np{1,2}` (32×32×25).
 
 ### 5.4 K4: distributed host Krylov fusion (flow, `kHostMemory` only)
 
