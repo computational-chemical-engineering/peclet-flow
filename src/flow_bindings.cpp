@@ -384,7 +384,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(the velocity RB-GS only) | 'pressure' (the pressure-multigrid coarse levels only) -- "
           "the split exists to ATTRIBUTE a measured regression to one subsystem. Set it BEFORE "
           "init_mpi (a later call raises: the momentum half is latched with the halo topology); "
-          "either half is inert on blocks smaller than 4 cells on any axis.")
+          "either half is inert on blocks smaller than 4 cells on any axis, and on a periodic axis "
+          "of odd global extent (the pressure half per multigrid level).")
       .def_prop_ro(
           "comm_avoiding",
           [](D& diag) {

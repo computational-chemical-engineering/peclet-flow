@@ -1758,7 +1758,14 @@ class CutcellMG {
       // phi staging, ghost-projection g=2 staging) assumes it. Only for the periodic/IBM operator
       // — with domain BCs (setBoundaryConditions BEFORE initMpi) every level keeps the g=1 layout,
       // so that path is byte-identical to the pre-CA code.
-      v.g = (L > 0 && !hasBC_ && (caMode_ & kCaMg) && minBlockExtent(dec) >= 4) ? 2 : 1;
+      // Also off on an ODD periodic global extent: the wrap ring slot then has the opposite
+      // parity of its image, so the colour-0 ring sweep would update it in the wrong colour.
+      bool oddPeriodic = false;
+      for (int a = 0; a < 3; ++a)
+        oddPeriodic = oddPeriodic || (per[a] && dec.globalSize()[a] % 2 != 0);
+      const bool ca =
+          L > 0 && !hasBC_ && (caMode_ & kCaMg) && minBlockExtent(dec) >= 4 && !oddPeriodic;
+      v.g = ca ? 2 : 1;
       v.caOk = (v.g == 2);
       v.halo->buildTopology(dec, curRank, v.g, per, curComm);
       v.comm = curComm;

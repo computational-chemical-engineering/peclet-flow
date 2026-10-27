@@ -184,7 +184,12 @@ void Solver<Grid>::initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, 
   for (const auto& s : dec.sizes())
     for (int k = 0; k < 3; ++k)
       minExt = std::min(minExt, (long)s[k]);
-  caMomentum_ = (caMode_ & kCaMomentum) && minExt >= 4;
+  // Also off on an ODD periodic global extent: the wrap ring slot then has the opposite parity of
+  // its image, so the colour-0 ring sweep would update it in the wrong colour (per-colour path).
+  bool oddPeriodic = false;
+  for (int a = 0; a < 3; ++a)
+    oddPeriodic = oddPeriodic || (per[a] && gs[a] % 2 != 0);
+  caMomentum_ = (caMode_ & kCaMomentum) && minExt >= 4 && !oddPeriodic;
   for (bool& d : momStencilDirty_)
     d = true;
   dec_ = std::make_shared<peclet::core::decomp::BlockDecomposer<3>>(dec);  // remember the partition
