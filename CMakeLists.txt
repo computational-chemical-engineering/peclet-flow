@@ -307,6 +307,14 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(vof_momentum_rho_names PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # diagnostics.set_vof_momentum_scheme: every name round-trips, an unknown one raises ValueError,
+  # set_vof_momentum_muscl stays the former spelling (doc/vof_momentum_second_order.md §7).
+  add_test(NAME vof_momentum_scheme_names
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_vof_momentum_scheme_names.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(vof_momentum_scheme_names PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The same face plane under MPI: an x-only split at np = 3, so the +x face has one owning rank
   # and the middle rank touches neither open face; distributed == serial to 1e-12 for the outlet
   # scalar, the backflow census and a high-side inflow, both grids (doc/uf_outlet_fix.md).

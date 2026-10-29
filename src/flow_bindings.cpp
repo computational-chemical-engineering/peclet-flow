@@ -2141,17 +2141,29 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "vof_rho_floor", [](D& diag) { return diag.s->vofRhoFloor(); },
           "The absolute rho^c floor used by the last recovery.")
       .def(
+          "set_vof_momentum_scheme",
+          [](D& diag, const std::string& name) { diag.s->setVofMomentumScheme(name); },
+          nb::arg("name"),
+          "The transported face velocity of the VoF momentum flux (flow "
+          "doc/vof_momentum_second_order.md). 'upwind' (the DEFAULT): donor cell, convex at every "
+          "density ratio, first order. 'muscl_mixed': a MinMod slope of the MIXED control-volume "
+          "velocity; on a volume a sweep empties of liquid the departing liquid's extra momentum "
+          "is debited from the gas left behind (gain rho_l/rho_g), so it converges to a WRONG "
+          "limit at high ratio (P1, ratio ~1e3: +3.0/+3.1 % at d/h 16/24). 'muscl_mixed_capped': "
+          "that slope times the mass-aware cap (the diagnosis ablation). 'muscl_phase': each "
+          "phase's mass flux carries its own face velocity from an interface-biased MC slope, "
+          "scaled by the cap - second order, a discrete maximum principle at any ratio, the "
+          "uniform-velocity identity bit-exact. vof_momentum_diagnostics()['capped'] counts the "
+          "faces the cap scaled in the last step. Any other name raises ValueError.")
+      .def(
+          "vof_momentum_scheme", [](D& diag) { return diag.s->vofMomentumScheme(); },
+          "The selected VoF momentum scheme (see set_vof_momentum_scheme).")
+      .def(
           "set_vof_momentum_muscl", [](D& diag, bool on) { diag.s->setVofMomentumMuscl(on); },
           nb::arg("on") = true,
-          "MinMod-limited linear reconstruction of the donor velocity in the momentum flux, "
-          "instead of the DEFAULT plain donor-cell upwind. Both preserve the uniform-velocity "
-          "identity exactly (a uniform field has a zero slope bit for bit), but on a control "
-          "volume "
-          "a sweep EMPTIES the slope's deviation from the volume's own velocity is amplified by "
-          "drho*F/rho^c, which is unbounded in the density ratio. Measured at ratio 1e4, 50 steps: "
-          "with the slope the uniform-velocity residual grows to 2.2e-10, without it it is flat at "
-          "6.7e-16; at ratio 1e3 the slope is harmless. Turn it on deliberately and re-run the "
-          "ratio sweep if you do.")
+          "Former spelling of set_vof_momentum_scheme: on = 'muscl_mixed' (a MinMod slope of the "
+          "mixed control-volume velocity), off = 'upwind'. Use set_vof_momentum_scheme; "
+          "'muscl_phase' is the second-order scheme that stays bounded at high density ratio.")
       .def(
           "set_vof_momentum_cell_flag",
           [](D& diag, bool on) { diag.s->setVofMomentumCellFlag(on); }, nb::arg("on") = true,
@@ -2179,11 +2191,15 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             r["min_rho_c"] = d.minRhoC;
             r["floored"] = d.floored;
             r["clamped"] = d.clamped;
+            r["capped"] = d.capped;
             return r;
           },
           "Census over THIS RANK's momentum control volumes: per-component min/max of the "
           "half-shifted colour C^c, the summed momentum rho^c u_c (the conservation census), the "
-          "minimum rho^c before the floor, and the number of control volumes the floor touched.")
+          "minimum rho^c before the floor, and the number of control volumes the floor touched; "
+          "'clamped' and 'capped' count the faces "
+          "the Weymouth clamp and the mass-aware cap (set_vof_momentum_scheme) touched in the last "
+          "step.")
       .def(
           "vof_advected_velocity",
           [](D& diag, int c) { return field_out(*diag.s, diag.s->getVofAdvectedVelocity(c)); },

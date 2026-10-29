@@ -2352,6 +2352,38 @@ double Solver<Grid>::vofRhoFloor() const {
 }
 
 template <class Grid>
+void Solver<Grid>::setVofMomentumScheme(const std::string& name) {
+  using MS = vof::MomentumScheme;
+  if (name == "upwind")
+    vofMom_.momentumScheme = MS::Upwind;
+  else if (name == "muscl_mixed")
+    vofMom_.momentumScheme = MS::MusclMixed;
+  else if (name == "muscl_mixed_capped")
+    vofMom_.momentumScheme = MS::MusclMixedCapped;
+  else if (name == "muscl_phase")
+    vofMom_.momentumScheme = MS::MusclPhase;
+  else
+    throw std::invalid_argument("set_vof_momentum_scheme: unknown scheme '" + name +
+                                "' (expected 'upwind', 'muscl_mixed', 'muscl_mixed_capped' or "
+                                "'muscl_phase')");
+}
+
+template <class Grid>
+std::string Solver<Grid>::vofMomentumScheme() const {
+  switch (vofMom_.momentumScheme) {
+    case vof::MomentumScheme::Upwind:
+      return "upwind";
+    case vof::MomentumScheme::MusclMixed:
+      return "muscl_mixed";
+    case vof::MomentumScheme::MusclMixedCapped:
+      return "muscl_mixed_capped";
+    case vof::MomentumScheme::MusclPhase:
+      return "muscl_phase";
+  }
+  return "upwind";
+}
+
+template <class Grid>
 void Solver<Grid>::setVofMomentumMuscl(bool on) {
   vofMom_.momentumScheme = on ? vof::MomentumScheme::MusclMixed : vof::MomentumScheme::Upwind;
 }
