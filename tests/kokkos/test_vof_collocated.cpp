@@ -223,8 +223,12 @@ void gateHydrostatic() {
                          {"walled,   through C (frozen)  ", false, true}};
   for (const Case& c : cases) {
     const auto st = hydrostatic<Stag>(1000.0, 0.0, 100, c.periodic, c.colour);
-    const auto co = hydrostatic<Colo>(1000.0, 0.0, 100, c.periodic, c.colour, 0);
-    const auto co4 = hydrostatic<Colo>(1000.0, 0.0, 400, c.periodic, c.colour, 0);
+    // Walled: solved at Chebyshev rtol 1e-14 (doc §9 G4 protocol, as gateBalancedOn): at the
+    // default 1e-9 the face error is a stopping draw of the symmetric V-cycle
+    // (doc/mg_depth_policy.md A3), 1.99e-12 in 10 iterations (trilinear 2.25e-13 in 13).
+    const double rt = c.periodic ? -1.0 : 1e-14;
+    const auto co = hydrostatic<Colo>(1000.0, 0.0, 100, c.periodic, c.colour, 0, rt);
+    const auto co4 = hydrostatic<Colo>(1000.0, 0.0, 400, c.periodic, c.colour, 0, rt);
     std::printf("  %s  staggered  cell %.3e  face %.3e  dP/dz %.3e  cb %.3e  it %ld\n", c.name,
                 st.cellU, st.faceU, st.pErr, st.cb, st.iters);
     std::printf(
@@ -235,9 +239,10 @@ void gateHydrostatic() {
     CHECK(st.pErr < 1e-11);
     // Collocated: the FACE field is the projected field of a velocity that is itself the decaying
     // transient, so it sits at the pressure solve's round-off of that transient. Walled: the
-    // note's 1e-12 holds (3.2e-13 measured, double operator storage). Periodic: FROZEN at WO-V1
-    // (2026-09-25) at 10x the measured 1.79e-10 (doc §9 G4 measure-then-freeze; the note's 1e-10
-    // missed by 1.8x; the periodic box carries a 2.3e-1 cell checkerboard transient at mu = 0).
+    // note's 1e-12 holds (8.2e-14 measured at rtol 1e-14, double operator storage). Periodic:
+    // FROZEN at WO-V1 (2026-09-25) at 10x the measured 1.79e-10 (doc §9 G4 measure-then-freeze; the
+    // note's 1e-10 missed by 1.8x; the periodic box carries a 2.3e-1 cell checkerboard transient at
+    // mu = 0).
     CHECK(co.faceU < (c.periodic ? 1.8e-9 : 1e-12));
     CHECK(co4.cellU < co.cellU);  // the transient decays ...
     CHECK(co4.pErr < co.pErr);    // ... in the velocity and in the pressure gradient
@@ -249,12 +254,12 @@ void gateHydrostatic() {
       "  gradient at variable rho: WO-P's mu*dt^2 residue).\n");
   for (double mu : {0.0, 1e-3, 1e-2, 1e-1}) {
     const auto st = hydrostatic<Stag>(1000.0, mu, 100, false, false);
-    const auto co = hydrostatic<Colo>(1000.0, mu, 100, false, false, 0);
+    const auto co = hydrostatic<Colo>(1000.0, mu, 100, false, false, 0, 1e-14);  // as T1 walled
     std::printf(
         "    mu = %-6g  staggered face %.3e  dP/dz %.3e   |   COLLOCATED face %.3e  "
         "dP/dz %.3e\n",
         mu, st.faceU, st.pErr, co.faceU, co.pErr);
-    CHECK(co.faceU < 1e-12);  // measured 4.2e-14 .. 3.2e-13 (double operator storage)
+    CHECK(co.faceU < 1e-12);  // measured 2.0e-14 .. 1.1e-13 at rtol 1e-14 (double storage)
   }
 }
 
