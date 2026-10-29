@@ -618,3 +618,37 @@ to the measured result at WO-S3. (The campaign's bubble column, ratio 50: on 9.2
 G-ITER-S PASS (11 rows), G-PERF-S PASS (M1 0.938, M2 0.881, M5 0.754, M10v 0.936), G-CONV-S PASS except (b) on M3s
 as written (solid-cell pressure) and Hysing / static drop not run, G-NP PASS, G-CONTRAST: no cap.
 Not re-thresholded; WO-S3 stays blocked (coordinator).
+
+## 2026-10-29 — Amendment A3: G-CONV (d) / G-CONV-S physics metrics, Hysing rise and static drop, switch on vs off
+
+Before WO-S3 (user condition (ii) on U-A3). Instrument: `tests/study/vof_surface_tension.py` copied to
+`gpu_diag/mgd/sym/phys/vst_sym.py` (diff `vst_sym.diff`: `--sym on|off` sets
+`diagnostics.set_pressure_vcycle_symmetric` on every Solver, metrics dumped at full precision; nothing else).
+CUDA build `build_cuda` (f81ecbd source), default resolution (static 16/32/48/64³; Hysing nx 64, T 3), Chebyshev
+driver at the script's rtol (static 1e-14, Hysing 1e-12), one arm each, OMP 4, under `heavy.lock`.
+Tolerance: 1e-6 relative — the script and its docstring state no tolerance of their own for these metrics.
+Data `sym/phys/logs/{static,hysing1,hysing2}_{off,on}.{log,json}`; table from `sym/phys/judge.py`.
+
+| metric | off | on | rel | verdict |
+|---|---|---|---|---|
+| static Ca, 16³ / 32³ / 48³ / 64³ | 2.5520e-4 / 5.9173e-5 / 2.8138e-5 / 1.4471e-5 | same | 4.7e-14 / 3.7e-14 / 1.8e-13 / 1.7e-12 | PASS |
+| static Δp vs Laplace 2σ/R | — | — | — | NOT JUDGED (the script does not measure it) |
+| Hysing 1 v_rise max | 0.24291129853633 | 0.24291129853633 | 2.3e-16 | PASS |
+| Hysing 1 t(v_rise max) | 0.95691509308147 | equal | 0 | PASS |
+| Hysing 1 y_c(3) | 1.08409344631311 | 1.08409344631311 | 2.0e-16 | PASS |
+| Hysing 2 v_rise max | 0.25223606197221 | 0.25223606197221 | 3.7e-15 | PASS |
+| Hysing 2 t(v_rise max) | 0.75979564297055 | 0.75979564297055 | 5.7e-15 | PASS |
+| Hysing 2 y_c(3) | 1.12584606332378 | 1.12584606332372 | 5.5e-14 | PASS |
+| Hysing 1, 2 circularity min | — | — | — | NOT JUDGED (the script does not compute it: no PLIC length) |
+
+Supplementary, not pre-registered: Δp = mean p(C > 1−1e-6) − mean p(C < 1e-6) after 60 steps is bit-equal on and off
+(0.5226 / 0.2521 / 0.1672 / 0.1252 against 2σ/R 0.5 / 0.25 / 0.1667 / 0.125).
+
+**Stop test, both arms: no capped solve** (cap 500 static, 600 Hysing). Pressure iterations per step, mean (max),
+off → on: static 16³ 12.00 (12) → 11.93 (12), 32³ 13.00 (13) → 11.98 (12), 48³ 13.00 (13) → 12.05 (13), 64³ 13.00 (13)
+→ 11.98 (12); Hysing 1 14.46 (17) → 15.32 (18), 2032 steps both; Hysing 2 20.88 (53) → 20.28 (121), 856 steps both —
+the on-arm max is a two-step transient (steps 718–719: 104, 121; next highest 37), off's max is steps 625–626 (45, 53).
+max |div(open u)| off / on: static ≤ 1.8e-15 / 3.2e-16; Hysing 1 5.2e-13 / 4.5e-13; Hysing 2 4.2e-11 / 4.8e-11.
+
+**Verdict: G-CONV (d) / G-CONV-S physics PASS on every metric the instrument measures (max rel 1.7e-12, static 64³
+Ca); static Δp and circularity NOT JUDGED (not measured by the script).** Not re-thresholded; WO-S3 not started.
