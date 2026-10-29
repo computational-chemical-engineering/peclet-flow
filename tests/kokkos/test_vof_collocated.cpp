@@ -454,15 +454,16 @@ void gateBalancedOn() {
   // The PERIODIC box at the default Chebyshev rtol 1e-9 misses by more than 10x (after 1 step: face
   // 5.6e-10, cell 2.0e-9, dP/dz 4.3e-11; after 100: face 9.9e-12) -- and passes at 1e-14 (face
   // 3.0e-14, cell 8.9e-14, dP/dz 1.2e-14), so it is the solve tolerance, not the scheme (doc §9 G4:
-  // re-run at Chebyshev 1e-14; only a miss there is conceptual). It is gated at 1e-14; the walled
-  // cases pass at the default. WO-P5 (the increment solve, full-RHS stop) does not change the
-  // first step -- one solve at rtol 1e-9 relative to the full right-hand side -- and after it the
-  // pre-projection skips (1e-9: 100 steps face 2.2e-10; 1e-14: 13 iterations at step 1, then 0,
+  // re-run at Chebyshev 1e-14; only a miss there is conceptual). It is gated at 1e-14. The walled
+  // cases are too since the symmetric V-cycle became the default (doc/mg_depth_policy.md A3): at
+  // 1e-9 their step-1 face error is a stopping draw, 6.6e-13 (trilinear) and 1.5e-12 (symmetric),
+  // at 1e-14 5.1e-14, the same protocol. WO-P5 (the increment solve, full-RHS stop) does not change
+  // the first step -- one solve at rtol 1e-9 relative to the full right-hand side -- and after it
+  // the pre-projection skips (1e-9: 100 steps face 2.2e-10; 1e-14: 13 iterations at step 1, then 0,
   // never the cap).
   for (const Case& c : cases)
     for (int steps : {1, 100}) {
-      const auto co = hydrostatic<Colo>(1000.0, 0.0, steps, c.periodic, c.colour, -1,
-                                        c.periodic ? 1e-14 : -1.0);
+      const auto co = hydrostatic<Colo>(1000.0, 0.0, steps, c.periodic, c.colour, -1, 1e-14);
       std::printf("  T1 %s %3d step(s)  cell %.3e  face %.3e  dP/dz %.3e  it %ld\n", c.name, steps,
                   co.cellU, co.faceU, co.pErr, co.iters);
       CHECK(co.faceU < 1e-12);
