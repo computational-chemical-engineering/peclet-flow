@@ -6381,6 +6381,31 @@ class CutcellMG {
         });
   }
 
+  // f += amp * h(global cell) over the inner cells, h a fixed hash of the GLOBAL cell index into
+  // [-0.5, 0.5): the same value at a cell whatever the decomposition (np-independent by
+  // construction). The cold eigenvalue seed's broadband component (see estimateEigenvalues).
+  void addSeedNoise(Level& lv, CCField f, double amp) {
+    CCExec space;
+    const C3 e = lv.ext, og = lv.og;
+    const int g = lv.g;
+    CCField ff = f;
+    Kokkos::parallel_for(
+        "peclet::flow::mg_seed_noise",
+        MDRange3<CCExec>(space, {g, g, g}, {e.x - g, e.y - g, e.z - g}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          std::uint64_t h = (std::uint64_t)(og.x + x - g) * 0x9E3779B97F4A7C15ull ^
+                            (std::uint64_t)(og.y + y - g) * 0xC2B2AE3D27D4EB4Full ^
+                            (std::uint64_t)(og.z + z - g) * 0x165667B19E3779F9ull;
+          h ^= h >> 30;  // splitmix64 finaliser
+          h *= 0xBF58476D1CE4E5B9ull;
+          h ^= h >> 27;
+          h *= 0x94D049BB133111EBull;
+          h ^= h >> 31;
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          ff(i) += amp * ((double)(h >> 11) * 0x1.0p-53 - 0.5);
+        });
+  }
+
   // A zero-filled level-0 work vector that persists across solves: the Chebyshev driver and its
   // eigenvalue estimate used to allocate (and free) eight of these per step -- a
   // cudaMalloc/cudaFree pair each, and cudaFree synchronises the device. Same contents as a fresh
@@ -6401,6 +6426,9 @@ class CutcellMG {
   // mean-removed and normalised exactly as the rhs seed is) and the kept iterates are replaced by
   // the new last ones; `seed` is not read. Warm requires eigenWarmReady().
   enum class EigenStart { Cold, ColdKeep, Warm };
+  // Symmetric V-cycle only: the factor on the lambda_max estimate that SHIFTS the min power
+  // iteration (see estimateEigenvalues). The returned lambda_max stays the raw estimate.
+  static constexpr double kChebSymShift = 1.15;
   // True when a ColdKeep or Warm estimate has run on the current hierarchy (init/initMpi drop it).
   bool eigenWarmReady() const {
     return eigWarm_ && !lv_.empty() && eigVmax_.extent(0) == lv_[0].n &&
@@ -6431,8 +6459,17 @@ class CutcellMG {
     CCField v = workVector(0, n, "ev_v"), w = workVector(1, n, "ev_w"),
             z = workVector(2, n, "ev_z"), srhs = workVector(3, n, "ev_srhs");
     const bool warm = start == EigenStart::Warm, keep = start != EigenStart::Cold;
-    if (!warm)
+    if (!warm) {
+      // The right-hand side plus a broadband, np-independent component of the same max amplitude
+      // (doc/mg_depth_policy_log.md 2026-10-29): a right-hand side confined to an invariant
+      // subspace of M^{-1}A (an x-y-uniform hydrostatic load) otherwise hides the top of the
+      // spectrum from the power iteration, and the symmetric V-cycle's top lies above 1.
       Kokkos::deep_copy(CCExec(), srhs, seed);
+      if (symVcycle_) {  // off: the pre-A3 estimate bit for bit (A3.3 item 4)
+        const double sm = maxabs(l0, srhs);
+        addSeedNoise(l0, srhs, sm > 0.0 ? sm : 1.0);
+      }
+    }
     auto matvec = [&](CCField y, CCField x) { matvecOverlap(l0, y, x); };
     auto applyT = [&](CCField out,
                       CCField in) {  // out = M^{-1} A in, projected onto the fluid range
@@ -6468,11 +6505,18 @@ class CutcellMG {
     }
     if (keep)
       keepf(eigVmax_, v, "ev_vmax");
+    // The min iteration runs on shift*I - T. A shift below the true lambda_max makes it converge
+    // to the wrong end of the spectrum and the lower bound collapse (pressure_wallbounded case B
+    // diverged on it, doc/mg_depth_policy_log.md 2026-10-29). The power iteration approaches the
+    // top from below and the symmetric V-cycle's top lies above 1, so in symmetric mode the shift
+    // is raised by kChebSymShift; lambda_max itself is returned raw (Chebyshev converges for every
+    // eigenvalue in (0, lmin + lmax), an unbracketed top costs little).
+    const double shift = symVcycle_ ? kChebSymShift * lmax : lmax;
     const double nrMin = seedf(v, warm ? eigVmin_ : srhs);
     double mu = 0.0;
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
-      lin(z, lmax, v, -1.0, z);  // z = lmax*v - T v
+      lin(z, shift, v, -1.0, z);  // z = shift*v - T v
       mu = dot(l0, v, z);
       Kokkos::deep_copy(CCExec(), v, z);
       normalize(v);
@@ -6485,7 +6529,7 @@ class CutcellMG {
       eigWarm_ =
           nrMax > 0.0 && nrMin > 0.0 && std::isfinite(lmax) && lmax > 0.0 && std::isfinite(mu);
     }
-    double e_hi = lmax, e_lo = lmax - mu;  // direct (max) + shifted (min) Rayleigh estimates
+    double e_hi = lmax, e_lo = shift - mu;  // direct (max) + shifted (min) Rayleigh estimates
     lmin = e_lo < e_hi ? e_lo : e_hi;
     lmax = e_lo < e_hi ? e_hi : e_lo;  // robust min/max bracket
     if (lmin < 0.02 * lmax)
