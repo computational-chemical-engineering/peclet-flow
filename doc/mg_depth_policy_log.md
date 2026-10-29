@@ -652,3 +652,43 @@ max |div(open u)| off / on: static ≤ 1.8e-15 / 3.2e-16; Hysing 1 5.2e-13 / 4.5
 
 **Verdict: G-CONV (d) / G-CONV-S physics PASS on every metric the instrument measures (max rel 1.7e-12, static 64³
 Ca); static Δp and circularity NOT JUDGED (not measured by the script).** Not re-thresholded; WO-S3 not started.
+
+## 2026-10-29 — WO-S3 gate mgsym3 triage (flip 4175de8): four re-pins, CA device default, one STOP (Chebyshev bounds)
+
+Gate mgsym3 (`validation/wo7/{host,cuda}_mgsym3.*`): host 6/274 failed, CUDA 5/274; the summary lists also carry
+skips. Every entry, classified:
+
+| test | backend | class | evidence | action |
+|---|---|---|---|---|
+| device_sync_budget, prefactor_hoist_bitwise | host | skip by design (exit 77, device-only) | skipped on main host_mglr2 too; CUDA mgsym3 Passed | none |
+| bottom_direct_mpi_np2/np4 | CUDA | skip by design | skipped on main cuda_mglr2/2b too; host mgsym3 Passed | none |
+| scalar_mg, scalar_cutcell_g4 | CUDA | (c) flake: GPU OOM under a shared GPU (`Cuda memory space failed to allocate 17.55 MiB` / `3.092 MiB`) | same two failed with the same OOM on main cuda_mglr2; serial CUDA rerun on c6c0494: both Passed | none |
+| units_anisotropic_sphere | both | (a) pinned iters/step | 7.0 → 6.0 at N = 24, 32 (N = 16: 6.0); K and steps unchanged | 41a7257 re-pin |
+| mg_fp32_vcycle | both | (a) pinned relative criterion | G-D3 (e) fp64 health 0.06–0.44 (trilinear) → 3e-15–3e-13 (symmetric: round-off); fp32 2e-8–1.6e-7 (FP32 rounding) | 5f59812 floor max(1.1×fp64, 1e-2) (G-D3's original absolute) |
+| vof_collocated | both | (a) stopping draw at rtol 1e-9 | T1 walled step 1 face 6.6e-13 → 1.53e-12 (bound 1e-12); at 1e-14 5.1e-14 (cell 1.2e-13, dP/dz 2.3e-14) | b5efbcf walled at 1e-14, the periodic case's protocol |
+| vof_twophase_mpi_np2/np4 | host | (a) stopping draw; the test's premise "|u| is round-off" | walls-z max|u| 2.7e-12 → 1.6e-10 at rtol 1e-9, du 4.2e-12 / 5.2e-12 (tol 1e-12); at 1e-12 and 1e-14 both arms |u| ≈ 3e-13 | 9c01268 walls-z at rtol 1e-12: du 4.4e-13 / 3.9e-13 |
+| pressure_wallbounded | host (CUDA symptomatic) | (b) **Chebyshev bounds do not bracket the symmetric V-cycle — STOP, design question** | case B Cheb 7 → 200 (cap), max|u| 4e84 host; CUDA 7 → 24 (passes, same mechanism) | none (below) |
+
+**pressure_wallbounded case B, root cause (measured, host, diagnostic prints not committed).** The symmetric V-cycle's
+λ_max(M⁻¹A) is above 1 (constant P with rediscretized coarse operators over-corrects): 300 power iterations from a
+rich seed give 1.0566 on this 24×24×16 D4 box (trilinear 0.9999); vof_collocated 1.059; the varRho cases C/D's warm
+estimates climb 1.02 → 1.12 over 8 steps (trilinear ≤ 1.010). The Chebyshev driver brackets with 1.05 × the
+15-iteration estimate seeded by the right-hand side. Case B's rhs (uniform body force, walls ±z, periodic x, y) is
+x-y-uniform, an invariant subspace of M⁻¹A, so the estimate sees only the 1-D spectrum: [0.0194, 0.9714] → b = 1.020
+< 1.0566; constant density never re-estimates, round-off seeds the other modes and they grow (200 iterations,
+|u| 4e84). Trilinear: the 1-D estimate 0.967 × 1.05 = 1.015 brackets 0.9999, so the same trap was latent. A rich seed
+alone (15 iterations) gives b = 1.039 and 12 iterations: still under λ_max. The A3 note puts Chebyshev in scope and
+is silent on its bounds. Options for the decision: (i) a decomposition-independent mean-free pseudo-random component
+in the cold seed (moves every Chebyshev digest); (ii) a larger upper margin in symmetric mode, or a floor on b;
+(iii) a residual-growth guard on cold-bound solves (re-estimate) — needs (i) to help. Default if asked: (i) + (ii).
+
+**CA device default (c6c0494)**: `sym/flip/ca_patch.py` applied as one commit. Host state_hash b5054ad271849e15
+(= mgsym3); CUDA 1c59f91ccf487086 (= mgsym3): bitwise. ca_odd_periodic_mpi + mg_stencil_halo host 5/5, CUDA 5/5; the re-pinned four CUDA 6/6 (walls-z du 0 / 6.6e-13). clang-format clean on the CI-covered
+files (flow_ibm.hpp, flow_bindings.cpp are on the CI exclude list).
+
+**G-NP (mgsym3 logs, switch on):** host 19/19 run green (device_sync_budget skip by design), CUDA 18/18 run green
+(device_sync_budget PASS; bottom_direct_mpi skip by design, host PASS): every one of the 20 green on its backend.
+
+**Not done (blocked on the Chebyshev decision):** the full gate re-run, the census vs mglr2 and the 14-digest table
+(gate mgsym3 digests: host b5054ad271849e15, CUDA 1c59f91ccf487086; pre-flip 51fec031a160c88b / 8337752781faf71b;
+a Chebyshev-bounds change would move the VoF/Chebyshev cases again).
