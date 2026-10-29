@@ -896,7 +896,10 @@ void gateAnisoSphere() {
     // (iv) the cubic control reproduces the recorded baseline value to every printed digit.
     const double dRec = std::fabs(cub.K - REC[i]) / REC[i];
     const int RECSTEPS[3] = {60, 80, 75};
-    const double RECITERS[3] = {6.0, 7.0, 7.0};
+    // Pressure iterations/step: 7 -> 6 at N = 24 and 32 when the symmetric V-cycle became the
+    // default (doc/mg_depth_policy.md A3, WO-S3); K and the step counts are unchanged.
+    // perf_baseline.json still records 7.0 there, inside its own +-2 band.
+    const double RECITERS[3] = {6.0, 6.0, 6.0};
     std::printf(
         "        cubic vs perf_baseline.json %.17g   rel %.3e (bound 1e-6)   steps %d "
         "(recorded %d)   iters/step %.1f (recorded %.1f)\n",
