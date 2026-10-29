@@ -442,3 +442,34 @@ census vs `*_mgdrebase.*` = pre-WO-7 main by `gpu_diag/mgd/caodd/compare_any.py`
 The CA fix also closes the CutcellMG-level gap of the pre-rebase record: `mg_fp32_vcycle_mpi` aniso 64×64×25 periodic,
 np 1, LR-off control now memcmp-equal (CUDA was 102398 cells differ), LR on equal; CUDA np 2 control max|dx| 1.2e-10 → 1.1e-13
 (main's change, not WO-7's).
+
+**G-LR (3) re-judged = G-ASP (1) with LR on, divergence condition (2′)** (A3.6, USER 2026-10-27; `wo7l/land3.sh`,
+judge `wo7l/judge3.py`, raw `wo7l/trace/`, verdicts `wo7l/glr3.txt`). Module mod_wo7l (rebased `mglr`). new = AUTO,
+old = explicit 4, both with LR at its default (on; LR triggers in both hierarchies), so the arms differ only in the
+depth. Per row and arm: the production rtol (dumps), the 1e-10 rerun (dumps; M10, M10h), and (2′): rtol 1e-17, cap 300
+(`tdiag2.py`: the driver re-selection of the A1 (2) runs, `--pcg-rtol` / `--cheb-rtol`, with the cap as an argument),
+validity checked per run (min_k div_k / (rtol r0_k) ≥ 10; the 1e-19 fallback was not needed). G-CONV (a), (b) use the
+traced runs (the attempt-1/2 matrix dumps are not reused; the traced production dumps are bitwise equal to attempt 2's,
+below).
+
+| row | (1a) stop test, restarts | (1b) AUTO vs 4: prod; 1e-10 | A1 (1) L0 / L4: prod; 1e-10 | (2′) validity min div/(rtol·r0) L0 / L4; it/step | (2′) worst div L0 / L4 = ratio (≤ 4) | G-LR (3) |
+|---|---|---|---|---|---|---|
+| M10 (PCG 1e-8) | 0 failed, max it 9 / 12 (cap 800), 0 FP32 flips | 1.790e-10 (≤ 1e-6); 1.150e-12 (≤ 1e-8) | 0.986 / 0.906; 0.886 / 0.687 | 214 / 244; 18.9 / 18.4 | 3.608e-16 / 3.192e-16 = **1.130** | **PASS** |
+| M10h (Cheb 1e-9) | 0 failed, max it 11 / 11 (cap 120), 0 restarts | 5.193e-12 (≤ 1e-7); 8.679e-13 (≤ 1e-8) | 0.985 / 0.411; 0.679 / 0.297 | 275 / 214; 19.0 / 18.2 | 3.331e-16 / 3.331e-16 = **1.000** | **PASS** |
+| M10v (np 2, 1e-10) | 0 failed, max it 9 (cap 500) | 1.341e-14 (≤ 1e-8); — | 0.161 / 0.158; — | 7.5e3 / 8.1e3; 15.0 / 15.0 | 1.735e-18 / 1.735e-18 = **1.000** | **PASS** |
+
+No (2′) run reached its cap (max 23 iterations). The old A1 (2) MISS on M10 (rtol 1e-13: 2.345e-15 / 7.910e-16 =
+2.965, attempt 1) stays on record; under (2′) the same pair sits at its round-off floor, 1.13 apart.
+
+**G-LR (1), (2): attempt 2 (`wo7/glr_attempt2.out`, mod_wo7r = 210bdac before the rebase; load max 19.6 / 22.7 / 17.0,
+no other GPU app; iterations identical across the three rounds).** They stand on the rebased tree: its production
+runs are bitwise equal to attempt 2's round-1 dumps (u v w p C, every row, AUTO and explicit 4).
+
+| row | iters L0 / L0off / L4 / L4off / L6 | ms L0 / L0off / L4 / L4off / L6 | (1) ≤ 1.15 × L4off + 0.5 | (2) t(L0) ≤ k × t(L0off) |
+|---|---|---|---|---|
+| M10 | 8.100 / 16.100 / 8.067 / 10.100 / 8.200 | 16.61 / 17.00 / 48.97 / 75.82 / 18.89 | 8.100 ≤ 12.115 PASS | 16.61 ≤ 1.00 × 17.00 **PASS** |
+| M10h | 10.033 / 21.967 / 10.000 / 13.000 / 11.000 | 165.06 / 207.34 / 231.88 / 241.85 / 168.46 | 10.033 ≤ 15.450 PASS | 165.06 ≤ 1.03 × 207.34 PASS |
+| M10v | 9.000 / 20.000 / 9.000 / 13.000 / 9.000 | 229.50 / 324.28 / 305.12 / 371.18 / 241.68 | 9.000 ≤ 15.450 PASS | 229.50 ≤ 1.03 × 324.28 PASS |
+
+**WO-7 gate summary on `mglr` (rebased): G-LR (1) PASS, (2) PASS (attempt 2, after the A2.6 remedy), (3) PASS under
+(2′), (4) PASS (np 1 included), (5) PASS (`mg_line_relax` green in both batteries).** Not pushed, not merged.
