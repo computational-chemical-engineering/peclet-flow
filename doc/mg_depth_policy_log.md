@@ -692,3 +692,34 @@ files (flow_ibm.hpp, flow_bindings.cpp are on the CI exclude list).
 **Not done (blocked on the Chebyshev decision):** the full gate re-run, the census vs mglr2 and the 14-digest table
 (gate mgsym3 digests: host b5054ad271849e15, CUDA 1c59f91ccf487086; pre-flip 51fec031a160c88b / 8337752781faf71b;
 a Chebyshev-bounds change would move the VoF/Chebyshev cases again).
+
+## 2026-10-29 — Chebyshev bounds under the symmetric V-cycle: (i) seed + (ii) upper margin measured; STOP on (ii)
+
+Coordinator decision: (i) an np-independent pseudo-random component in the cold eigen seed, (ii) an upper margin
+chosen from measurement. Measured on host (diagnostic build, not committed; evidence and the WIP patch in
+`gpu_diag/mgd/sym/flip/cheb/`). (i) = rhs + max|rhs| · h(global cell), h a splitmix64 hash in [−0.5, 0.5), gated on
+the symmetric mode (off stays the pre-A3 estimate bit for bit). Reference λ_max(M⁻¹A): 150 power iterations from the
+broadband seed (CG-Lanczos agrees within 2 % wherever M is symmetric; it is invalid for the trilinear V-cycle).
+
+**Underestimate ratio λ_max / estimate, worst over the -LE bench battery (53 Chebyshev ctests), with (i):**
+symmetric: cold 1.129 (vof_blocks_ns_mpi), 1.126 (vof_momentum), 1.111 (pressure_wallbounded C), 1.100
+(vof_redistribute_mpi), 1.099 (balanced_force_mpi); warm 1.122. Trilinear: 1.041 (inside its 1.05). So a
+bracketing margin needs ≥ 1.13 total: kChebSymUpper ≥ 1.076 on top of solveChebyshev's 1.05; 1.15 gives 7 %
+headroom.
+
+**Cost, Chebyshev V-cycles summed over the 53 tests:** trilinear 237 889; (i) only 239 557; (i) + factor 1.15
+on λ_max (bracketing, total 1.21) 260 757 (+9.6 % vs trilinear; per test +5…+29 %, collocated_stability_guard
++29 %, cell_force_placement +22 %, vof_twophase +14 %); 1.20: 269 535 (+13.3 %); 1.25: 279 714 (+17.6 %).
+
+**Mechanism:** Chebyshev converges for every λ in (0, a + b), so an unbracketed top costs little (the (i)-only arm
+is within 1 % of trilinear). The failure (pressure_wallbounded B) is the LOWER bound collapsing: the min iteration
+is shifted by the unmargined λ_max estimate, and a shift below λ_max makes it converge to the wrong end (estimate
+0.0194 / 0.16 against a true 0.90), so a + b < λ_max. Applying the factor to the SHIFT only and returning the raw
+λ_max ("shift-only"): total 232 854 at 1.15 (−2.1 % vs trilinear), 232 573 at 1.25; case B 8 iterations (trilinear 7;
+mgsym3 200 = cap; (i) only 34).
+
+**Verdict:** (ii) as decided (bracket the top) costs about 10 % of the Chebyshev V-cycles (the VoF default driver)
+and would likely break G-ITER-S (≤ 1.10 × off + 0.5): STOP per the decision's own condition. Not committed. The
+shift-only variant fixes the measured failure at no cost but is a different design choice: it goes to the
+coordinator / architect. In every symmetric arm vof_collocated (lines 241, 257: exactness at the default rtol 1e-9)
+fails on the changed stopping draw; it passes at factor 1.25 bracketing. Not triaged further.
