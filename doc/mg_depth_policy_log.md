@@ -418,3 +418,27 @@ smoothed bottom L3 2×2×2) is of this class. Not tuned; reported.
 
 **G-LR (2) re-judge (attempt 2, mod_wo7r = 210bdac):** PENDING — `gpu_diag/mgd/wo7/glr_attempt.sh 2 wo7r` waits for no
 other GPU compute app and load ≤ 24 (up to 4 h), then the same matrix; verdict in `wo7/glr_attempt2.out` (GLR lines).
+
+## 2026-10-29 — WO-7 landing prep: rebase onto eddb790, G-LR (4) re-gate (np 1 judged), G-LR (3) re-judged under A1 (2′)
+
+**Rebase.** `mglr` rebased onto flow `origin/main` eddb790 (CA red-black pairs off across an odd periodic global
+extent; ctest `ca_odd_periodic_mpi_np{1,2}`). The source commits applied cleanly; the only conflict was this log
+(both sections kept, main's first). Branch commits after the rebase: d2fc25c (A2.4 kernel), 14f3728 + 8771ff5 (ctests),
+71f57c4 (A2.6 remedy), ae199ff (gate record), 1b4459a (Amendment A3). Gate scripts: `gpu_diag/mgd/wo7l/` (`land2.sh`,
+`land3.sh`, `judge3.py`, `tdiag2.py`); module snapshot `ref/mod_wo7l_{host,cuda}`.
+
+**G-LR (4) bit identity, re-gated** (`validation/wo7/gate.sh <host|cuda> mglr2`; raw `validation/wo7/{host,cuda}_mglr2.*`,
+census vs `*_mgdrebase.*` = pre-WO-7 main by `gpu_diag/mgd/caodd/compare_any.py`):
+
+| check | host | CUDA | verdict |
+|---|---|---|---|
+| -LE bench battery | 270/270 (main 269 + mg_line_relax) | 270/270 (clean rerun `cuda_mglr2b`; the first run `cuda_mglr2` had two -j4 failures, scalar_mg = CUDA allocation failure of 96 MiB while another session's process held the GPU, and the known flake scalar_cutcell_g4; both passed serially with printed values identical to main, `cuda_mglr2.rerun.ctest.log`) | PASS |
+| state_hash 13 np1 + np2 | 12 + np2 = main; `scalar` fc99aa51…c584 → b9fc5744…89f8 | 12 + np2 = main; `scalar` 83554517…5a92 → 27445fd8…63d1 | PASS (ruled mover only) |
+| digest (14 lines) | 51fec031a160c88b (= the pre-rebase WO-7 digest) | 8337752781faf71b (= pre-rebase) | — |
+| census movers vs main | full_stress_large_dt, open_face_plane_mpi_np3, verify_colocated_taylor_green, vof_bc — printed values identical to the pre-rebase WO-7 record | same four, identical to the pre-rebase record | PASS |
+| other diffs | mg_fp32_vcycle_mpi_np{1,2,4,8} (the 14 new line-check lines only; nothing old changed); noise: hydro_force_units, movingscene_advect_mpi_np{1,2,4}, units_anisotropic_sphere, scalar_cutcell_solve_mpi_np4, balanced_force_mpi_np2 and varmu_mpi_np4 (interleaved stderr) | mg_fp32 alike; noise: the same set + bottom_direct_mpi_np{2,4} skip text | not movers |
+| M10 host np 1 `init_mpi` ≡ single rank, LR on (`wo7/np1_gate.sh`, 10 + 2 steps) | u v w p C memcmp-equal, per-step iteration and divergence lists equal (D 5, 8.7 it/step); LR-off control equal too (16.5) | — | **PASS** (was NOT JUDGEABLE: the CA bug, fixed by eddb790) |
+
+The CA fix also closes the CutcellMG-level gap of the pre-rebase record: `mg_fp32_vcycle_mpi` aniso 64×64×25 periodic,
+np 1, LR-off control now memcmp-equal (CUDA was 102398 cells differ), LR on equal; CUDA np 2 control max|dx| 1.2e-10 → 1.1e-13
+(main's change, not WO-7's).
