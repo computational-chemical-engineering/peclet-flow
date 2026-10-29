@@ -2353,7 +2353,7 @@ double Solver<Grid>::vofRhoFloor() const {
 
 template <class Grid>
 void Solver<Grid>::setVofMomentumMuscl(bool on) {
-  vofMom_.momentumMuscl = on;
+  vofMom_.momentumScheme = on ? vof::MomentumScheme::MusclMixed : vof::MomentumScheme::Upwind;
 }
 
 template <class Grid>

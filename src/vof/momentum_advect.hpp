@@ -90,6 +90,23 @@
 ///
 /// ## The transported velocity in the flux
 ///
+/// `momentumScheme` selects the face velocity `u^` (design: `doc/vof_momentum_second_order.md`):
+/// - `Upwind` (the DEFAULT): plain donor-cell, `u^ = u_don`. The update is then convex at every
+///   density ratio — the reason the ratio-1e4 uniform gate is flat.
+/// - `MusclMixed`: a MinMod slope of the MIXED control-volume velocity. Kept as an opt-in and as
+///   the diagnosis control; it converges to a WRONG limit at high ratio (note §2): on a CV a sweep
+///   empties of liquid, the extra momentum the departing liquid takes is debited from the gas left
+///   behind, a velocity error with gain `rho_l/rho_g`.
+/// - `MusclMixedCapped`: the same MinMod slope times the mass-aware cap `theta` of note §4.3 (the
+///   diagnosis ablation, gate G-D). `uL == uG`, so it reuses the upwind update kernel.
+/// - `MusclPhase`: each phase's mass flux carries its OWN face velocity, `uL` for the liquid and
+///   `uG` for the gas, from interface-biased MC slopes of the one CV velocity (note §4.2), scaled
+///   by the cap (§4.3). Second order, a per-sweep discrete maximum principle at any ratio, the
+///   uniform-velocity identity bit-exact, plain MC MUSCL wherever one phase is present.
+/// NEVER a slope of the mixed CV velocity without the cap. The two capped schemes need the frozen
+/// flag of the donor also in the first ghost layer: `freezeGhostFlags` sets it from the exchanged
+/// `C^{e,n}` with the inner formula, so both sides of a rank boundary compute the same bits.
+///
 /// ## Cut cells (rung V5a, WO-Q item 8)
 ///
 /// With an immersed solid the half-shifted control volume gets a fluid volume and open face areas
@@ -114,8 +131,8 @@
 /// them. Measured on a sphere packing at ratio 1e3: 0.0.
 ///
 /// `u^` is the CURRENT transported velocity of the donor CV (plain donor-cell upwind by default;
-/// `momentumMuscl` adds a MinMod-limited slope to the flux slab's centroid, and the note on that
-/// flag says why it is NOT the default at high density ratio). With a uniform field `u^ = U` bit
+/// the slope schemes of `momentumScheme` reconstruct it to the flux slab's centroid, see "The
+/// transported velocity in the flux" above). With a uniform field `u^ = U` bit
 /// for bit either way, so the gate above is untouched. The velocity is exchanged between sweeps
 /// alongside `C^e` — fluxing the FROZEN `u^n` instead would be one exchange cheaper but leaves a
 /// term with gain `rho_l/rho_g` on any control volume a sweep empties (see the derivation in
@@ -146,6 +163,73 @@ KOKKOS_INLINE_FUNCTION double vofMinmod(double a, double b) {
   return Kokkos::fabs(a) < Kokkos::fabs(b) ? a : b;
 }
 
+/// The transported face velocity of the momentum flux (`doc/vof_momentum_second_order.md`; the
+/// file header, "The transported velocity in the flux").
+enum class MomentumScheme : int { Upwind, MusclMixed, MusclMixedCapped, MusclPhase };
+
+/// The interface-biased, MC-bounded slope of one phase (note §4.2). `hq`, `hm`, `hp`: whether the
+/// donor, its `-d` and its `+d` neighbour hold that phase. Zero when the donor does not hold it;
+/// central, or one-sided away from the other phase, otherwise; inside the MC bound always. Both
+/// phases share the sign of `dm * dp`, written NaN-safe like `vofMinmod`. A uniform field gives
+/// `dm == dp == 0` and hence exactly 0.
+KOKKOS_INLINE_FUNCTION double vofPhaseSlope(double dm, double dp, bool hq, bool hm, bool hp) {
+  const double est = !hq ? 0.0 : (hm && hp ? 0.5 * (dm + dp) : (hm ? dm : (hp ? dp : 0.0)));
+  const double sgn = !(dm * dp > 0.0) ? 0.0 : (dm > 0.0 ? 1.0 : -1.0);
+  const double a2m = 2.0 * Kokkos::fabs(dm), a2p = 2.0 * Kokkos::fabs(dp);
+  const double ae = Kokkos::fabs(est);
+  double mn = a2m < a2p ? a2m : a2p;
+  mn = ae < mn ? ae : mn;
+  return sgn * mn;
+}
+
+/// The mass-aware cap `theta` in (0, 1] of note §4.3, for face p of donor q. `s = sign(a_p)`,
+/// `aGeo` the geometric Courant number of p (the time-centring `1 - |a|`), `atP` / `atO` the
+/// open-area-weighted Courant numbers of p and of the donor's other face o, `fAbs = |F_p|`,
+/// `epsQ` / `cQ` / `kQ` the donor's fluid fraction, current shifted colour and frozen flag. `R`
+/// is a lower bound of the donor's stayer + dilation mass: exact when o is inflow, conservative by
+/// Weymouth's bound `min(|at_o|, eps_q C_q)` on o's liquid flux when o is outflow.
+KOKKOS_INLINE_FUNCTION double vofMomentumCap(double rg, double rl, double s, double aGeo,
+                                             double atP, double atO, double fAbs, double epsQ,
+                                             double cQ, bool kQ, double dm, double dp, double sigL,
+                                             double sigG) {
+  const double aaP = Kokkos::fabs(atP), aaO = Kokkos::fabs(atO);
+  const double muL = rl * fAbs, muG = rg * (aaP - fAbs), muP = muL + muG;
+  const bool outO = atO * s < 0.0;
+  const double lq = epsQ * cQ;
+  const double muO = outO ? rg * aaO + (rl - rg) * (aaO < lq ? aaO : lq) : 0.0;
+  const double R = epsQ * vofPhaseRho(rg, rl, cQ) - muP - muO + (kQ ? rl : rg) * s * (atP - atO);
+  const double adm = Kokkos::fabs(dm), adp = Kokkos::fabs(dp);
+  const double m = adm < adp ? adm : adp;
+  const double ext = 0.5 * (1.0 - Kokkos::fabs(aGeo)) * Kokkos::fabs(muG * sigG + muL * sigL);
+  const double beta = outO ? 0.5 : 1.0;
+  const double lim = beta * (R > 0.0 ? R : 0.0) * m;
+  return ext > lim ? lim / ext : 1.0;
+}
+
+/// The two face counters of the capped flux kernels, one reduction (never a second fence).
+struct VofMomCount {
+  long clamped = 0;  ///< Weymouth clamps
+  long capped = 0;   ///< faces with theta < 1
+  KOKKOS_INLINE_FUNCTION VofMomCount& operator+=(const VofMomCount& o) {
+    clamped += o.clamped;
+    capped += o.capped;
+    return *this;
+  }
+};
+
+}  // namespace peclet::flow::vof
+
+namespace Kokkos {
+template <>
+struct reduction_identity<peclet::flow::vof::VofMomCount> {
+  KOKKOS_FORCEINLINE_FUNCTION static peclet::flow::vof::VofMomCount sum() {
+    return peclet::flow::vof::VofMomCount();
+  }
+};
+}  // namespace Kokkos
+
+namespace peclet::flow::vof {
+
 /// Liquid volume of the PLIC polyhedron of cell `q` inside a box given as per-axis intervals,
 /// as a fraction of a whole cell. Non-mixed cells take the algebraic branch `C * volume` — the same
 /// contract `wyFaceFlux` uses, which is what keeps full/empty cells exactly stationary.
@@ -172,6 +256,7 @@ class MomentumConsistentAdvector {
     double minRhoC = 0.0;         ///< min rho^e before the floor
     long floored = 0;             ///< inner CVs where the rho^e floor bit in the last recovery
     long clamped = 0;             ///< fluxes Weymouth's admissible interval had to clamp, last step
+    long capped = 0;  ///< faces whose slope the mass-aware cap scaled (theta < 1), last step
     double sumM[3] = {0, 0, 0};   ///< sum of rho^e u_e over inner CVs AFTER the last advection
     double sumM0[3] = {0, 0, 0};  ///< the same sum at the START of the last advection (seeding)
   };
@@ -196,6 +281,7 @@ class MomentumConsistentAdvector {
     }
     fluxC_ = SField("vof::momFluxC", len_);
     fluxU_ = SField("vof::momFluxU", len_);
+    fluxUG_ = SField("vof::momFluxUG", len_);
     aFace_ = SField("vof::momAFace", len_);
   }
 
@@ -213,23 +299,16 @@ class MomentumConsistentAdvector {
   /// means "use `rhoFloorFrac * min(rho_g, rho_l)`".
   double rhoFloor = 0.0;
   double rhoFloorFrac = 1e-6;
-  /// Opt-in MinMod-limited linear reconstruction of the donor velocity in the momentum flux,
-  /// instead of the DEFAULT plain donor-cell (first-order upwind) value.
+  /// The transported face velocity of the momentum flux; `Upwind` by default. See the file header,
+  /// "The transported velocity in the flux", and `doc/vof_momentum_second_order.md`.
   ///
-  /// **Off by default, and the reason is measured, not stylistic.** The velocity update is
-  /// `u_new = u_old + [rho_g (a_- dv_- - a_+ dv_+) + drho (F_- dv_- - F_+ dv_+)]/rho_new` with
-  /// `dv = u^ - u_old`. On a control volume whose OWN outgoing flux is the donor (`a_+ > 0`), plain
-  /// upwind gives `u^_+ = u_old` and hence `dv_+ = 0` EXACTLY. A slope makes
-  /// `dv_+ = (1/2 - |a|/2) * slope`, and its coefficient `drho F_+ / rho_new` is unbounded in the
-  /// density ratio precisely when the sweep empties the volume (`F_+ -> C^e`, `rho_new -> rho_g`) —
-  /// the volume's residual velocity is then a difference of two liquid-scale momenta. Measured on
-  /// the uniform-velocity gate at ratio 1e4, 50 steps, in a double-storage build (so the solver's
-  /// own float floor is out of the picture): with the slope the error grows
-  /// `3.3e-16 -> 6.1e-16 -> 4.3e-14 -> 5.1e-13 -> 2.2e-10` over steps 10..50; without it, it is
-  /// FLAT at `3.3e-16 ... 6.7e-16`. At ratio 1e3 the slope is harmless (6.1e-15 at 50 steps), so
-  /// this is a high-ratio robustness choice, not an accuracy verdict — turn it on deliberately and
-  /// re-run the ratio sweep if you do.
-  bool momentumMuscl = false;
+  /// The measured history behind the default (MinMod of the mixed velocity, `MusclMixed`): on the
+  /// uniform-velocity gate at ratio 1e4, 50 steps, double-storage build, its error grew
+  /// `3.3e-16 -> 6.1e-16 -> 4.3e-14 -> 5.1e-13 -> 2.2e-10` over steps 10..50, while upwind stayed
+  /// FLAT at `3.3e-16 ... 6.7e-16`; at P1 it converged to a wrong limit (+3.0 / +3.1 % at d/h
+  /// 16 / 24). The note's §2 derives both from one term: the stayer debit with gain `rho_l/rho_g`.
+  /// `MusclPhase` removes it (per-phase slopes + the mass-aware cap).
+  MomentumScheme momentumScheme = MomentumScheme::Upwind;
   /// Ablation: use the PRESSURE-cell frozen dilation flag `H(C^n - 1/2)` on the shifted CV instead
   /// of the structural analogue `H(C^{e,n} - 1/2)`. See the file header, point 4.
   bool useCellDilationFlag = false;
@@ -242,6 +321,12 @@ class MomentumConsistentAdvector {
   double phaseRhoL() const { return rhoL_; }
   double lastRhoFloor() const { return floorUsed_; }
   long clampedFluxes() const { return clamped_; }
+  /// Faces whose slope the mass-aware cap scaled in the last step (capped schemes only).
+  long cappedFaces() const { return capped_; }
+  bool cappedScheme() const {
+    return momentumScheme == MomentumScheme::MusclMixedCapped ||
+           momentumScheme == MomentumScheme::MusclPhase;
+  }
 
   /// One momentum-consistent Weymouth-Yue step: advances BOTH the colour field inside `w` and the
   /// half-shifted `rho^e u_e`, sharing the planes, the sweep order and the frozen flag.
@@ -256,11 +341,17 @@ class MomentumConsistentAdvector {
           "peclet::flow::vof::MomentumConsistentAdvector: the shifted control volume needs "
           "|u| dt/h < 1/2 strictly (its flux slab lives inside ONE half cell), so the "
           "Weymouth-Yue cap must be < 0.5 - the default 0.25 is the proven 3D bound");
+    if (cappedScheme() && useCellDilationFlag)
+      throw std::invalid_argument(
+          "peclet::flow::vof::MomentumConsistentAdvector: the capped momentum schemes read the "
+          "donor's frozen flag in the first ghost layer, which the cell-flag ablation does not "
+          "define; use 'upwind' or 'muscl_mixed' with set_vof_momentum_cell_flag");
     w.requireExchange();
     w.checkCourant(dt);  // same guard, same lastCfl_, as WyAdvector::advect
     const double dth = dt / w.h();
     clamped_ = 0;
     floored_ = 0;
+    capped_ = 0;
 
     w.freezeDilationFlag();  // the pressure-cell flag, for the colour update
     w.reconstruct();         // planes of C^n: what C^e is clipped out of
@@ -280,6 +371,10 @@ class MomentumConsistentAdvector {
         w.exchangeTimed(cc_[e]);
         w.exchangeTimed(vel_[e]);
       }
+      // The ghosts of C^e now hold C^{e,n}: the capped schemes need the donor's frozen flag also
+      // in the first ghost layer (note §4.8 item 3).
+      if (s == 0 && cappedScheme())
+        freezeGhostFlags();
       w.reconstruct();  // idempotent for s = 0; re-reconstructs after each applied sweep
       w.computeFluxes(d, dth);
       for (int e = 0; e < 3; ++e) {
@@ -341,6 +436,7 @@ class MomentumConsistentAdvector {
     dg.minRhoC = gmin;
     dg.floored = floored_;
     dg.clamped = clamped_;
+    dg.capped = capped_;
     for (int c = 0; c < 3; ++c)
       dg.sumM0[c] = seedM_[c];
     return dg;
@@ -425,7 +521,11 @@ class MomentumConsistentAdvector {
     const long sd = strideOf(d), se = strideOf(comp);
     const int dd = d, ec = comp;
     const double rg = rhoG_, rl = rhoL_;
-    const bool muscl = momentumMuscl, clamp = clampFluxes;
+    if (cappedScheme()) {
+      momentumFluxesCapped(w, d, comp, dth);
+      return;
+    }
+    const bool muscl = momentumScheme == MomentumScheme::MusclMixed, clamp = clampFluxes;
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
            al = w.planeAlpha();
     const double weps = w.wispEps;
@@ -520,6 +620,10 @@ class MomentumConsistentAdvector {
   /// `C^e_i += (F_- - F_+) + flag (a_+ - a_-)` and `M_i += (G_- - G_+) + rho^ u^n_i (a_+ - a_-)`,
   /// with ONE frozen flag and the SAME `a` in both — see the consistency identity in the header.
   void momentumUpdate(const WyAdvector& w, int d, int comp) {
+    if (momentumScheme == MomentumScheme::MusclPhase) {
+      momentumUpdatePhase(w, d, comp);
+      return;
+    }
     const I3 e = e_, n = n_;
     const int g = g_;
     const long sd = strideOf(d), se = strideOf(comp);
@@ -655,7 +759,11 @@ class MomentumConsistentAdvector {
     const int g = g_;
     const long sd = strideOf(d), se = strideOf(comp);
     const int dd = d, ec = comp;
-    const bool muscl = momentumMuscl, clamp = clampFluxes;
+    if (cappedScheme()) {
+      momentumFluxesCutCapped(w, d, comp, dth);
+      return;
+    }
+    const bool muscl = momentumScheme == MomentumScheme::MusclMixed, clamp = clampFluxes;
     SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
            al = w.planeAlpha(), ep = w.epsFraction(), od = w.faceOpenness(d);
     UCField kd = w.cellKind();
@@ -749,6 +857,10 @@ class MomentumConsistentAdvector {
   /// in particular `dev` is still a sum of velocity DIFFERENCES, so a uniform field is stationary
   /// bit for bit in cut cells too.
   void momentumUpdateCut(const WyAdvector& w, int d, int comp) {
+    if (momentumScheme == MomentumScheme::MusclPhase) {
+      momentumUpdateCutPhase(w, d, comp);
+      return;
+    }
     const I3 e = e_, n = n_;
     const int g = g_;
     const long sd = strideOf(d), se = strideOf(comp);
@@ -789,6 +901,351 @@ class MomentumConsistentAdvector {
     floored_ += nfloor;
   }
 
+  // ---- the capped schemes (doc/vof_momentum_second_order.md §4): 'muscl_mixed_capped' and
+  // 'muscl_phase'. Siblings of the kernels above, reached only through `cappedScheme()`; the
+  // 'upwind' and 'muscl_mixed' bodies are untouched, so those schemes are byte-identical.
+
+  /// The frozen flag on the GHOST shell of every component, `H(C^{e,n} - 1/2)` from the exchanged
+  /// shifted colour — the inner formula on the owner's own values, so a ghost flag equals the
+  /// owner's bitwise and no exchange is needed (note §4.8 item 3). On the advector's instance, no
+  /// fence of its own: the flux kernels that read it are ordered after it on that instance.
+  void freezeGhostFlags() {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    for (int comp = 0; comp < 3; ++comp) {
+      SField cf = cc_[comp];
+      UCField fl = flag_[comp];
+      Kokkos::parallel_for(
+          "vof::mom::ghost_flag", MDRange3<SExec>(SExec(), {0, 0, 0}, {e.x, e.y, e.z}),
+          KOKKOS_LAMBDA(int x, int y, int z) {
+            if (x >= g && x < g + n.x && y >= g && y < g + n.y && z >= g && z < g + n.z)
+              return;  // inner: frozen by freezeShiftedState
+            const long i = L3(x, y, z, e);
+            fl(i) = cf(i) > 0.5 ? 1u : 0u;
+          });
+    }
+  }
+
+  /// `momentumFluxes` for the capped schemes: the same `a` and clamped `F`, then the slopes of
+  /// note §4.2 ('muscl_phase': per phase; 'muscl_mixed_capped': MinMod of the mixed velocity), the
+  /// cap of §4.3 and the face values of §4.4 (`fluxU_` = uL, `fluxUG_` = uG; the mixed variant
+  /// stores uL == uG into `fluxU_` only).
+  void momentumFluxesCapped(const WyAdvector& w, int d, int comp, double dth) {
+    const I3 e = e_;
+    const int g = g_;
+    const long sd = strideOf(d), se = strideOf(comp);
+    const int dd = d, ec = comp;
+    const double rg = rhoG_, rl = rhoL_;
+    const bool phase = momentumScheme == MomentumScheme::MusclPhase, clamp = clampFluxes;
+    SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
+           al = w.planeAlpha();
+    const double weps = w.wispEps;
+    SField ud = w.faceVel(d), cvU = vel_[comp], cvC = cc_[comp];
+    SField fc = fluxC_, fu = fluxU_, fug = fluxUG_, af = aFace_;
+    UCField fl = flag_[comp];
+    int lo3[3] = {g, g, g};
+    const int hi3[3] = {g + n_.x, g + n_.y, g + n_.z};
+    lo3[d] -= 1;
+    VofMomCount cnt;
+    Kokkos::parallel_reduce(
+        "vof::mom::flux_capped",
+        MDRange3<SExec>(SExec(), {lo3[0], lo3[1], lo3[2]}, {hi3[0], hi3[1], hi3[2]}),
+        KOKKOS_LAMBDA(int x, int y, int z, VofMomCount& acc) {
+          const long p = L3(x, y, z, e);
+          const double a = 0.5 * (ud(p - se) + ud(p)) * dth;
+          af(p) = a;
+          if (a == 0.0) {
+            fc(p) = 0.0;
+            fu(p) = cvU(p);  // any finite value; the update multiplies it by a == F == 0
+            if (phase)
+              fug(p) = cvU(p);
+            return;
+          }
+          const double aa = a > 0.0 ? a : -a;
+          double lo[3] = {0.0, 0.0, 0.0}, hi[3] = {1.0, 1.0, 1.0};
+          double F;
+          if (dd == ec) {
+            if (a > 0.0) {
+              lo[ec] = 0.5 - aa;
+              hi[ec] = 0.5;
+            } else {
+              lo[ec] = 0.5;
+              hi[ec] = 0.5 + aa;
+            }
+            F = vofCellBox(c, mx, my, mz, al, p, lo, hi, weps);
+          } else {
+            long q;
+            if (a > 0.0) {
+              q = p;
+              lo[dd] = 1.0 - aa;
+              hi[dd] = 1.0;
+            } else {
+              q = p + sd;
+              lo[dd] = 0.0;
+              hi[dd] = aa;
+            }
+            lo[ec] = 0.5;
+            hi[ec] = 1.0;
+            const double hiHalf = vofCellBox(c, mx, my, mz, al, q - se, lo, hi, weps);
+            lo[ec] = 0.0;
+            hi[ec] = 0.5;
+            const double loHalf = vofCellBox(c, mx, my, mz, al, q, lo, hi, weps);
+            F = hiHalf + loHalf;
+          }
+          if (clamp) {
+            const double cd = cvC(a > 0.0 ? p : p + sd);
+            const double up = aa < cd ? aa : cd;
+            const double dn = aa - (1.0 - cd);
+            const double lob = dn > 0.0 ? dn : 0.0;
+            const double Fc = F > up ? up : (F < lob ? lob : F);
+            if (Fc != F)
+              ++acc.clamped;
+            F = Fc;
+          }
+          const double fAbs = F;
+          if (a < 0.0)
+            F = -F;
+          // Donor q, its other face o, and the differences along d (note §4.2, §4.3).
+          const long q = a > 0.0 ? p : p + sd;
+          const long o = a > 0.0 ? p - sd : p + sd;
+          const double s = a > 0.0 ? 1.0 : -1.0;
+          const double uq = cvU(q);
+          const double dm = uq - cvU(q - sd), dp = cvU(q + sd) - uq;
+          const double cq = cvC(q);
+          double sigL, sigG;
+          if (phase) {
+            const double cm = cvC(q - sd), cp = cvC(q + sd);
+            sigL = vofPhaseSlope(dm, dp, cq >= 0.5, cm >= 0.5, cp >= 0.5);
+            sigG = vofPhaseSlope(dm, dp, cq <= 0.5, cm <= 0.5, cp <= 0.5);
+          } else {
+            sigL = vofMinmod(dm, dp);
+            sigG = sigL;
+          }
+          const double aO = 0.5 * (ud(o - se) + ud(o)) * dth;
+          const double th =
+              vofMomentumCap(rg, rl, s, a, a, aO, fAbs, 1.0, cq, fl(q) != 0, dm, dp, sigL, sigG);
+          if (th < 1.0)
+            ++acc.capped;
+          fc(p) = F;
+          fu(p) = uq + s * (0.5 - 0.5 * aa) * (th * sigL);
+          if (phase)
+            fug(p) = uq + s * (0.5 - 0.5 * aa) * (th * sigG);
+        },
+        Kokkos::Sum<VofMomCount>(cnt));
+    Kokkos::fence();
+    clamped_ += cnt.clamped;
+    capped_ += cnt.capped;
+  }
+
+  /// `momentumUpdate` for 'muscl_phase' (note §4.4): each phase's mass flux carries its own face
+  /// velocity; everything else — `dC`, the dilation coefficient, `rn`, the floor, the division —
+  /// exactly as in `momentumUpdate`. Algebraically equal to that form when `uL == uG`, not
+  /// bit-equal.
+  void momentumUpdatePhase(const WyAdvector& w, int d, int comp) {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    const long sd = strideOf(d), se = strideOf(comp);
+    const double rg = rhoG_, rl = rhoL_;
+    const double rmin = rhoG_ < rhoL_ ? rhoG_ : rhoL_;
+    const double fl0 = rhoFloor > 0.0 ? rhoFloor : rhoFloorFrac * rmin;
+    floorUsed_ = fl0;
+    SField cf = cc_[comp], vf = vel_[comp], uf = w.faceVel(comp);
+    SField fc = fluxC_, fu = fluxU_, fug = fluxUG_, af = aFace_;
+    UCField fl = flag_[comp];
+    long nfloor = 0;
+    Kokkos::parallel_reduce(
+        "vof::mom::update_phase", MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+          const long i = L3(x, y, z, e);
+          const double aP = af(i), aM = af(i - sd);
+          const unsigned char k = fl(i);
+          const double dil = k ? (aP - aM) : 0.0;
+          const double dC = (fc(i - sd) - fc(i)) + dil;
+          const double cNew = cf(i) + dC;
+          cf(i) = cNew;
+          const double uo = vf(i);
+          const double fM = fc(i - sd), fP = fc(i);
+          const double dvLM = fu(i - sd) - uo, dvLP = fu(i) - uo;
+          const double dvGM = fug(i - sd) - uo, dvGP = fug(i) - uo;
+          const double dilCoef = (k ? rl : rg) * (uf(i - se) - uo) * (aP - aM);
+          const double dev =
+              rg * ((aM - fM) * dvGM - (aP - fP) * dvGP) + rl * (fM * dvLM - fP * dvLP) + dilCoef;
+          const double rn = vofPhaseRho(rg, rl, cNew);
+          if (rn < fl0)
+            ++acc;
+          vf(i) = uo + dev / (rn < fl0 ? fl0 : rn);
+        },
+        nfloor);
+    Kokkos::fence();
+    floored_ += nfloor;
+  }
+
+  /// `momentumFluxesCut` for the capped schemes: masses in cell-volume units (`eps_q`, `at`, `F`
+  /// openness-weighted), the time-centring on the geometric `|a|` (note §4.8 item 1).
+  void momentumFluxesCutCapped(const WyAdvector& w, int d, int comp, double dth) {
+    const I3 e = e_;
+    const int g = g_;
+    const long sd = strideOf(d), se = strideOf(comp);
+    const int dd = d, ec = comp;
+    const double rg = rhoG_, rl = rhoL_;
+    const bool phase = momentumScheme == MomentumScheme::MusclPhase, clamp = clampFluxes;
+    SField c = w.colour(), mx = w.planeM(0), my = w.planeM(1), mz = w.planeM(2),
+           al = w.planeAlpha(), ep = w.epsFraction(), od = w.faceOpenness(d);
+    UCField kd = w.cellKind();
+    const double weps = w.wispEps;
+    SField ud = w.faceVel(d), cvU = vel_[comp], cvC = cc_[comp];
+    SField fc = fluxC_, fu = fluxU_, fug = fluxUG_, af = aFace_;
+    UCField fl = flag_[comp];
+    int lo3[3] = {g, g, g};
+    const int hi3[3] = {g + n_.x, g + n_.y, g + n_.z};
+    lo3[d] -= 1;
+    VofMomCount cnt;
+    Kokkos::parallel_reduce(
+        "vof::mom::flux_cut_capped",
+        MDRange3<SExec>(SExec(), {lo3[0], lo3[1], lo3[2]}, {hi3[0], hi3[1], hi3[2]}),
+        KOKKOS_LAMBDA(int x, int y, int z, VofMomCount& acc) {
+          const long p = L3(x, y, z, e);
+          const double ofac =
+              (dd == ec) ? vofEpsEff(ep(p), kd(p) == kVofSolid) : 0.5 * (od(p - se) + od(p));
+          const double a = 0.5 * (ud(p - se) + ud(p)) * dth;
+          af(p) = ofac * a;
+          if (a == 0.0 || ofac == 0.0) {
+            fc(p) = 0.0;
+            fu(p) = cvU(p);
+            if (phase)
+              fug(p) = cvU(p);
+            return;
+          }
+          const double aa = a > 0.0 ? a : -a;
+          double lo[3] = {0.0, 0.0, 0.0}, hi[3] = {1.0, 1.0, 1.0};
+          double F;
+          if (dd == ec) {
+            if (a > 0.0) {
+              lo[ec] = 0.5 - aa;
+              hi[ec] = 0.5;
+            } else {
+              lo[ec] = 0.5;
+              hi[ec] = 0.5 + aa;
+            }
+            F = vofCellBox(c, mx, my, mz, al, p, lo, hi, weps);
+          } else {
+            long q;
+            if (a > 0.0) {
+              q = p;
+              lo[dd] = 1.0 - aa;
+              hi[dd] = 1.0;
+            } else {
+              q = p + sd;
+              lo[dd] = 0.0;
+              hi[dd] = aa;
+            }
+            lo[ec] = 0.5;
+            hi[ec] = 1.0;
+            const double ea = vofEpsEff(ep(q - se), kd(q - se) == kVofSolid);
+            const double eb = vofEpsEff(ep(q), kd(q) == kVofSolid);
+            const double ecv = 0.5 * (ea + eb);
+            const double hiHalf = vofCellBox(c, mx, my, mz, al, q - se, lo, hi, weps);
+            lo[ec] = 0.0;
+            hi[ec] = 0.5;
+            const double loHalf = vofCellBox(c, mx, my, mz, al, q, lo, hi, weps);
+            F = ecv > 0.0 ? (ea * hiHalf + eb * loHalf) / ecv : 0.0;
+          }
+          F *= ofac;
+          if (clamp) {
+            const long don = a > 0.0 ? p : p + sd;
+            const double cd = cvC(don);
+            const double sweep = ofac * aa;
+            const double ecvDon = cvEps(ep, kd, don, se);
+            const double Fc = vofCutFluxClamp(F, sweep, ecvDon, cd);
+            if (Fc != F)
+              ++acc.clamped;
+            F = Fc;
+          }
+          const double fAbs = F;
+          if (a < 0.0)
+            F = -F;
+          const long q = a > 0.0 ? p : p + sd;
+          const long o = a > 0.0 ? p - sd : p + sd;
+          const double s = a > 0.0 ? 1.0 : -1.0;
+          const double uq = cvU(q);
+          const double dm = uq - cvU(q - sd), dp = cvU(q + sd) - uq;
+          const double cq = cvC(q), eq = cvEps(ep, kd, q, se);
+          double sigL, sigG;
+          if (phase) {
+            const double cm = cvC(q - sd), cp = cvC(q + sd);
+            const bool fm = cvEps(ep, kd, q - sd, se) > 0.0, fp = cvEps(ep, kd, q + sd, se) > 0.0;
+            const bool fq = eq > 0.0;
+            sigL = vofPhaseSlope(dm, dp, fq && cq >= 0.5, fm && cm >= 0.5, fp && cp >= 0.5);
+            sigG = vofPhaseSlope(dm, dp, fq && cq <= 0.5, fm && cm <= 0.5, fp && cp <= 0.5);
+          } else {
+            sigL = vofMinmod(dm, dp);
+            sigG = sigL;
+          }
+          // The other face's Courant numbers, by exactly the expressions that produce `af` there.
+          const double aO = 0.5 * (ud(o - se) + ud(o)) * dth;
+          const double ofacO =
+              (dd == ec) ? vofEpsEff(ep(o), kd(o) == kVofSolid) : 0.5 * (od(o - se) + od(o));
+          const double th = vofMomentumCap(rg, rl, s, a, ofac * a, ofacO * aO, fAbs, eq, cq,
+                                           fl(q) != 0, dm, dp, sigL, sigG);
+          if (th < 1.0)
+            ++acc.capped;
+          fc(p) = F;
+          fu(p) = uq + s * (0.5 - 0.5 * aa) * (th * sigL);
+          if (phase)
+            fug(p) = uq + s * (0.5 - 0.5 * aa) * (th * sigG);
+        },
+        Kokkos::Sum<VofMomCount>(cnt));
+    Kokkos::fence();
+    clamped_ += cnt.clamped;
+    capped_ += cnt.capped;
+  }
+
+  /// `momentumUpdateCut` for 'muscl_phase': the per-phase `dev` of `momentumUpdatePhase`, divided
+  /// by the CV's fluid volume exactly as in `momentumUpdateCut`.
+  void momentumUpdateCutPhase(const WyAdvector& w, int d, int comp) {
+    const I3 e = e_, n = n_;
+    const int g = g_;
+    const long sd = strideOf(d), se = strideOf(comp);
+    const double rg = rhoG_, rl = rhoL_;
+    const double rmin = rhoG_ < rhoL_ ? rhoG_ : rhoL_;
+    const double fl0 = rhoFloor > 0.0 ? rhoFloor : rhoFloorFrac * rmin;
+    floorUsed_ = fl0;
+    SField cf = cc_[comp], vf = vel_[comp], uf = w.faceVel(comp), ep = w.epsFraction();
+    UCField kd = w.cellKind();
+    SField fc = fluxC_, fu = fluxU_, fug = fluxUG_, af = aFace_;
+    UCField fl = flag_[comp];
+    long nfloor = 0;
+    Kokkos::parallel_reduce(
+        "vof::mom::update_cut_phase",
+        MDRange3<SExec>(SExec(), {g, g, g}, {g + n.x, g + n.y, g + n.z}),
+        KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+          const long i = L3(x, y, z, e);
+          const double ecv = cvEps(ep, kd, i, se);
+          if (!(ecv > 0.0))
+            return;  // the control volume is entirely inside the solid
+          const double aP = af(i), aM = af(i - sd);
+          const unsigned char k = fl(i);
+          const double dil = k ? (aP - aM) : 0.0;
+          const double dC = ((fc(i - sd) - fc(i)) + dil) / ecv;
+          const double cNew = cf(i) + dC;
+          cf(i) = cNew;
+          const double uo = vf(i);
+          const double fM = fc(i - sd), fP = fc(i);
+          const double dvLM = fu(i - sd) - uo, dvLP = fu(i) - uo;
+          const double dvGM = fug(i - sd) - uo, dvGP = fug(i) - uo;
+          const double dilCoef = (k ? rl : rg) * (uf(i - se) - uo) * (aP - aM);
+          const double dev =
+              rg * ((aM - fM) * dvGM - (aP - fP) * dvGP) + rl * (fM * dvLM - fP * dvLP) + dilCoef;
+          const double rn = vofPhaseRho(rg, rl, cNew);
+          if (rn < fl0)
+            ++acc;
+          vf(i) = uo + dev / (ecv * (rn < fl0 ? fl0 : rn));
+        },
+        nfloor);
+    Kokkos::fence();
+    floored_ += nfloor;
+  }
+
   long strideOf(int d) const {
     return d == 0 ? 1 : (d == 1 ? static_cast<long>(e_.x) : static_cast<long>(e_.x) * e_.y);
   }
@@ -798,9 +1255,9 @@ class MomentumConsistentAdvector {
   int g_ = 3;
   long len_ = 0;
   double rhoG_ = 1.0, rhoL_ = 1.0, floorUsed_ = 0.0;
-  long floored_ = 0, clamped_ = 0;
+  long floored_ = 0, clamped_ = 0, capped_ = 0;
   double seedM_[3] = {0, 0, 0};
-  SField cc_[3], vel_[3], fluxC_, fluxU_, aFace_;
+  SField cc_[3], vel_[3], fluxC_, fluxU_, fluxUG_, aFace_;
   UCField flag_[3];
 };
 

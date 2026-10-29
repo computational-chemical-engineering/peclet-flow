@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
 
     vf::MomentumConsistentAdvector mom;
     mom.init(w, rg, rl);
-    mom.momentumMuscl = muscl != 0;
+    mom.momentumScheme = muscl != 0 ? vf::MomentumScheme::MusclMixed : vf::MomentumScheme::Upwind;
     // The seed C^e, exactly as advect() builds it (planes of C^n).
     w.reconstruct();
     mom.buildShiftedColour(w);
