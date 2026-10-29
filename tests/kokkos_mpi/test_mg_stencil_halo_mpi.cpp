@@ -133,7 +133,8 @@ struct Run {
 
 static Run solveSteps(const Case& c, bool hookOff) {
   CutcellMG mg;
-  mg.setBoundaryConditions(c.bc);  // before initMpi
+  mg.setBoundaryConditions(c.bc);             // before initMpi
+  mg.setCommAvoiding(peclet::flow::kCaBoth);  // CA on every backend (device default: off)
   mg.setTelescope(c.teleForce >= 0);
   mg.setTelescopeForceLevel(c.teleForce);
   mg.initMpi(c.gs[0], c.gs[1], c.gs[2], c.nlev, MPI_COMM_WORLD);

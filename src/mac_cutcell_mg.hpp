@@ -1084,9 +1084,12 @@ inline int mgDebugSolves() {
 // ring of the first colour so the second colour reads exactly the values a per-colour exchange
 // would have delivered — bit-identical, at half the halo events. Consumed by CutcellMG's coarse
 // levels and by the momentum RB-GS in flow_ibm.hpp. The two subsystems are switched independently
-// so a measured regression can be ATTRIBUTED to one of them without a rebuild; both are on by
-// default.
+// so a measured regression can be ATTRIBUTED to one of them without a rebuild.
 enum : int { kCaMomentum = 1, kCaMg = 2, kCaBoth = kCaMomentum | kCaMg };
+// The default mask: both halves on a host backend, OFF on a device backend (USER 2026-10-29: H100
+// weak scaling measured CA off 21-39 ms/step faster, bit-identical). set_comm_avoiding overrides
+// it on any backend.
+inline constexpr int kCaDefault = std::is_same_v<CCMem, Kokkos::HostSpace> ? kCaBoth : 0;
 
 class CutcellMG {
  public:
@@ -7154,9 +7157,9 @@ class CutcellMG {
   bool lineRelax_ =
       true;  // A2.4: the line smoother on triggered smoothed levels (setLineRelaxation)
   bool symVcycle_ = true;  // A3: P = c R^T + the palindromic bottom (setSymmetricVcycle)
-  // Communication-avoiding smoothing (see the kCa* enum): both subsystems on by default. Only
+  // Communication-avoiding smoothing (see the kCa* enum): kCaDefault (host both, device off). Only
   // kCaMg is read here; the momentum half lives in IbmSolver.
-  int caMode_ = kCaBoth;
+  int caMode_ = kCaDefault;
   // ISSUES sweep item 6. `setStrictPressure(true)` turns a non-finite preconditioner output into a
   // throw instead of a printed line + a zero correction. Off by default: the shipped behaviour is
   // to report the cap through `last_pressure_iterations()` and raise the `pressure_solve_failed()`

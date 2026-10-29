@@ -813,7 +813,8 @@ class Solver {
   bool ufAdvection() const;
 
 
-  /// Communication-avoiding red-black smoothing: kCaMomentum | kCaMg. DEFAULT both.
+  /// Communication-avoiding red-black smoothing: kCaMomentum | kCaMg. DEFAULT kCaDefault: both
+  /// on a host backend, off on a device backend (USER 2026-10-29).
   /// Must be set BEFORE init_mpi (the momentum half is latched with the halo topology).
   void setCommAvoiding(int mask);
 
@@ -5111,9 +5112,10 @@ class Solver {
   // P1 — the exact double flux-form level-0 apply (setPressureExactResidual; enableVof turns it
   // on). Mirrored into mg_, and read directly by the star overlay's additive delta.
   bool exactResidual_ = false;
-  // Communication-avoiding smoothing mask (kCaMomentum | kCaMg), see setCommAvoiding. Both on by
-  // default; the momentum half is additionally gated on the block extent (caMomentum_).
-  int caMode_ = kCaBoth;
+  // Communication-avoiding smoothing mask (kCaMomentum | kCaMg), see setCommAvoiding. kCaDefault
+  // (host both, device off); the momentum half is additionally gated on the block extent
+  // (caMomentum_).
+  int caMode_ = kCaDefault;
   // The shared level-0 MPI decomposition (setDecomposition): 0 = auto (default), 1 = the legacy
   // aligned ORB, >= 2 = the legacy coarse-first search from that depth (the deepest candidate
   // within maxImbalance).
