@@ -572,6 +572,44 @@ void momentumCutCells() {
     CHECK(dev == 0.0);
     CHECK(md.floored == 0);
   }
+  // --- G8a for every momentum scheme (doc/vof_momentum_second_order.md G-M2-1) ----------------
+  for (const char* sch : {"upwind", "muscl_mixed", "muscl_mixed_capped", "muscl_phase"})
+    for (double R : {1.0, 1e2, 1e3, 1e4}) {
+      peclet::flow::IbmSolver s(N, N, N);
+      s.setRho(R);
+      s.setMu(0.0);
+      s.setDt(0.04);
+      s.setSolid(sdf, true);
+      s.setPressureChebyshev(true, 300, 1e-13);
+      s.enableVof();
+      std::vector<double> c0((std::size_t)N * N * N);
+      for (int z = 0; z < N; ++z)
+        for (int y = 0; y < N; ++y)
+          for (int x = 0; x < N; ++x)
+            c0[idx(x, y, z, N, N)] = peclet::flow::vof::sphereCellFraction(
+                0.5 * N, 0.5 * N, 0.5 * N, 0.28 * N, x, y, z, 1.0, 4);
+      s.setVof(c0);
+      s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {1.0, R - 1.0});
+      s.enableVofMomentum(1.0, R);
+      s.setVofMomentumScheme(sch);
+      const std::size_t nc = (std::size_t)N * N * N;
+      s.uploadVelocity(std::vector<double>(nc, U[0]), std::vector<double>(nc, U[1]),
+                       std::vector<double>(nc, U[2]));
+      double dev = 0.0;
+      for (int k = 0; k < 3; ++k) {  // three advections: the colour moves, the field stays uniform
+        s.advectVofMomentum();
+        for (int c = 0; c < 3; ++c)
+          for (double v : s.getVofAdvectedVelocity(c))
+            dev = std::fmax(dev, std::fabs(v - U[c]));
+      }
+      const auto md = s.vofMomentumDiagnostics();
+      std::printf(
+          "G8a %-18s packing + uniform U, ratio %-6g, 3 advections: max|u_adv - U| = "
+          "%.17g%s   (floored %ld, clamped %ld, capped %ld)\n",
+          sch, R, dev, dev == 0.0 ? "   BITWISE" : "", md.floored, md.clamped, md.capped);
+      CHECK(dev == 0.0);
+      CHECK(md.floored == 0);
+    }
   // --- G8b ------------------------------------------------------------------------------------
   // The body force is the ZERO-MEAN buoyancy `f_z = -g (rho - <rho>)`, not `-g rho`: in a fully
   // periodic box the projection removes only GRADIENTS, so a force with a non-zero mean accelerates

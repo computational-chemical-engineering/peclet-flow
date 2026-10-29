@@ -195,6 +195,54 @@ void uniformIdentity() {
   }
 }
 
+// ------------------------------------- K7: the identity and the 1e4 noise gate for every scheme
+// doc/vof_momentum_second_order.md §9. G-M2-1: the step-1 identity of K1 for each momentum scheme
+// at ratios 1, 1e2, 1e3, 1e4 (tolerance-free). G-M2-2: the ratio-1e4 uniform gate over 50 coupled
+// steps on the tilted plane (operator storage is double by default, so the solver's own float
+// floor is out of the picture): the capped schemes must stay at upwind's round-off level,
+// <= 1e-14 (the uncapped 'muscl_mixed' measured 2.2e-10 here; printed, not gated).
+const char* const kSchemes[4] = {"upwind", "muscl_mixed", "muscl_mixed_capped", "muscl_phase"};
+
+void schemeIdentity() {
+  const int n = 24;
+  const double U[3] = {1.0, 0.6, -0.4};
+  const double dt = 0.2;
+  const char* names[3] = {"slab", "tilted", "sphere"};
+  std::vector<double> scenes[3] = {sceneSlab(n), sceneTilted(n), sceneSphere(n)};
+  for (const char* sch : kSchemes)
+    for (int sc = 0; sc < 3; ++sc)
+      for (double R : {1.0, 1e2, 1e3, 1e4}) {
+        auto s = makeSolver(n, scenes[sc], 1.0, R, dt, U, true);
+        s->setVofMomentumScheme(sch);
+        s->step();
+        double one = 0.0;
+        for (int c = 0; c < 3; ++c)
+          one = std::fmax(one, maxAbsDev(s->getVofAdvectedVelocity(c), U[c]));
+        std::printf("K7 G-M2-1 %-18s %-7s ratio %-8g step 1: max|u_adv - U| = %.17g%s\n", sch,
+                    names[sc], R, one, one == 0.0 ? "   (BITWISE)" : "");
+        CHECK(one == 0.0);
+        CHECK(s->vofMomentumDiagnostics().floored == 0);
+      }
+  for (const char* sch : kSchemes) {
+    auto s = makeSolver(n, sceneTilted(n), 1.0, 1e4, dt, U, true);
+    s->setVofMomentumScheme(sch);
+    double w = 0.0;
+    long capped = 0;
+    for (int k = 0; k < 50; ++k) {
+      s->step();
+      capped += s->vofMomentumDiagnostics().capped;
+      for (int c = 0; c < 3; ++c)
+        w = std::fmax(w, maxAbsDev(s->getVelocity(c), U[c]));
+    }
+    std::printf(
+        "K7 G-M2-2 %-18s tilted ratio 1e4, 50 coupled steps: max|u - U| = %.4e  "
+        "(capped faces %ld)\n",
+        sch, w, capped);
+    if (std::string(sch) == "muscl_phase" || std::string(sch) == "muscl_mixed_capped")
+      CHECK(w <= 1e-14);
+  }
+}
+
 // ------------------------------------------------------- K2: boundedness of C^e, and the clamp
 void boundedness() {
   const int n = 24;
@@ -387,6 +435,7 @@ int main(int argc, char** argv) {
     momentumConservation();
     inertWhenOff();
     densityOrderGuard();
+    schemeIdentity();
   }
   Kokkos::finalize();
   if (failures == 0) {

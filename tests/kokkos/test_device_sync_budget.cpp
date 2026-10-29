@@ -220,6 +220,86 @@ int hoistBitwise() {
               pre[1], rc ? "FAIL" : "PASS");
   return rc;
 }
+// G-M2-10 (doc/vof_momentum_second_order.md §9): the device synchronization of a VoF-momentum step,
+// 'muscl_phase' against 'upwind'. A 24^3 periodic box, a tilted sharp plane at ratio 1e3, a UNIFORM
+// velocity (the identity keeps both schemes' fields bitwise equal, so the pressure solve sees the
+// same input and its iteration count cannot differ), 2 warm + 8 counted steps. Global fences,
+// combined-reducer fences and device View allocations / deallocations per step must be EQUAL: the
+// capped kernels add no fence and no View (the ghost-flag kernel has no fence of its own, the
+// 'capped' count rides the clamp reduction).
+struct SyncCounts {
+  double global, combined, alloc, dealloc;
+};
+
+SyncCounts vofMomCounts(const char* scheme) {
+  gGlobal = gAlloc = gDealloc = 0;
+  gCombined.clear();
+  gAllocBy.clear();
+  const int n = 24;
+  const double ratio = 1e3, U[3] = {1.0, 0.6, -0.4};
+  Stag s(n, n, n);
+  s.setAdvection(false);
+  s.setRho(ratio);
+  s.setMu(0.0);
+  s.setDt(0.2);
+  s.setPressureGeometry(std::vector<double>((std::size_t)n * n * n, 10.0));
+  s.setPressureChebyshev(true, 300, 1e-13);
+  s.enableVof();
+  std::vector<double> c((std::size_t)n * n * n);
+  const double m[3] = {0.6 / 1.72456, -0.5 / 1.72456, 0.62456 / 1.72456};
+  const double alpha = 0.5 * (m[0] + m[1] + m[2]) * n;
+  for (int z = 0; z < n; ++z)
+    for (int y = 0; y < n; ++y)
+      for (int x = 0; x < n; ++x)
+        c[(std::size_t)x + (std::size_t)n * (y + (std::size_t)n * z)] =
+            peclet::flow::vof::plicVolume(m[0], m[1], m[2],
+                                          alpha - (m[0] * x + m[1] * y + m[2] * z));
+  s.setVof(c);
+  s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {1.0, ratio - 1.0});
+  s.enableVofMomentum(1.0, ratio);
+  s.setVofMomentumScheme(scheme);
+  const std::size_t nc = (std::size_t)n * n * n;
+  s.uploadVelocity(std::vector<double>(nc, U[0]), std::vector<double>(nc, U[1]),
+                   std::vector<double>(nc, U[2]));
+  namespace KT = Kokkos::Tools::Experimental;
+  KT::set_begin_fence_callback(onBeginFence);
+  KT::set_end_fence_callback(onEndFence);
+  KT::set_begin_parallel_reduce_callback(onBeginReduce);
+  KT::set_end_parallel_reduce_callback(onEndReduce);
+  KT::set_allocate_data_callback(onAlloc);
+  KT::set_deallocate_data_callback(onDealloc);
+  const int warm = 2, steps = 8;
+  for (int k = 0; k < warm + steps; ++k) {
+    gCount = k >= warm;
+    s.step();
+    gCount = false;
+  }
+  KT::set_begin_fence_callback(nullptr);
+  KT::set_end_fence_callback(nullptr);
+  KT::set_begin_parallel_reduce_callback(nullptr);
+  KT::set_end_parallel_reduce_callback(nullptr);
+  KT::set_allocate_data_callback(nullptr);
+  KT::set_deallocate_data_callback(nullptr);
+  long comb = 0;
+  for (const auto& [label, k] : gCombined)
+    comb += k;
+  return {(double)gGlobal / steps, (double)comb / steps, (double)gAlloc / steps,
+          (double)gDealloc / steps};
+}
+
+int vofMomBudget() {
+  const SyncCounts up = vofMomCounts("upwind");
+  const SyncCounts ph = vofMomCounts("muscl_phase");
+  std::printf(
+      "vofmom_sync_budget: per step, upwind vs muscl_phase: global fences %.2f / %.2f, "
+      "combined-reducer fences %.2f / %.2f, device View alloc %.2f / %.2f, dealloc %.2f / "
+      "%.2f\n",
+      up.global, ph.global, up.combined, ph.combined, up.alloc, ph.alloc, up.dealloc, ph.dealloc);
+  const bool ok = up.global == ph.global && up.combined == ph.combined && up.alloc == ph.alloc &&
+                  up.dealloc == ph.dealloc;
+  std::printf("vofmom_sync_budget: %s\n", ok ? "PASS" : "FAIL");
+  return ok ? 0 : 1;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -228,9 +308,12 @@ int main(int argc, char** argv) {
   {
     using MemSpace = Kokkos::DefaultExecutionSpace::memory_space;
     const bool hoist = argc > 1 && std::strcmp(argv[argc - 1], "hoist") == 0;
+    const bool vofmom = argc > 1 && std::strcmp(argv[argc - 1], "vofmom") == 0;
     if (std::is_same_v<MemSpace, Kokkos::HostSpace>) {
       std::printf("device_sync_budget: host backend, nothing to measure -- SKIP\n");
       rc = 77;
+    } else if (vofmom) {
+      rc = vofMomBudget();
     } else if (hoist) {
       rc = hoistBitwise();
     } else {

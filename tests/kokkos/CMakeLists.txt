@@ -288,6 +288,14 @@ target_include_directories(test_vof_momentum PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(test_vof_momentum PRIVATE Kokkos::kokkos)
 add_test(NAME vof_momentum COMMAND test_vof_momentum)
 
+# The second-order momentum flux (doc/vof_momentum_second_order.md, G-M2-7 / G-M2-9): the device
+# advector against the 1D a-priori operator test, single-phase cap inactivity, direct identity.
+add_executable(test_vof_momentum_slab test_vof_momentum_slab.cpp)
+target_include_directories(test_vof_momentum_slab PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_vof_momentum_slab PRIVATE Kokkos::kokkos)
+add_test(NAME vof_momentum_slab COMMAND test_vof_momentum_slab)
+
 # VoF rung V3 (WO-O): the Popinet height-function curvature cascade + the Jibben/Han PLIC-volumetric
 # paraboloid fallback (src/vof/curvature.hpp, src/vof/curvature_field.hpp). Standalone — no Solver.
 add_executable(test_vof_curvature test_vof_curvature.cpp)
@@ -526,6 +534,10 @@ set_tests_properties(device_sync_budget PROPERTIES SKIP_RETURN_CODE 77)
 # WO-X hoist off vs on: the state after 10 steps byte for byte (same executable, argument 'hoist').
 add_test(NAME prefactor_hoist_bitwise COMMAND test_device_sync_budget hoist)
 set_tests_properties(prefactor_hoist_bitwise PROPERTIES SKIP_RETURN_CODE 77)
+# G-M2-10 (doc/vof_momentum_second_order.md): a VoF-momentum step's global fences, combined-reducer
+# fences and device View allocations per step are equal for 'muscl_phase' and 'upwind'.
+add_test(NAME vofmom_sync_budget COMMAND test_device_sync_budget vofmom)
+set_tests_properties(vofmom_sync_budget PROPERTIES SKIP_RETURN_CODE 77)
 
 # G.8: link every target in this directory against the one compiled instantiation. The library is
 # STATIC, so this is inert for the kernel unit tests that never name `Solver` -- the linker pulls no

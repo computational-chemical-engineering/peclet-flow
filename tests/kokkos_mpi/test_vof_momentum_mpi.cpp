@@ -181,6 +181,38 @@ static double sumOf(const std::vector<double>& a) {
   return s;
 }
 
+// G-M2-8 (doc/vof_momentum_second_order.md §9): the 'muscl_phase' advection ALONE (no projection,
+// no momentum solve, so no MPI reduction enters) must be bitwise the single-rank one. A sharp
+// tilted interface moved by a non-uniform, discretely divergence-free field (each face component is
+// independent of its own coordinate), periodic, ratio 1e3, ten advections. Exercises the face
+// values at rank boundaries: the per-phase slopes read the donor's neighbours, the cap reads the
+// donor's other face and its ghost-layer frozen flag (freezeGhostFlags). 'muscl_mixed_capped' runs
+// too: its cap bites here, so a ghost flag that differed from the owner's would show.
+static double phaseU(int, int y, int z) {
+  return 0.6 + 0.3 * std::sin(2 * M_PI * (y + 0.5) / NY) * std::cos(2 * M_PI * z / NZ);
+}
+static double phaseV(int, int, int z) {
+  return -0.4 + 0.3 * std::cos(2 * M_PI * (z + 0.5) / NZ);
+}
+static double phaseW(int x, int, int) {
+  return 0.3 + 0.4 * std::sin(2 * M_PI * (x + 0.5) / NX + 0.3);
+}
+static void configurePhase(IbmSolver& s, const char* scheme, int ox, int oy, int oz, int lnx,
+                           int lny, int lnz) {
+  const double ratio = 1000.0;
+  s.setRho(ratio);
+  s.setMu(0.0);
+  s.setDt(0.2);
+  s.setPressureGeometry(std::vector<double>((std::size_t)lnx * lny * lnz, 10.0));
+  s.setVof(blockOf(colourAt, ox, oy, oz, lnx, lny, lnz));
+  s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {1.0, ratio - 1.0});
+  s.enableVofMomentum(1.0, ratio);
+  s.setVofMomentumScheme(scheme);
+  s.uploadVelocity(blockOf(phaseU, ox, oy, oz, lnx, lny, lnz),
+                   blockOf(phaseV, ox, oy, oz, lnx, lny, lnz),
+                   blockOf(phaseW, ox, oy, oz, lnx, lny, lnz));
+}
+
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   Kokkos::initialize(argc, argv);
@@ -288,6 +320,49 @@ int main(int argc, char** argv) {
         }
         if (!c.walls && !(std::fabs(drift) < 1e-11)) {
           std::printf("  [%-9s np=%d] FAIL — colour volume drift %.3e\n", c.name, size, drift);
+          fail = 1;
+        }
+      }
+      MPI_Bcast(&fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    }
+    for (const char* scheme : {"muscl_phase", "muscl_mixed_capped"}) {  // G-M2-8
+      const int nAdv = 10;
+      IbmSolver sd(lnx, lny, lnz);
+      sd.initMpi(dec, MPI_COMM_WORLD);
+      configurePhase(sd, scheme, ox, oy, oz, lnx, lny, lnz);
+      long capLoc = 0;
+      for (int k = 0; k < nAdv; ++k) {
+        sd.advectVofMomentum();
+        capLoc += sd.vofMomentumDiagnostics().capped;
+      }
+      long cap = 0;
+      MPI_Allreduce(&capLoc, &cap, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+      std::vector<double> gua[3];
+      for (int comp = 0; comp < 3; ++comp)
+        gua[comp] =
+            gatherGlobal(sd.getVofAdvectedVelocity(comp), ox, oy, oz, lnx, lny, lnz, rank, size);
+      const std::vector<double> gc =
+          gatherGlobal(sd.getVof(), ox, oy, oz, lnx, lny, lnz, rank, size);
+      if (rank == 0) {
+        IbmSolver ref(NX, NY, NZ);
+        configurePhase(ref, scheme, 0, 0, 0, NX, NY, NZ);
+        for (int k = 0; k < nAdv; ++k)
+          ref.advectVofMomentum();
+        double dua = 0.0, umag = 0.0;
+        for (int comp = 0; comp < 3; ++comp) {
+          dua = std::fmax(dua, maxAbsDiff(gua[comp], ref.getVofAdvectedVelocity(comp)));
+          umag = std::fmax(umag, maxAbs(ref.getVofAdvectedVelocity(comp)));
+        }
+        const double dc = maxAbsDiff(gc, ref.getVof());
+        std::printf(
+            "  [phase-adv np=%d] G-M2-8 %s, %d advections, ratio 1e3: du_adv %.3e "
+            "(|u| %.2e)  dC %.3e  (== 0 required; capped faces, all ranks %ld)\n",
+            size, scheme, nAdv, dua, umag, dc, cap);
+        if (!(dua == 0.0) || !(dc == 0.0)) {
+          std::printf(
+              "  [phase-adv np=%d] FAIL — the %s advection is not bitwise "
+              "single-rank\n",
+              size, scheme);
           fail = 1;
         }
       }
