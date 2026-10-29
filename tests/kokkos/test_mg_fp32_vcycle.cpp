@@ -41,8 +41,11 @@
 ///       (rtol 1e-14, cap 300) <= 2x fp64's; (c) at exit max|P(b - A x)| / max|P b| <= 1.5 rtol;
 ///       (d) no capped solve where fp64 converges, no failure flag ((a), (c), (d), (e) only where
 ///       fp64 converges: rulings 2026-10-15, design §13 G-D3, §15 R-4); (e) the health ratio
-///       |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| (setHealthTrace): fp32's per-solve median <= 1.1x
-///       fp64's (ruling 2026-10-15: the absolute 1e-2 is unattainable by fp64 itself, §13 G-D3).
+///       |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| (setHealthTrace): fp32's per-solve median <=
+///       max(1.1x fp64's, 1e-2) (ruling 2026-10-15: the absolute 1e-2 of §13 G-D3 is unattainable
+///       by the trilinear FP64 V-cycle itself, so relative; since the symmetric V-cycle became the
+///       default (doc/mg_depth_policy.md A3) fp64's ratio is round-off, 2e-15..3e-13, and fp32's
+///       is FP32 rounding, 2e-8..2e-7 measured, so the design's absolute 1e-2 is the floor).
 /// G-K1 (doc/vof_projection_distributed_design.md §8): the distributed launch forms of the FP32
 /// smoother and residual (box kernels, plain offsets, ghosts filled by fillWrap) are bitwise the
 /// in-kernel wrap kernels on every non-bottom level of column, cyl, pack and a 64^3 periodic box,
@@ -509,9 +512,9 @@ void solverChecks(const Problem& P, bool fcgMustConverge = false) {
       check(a32.trueRel <= 1.5e-8, tag + ": G-D3 (c) exit max|P(b - Ax)|/max|Pb| = " +
                                        num(a32.trueRel) + " (fp64 " + num(a64.trueRel) + ")");
       check(!a32.failed && a32.it < 200, tag + ": G-D3 (d) no failure, not capped");
-      check(a32.healthMedian <= 1.1 * a64.healthMedian,
-            tag + ": G-D3 (e) health median fp32 " + num(a32.healthMedian) + " <= 1.1x fp64 " +
-                num(a64.healthMedian));
+      check(a32.healthMedian <= std::fmax(1.1 * a64.healthMedian, 1e-2),
+            tag + ": G-D3 (e) health median fp32 " + num(a32.healthMedian) + " <= max(1.1x fp64 " +
+                num(a64.healthMedian) + ", 1e-2)");
     }
     const KrylovRun f64 = krylov(P, CutcellMG::kVcycleFp64, driver, 1e-14, 300),
                     f32 = krylov(P, CutcellMG::kVcycleFp32, driver, 1e-14, 300);
