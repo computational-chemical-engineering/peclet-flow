@@ -224,21 +224,26 @@ global `extent`/`origin`. `extent=None` keeps cell units and is bit-identical to
 
 ## Pressure solve
 
-Geometric multigrid (`CutcellMG`), RB-GS smoother, **rediscretized** cut-cell coarse operators. Four
+Geometric multigrid (`CutcellMG`), RB-GS smoother, **rediscretized** cut-cell coarse operators,
+**piecewise-constant prolongation P = c·Rᵀ and a palindromic smoothed bottom: the V-cycle is SPD**
+(`doc/mg_depth_policy.md` A3; default since WO-S3, `diagnostics.set_pressure_vcycle_symmetric(False)`
+restores the trilinear P bit for bit as the A/B lever). Four
 outer drivers, **one per solver**; the three Krylov ones are mutually exclusive, last set wins:
 
 | driver | select with | use |
 |---|---|---|
 | standalone V-cycle | default | multi-rank default; `set_pressure_multigrid(True, levels=1)` = pure RB-GS |
 | MG-PCG | `set_pressure_pcg(True, iters, rtol)` | single-rank default (auto-enabled at np = 1) |
-| flexible MG-CG | `set_pressure_fcg(True, iters, rtol)` | tolerant of a non-symmetric preconditioner — try it when PCG caps |
+| flexible MG-CG | `set_pressure_fcg(True, iters, rtol)` | tolerant of a non-symmetric preconditioner — none by default since A3 |
 | Chebyshev | `set_pressure_chebyshev(True, iters, rtol)` | no global dots per iteration; the variable-density / porous default |
 
 `set_pressure_pcg(False)` **raises** (the terminal fallback cannot be deselected; name the driver
 you want). Detail and numbers for every bullet: ref §6.
 
-- **High coefficient CONTRAST makes the V-cycle preconditioner indefinite**: both CG drivers cap
-  above density ratio ~10³ (the coarsening, not float storage); only Chebyshev is healthy there.
+- **High coefficient CONTRAST: the CG drivers are healthy since A3** (measured G-CONTRAST: 128³ swarm,
+  density ratio 10³, MG-PCG, 50 steps: 11.8 iterations/step, max 14, no cap; trilinear P: 229, 13 of
+  50 capped at 800). NEVER reintroduce a prolongation that is not c·Rᵀ under a CG driver because
+  'trilinear is more accurate'. Guard: ctest `mg_vcycle_symmetry`.
 - **Operator storage precision** (`MReal`; double by default, +12 % step time) covers the pressure
   hierarchy, momentum stencil, K/M/X/Nbc/R/D_rescale and the ghost overlay. Float = **invalid, not
   degraded** on a high-contrast bed (`../docs/SCALING_ISSUES.md` #1). Ctest `no_float_operator_casts`

@@ -761,7 +761,8 @@ records stay valid: they compare like with like).
 - **G-PERF-S** (quiet host, load ≤ 24; GPU under the `heavy.lock` flock; 3 interleaved rounds of 5 + 30 steps,
   medians): t(on) ≤ 1.02 × t(off) on M1 and the bubble column (device); ≤ 1.03 × on G-PERF-H (host 128³ swarm 1 × 6)
   and M10v (host np 2).
-- **G-CONV-S:** A1 (1) on every step, both arms; G-CONV (b) on vs off ≤ 100 × rtol; physics metrics (`zh_sphere` K,
+- **G-CONV-S:** A1 (1) on every step, both arms; G-CONV (b) on vs off ≤ 100 × rtol, **p compared over the cells
+  with an OPEN face (USER 2026-10-27, U-A3; the M3s MISS as written stays on record)**; physics metrics (`zh_sphere` K,
   `random_spheres` k*, Hysing rise, static drop) within their own gate tolerances; A1 (2) as the user settles Q2
   (A3.6; default (2′)).
 - **G-NP:** `mg_stencil_halo_np*`, `telescope*_mpi`, `bottom_direct_mpi`, `mg_fp32_vcycle_mpi` green, switch on;
@@ -804,7 +805,9 @@ inlines the last sentence.
 
 **A3.8 Open questions (work proceeds on each default).**
 - **U-A3 [pref, USER]** flip the default (WO-S3): every pressure result moves within tolerance, all 14 `state_hash`
-  digests expected. Recommended yes. Default until answered: WO-S1 and WO-S2 proceed; WO-S3 is prepared as one
+  digests expected. Recommended yes. **Answered 2026-10-27 (USER): yes**, on two conditions: (i) G-CONV-S (b)
+  compares p over cells with an OPEN face (A3.5), (ii) Hysing rise and static drop run before the flip (log
+  2026-10-29: PASS). Default until answered: WO-S1 and WO-S2 proceed; WO-S3 is prepared as one
   isolated commit on `mgsym`, not merged to main.
 - **U-Q2 [pref, USER]** A1 (2) → (2′) (A3.6). **Answered 2026-10-27 (USER): (2′) adopted.** Default until answered: WO-S2 reports both, judges on (2′), and
   records A1 (2) as written.

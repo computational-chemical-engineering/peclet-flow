@@ -7153,7 +7153,7 @@ class CutcellMG {
   double aspectTheta_ = 2.0;
   bool lineRelax_ =
       true;  // A2.4: the line smoother on triggered smoothed levels (setLineRelaxation)
-  bool symVcycle_ = false;  // A3: P = c R^T + the palindromic bottom (setSymmetricVcycle)
+  bool symVcycle_ = true;  // A3: P = c R^T + the palindromic bottom (setSymmetricVcycle)
   // Communication-avoiding smoothing (see the kCa* enum): both subsystems on by default. Only
   // kCaMg is read here; the momentum half lives in IbmSolver.
   int caMode_ = kCaBoth;
@@ -7279,7 +7279,7 @@ class CutcellMG {
   /// A3 (doc/mg_depth_policy.md Amendment A3, WO-S1): the symmetric pressure V-cycle --
   /// piecewise-constant prolongation P = c R^T of the average restriction on every transfer
   /// (FP64, FP32, the FP32 <- FP64 bottom interface, the telescope transition; no coarse-ghost
-  /// refresh before it) and the palindromic smoothed bottom. Off (the default until WO-S3) is the
+  /// refresh before it) and the palindromic smoothed bottom: the DEFAULT since WO-S3. Off is the
   /// trilinear prolongation and the forward bottom bit for bit. Read at V-cycle time; a change
   /// invalidates the kept Chebyshev eigenvalue vectors.
   void setSymmetricVcycle(bool on) {

@@ -521,8 +521,8 @@ class Solver {
   void setPressureLineRelaxation(bool enabled);
   // The symmetric pressure V-cycle (doc/mg_depth_policy.md Amendment A3): piecewise-constant
   // prolongation P = c R^T of the average restriction and a palindromic smoothed bottom, so the
-  // V-cycle is an SPD preconditioner for the CG drivers. DEFAULT off (WO-S1; the trilinear
-  // prolongation and the forward bottom bit for bit). Live.
+  // V-cycle is an SPD preconditioner for the CG drivers. DEFAULT on (WO-S3); off = the trilinear
+  // prolongation and the forward bottom bit for bit. Live.
   void setPressureVcycleSymmetric(bool enabled);
   // Precision of the pressure V-cycle preconditioner (doc/vof_projection_cost_design.md §4.4.6):
   // 1 "fp64" (DEFAULT), 2 "fp32" (opt-in, single-rank; raises at the solve, naming the failed

@@ -808,14 +808,15 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "set_pressure_vcycle_symmetric",
           [](D& diag, bool enabled) { diag.s->setPressureVcycleSymmetric(enabled); },
           nb::arg("enabled"),
-          "The symmetric pressure V-cycle (DEFAULT False). True: every coarse-to-fine transfer "
-          "adds the coarse parent's value to each fine cell (piecewise-constant prolongation, "
-          "the transpose of the cell-average restriction up to the factor 2^k) and the smoothed "
-          "coarsest level sweeps forward then in reverse, so the V-cycle is a symmetric positive "
-          "definite preconditioner and the CG drivers keep their optimality on high-contrast and "
-          "thin-slab grids. False: the trilinear prolongation and the forward bottom, bit for "
-          "bit. Applies to every pressure driver (PCG, FCG, Chebyshev, the standalone V-cycle, "
-          "the ghost projection's BiCGStab), single rank and distributed, FP64 and FP32. Live. "
+          "The symmetric pressure V-cycle (DEFAULT True since doc/mg_depth_policy.md A3, WO-S3). "
+          "True: every coarse-to-fine transfer adds the coarse parent's value to each fine cell "
+          "(piecewise-constant prolongation, the transpose of the cell-average restriction up to "
+          "the factor 2^k) and the smoothed coarsest level sweeps forward then in reverse, so the "
+          "V-cycle is a symmetric positive definite preconditioner and the CG drivers keep their "
+          "optimality on high-contrast and thin-slab grids. False: the pre-A3 trilinear "
+          "prolongation and forward bottom, bit for bit (the A/B lever). Applies to every "
+          "pressure driver (PCG, FCG, Chebyshev, the standalone V-cycle, the ghost projection's "
+          "BiCGStab), single rank and distributed, FP64 and FP32. Live. "
           "doc/mg_depth_policy.md Amendment A3.")
       .def(
           "set_pressure_vcycle_precision",
