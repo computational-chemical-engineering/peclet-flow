@@ -106,6 +106,11 @@ static void configure(IbmSolver& s, const Config& c, int ox, int oy, int oz, int
                      {1.0, c.ratio - 1.0});  // enables the variable-density path
   if (c.walls) {
     s.setPropertyModel("force_z", peclet::flow::ClosureKind::LinearMix, "rho", "", {0.0, -GRAV});
+    // |u| here must BE round-off for the absolute tolerance below to gate the reduction order:
+    // at the default Chebyshev rtol 1e-9 the symmetric V-cycle (doc/mg_depth_policy.md A3) stops
+    // with max|u| 1.6e-10 (the trilinear one happened to land at 2.7e-12); at 1e-12 both are
+    // 3e-13.
+    s.setPressureChebyshev(true, 120, 1e-12);
   } else {
     s.setPropertyModel("mu", peclet::flow::ClosureKind::LinearMix, "C", "", {0.05, 0.45});
     s.enableCellForce();
