@@ -489,7 +489,9 @@ G-CONV (c) and G-IBM's "flux divergence ≤ 2 × L4's" are REPLACED by two condi
 1. **At the production tolerance:** every step's post-projection max|div u| ≤ rtol · r0 of that step,
    for both depths. This is the stop test of PCG and Chebyshev (`src/mac_cutcell_mg.hpp:3204` resident
    PCG, `:6240` Chebyshev; `|r|inf < rtol · rref`, rref = r0 = |r0|inf unless a stop reference is set).
-2. **At a fixed tight tolerance (rtol 1e-13):** the worst divergence over the run, depth 5 / depth 4, ≤ 2.
+2. ~~**At a fixed tight tolerance (rtol 1e-13):** the worst divergence over the run, depth 5 / depth 4, ≤ 2.~~
+   **Superseded by (2′) (A3.6) for gates judged from 2026-10-27** (USER, U-Q2); records judged against (2)
+   before that date stay on record as written.
 
 Why: the post-projection max divergence IS the final max-norm residual, and a correct solve stops
 anywhere in (ρ · rtol, rtol] · r0 (ρ = per-iteration contraction, 0.06–0.2), so two correct depths differ
@@ -768,7 +770,7 @@ records stay valid: they compare like with like).
 - **G-CONTRAST** (decides the CLAUDE.md contrast bullet only, not the landing): a VoF case at density ratio 10³ with
   PCG forced, switch on, 50 steps: no capped solve → the bullet is rewritten to the measured result; else unchanged.
 
-**A3.6 Q2 — A1 (2) is a stopping draw; recommended replacement (USER decision U-Q2).** D2: at rtol 1e-13 every solve
+**A3.6 Q2 — A1 (2) is a stopping draw; recommended replacement (USER decision U-Q2).** **Answered 2026-10-27 (USER): (2′) adopted.** D2: at rtol 1e-13 every solve
 stops on its tolerance with the final residual anywhere in 0.12–0.98 of rtol·r0, so "worst divergence, new/old ≤ 2"
 compares two draws bounded only by 1/ρ (2.965 measured between two correct arms solving the same system). At rtol
 1e-17 the recursive residual reaches 1–2e-19 in 20–57 iterations while the TRUE divergence has stagnated at its
@@ -804,7 +806,7 @@ inlines the last sentence.
 - **U-A3 [pref, USER]** flip the default (WO-S3): every pressure result moves within tolerance, all 14 `state_hash`
   digests expected. Recommended yes. Default until answered: WO-S1 and WO-S2 proceed; WO-S3 is prepared as one
   isolated commit on `mgsym`, not merged to main.
-- **U-Q2 [pref, USER]** A1 (2) → (2′) (A3.6). Default until answered: WO-S2 reports both, judges on (2′), and
+- **U-Q2 [pref, USER]** A1 (2) → (2′) (A3.6). **Answered 2026-10-27 (USER): (2′) adopted.** Default until answered: WO-S2 reports both, judges on (2′), and
   records A1 (2) as written.
 - Q-S1 [pref] keep the trilinear path selectable after the flip: default keep (the A/B lever) through the next family
   release, then decide its removal.
