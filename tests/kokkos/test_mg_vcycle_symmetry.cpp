@@ -16,8 +16,9 @@
 ///   a rho x 1e4 blob), and an outflow-anchored channel (32x16x16, -x inflow, +x outflow, y/z
 ///   walls, uniform);
 ///   a <= 1e-8 with the agglomerated bottom (64^3 periodic blob, 4 levels, forced);
-///   the FP32 V-cycle (forced 'fp32' where eligible): a recorded; on a device backend PCG on thinW
-///   not capped;
+///   the FP32 V-cycle (forced 'fp32' where eligible) on thinW: a <= 100 x its recorded value
+///   (host 3.582e-10, CUDA 1.154e-9: the FP32 face weights' rounding, not a structural asymmetry --
+///   the trilinear FP32 prolongation is orders above) and production PCG <= 18 (recorded 10);
 ///   production solvePCG (rhsOf, rtol 1e-10, zero guess, cap 500): thinW <= 16 (line relaxation on
 ///   and off), thin periodic slab <= 14.
 /// The switch-off values are printed for reference (the trilinear V-cycle's a), not gated.
@@ -191,7 +192,9 @@ void guardCase(const Problem& P, bool lr, int bound) {
   check(on <= bound, tag + ": PCG " + std::to_string(on) + " <= " + std::to_string(bound));
 }
 
-// The FP32 V-cycle (forced 'fp32'): a recorded; on a device backend PCG on thinW not capped.
+// The FP32 V-cycle (forced 'fp32'): a within 100x of its recorded value, PCG on thinW <= 18.
+// Positive control (doc/mg_depth_policy_log.md 2026-10-30): with the symmetric FP32 branch's
+// prolongation swapped to the trilinear prolongFp32 this case FAILS on both checks.
 void fp32Case(const Problem& P) {
   CutcellMG mg;
   setUp(mg, P, CutcellMG::kVcycleFp32);
@@ -203,12 +206,14 @@ void fp32Case(const Problem& P) {
   }
   const double a = asym(mg, true);
   const int it = pcgIters(mg, P);
-  std::printf("%s FP32 V-cycle (forced 'fp32', symmetric): a %s (recorded); PCG %d%s\n",
-              P.name.c_str(), num(a).c_str(), it, mg.lastVcycleFp32() ? "" : " (not FP32)");
-  if (!CutcellMG::kHostMemory)
-    check(it < kCap && !mg.lastSolveFailed(), P.name + " FP32: PCG not capped (" +
-                                                  std::to_string(it) + " < " +
-                                                  std::to_string(kCap) + ")");
+  // Recorded at gate mgsym4 (thinW, 2026-10-29): host 3.582e-10, CUDA 1.154e-9; PCG 10 on both.
+  const double aRec = CutcellMG::kHostMemory ? 3.582e-10 : 1.154e-9;
+  std::printf("%s FP32 V-cycle (forced 'fp32', symmetric): a %s (recorded %s); PCG %d%s\n",
+              P.name.c_str(), num(a).c_str(), num(aRec).c_str(), it,
+              mg.lastVcycleFp32() ? "" : " (not FP32)");
+  check(mg.lastVcycleFp32(), P.name + " FP32: the V-cycles ran in FP32");
+  check(a <= 100.0 * aRec, P.name + " FP32: a " + num(a) + " <= 100 x " + num(aRec));
+  check(it <= 18 && !mg.lastSolveFailed(), P.name + " FP32: PCG " + std::to_string(it) + " <= 18");
 }
 
 }  // namespace
