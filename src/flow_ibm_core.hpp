@@ -529,12 +529,24 @@ void Solver<Grid>::setPressureBottomSolver(int engine) {
 
 template <class Grid>
 void Solver<Grid>::setPressureLineRelaxation(bool enabled) {
-  mg_.setLineRelaxation(enabled);
+  // A different V-cycle: the kept Chebyshev bounds (main and balanced-force) are stale.
+  if (enabled != mg_.lineRelaxation()) {
+    chebBoundsSet_ = false;
+    chebWarmOk_ = false;
+    bfpChebSet_ = false;
+  }
+  mg_.setLineRelaxation(enabled);  // drops the kept power-iteration vectors on a change
 }
 
 template <class Grid>
 void Solver<Grid>::setPressureVcycleSymmetric(bool enabled) {
-  mg_.setSymmetricVcycle(enabled);
+  // A different V-cycle: the kept Chebyshev bounds (main and balanced-force) are stale.
+  if (enabled != mg_.symmetricVcycle()) {
+    chebBoundsSet_ = false;
+    chebWarmOk_ = false;
+    bfpChebSet_ = false;
+  }
+  mg_.setSymmetricVcycle(enabled);  // drops the kept power-iteration vectors on a change
 }
 
 template <class Grid>

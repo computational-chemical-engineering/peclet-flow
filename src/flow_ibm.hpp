@@ -1366,6 +1366,9 @@ class Solver {
   // Chebyshev bounds tripped the guard (the cap, or a residual above r0 after 3 iterations) and
   // were redone on cold bounds, since construction.
   long numPressureChebyshevRestarts() const { return chebColdRestarts_; }
+  // C++ test hook, no Python binding: how many Chebyshev spectral-bound estimates (main and
+  // balanced-force) the pressure multigrid has run since construction.
+  long numPressureEigenEstimates() const { return mg_.numEigenEstimates(); }
 
 
   // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level

@@ -132,6 +132,15 @@ target_include_directories(test_pressure_wallbounded PRIVATE ${CMAKE_CURRENT_SOU
                            ${PECLET_CORE_INCLUDE})
 target_link_libraries(test_pressure_wallbounded PRIVATE Kokkos::kokkos)
 add_test(NAME pressure_wallbounded COMMAND test_pressure_wallbounded)
+# doc/mg_depth_policy_log.md 2026-10-30 (A3 review fixes): the Chebyshev pressure bounds' life
+# cycle -- a V-cycle setter that changes the V-cycle re-estimates the kept bounds.
+add_executable(test_pressure_chebyshev_bounds test_pressure_chebyshev_bounds.cpp)
+target_include_directories(test_pressure_chebyshev_bounds PRIVATE
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_pressure_chebyshev_bounds PRIVATE Kokkos::kokkos)
+add_test(NAME pressure_chebyshev_bounds COMMAND test_pressure_chebyshev_bounds)
+set_tests_properties(pressure_chebyshev_bounds PROPERTIES ENVIRONMENT
+                     "OMP_NUM_THREADS=4;OMP_PROC_BIND=false")
 
 # VoF rung V0: PLIC toolbox (SZ/Lehmann-Gekle plane<->volume, MYC/Youngs normals, slab flux).
 add_executable(test_vof_plic test_vof_plic.cpp)

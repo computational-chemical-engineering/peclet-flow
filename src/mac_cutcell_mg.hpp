@@ -6451,6 +6451,7 @@ class CutcellMG {
   void estimateEigenvalues(CCConst seed, double& lmin, double& lmax, int iters, int pre, int post,
                            int bottom, EigenStart start = EigenStart::Cold) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
+    ++eigenEstimates_;
     pre_ = pre;
     post_ = post;
     bottom_ = bottom;
@@ -6644,6 +6645,9 @@ class CutcellMG {
     guessV1_ = CCField();
     guessHist_ = 0;
   }
+  // How many spectral-bound estimates (estimateEigenvalues) have run since construction: test
+  // hook, it tells a re-estimate from kept bounds.
+  long numEigenEstimates() const { return eigenEstimates_; }
   // Did the last solveChebyshev(..., guard3 = true) stop on its 3-iteration growth guard?
   bool chebyshevGuardTripped() const { return chebGuardTripped_; }
   // max|b| over the fluid cells after the null-space (mean) projection -- the drivers' norm.
@@ -7133,6 +7137,7 @@ class CutcellMG {
   bool overlaySolve_ = false;              // A3: the current solve has an overlay (OverlayScope)
   int dbgBrkWhich_ = 0, dbgBrkIter_ = -1;  // setDebugBreakdown (test hook)
   int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)
+  long eigenEstimates_ = 0;     // estimateEigenvalues calls since construction (numEigenEstimates)
   int dbgBicgBreakdowns_ = 0;   // solveBiCGStab breakdown exits (1-5), for its debug trace only
   int dbgBicgStagnations_ = 0;  // solveBiCGStab compatibility-floor exits, for its debug trace only
   // ISSUES sweep item 6: did the LAST Krylov solve give up on a non-finite recurrence
