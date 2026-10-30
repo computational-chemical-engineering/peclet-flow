@@ -1370,12 +1370,18 @@ class Solver {
   // balanced-force) the pressure multigrid has run since construction.
   long numPressureEigenEstimates() const { return mg_.numEigenEstimates(); }
   // How many Chebyshev pressure solves on COLD-estimated bounds (main and balanced-force) saw
-  // their residual rise above r0 and were redone on bounds re-estimated with the bracketing
+  // their preconditioned residual norm rise above its initial value and were redone on bounds re-estimated with the bracketing
   // margin (CutcellMG::kChebBracket), since construction (doc/mg_depth_policy_log.md 2026-10-30).
   long numPressureChebyshevGrowthTrips() const { return chebGrowthTrips_; }
   // C++ test hook, no Python binding: the NEXT spectral-bound estimate returns both bounds x s
   // (CutcellMG::debugSetEigenScale; s < 1 forces the growth guard).
   void debugSetPressureEigenScale(double s) { mg_.debugSetEigenScale(s); }
+  // C++ test hook, no Python binding: drop the main Chebyshev bounds exactly as a coefficient
+  // rebuild does (project()'s variable-density refresh), so the next solve re-estimates warm.
+  void debugDropPressureBounds() {
+    chebWarmOk_ = chebWarmOk_ || chebBoundsSet_;
+    chebBoundsSet_ = false;
+  }
 
 
   // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
@@ -4993,6 +4999,13 @@ class Solver {
   long chebColdRestarts_ = 0;  // guard firings (numPressureChebyshevRestarts)
   long chebGrowthTrips_ = 0;   // cold-bounds growth-guard firings (numPressureChebyshevGrowthTrips)
   bool chebGrowthWarned_ = false;  // the first growth-guard firing prints one stderr notice
+  // The bounds ratchet (DECISIONS_GPU.log 2026-10-30 "A3 finish" (b)): the bracketed lambda_max
+  // of the last growth-guard re-estimate (0 = none). Every later main estimate uses
+  // max(estimate, floor), so a trip's bounds persist through the warm re-estimates of the
+  // coefficient rebuilds; a structural invalidation (chebWarmOk_ cleared: the driver, density,
+  // porous and V-cycle setters) drops it. bfpLmaxFloor_: the same for the balanced-force
+  // pre-projection's own bounds, dropped when they are re-estimated from scratch.
+  double chebLmaxFloor_ = 0.0, bfpLmaxFloor_ = 0.0;
   CCField chebX0_;             // the solve's starting iterate under the pressure warm start
   int nLevels_ = 0;             // pressure-MG depth, 0 = AUTO (doc/mg_depth_policy.md §3.1)
   bool pressGraphAmg_ = false;

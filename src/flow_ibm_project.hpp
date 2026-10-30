@@ -771,8 +771,9 @@ long Solver<Grid>::solveBalancedForceSystem(double bref, double r0) {
   } guard{mg_};
   mg_.setStopReference(bref);
   if (useChebyshev_) {
-    if (!bfpChebSet_) {
+    if (!bfpChebSet_) {  // from scratch (a structural change): no ratchet floor
       mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12);
+      bfpLmaxFloor_ = 0.0;
       bfpChebSet_ = true;
     }
     // The bounds are always a cold estimate: the growth guard (as solvePressureSystem's) runs.
@@ -782,12 +783,17 @@ long Solver<Grid>::solveBalancedForceSystem(double bref, double r0) {
       noteChebyshevGrowthTrip(it);
       mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12,
                               CutcellMG::EigenStart::Cold, CutcellMG::kChebBracket);
+      if (bfpChebB_ < bfpLmaxFloor_)
+        bfpChebB_ = bfpLmaxFloor_;
+      bfpLmaxFloor_ = bfpChebB_;  // the bracketed bounds persist ((b))
       copyInner(pb1_, e1_, 1, CCConst(Pb_), e_, G);
       it += mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_);
     } else if (it >= chebMaxit_) {  // never met the stop: slow, or diverging on bounds gone stale?
       const double rfin = mg_.residualNorm(rhs1_, pb1_, r_, Ap_);
       if (!(rfin <= r0)) {  // residual growth (or non-finite): re-estimate and restart once
         mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12);
+        if (bfpChebB_ < bfpLmaxFloor_)  // the ratchet ((b))
+          bfpChebB_ = bfpLmaxFloor_;
         copyInner(pb1_, e1_, 1, CCConst(Pb_), e_, G);
         it +=
             mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_);
@@ -1536,8 +1542,16 @@ long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
     // the first, and the one after a structural change (a driver/density/porous setter, a
     // hierarchy rebuild) -- is the cold one, unchanged.
     using ES = typename CutcellMG::EigenStart;
+    // The bounds ratchet ((b), chebLmaxFloor_): lambda_max never drops below a growth trip's
+    // bracketed value. Bitwise inert while no trip has happened (floor 0).
+    auto ratchet = [&]() {
+      if (chebB_ < chebLmaxFloor_)
+        chebB_ = chebLmaxFloor_;
+    };
     bool warm = false;
     if (!chebBoundsSet_) {
+      if (!chebWarmOk_)  // a structural invalidation (or the first estimate): no floor
+        chebLmaxFloor_ = 0.0;
       warm = chebWarmOk_ && mg_.eigenWarmReady();
       mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, warm ? 5 : 15, 2, 2, 12,
                               warm ? ES::Warm : ES::ColdKeep);
@@ -1545,6 +1559,7 @@ long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
         warm = false;
         mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12, ES::ColdKeep);
       }
+      ratchet();
       chebBoundsSet_ = true;
     }
     // Under the pressure warm start the starting iterate is the previous phi: kept for a redo
@@ -1575,6 +1590,8 @@ long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
         noteChebyshevGrowthTrip(it);
         mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12, ES::ColdKeep,
                                 CutcellMG::kChebBracket);
+        ratchet();
+        chebLmaxFloor_ = chebB_;  // the bracketed bounds persist ((b))
         restoreStart();
         it += mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
       }
@@ -1588,6 +1605,7 @@ long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
       if (iters >= chebMaxit_ || mg_.chebyshevGuardTripped()) {
         ++chebColdRestarts_;
         mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12, ES::ColdKeep);
+        ratchet();
         restoreStart();
         iters += coldSolve();
       }

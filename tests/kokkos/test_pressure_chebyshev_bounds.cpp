@@ -14,6 +14,11 @@
 //      guard trips once, the bounds are re-estimated with the bracketing margin, the step
 //      converges, and later steps keep the new bounds without tripping. Without the hook the
 //      guard never trips (case 1 also checks 0 trips).
+//   3. The bounds ratchet (DECISIONS_GPU.log 2026-10-30 "A3 finish" (b)): after a trip, the
+//      bounds are dropped as a coefficient rebuild drops them and the warm re-estimate is scaled
+//      by 0.4 again. The ratchet keeps lambda_max at the trip's bracketed value, so the warm
+//      solve neither trips its 3-iteration guard nor restarts cold. Without the ratchet the
+//      warm bounds are the scaled ones and the step restarts (negative control: 1 restart).
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
@@ -114,6 +119,26 @@ void guardCase(bool symmetric) {
   CHECK(s.numPressureChebyshevGrowthTrips() == 1);
   CHECK(s.numPressureEigenEstimates() == 2);
 }
+
+// 3. The ratchet: a trip's bracketed lambda_max survives the warm re-estimate.
+void ratchetCase() {
+  std::printf("  3. bounds ratchet: trip, drop the bounds, warm re-estimate x 0.4\n");
+  peclet::flow::IbmSolver s(NX, NY, NZ);
+  setUp(s);
+  s.debugSetPressureEigenScale(0.4);
+  stepChecked(s, "step 1 (scaled bounds, trips)");
+  CHECK(s.numPressureChebyshevGrowthTrips() == 1);
+  s.debugDropPressureBounds();
+  s.debugSetPressureEigenScale(0.4);
+  const long n0 = s.numPressureEigenEstimates();
+  stepChecked(s, "step 2 (warm x 0.4, ratcheted)");
+  std::printf("    estimates +%ld  restarts %ld  growth trips %ld\n",
+              s.numPressureEigenEstimates() - n0, s.numPressureChebyshevRestarts(),
+              s.numPressureChebyshevGrowthTrips());
+  CHECK(s.numPressureEigenEstimates() - n0 == 1);  // the warm one only
+  CHECK(s.numPressureChebyshevRestarts() == 0);
+  CHECK(s.numPressureChebyshevGrowthTrips() == 1);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -124,6 +149,7 @@ int main(int argc, char** argv) {
     toggleCase();
     guardCase(true);
     guardCase(false);
+    ratchetCase();
     if (failures == 0)
       std::printf("PASS: pressure_chebyshev_bounds\n");
     else
