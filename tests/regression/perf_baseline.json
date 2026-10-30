@@ -40,7 +40,7 @@
       "16": {
         "N": 16,
         "metric": 7.299689474225098,
-        "pressure_iters_total": 368,
+        "pressure_iters_total": 366,
         "pressure_iters_per_step": 6.0,
         "outer_iters": 1,
         "steps": 60,
@@ -51,8 +51,8 @@
       "24": {
         "N": 24,
         "metric": 7.389063051924422,
-        "pressure_iters_total": 560,
-        "pressure_iters_per_step": 7.0,
+        "pressure_iters_total": 494,
+        "pressure_iters_per_step": 6.0,
         "outer_iters": 1,
         "steps": 80,
         "divergence": 1.3673444321238293e-11,
@@ -62,8 +62,8 @@
       "32": {
         "N": 32,
         "metric": 7.416167928926183,
-        "pressure_iters_total": 525,
-        "pressure_iters_per_step": 7.0,
+        "pressure_iters_total": 485,
+        "pressure_iters_per_step": 6.0,
         "outer_iters": 1,
         "steps": 75,
         "divergence": 2.8678344421440016e-11,
@@ -73,7 +73,7 @@
       "48": {
         "N": 48,
         "metric": 7.436088166980143,
-        "pressure_iters_total": 976,
+        "pressure_iters_total": 959,
         "pressure_iters_per_step": 6.0,
         "outer_iters": 1,
         "steps": 150,
@@ -84,7 +84,7 @@
       "64": {
         "N": 64,
         "metric": 7.440413851092653,
-        "pressure_iters_total": 1607,
+        "pressure_iters_total": 1587,
         "pressure_iters_per_step": 6.0,
         "outer_iters": 1,
         "steps": 245,

@@ -898,7 +898,7 @@ void gateAnisoSphere() {
     const int RECSTEPS[3] = {60, 80, 75};
     // Pressure iterations/step: 7 -> 6 at N = 24 and 32 when the symmetric V-cycle became the
     // default (doc/mg_depth_policy.md A3, WO-S3); K and the step counts are unchanged.
-    // perf_baseline.json still records 7.0 there, inside its own +-2 band.
+    // perf_baseline.json records 6.0 there too (its iteration fields re-recorded, A3 review 5a).
     const double RECITERS[3] = {6.0, 6.0, 6.0};
     std::printf(
         "        cubic vs perf_baseline.json %.17g   rel %.3e (bound 1e-6)   steps %d "
