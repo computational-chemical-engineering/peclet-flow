@@ -795,3 +795,38 @@ solves, 0 FP32 / Chebyshev restarts. Iterations equal to WO-S2's; M7a div_max 9.
 
 **CA device default c6c0494 bitwise on top:** CUDA state_hash with c6c0494 reverted in the working tree
 81ed80eebb3c905a = with it 81ed80eebb3c905a. **PASS.**
+
+## 2026-10-30 — A3 review fixes (fa1303c … 02848cf): two STOP findings on the Chebyshev bounds; CA np 2/4 bitwise
+
+Measured on host at 164384d (`bubble_column_perf/gpu_diag/mgd/sym/flip/cheb2/`: arms over the 53 Chebyshev ctests, a
+temporary diagnostic injected and reverted; trip diagnostic `cheb2/tripdiag.log`, per-test sums `cheb2/pertest.py`).
+Gate mgsym5 NOT run: both findings below are design questions.
+
+**STOP 1 — safety ratio s = (0.95·λmin_est + 1.05·λmax_est)/λ_true** (Chebyshev converges for λ < a + b, so s ≥ 1
+brackets; the bar is 1.05). Symmetric mode: cold min **0.9997**, warm min **1.0035**, both at collocated_stability_guard
+(est [0.0448, 0.9953], λ_true 1.0879: the 1a A-norm Rayleigh quotient still sees λmax ≈ 1.00 of 1.088). Every other
+test ≥ 1.4189. Trilinear: warm min 1.0918 (cold "0.0000" rows are zero-rhs estimates, not misses). **MISS.**
+
+**STOP 2 — the growth guard (1b) is not inert on healthy solves.** Trip test `rn > r0` in the max norm at ANY iteration:
+
+| test | cold solves | trips | trip iteration, rn/r0 | s (bounds bracket?) | verdict |
+|---|---|---|---|---|---|
+| vof_blocks_ns_mpi_np{1,2,4} | 6 | 4 | it 1, 1.55 | ≥ 1.53 (yes) | false positive: max-norm transient; redo b 1.050 → 1.207, 19 V-cycles |
+| multiphysics_mpi_np{1,2,4} | 4 | 2 | it 1, 5.70 | ≥ 1.42 (yes) | false positive, same mechanism |
+| collocated_stability_guard | 460 | 421 | it 3, 1.035–1.135 | 0.9997–1.0035 (no) | genuine underestimate, but it recurs every step |
+| vof_collocated, pressure_wallbounded | 271, 20 | 0 | — (max rn/r0 0.37, 0.36) | yes | inert |
+
+With correct bounds only the M⁻¹-norm of the Chebyshev residual is non-increasing; the max norm can rise (×5.7 at
+it 1). In collocated_stability_guard the redo's bracketed bounds do not persist: the next warm estimate is again
+unbracketed, guard3 trips (420 warm trips), the cold re-estimate trips again, redo — +839 solves. The "21 trips" of
+`cheb2/run.out` are the once-per-process stderr notices (7 tests × 3), not the trip count.
+
+**Chebyshev V-cycles over the 53 tests: 232 854 (mgsym4) → 253 081 (+20 227, +8.7 %)**: collocated_stability_guard
++13 305 (the trip loop above), vof_collocated +6 929 with 0 trips (1a's estimate: bounds moved, every solve on
+them), vof_blocks_ns +58 ×3 and multiphysics +2 ×3 (false-positive redos), the rest ±≤ 112 (1a).
+
+**Item 4 — CA device default at np > 1** (`sym/flip/item45.out`, CUDA, 8 steps, CA both vs off): periodic np 2, np 4,
+walled np 2, np 4 all **BITWISE** (u, v, w, p, every rank); iterations identical. **PASS.**
+
+**Item 5a** (02848cf): perf_baseline.json zh_sphere iteration fields re-recorded from a CUDA run (6.0 at every grid;
+totals 366/494/485/959/1587); K kept (moved ≤ 3.3e-6 rel), steps unchanged.
