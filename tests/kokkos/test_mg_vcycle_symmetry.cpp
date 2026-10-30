@@ -18,7 +18,8 @@
 ///   a <= 1e-8 with the agglomerated bottom (64^3 periodic blob, 4 levels, forced);
 ///   the FP32 V-cycle (forced 'fp32' where eligible) on thinW: a <= 100 x its recorded value
 ///   (host 3.582e-10, CUDA 1.154e-9: the FP32 face weights' rounding, not a structural asymmetry --
-///   the trilinear FP32 prolongation is orders above) and production PCG <= 18 (recorded 10);
+///   with the trilinear FP32 prolongation it is 1.345e-4) and production PCG <= 18 (recorded 10;
+///   trilinear 140);
 ///   production solvePCG (rhsOf, rtol 1e-10, zero guess, cap 500): thinW <= 16 (line relaxation on
 ///   and off), thin periodic slab <= 14.
 /// The switch-off values are printed for reference (the trilinear V-cycle's a), not gated.
@@ -194,7 +195,8 @@ void guardCase(const Problem& P, bool lr, int bound) {
 
 // The FP32 V-cycle (forced 'fp32'): a within 100x of its recorded value, PCG on thinW <= 18.
 // Positive control (doc/mg_depth_policy_log.md 2026-10-30): with the symmetric FP32 branch's
-// prolongation swapped to the trilinear prolongFp32 this case FAILS on both checks.
+// prolongation swapped to the trilinear prolongFp32 this case FAILS on both checks (host: a
+// 1.345e-4, PCG 140).
 void fp32Case(const Problem& P) {
   CutcellMG mg;
   setUp(mg, P, CutcellMG::kVcycleFp32);
