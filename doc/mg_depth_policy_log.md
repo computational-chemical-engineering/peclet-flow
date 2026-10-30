@@ -723,3 +723,75 @@ and would likely break G-ITER-S (≤ 1.10 × off + 0.5): STOP per the decision's
 shift-only variant fixes the measured failure at no cost but is a different design choice: it goes to the
 coordinator / architect. In every symmetric arm vof_collocated (lines 241, 257: exactness at the default rtol 1e-9)
 fails on the changed stopping draw; it passes at factor 1.25 bracketing. Not triaged further.
+
+## 2026-10-29 — Chebyshev bounds landed ((i) + shift-only), vof_collocated triage, full gate mgsym4
+
+Coordinator decision ((i) + shift-only, supersedes the (i) + (ii) line). **c54a828** (production only): cold eigen
+seed = rhs + max|rhs| · h(global cell) (splitmix64 of the global index, np-independent), symmetric mode only; the min
+power iteration is shifted by 1.15 × the λ_max estimate (`kChebSymShift`), λ_max returned raw. Switch off: shift =
+λ_max, no noise — the pre-A3 estimate bit for bit (porous / non-Chebyshev hashes unchanged, below). Chebyshev
+V-cycles over the 53 Chebyshev ctests 232 854 (trilinear 237 889, −2.1 %; = cb63826's shift-only arm exactly);
+pressure_wallbounded B 8 iterations (mgsym3: 200 = cap).
+
+**Unit check, lmin estimate within 20 % of the true lmin** (host, diagnostic layer not committed:
+`gpu_diag/mgd/sym/flip/cheb/prod_shiftonly_with_diag.patch`). True lmin = 300 shifted-power iterations from a
+broadband seed with re-projection each iteration. CG-Lanczos agrees to 1e-4 on pressure_wallbounded / vof_momentum
+/ balanced_force_mpi, but gives spurious 0.10–0.28 on vof_blocks_ns_mpi and vof_redistribute_mpi (the earlier
+table's "est_lo/lanczos_lo 8.3" there is the Lanczos reference, not the estimate). Worst row per case:
+
+| case | est lmin | true lmin | est/true |
+|---|---|---|---|
+| pressure_wallbounded B (cold) | 0.9223 | 0.9018 | 1.023 PASS |
+| pressure_wallbounded C (cold; warm 1.005–1.015) | 0.9250 | 0.9028 | 1.025 PASS |
+| vof_blocks_ns_mpi_np1 | 0.7105 | 0.7136 | 0.996 PASS |
+| vof_momentum | 0.8187 | 0.7795 | 1.050 PASS |
+| vof_redistribute_mpi_np1 | 0.8903 | 0.8637 | 1.031 PASS |
+| balanced_force_mpi_np1 | 0.9338 | 0.9048 | 1.032 PASS |
+
+**vof_collocated lines 241 / 257 (face ≤ 1e-12), class (a) stopping draw — 921b778.** Default rtol 1e-9: symmetric
+face 1.99e-12 in 10 iterations (mu sweep 1.27–1.99e-12), trilinear 2.25e-13 in 13. At 1e-14 (the test's G4
+protocol, as b5efbcf): 8.2e-14 in 15 iterations, mu sweep 2.0e-14–1.1e-13; cell / dP/dz transient unchanged
+(2.862e-04 / 4.180e-03). Bounds unchanged; the periodic case stays at the default rtol.
+
+**Gate mgsym4 (`validation/wo7/{host,cuda}_mgsym4.*`, head 921b778):** host 274/274, CUDA 274/274 (0 failed; skips
+by design only: host device_sync_budget / prefactor_hoist_bitwise, CUDA bottom_direct_mpi_np2/np4; the OOM flakes
+did not recur). **PASS.**
+
+state_hash (14 cases; first 12 hex, pre-flip → mgsym3 → mgsym4): 13 move with the flip, `porous` unchanged on both
+backends; the Chebyshev change moves `vof_droplet` only (the one Chebyshev case):
+
+| case | host pre → mgsym4 | CUDA pre → mgsym4 |
+|---|---|---|
+| channel | d2512e2c3486 → f4a5922cbeab | 4fd52a6be32f → 1178dcd06774 |
+| colocated_advect | 89324a797ea8 → feda0b6bff0d | 739a644d6bab → 99f52abf0a9c |
+| colocated_advect_bc | 5df7c013c9db → 27ce08217e47 | 44c2be37d16f → bb2feb5f60c3 |
+| colocated_bfp | d234ba65950a → f483970b809f | b2b5f6188bba → a893c10cf563 |
+| colocated_embed | d22cd2f07ae5 → 785fb19576c9 | d3224126afbc → 21f4c1e32b25 |
+| colocated_gauge_exact | bf0698145f75 → e2a657b264fc | f51471270a07 → d1dc25455101 |
+| colocated_ghost | 4b2762dc018c → 927b9278b85c | ba618738445d → b2a1b68a38b0 |
+| colocated_plain | 6d61f3ef3f47 → ed983cffe773 | b9e4ccc87102 → 72a74eba5770 |
+| mpi_np2 | 1ca4ff4d85ae → 1b676469c56d | 637f7ebdc30f → eab10d6b39d3 |
+| porous | 8226b7ee9fe6 (same) | 7ca6f39d89e7 (same) |
+| scalar | b9fc57440bb6 → f21301301875 | 27445fd86a99 → 8ee60cf84562 |
+| scene_moving | f23c8c5a666b → b3f9b0fd48ef | 14fd3b6138f2 → c074c0318bc1 |
+| staggered_bed | d12cfa34e39d → e2adb7800aaa | 56b52c908927 → ab98c36f2539 |
+| vof_droplet | 41a51923c28e → 70fc2c7ea7b0 (mgsym3 bf7fd5249fdb) | d12105490c40 → e5e4a0a5508a (mgsym3 fb494755dbed) |
+
+Digests (sha of all 14 lines): host 51fec031a160c88b → **f36332b3a2b1c46d**, CUDA 8337752781faf71b →
+**81ed80eebb3c905a**.
+
+**Census** (`sym/flip/compare_name.py`, printed output per test): host mglr2 → mgsym4 126 of 270 common tests print
+differently, CUDA mglr2b → mgsym4 124 of 270 (noise set cuda_mglr2 vs mglr2b: 8); every status unchanged or
+flake → Passed; 4 tests new since main's logs. mgsym3 → mgsym4: host 49, CUDA 50 — the Chebyshev / VoF set
+(balanced_force*, vardensity*, vof_*, units_vof_*, pressure_wallbounded, cell_force_placement, multiphysics_mpi),
+the four re-pinned tests, and the run-to-run printers of the noise set.
+
+**G-NP** (mgsym4 logs): host 19 Passed + device_sync_budget skip by design, CUDA 18 Passed + bottom_direct_mpi_np2/4
+skip by design (host Passed): 20/20 green on their backends. **PASS.**
+
+**G-ITER-S on the Chebyshev rows** (`sym/flip/giters4.out`, --levels 0, 30 steps, off vs on, this build): M7a swarm
+192³ 11.967 → 11.000 PASS; M7b porous bed 9.000 → 8.100 PASS; M10h 10.033 → 11.000 PASS (≤ 11.537); 0 failed
+solves, 0 FP32 / Chebyshev restarts. Iterations equal to WO-S2's; M7a div_max 9.29e-12 → 8.21e-12.
+
+**CA device default c6c0494 bitwise on top:** CUDA state_hash with c6c0494 reverted in the working tree
+81ed80eebb3c905a = with it 81ed80eebb3c905a. **PASS.**
