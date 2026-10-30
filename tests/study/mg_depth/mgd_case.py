@@ -500,6 +500,7 @@ if rank == 0:
         "prec_first": prec[0], "prec_last": prec[-1], "fp32_restart_flips": prec_flips,
         "solve_failed": int(sum(failed)),
         "cheb_restarts": int(getattr(s.diagnostics, "num_pressure_chebyshev_restarts", -1)),
+        "cheb_growth_trips": int(getattr(s.diagnostics, "num_pressure_chebyshev_growth_trips", -1)),
         "load_before": list(load0), "load_after": list(load1), "hash": digest,
     }
     res.update({k: v for k, v in info.items()})
@@ -507,7 +508,8 @@ if rank == 0:
         res.update(porous_res_max=max(pres), porous_res_last=pres[-1])
     keep = ("case", "tag", "np", "levels_req", "levels", "bottom", "steps", "wall_ms",
             "step_ms_median", "iters_mean", "iters_min", "iters_max", "div_max", "prec_last",
-            "fp32_restart_flips", "solve_failed", "cheb_restarts", "porous_res_max", "K", "k_star")
+            "fp32_restart_flips", "solve_failed", "cheb_restarts", "cheb_growth_trips",
+            "porous_res_max", "K", "k_star")
 
     def fmt(v):
         if isinstance(v, float):
