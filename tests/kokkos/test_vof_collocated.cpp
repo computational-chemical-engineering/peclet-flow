@@ -131,6 +131,9 @@ struct HydroResult {
   double cellU = 0, faceU = 0, pErr = 0, cb = 0;
   long iters = 0;
 };
+// The Chebyshev cap of a solve at an explicit rtol (hydrostatic's chebRtol > 0). A gate at rtol
+// 1e-14 also checks iters < kChebMaxit: a capped solve's face error is not the scheme's.
+constexpr int kChebMaxit = 4000;
 
 template <class S>
 // `bfp`: -1 = the solver's default (balanced-force projection ON on the collocated V8 path, OFF on
@@ -189,7 +192,7 @@ HydroResult hydrostatic(double ratio, double mu, int steps, bool periodic, bool 
   if (bfp >= 0)
     s.setBalancedForceProjection(bfp == 1);
   if (chebRtol > 0.0)  // the driver last (set_density_mode re-selects Chebyshev)
-    s.setPressureChebyshev(true, 4000, chebRtol);
+    s.setPressureChebyshev(true, kChebMaxit, chebRtol);
   for (int k = 0; k < steps; ++k)
     s.step();
   HydroResult r;
@@ -247,6 +250,8 @@ void gateHydrostatic() {
     CHECK(co4.cellU < co.cellU);  // the transient decays ...
     CHECK(co4.pErr < co.pErr);    // ... in the velocity and in the pressure gradient
     CHECK(co.iters < 200);        // rule 3b: no capped solve
+    if (rt > 0.0)
+      CHECK(co4.iters < kChebMaxit);
   }
   std::printf(
       "\n  The mu sweep (walled, hand-set rho, ratio 1000, 100 steps). The staggered balance is\n"
@@ -260,6 +265,7 @@ void gateHydrostatic() {
         "dP/dz %.3e\n",
         mu, st.faceU, st.pErr, co.faceU, co.pErr);
     CHECK(co.faceU < 1e-12);  // measured 2.0e-14 .. 1.1e-13 at rtol 1e-14 (double storage)
+    CHECK(co.iters < kChebMaxit);
   }
 }
 
@@ -474,6 +480,7 @@ void gateBalancedOn() {
       CHECK(co.faceU < 1e-12);
       CHECK(co.cellU < 1e-10);
       CHECK(co.pErr < 1e-10);
+      CHECK(co.iters < kChebMaxit);
     }
   {  // T1 periodic at the DEFAULT Chebyshev rtol (1e-9), 100 steps: the frozen step-1 error.
     // Why 1e-9 and not the 1e-12 above: the pre-projection solves once at step 1 to rtol * |b|
