@@ -2654,9 +2654,11 @@ class CutcellMG {
     kG12 = 11,
     kG22 = 12,
     kGb1 = 13,
-    kGb2 = 14
+    kGb2 = 14,
+    // solveChebyshev's growth guard: r^T z of the iteration just preconditioned (local partial)
+    kChebRz = 15
   };
-  static constexpr int kNSlots = 15;
+  static constexpr int kNSlots = 16;
   static constexpr int kGuessPacket = 6;
   static constexpr int kPacket = 4;  // the per-iteration host packet {pAp, rn, stop, bottomFlag}
   static constexpr double kBrkPAp = 1.0, kBrkRz = 2.0;  // the stop codes (slot kStop)
@@ -2669,6 +2671,7 @@ class CutcellMG {
   Kokkos::View<double*, PinnedHost> kpk_;  // the host packet {pAp, rn, stop, bottomFlag}
   Kokkos::View<double*, PinnedHost> kgp_;  // E's host packet {rref, G11, G12, G22, g1, g2}
   Kokkos::View<double, PinnedHost> krd_;   // readSlot's buffer
+  Kokkos::View<double, PinnedHost> kcz_;   // solveChebyshev's lagged r^T z (growth guard)
   void ensureScalars() {
     if (ks_.extent(0) == (std::size_t)kNSlots)
       return;
@@ -2677,6 +2680,7 @@ class CutcellMG {
     kpk_ = Kokkos::View<double*, PinnedHost>("peclet::flow::mg_krylov_packet", kPacket);
     kgp_ = Kokkos::View<double*, PinnedHost>("peclet::flow::mg_guess_packet", kGuessPacket);
     krd_ = Kokkos::View<double, PinnedHost>("peclet::flow::mg_slot_read");
+    kcz_ = Kokkos::View<double, PinnedHost>("peclet::flow::mg_cheb_rz");
   }
   Kokkos::View<double, CCMem> slot(int k) const {
     return Kokkos::View<double, CCMem>(ks_.data() + k);
@@ -6576,11 +6580,17 @@ class CutcellMG {
   // is not <= r0 the solve stops there and chebyshevGuardTripped() reports it, so the caller can
   // re-estimate cold and redo the solve. Off, the loop is the pre-D3 loop.
   // `guardGrowth` (for a solve on cold-estimated bounds, doc/mg_depth_policy_log.md 2026-10-30):
-  // if the residual is not <= r0 at ANY iteration the solve stops there and
-  // chebyshevGuardTripped() reports it -- Chebyshev converges for every eigenvalue in (0, a + b),
-  // so a growing residual means the top of the spectrum lies above it -- and the caller
-  // re-estimates with the bracketing margin kChebBracket and redoes the solve. A comparison
-  // only: a solve that does not trip is unchanged bit for bit.
+  // if the preconditioned residual norm rho_k = r_k . z_k (z_k = M^{-1} r_k) of an iteration is
+  // not <= rho_0 the solve stops and chebyshevGuardTripped() reports it, and the caller
+  // re-estimates with the bracketing margin kChebBracket and redoes the solve. The norm is the
+  // M^{-1} one: T = M^{-1} A is A-self-adjoint and the Chebyshev residual polynomial p_k(T)
+  // satisfies |p_k| <= 1 on (0, a + b], so with bounds that bracket the spectrum rho_k <= rho_0
+  // at every k and only a top above a + b can make it grow. The max norm has no such bound (it
+  // rose x5.7 at iteration 1 on valid bounds, doc/mg_depth_policy_log.md 2026-10-30). rho_k is
+  // reduced into a device slot right after the V-cycle that forms z_k and read back, one
+  // iteration later, with the stop test's max|r| (one fence, one Allreduce of the pair), so the
+  // guard adds no synchronisation. A comparison only: a solve that does not trip is unchanged
+  // bit for bit.
   int solveChebyshev(CCField b, CCField x, int maxit, double rtol, int pre, int post, int bottom,
                      double a, double bnd, bool guard3 = false, bool guardGrowth = false) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
@@ -6614,22 +6624,37 @@ class CutcellMG {
     const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
     int nvc = 0;
     double rnLast = r0;  // final |r|inf, for the trace below only
+    // Growth guard: launch rho = r . z of the iteration just preconditioned (local partial into a
+    // device slot, copied to pinned host memory, both asynchronous on the solve's instance).
+    double rho0 = 0.0;
+    auto launchRz = [&]() {
+      ensureScalars();
+      dotTo(l0, r, z, kChebRz);
+      Kokkos::deep_copy(CCExec(), kcz_, slot(kChebRz));
+    };
     if (r0 > 0.0) {
       precond(z, r);
       ++nvc;  // z = M^{-1} r
+      if (guardGrowth)
+        launchRz();
       lin(d, 1.0 / theta, z, 0.0, z);
       axpy(x, 1.0, d);  // d = z/theta; x += d
       for (int i = 1; i < maxit; ++i) {
         matvec(w, d);
         axpy(r, -1.0, w);
-        removeMean(l0, r);  // r -= A d
-        const double rn = maxabs(l0, r);
+        removeMean(l0, r);     // r -= A d
+        double rhoPrev = 0.0;  // guardGrowth: rho of iteration i - 1, read with max|r|
+        const double rn = guardGrowth ? maxabsWithLocalSum(l0, r, kcz_, rhoPrev) : maxabs(l0, r);
         rnLast = rn;
         if (rn < rtol * rref)
           break;
-        if (guardGrowth && !(rn <= r0)) {  // growing: lambda_max underestimated
-          chebGuardTripped_ = true;
-          break;
+        if (guardGrowth) {
+          if (i == 1)
+            rho0 = rhoPrev;
+          else if (!(rhoPrev <= rho0)) {  // the M^{-1}-norm grew: lambda_max underestimated
+            chebGuardTripped_ = true;
+            break;
+          }
         }
         if (guard3 && i == 3 && !(rn <= r0)) {  // growing after 3 iterations: bounds gone stale
           chebGuardTripped_ = true;
@@ -6637,6 +6662,8 @@ class CutcellMG {
         }
         precond(z, r);
         ++nvc;
+        if (guardGrowth)
+          launchRz();
         const double rho_new = 1.0 / (2.0 * sigma1 - rho);
         lin(d, rho_new * rho, d, 2.0 * rho_new / delta, z);
         axpy(x, 1.0, d);  // d update; x += d
@@ -6766,6 +6793,56 @@ class CutcellMG {
     );
   }
   double maxabs(Level& lv, CCField a) {
+#ifdef PECLET_FLOW_MPI
+    return allreduce(maxabsLocal(lv, a), MPI_MAX_, lv.comm);
+#else
+    return allreduce(maxabsLocal(lv, a), MPI_MAX_);
+#endif
+  }
+  // maxabs, plus the global sum of a local partial `part` that an earlier kernel on the same
+  // instance left in pinned host memory: the max's reduction fences the instance (so `part` is
+  // complete), and ONE Allreduce carries {max, sum} (maxabs' MAX on the first, a SUM on the
+  // second). The returned max is bitwise maxabs'.
+  double maxabsWithLocalSum(Level& lv, CCField a, Kokkos::View<double, PinnedHost> part,
+                            double& sum) {
+    const double m = maxabsLocal(lv, a);
+    sum = part();
+#ifdef PECLET_FLOW_MPI
+    if (distributed_) {
+      const auto t0 = std::chrono::steady_clock::now();
+      double v[2] = {m, sum}, g[2] = {0.0, 0.0};
+      MPI_Allreduce(v, g, 2, MPI_DOUBLE, maxSumOp(), lv.comm);
+      allreduceTime_ +=
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      ++allreduceCount_;
+      sum = g[1];
+      return g[0];
+    }
+#endif
+    return m;
+  }
+#ifdef PECLET_FLOW_MPI
+  // The {max, sum} pair operator of maxabsWithLocalSum (elementwise on pairs; commutative).
+  static MPI_Op maxSumOp() {
+    static MPI_Op op = [] {
+      MPI_Op o;
+      MPI_Op_create(
+          [](void* in, void* inout, int* len, MPI_Datatype*) {
+            const double* a = static_cast<const double*>(in);
+            double* b = static_cast<double*>(inout);
+            for (int k = 0; k + 1 < *len; k += 2) {
+              b[k] = a[k] > b[k] ? a[k] : b[k];
+              b[k + 1] += a[k + 1];
+            }
+          },
+          1, &o);
+      return o;
+    }();
+    return op;
+  }
+#endif
+  // The rank-local max|a| over the inner FLUID cells (maxabs before its Allreduce).
+  double maxabsLocal(Level& lv, CCField a) {
     CCExec space;
     C3 e = lv.ext;
     const int g = lv.g;
@@ -6794,11 +6871,7 @@ class CutcellMG {
             }
           },
           Kokkos::Max<double>(m));
-#ifdef PECLET_FLOW_MPI
-    return allreduce(m, MPI_MAX_, lv.comm);
-#else
-    return allreduce(m, MPI_MAX_);
-#endif
+    return m;
   }
   // H-1 (§8, host single rank): removeMean with the level's precomputed fluid count -- the sum
   // reduces in the same 4-lane pencil order (C0) as the {sum, count} pair, and an all-fluid level
