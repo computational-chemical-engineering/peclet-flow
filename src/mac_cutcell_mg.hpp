@@ -6453,6 +6453,148 @@ class CutcellMG {
     eigWarm_ = true;
   }
 
+  // The cold lambda_max estimate of the symmetric V-cycle ((c), DECISIONS_GPU.log 2026-10-30 "A3
+  // finish"; PETSc KSPChebyshev's estimate): kLanczosSteps steps of PCG on A x = b from x = 0,
+  // b = `v` (the seed, normalised), preconditioned by the symmetric V-cycle M. PCG is Lanczos on
+  // M^{1/2} A M^{1/2}; its coefficients give the tridiagonal T_m (diagonal 1/alpha_j +
+  // beta_{j-1}/alpha_{j-1}, off-diagonal sqrt(beta_j)/alpha_j), whose eigenvalues are the Ritz
+  // values of M^{-1} A. Returns the top one; it stops early once that changes by less than
+  // kLanczosTol (relative). The Ritz values lie inside the spectrum and the top converges at
+  // the Krylov rate, not the power iteration's geometric one. With `ritz` the same PCG run is
+  // repeated (identical arithmetic) to accumulate the top Ritz vector sum_j y_j (-1)^j
+  // z_j / sqrt(r_j . z_j) into `v` (normalised), the warm estimates' seed; else `v` is left as
+  // given. Work: m V-cycles and m matvecs (twice with `ritz`), two reductions per step.
+  static constexpr int kLanczosSteps = 10;
+  static constexpr double kLanczosTol = 1e-3;
+  double lanczosTop(Level& l0, CCField v, bool ritz) {
+    const std::size_t n = l0.n;
+    CCField w = workVector(1, n, "ev_w"), z = workVector(2, n, "ev_z"),
+            r = workVector(4, n, "lz_r"), p = workVector(5, n, "lz_p");
+    auto precondP = [&](CCField zz, CCField rr) {  // z = M r on the fluid range (applyT's)
+      precondVcycle(zz, rr);
+      removeMean(l0, zz);
+      maskSolid(l0, zz);
+    };
+    double alpha[kLanczosSteps], beta[kLanczosSteps], rhoj[kLanczosSteps];
+    auto tridiag = [&](int m, double* d, double* e) {
+      for (int j = 0; j < m; ++j) {
+        d[j] = 1.0 / alpha[j] + (j > 0 ? beta[j - 1] / alpha[j - 1] : 0.0);
+        e[j] = j + 1 < m ? std::sqrt(beta[j]) / alpha[j] : 0.0;
+      }
+    };
+    // One PCG pass. mFixed = 0: adaptive (stop on the top Ritz value), returns m and the top.
+    // mFixed > 0: the repeat -- accumulate acc += c[j] z_j for j < mFixed and stop.
+    auto pass = [&](int mFixed, const double* c, CCField acc, double& top) {
+      Kokkos::deep_copy(CCExec(), r, v);
+      precondP(z, r);
+      double rho = dot(l0, r, z);
+      Kokkos::deep_copy(CCExec(), p, z);
+      double prev = 0.0;
+      int m = 0;
+      top = 0.0;
+      for (int k = 0; k < kLanczosSteps; ++k) {
+        if (!(rho > 0.0))
+          break;
+        if (mFixed > 0) {
+          axpy(acc, c[k], z);
+          if (k + 1 == mFixed)
+            break;
+        } else
+          rhoj[k] = rho;
+        matvecOverlap(l0, w, p);
+        const double pAp = dot(l0, p, w);
+        if (!(pAp > 0.0))
+          break;
+        alpha[k] = rho / pAp;
+        if (mFixed == 0) {
+          m = k + 1;
+          double d[kLanczosSteps], e[kLanczosSteps];
+          tridiag(m, d, e);
+          top = symTridiagTop(m, d, e, nullptr);
+          if ((k > 0 && std::fabs(top - prev) < kLanczosTol * top) || m == kLanczosSteps)
+            break;
+          prev = top;
+        }
+        axpy(r, -alpha[k], w);
+        removeMean(l0, r);
+        precondP(z, r);
+        const double rhoNew = dot(l0, r, z);
+        beta[k] = rhoNew / rho;
+        rho = rhoNew;
+        lin(p, 1.0, z, beta[k], p);  // p = z + beta p
+      }
+      return m;
+    };
+    double top = 0.0;
+    const int m = pass(0, nullptr, CCField(), top);
+    if (ritz && m > 0) {
+      double d[kLanczosSteps], e[kLanczosSteps], y[kLanczosSteps], c[kLanczosSteps];
+      tridiag(m, d, e);
+      symTridiagTop(m, d, e, y);
+      for (int j = 0; j < m; ++j)
+        c[j] = ((j & 1) ? -y[j] : y[j]) / std::sqrt(rhoj[j]);
+      CCField u = workVector(6, n, "lz_u");
+      double unused = 0.0;
+      pass(m, c, u, unused);
+      Kokkos::deep_copy(CCExec(), v, u);
+      const double nr = std::sqrt(dot(l0, v, v));
+      if (nr > 0)
+        scale(v, 1.0 / nr);
+    }
+    return top;
+  }
+  // The largest eigenvalue of the symmetric tridiagonal (d[0..m-1], off-diagonal e[0..m-2]),
+  // m <= kLanczosSteps, by cyclic Jacobi on the dense matrix (host, deterministic); with `y`
+  // its unit eigenvector.
+  static double symTridiagTop(int m, const double* d, const double* e, double* y) {
+    double A[kLanczosSteps][kLanczosSteps] = {}, V[kLanczosSteps][kLanczosSteps] = {};
+    for (int i = 0; i < m; ++i) {
+      A[i][i] = d[i];
+      V[i][i] = 1.0;
+      if (i + 1 < m)
+        A[i][i + 1] = A[i + 1][i] = e[i];
+    }
+    for (int sweep = 0; sweep < 60; ++sweep) {
+      double off = 0.0, nrm = 0.0;
+      for (int i = 0; i < m; ++i)
+        for (int j = 0; j < m; ++j)
+          (i == j ? nrm : off) += A[i][j] * A[i][j];
+      if (!(off > 1e-30 * nrm))
+        break;
+      for (int pq = 0; pq < m; ++pq)
+        for (int q = pq + 1; q < m; ++q) {
+          if (A[pq][q] == 0.0)
+            continue;
+          const double th = 0.5 * (A[q][q] - A[pq][pq]) / A[pq][q];
+          const double t = (th >= 0 ? 1.0 : -1.0) / (std::fabs(th) + std::sqrt(th * th + 1.0));
+          const double c = 1.0 / std::sqrt(t * t + 1.0), sn = t * c;
+          for (int k = 0; k < m; ++k) {  // A = J^T A J, columns then rows
+            const double akp = A[k][pq], akq = A[k][q];
+            A[k][pq] = c * akp - sn * akq;
+            A[k][q] = sn * akp + c * akq;
+          }
+          for (int k = 0; k < m; ++k) {
+            const double apk = A[pq][k], aqk = A[q][k];
+            A[pq][k] = c * apk - sn * aqk;
+            A[q][k] = sn * apk + c * aqk;
+          }
+          for (int k = 0; k < m; ++k) {
+            const double vkp = V[k][pq], vkq = V[k][q];
+            V[k][pq] = c * vkp - sn * vkq;
+            V[k][q] = sn * vkp + c * vkq;
+          }
+        }
+    }
+    int top = 0;
+    for (int i = 1; i < m; ++i)
+      if (A[i][i] > A[top][top])
+        top = i;
+    if (y)
+      for (int i = 0; i < m; ++i)
+        y[i] = V[i][top];
+    return m > 0 ? A[top][top] : 0.0;
+  }
+
   // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power
   // iteration (direct for the max + a shifted iteration for the min), seeded by `seed` (or, with
   // EigenStart::Warm, by the iterates a previous estimate kept). Communication-heavy, so the CUDA
@@ -6509,23 +6651,30 @@ class CutcellMG {
     };
     const double nrMax = seedf(v, warm ? eigVmax_ : srhs);
     lmax = 1.0;
-    for (int k = 0; k < iters; ++k) {
-      applyT(z, v);
-      if (symVcycle_) {
-        // T = M^{-1} A is self-adjoint in the A inner product when M is symmetric, so the
-        // Rayleigh quotient is taken there: (Av . Tv) / (Av . v), w = A v as applyT left it, both
-        // sums in ONE reduction. It never exceeds lambda_max and its error is quadratic in the
-        // iterate's; the Euclidean v . Tv is not a Rayleigh quotient of this T (with it the true
-        // top reached 1.129 x the estimate, doc/mg_depth_policy_log.md 2026-10-29/30).
-        double wz = 0.0, wv = 0.0;
-        dotPair(l0, w, z, v, wz, wv);
-        lmax = wv > 0.0 ? wz / wv : 0.0;
-      } else {  // the trilinear V-cycle (M not symmetric): the pre-A3 estimate bit for bit
-        lmax = dot(l0, v, z);
+    if (symVcycle_ && !warm) {
+      // A cold estimate on the symmetric V-cycle ((c), DECISIONS_GPU.log 2026-10-30 "A3
+      // finish"): lambda_max is the top Ritz value of a short PCG run from the seed, v leaves as
+      // the top Ritz vector (the warm estimates' seed). The power iteration's 15 steps left the
+      // top 9 % under (collocated_stability_guard: 0.995 of 1.088).
+      lmax = lanczosTop(l0, v, keep);
+    } else
+      for (int k = 0; k < iters; ++k) {
+        applyT(z, v);
+        if (symVcycle_) {
+          // T = M^{-1} A is self-adjoint in the A inner product when M is symmetric, so the
+          // Rayleigh quotient is taken there: (Av . Tv) / (Av . v), w = A v as applyT left it, both
+          // sums in ONE reduction. It never exceeds lambda_max and its error is quadratic in the
+          // iterate's; the Euclidean v . Tv is not a Rayleigh quotient of this T (with it the true
+          // top reached 1.129 x the estimate, doc/mg_depth_policy_log.md 2026-10-29/30).
+          double wz = 0.0, wv = 0.0;
+          dotPair(l0, w, z, v, wz, wv);
+          lmax = wv > 0.0 ? wz / wv : 0.0;
+        } else {  // the trilinear V-cycle (M not symmetric): the pre-A3 estimate bit for bit
+          lmax = dot(l0, v, z);
+        }
+        Kokkos::deep_copy(CCExec(), v, z);
+        normalize(v);
       }
-      Kokkos::deep_copy(CCExec(), v, z);
-      normalize(v);
-    }
     if (keep)
       keepf(eigVmax_, v, "ev_vmax");
     // The min iteration runs on shift*I - T. A shift below the true lambda_max makes it converge
