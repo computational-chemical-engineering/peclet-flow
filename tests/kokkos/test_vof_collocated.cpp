@@ -51,6 +51,7 @@
 //   T5 SCOPE. Variable density / VoF on the collocated grid with an immersed solid, with
 //      `enable_vof_momentum`, with `set_rho_face_harmonic` or with the non-incremental pressure,
 //      must throw.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
@@ -517,7 +518,10 @@ void gateBalancedOn() {
         "cell %.4e\n",
         mu, st.faceU, co.faceU, co.cellU);
     CHECK(!co.threw && co.faceU < 1e-13);
-    CHECK(co.faceU < st.faceU);
+    // No worse than staggered. At mu = 0 both faces are round-off (staggered 7e-18 / 1e-17,
+    // collocated 5e-18 / 5e-17 across V-cycle builds, doc/mg_depth_policy_log.md 2026-10-30
+    // "A3 finish"), and the order of two round-off values is a draw: floored at 1e-16.
+    CHECK(co.faceU < std::max(st.faceU, 1e-16));
   }
 }
 
