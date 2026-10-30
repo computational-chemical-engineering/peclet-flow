@@ -1024,6 +1024,17 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "cap, or whose residual after 3 iterations exceeds the initial one, is redone "
           "on a cold estimate and counted here; the abandoned attempt's V-cycles count in "
           "last_pressure_iterations().")
+      .def_prop_ro(
+          "num_pressure_chebyshev_growth_trips",
+          [](D& diag) { return diag.s->numPressureChebyshevGrowthTrips(); },
+          "How many Chebyshev pressure solves on cold spectral bounds (the main projection's "
+          "and the balanced-force pre-projection's) saw their residual rise above the initial "
+          "one, since construction. Chebyshev converges for every eigenvalue below the sum of "
+          "its two bounds, so a growing residual means lambda_max was underestimated: the bounds "
+          "are re-estimated with a bracketing margin (1.15 on lambda_max) and the solve is "
+          "redone once from its starting iterate; the first such case prints a stderr notice. "
+          "Expected 0; a solve that does not trip is unchanged bit for bit. "
+          "doc/mg_depth_policy_log.md 2026-10-30.")
       .def(
           "pressure_solve_failed", [](D& diag) { return diag.s->pressureSolveFailed(); },
           "Did the last pressure solve break down on a non-finite recurrence scalar (a "

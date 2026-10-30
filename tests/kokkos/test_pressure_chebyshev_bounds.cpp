@@ -9,6 +9,11 @@
 //      set_pressure_line_relaxation) invalidates the kept bounds: the next step re-estimates them
 //      (one more estimate), and still converges. Setting the value already in force is inert (no
 //      estimate). Before the fix the kept bounds of the old V-cycle survived the toggle.
+//   2. The cold-bounds growth guard, symmetric and trilinear V-cycle: the test hook scales the
+//      first estimate's bounds by 0.4 (lambda_max far below the top, so the solve diverges); the
+//      guard trips once, the bounds are re-estimated with the bracketing margin, the step
+//      converges, and later steps keep the new bounds without tripping. Without the hook the
+//      guard never trips (case 1 also checks 0 trips).
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
@@ -89,6 +94,25 @@ void toggleCase() {
     stepChecked(s, t.what);
     CHECK(s.numPressureEigenEstimates() - n0 == t.expect);
   }
+  CHECK(s.numPressureChebyshevGrowthTrips() == 0);
+}
+
+// 2. The growth guard on deliberately too-small bounds.
+void guardCase(bool symmetric) {
+  std::printf("  2. growth guard, %s V-cycle, first estimate x 0.4\n",
+              symmetric ? "symmetric" : "trilinear");
+  peclet::flow::IbmSolver s(NX, NY, NZ);
+  setUp(s);
+  s.setPressureVcycleSymmetric(symmetric);
+  s.debugSetPressureEigenScale(0.4);
+  stepChecked(s, "step 1 (scaled bounds)");
+  CHECK(s.numPressureChebyshevGrowthTrips() == 1);
+  CHECK(s.numPressureEigenEstimates() == 2);  // the scaled one + the bracketed re-estimate
+  stepChecked(s, "step 2");
+  stepChecked(s, "step 3");
+  std::printf("    growth trips %ld\n", s.numPressureChebyshevGrowthTrips());
+  CHECK(s.numPressureChebyshevGrowthTrips() == 1);
+  CHECK(s.numPressureEigenEstimates() == 2);
 }
 }  // namespace
 
@@ -98,6 +122,8 @@ int main(int argc, char** argv) {
     std::printf("Chebyshev pressure bounds: %dx%dx%d, %d levels, cap %d, rtol %.0e\n", NX, NY, NZ,
                 LEVELS, MAXIT, RTOL);
     toggleCase();
+    guardCase(true);
+    guardCase(false);
     if (failures == 0)
       std::printf("PASS: pressure_chebyshev_bounds\n");
     else

@@ -1369,6 +1369,13 @@ class Solver {
   // C++ test hook, no Python binding: how many Chebyshev spectral-bound estimates (main and
   // balanced-force) the pressure multigrid has run since construction.
   long numPressureEigenEstimates() const { return mg_.numEigenEstimates(); }
+  // How many Chebyshev pressure solves on COLD-estimated bounds (main and balanced-force) saw
+  // their residual rise above r0 and were redone on bounds re-estimated with the bracketing
+  // margin (CutcellMG::kChebBracket), since construction (doc/mg_depth_policy_log.md 2026-10-30).
+  long numPressureChebyshevGrowthTrips() const { return chebGrowthTrips_; }
+  // C++ test hook, no Python binding: the NEXT spectral-bound estimate returns both bounds x s
+  // (CutcellMG::debugSetEigenScale; s < 1 forces the growth guard).
+  void debugSetPressureEigenScale(double s) { mg_.debugSetEigenScale(s); }
 
 
   // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
@@ -2662,6 +2669,8 @@ class Solver {
   // the iteration count; `mg_.lastSolveFailed()` reports a non-finite recurrence. Shared by the
   // main projection and the balanced-force projection (doc/collocated_varrho_forces.md §4.6.2 B4).
   long solvePressureSystem(CCField rhs1, CCField x1);
+  // Count a cold-bounds Chebyshev growth-guard firing; the first one prints a stderr notice.
+  void noteChebyshevGrowthTrip(long iters);
 
 
   // The projection's constraint divergence of a face field (`out` on the g=2 block, inner cells):
@@ -4982,6 +4991,8 @@ class Solver {
   // drops VALID bounds, cleared by every structural invalidation (driver, density, porous setters).
   bool chebWarmOk_ = false;
   long chebColdRestarts_ = 0;  // guard firings (numPressureChebyshevRestarts)
+  long chebGrowthTrips_ = 0;   // cold-bounds growth-guard firings (numPressureChebyshevGrowthTrips)
+  bool chebGrowthWarned_ = false;  // the first growth-guard firing prints one stderr notice
   CCField chebX0_;             // the solve's starting iterate under the pressure warm start
   int nLevels_ = 0;             // pressure-MG depth, 0 = AUTO (doc/mg_depth_policy.md §3.1)
   bool pressGraphAmg_ = false;

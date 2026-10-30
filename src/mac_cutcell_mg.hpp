@@ -6429,6 +6429,11 @@ class CutcellMG {
   // Symmetric V-cycle only: the factor on the lambda_max estimate that SHIFTS the min power
   // iteration (see estimateEigenvalues). The returned lambda_max stays the raw estimate.
   static constexpr double kChebSymShift = 1.15;
+  // The bracketing upper margin of the re-estimate after a cold-bounds Chebyshev solve tripped
+  // its growth guard (estimateEigenvalues' `bracket`): lambda_max is returned as 1.15 x the
+  // estimate, which brackets every top measured over the ctest battery (worst 1.129 x the
+  // Euclidean estimate, doc/mg_depth_policy_log.md 2026-10-29).
+  static constexpr double kChebBracket = 1.15;
   // True when a ColdKeep or Warm estimate has run on the current hierarchy (init/initMpi drop it).
   bool eigenWarmReady() const {
     return eigWarm_ && !lv_.empty() && eigVmax_.extent(0) == lv_[0].n &&
@@ -6448,8 +6453,10 @@ class CutcellMG {
   // iteration (direct for the max + a shifted iteration for the min), seeded by `seed` (or, with
   // EigenStart::Warm, by the iterates a previous estimate kept). Communication-heavy, so the CUDA
   // driver runs it once on step 1 and reuses the bounds. Port of estimate_eigenvalues.
+  // `bracket` > 1 (the growth guard's re-estimate, kChebBracket): lambda_max is returned as
+  // bracket x the estimate, and the min iteration is shifted at least that far. 1 = unchanged.
   void estimateEigenvalues(CCConst seed, double& lmin, double& lmax, int iters, int pre, int post,
-                           int bottom, EigenStart start = EigenStart::Cold) {
+                           int bottom, EigenStart start = EigenStart::Cold, double bracket = 1.0) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     ++eigenEstimates_;
     pre_ = pre;
@@ -6523,7 +6530,12 @@ class CutcellMG {
     // top from below and the symmetric V-cycle's top lies above 1, so in symmetric mode the shift
     // is raised by kChebSymShift; lambda_max itself is returned raw (Chebyshev converges for every
     // eigenvalue in (0, lmin + lmax), an unbracketed top costs little).
-    const double shift = symVcycle_ ? kChebSymShift * lmax : lmax;
+    double shift = symVcycle_ ? kChebSymShift * lmax : lmax;
+    if (bracket > 1.0) {
+      lmax *= bracket;
+      if (shift < lmax)
+        shift = lmax;
+    }
     const double nrMin = seedf(v, warm ? eigVmin_ : srhs);
     double mu = 0.0;
     for (int k = 0; k < iters; ++k) {
@@ -6546,7 +6558,15 @@ class CutcellMG {
     lmax = e_lo < e_hi ? e_hi : e_lo;  // robust min/max bracket
     if (lmin < 0.02 * lmax)
       lmin = 0.02 * lmax;
+    if (dbgEigScale_ != 1.0) {  // test hook (debugSetEigenScale): one estimate only
+      lmin *= dbgEigScale_;
+      lmax *= dbgEigScale_;
+      dbgEigScale_ = 1.0;
+    }
   }
+  // Test hook: the NEXT estimateEigenvalues returns both bounds multiplied by `s` (s < 1 forces a
+  // lambda_max below the spectrum's top, the growth guard's trigger). One-shot.
+  void debugSetEigenScale(double s) { dbgEigScale_ = s; }
 
   // Chebyshev semi-iteration preconditioned by ONE symmetric V-cycle -- same goal as solvePCG but
   // the step coefficients come from the spectral bounds [a,b], so NO per-iteration global
@@ -6555,8 +6575,14 @@ class CutcellMG {
   // `guard3` (D3, §5.13, for a solve on warm-started bounds): if the residual after 3 iterations
   // is not <= r0 the solve stops there and chebyshevGuardTripped() reports it, so the caller can
   // re-estimate cold and redo the solve. Off, the loop is the pre-D3 loop.
+  // `guardGrowth` (for a solve on cold-estimated bounds, doc/mg_depth_policy_log.md 2026-10-30):
+  // if the residual is not <= r0 at ANY iteration the solve stops there and
+  // chebyshevGuardTripped() reports it -- Chebyshev converges for every eigenvalue in (0, a + b),
+  // so a growing residual means the top of the spectrum lies above it -- and the caller
+  // re-estimates with the bracketing margin kChebBracket and redoes the solve. A comparison
+  // only: a solve that does not trip is unchanged bit for bit.
   int solveChebyshev(CCField b, CCField x, int maxit, double rtol, int pre, int post, int bottom,
-                     double a, double bnd, bool guard3 = false) {
+                     double a, double bnd, bool guard3 = false, bool guardGrowth = false) {
     solveFailed_ = false;  // ISSUES sweep item 6: per-solve breakdown flag
     chebGuardTripped_ = false;
     pre_ = pre;
@@ -6601,6 +6627,10 @@ class CutcellMG {
         rnLast = rn;
         if (rn < rtol * rref)
           break;
+        if (guardGrowth && !(rn <= r0)) {  // growing: lambda_max underestimated
+          chebGuardTripped_ = true;
+          break;
+        }
         if (guard3 && i == 3 && !(rn <= r0)) {  // growing after 3 iterations: bounds gone stale
           chebGuardTripped_ = true;
           break;
@@ -6659,7 +6689,7 @@ class CutcellMG {
   // How many spectral-bound estimates (estimateEigenvalues) have run since construction: test
   // hook, it tells a re-estimate from kept bounds.
   long numEigenEstimates() const { return eigenEstimates_; }
-  // Did the last solveChebyshev(..., guard3 = true) stop on its 3-iteration growth guard?
+  // Did the last solveChebyshev stop on a guard (guard3's 3-iteration test, or guardGrowth)?
   bool chebyshevGuardTripped() const { return chebGuardTripped_; }
   // max|b| over the fluid cells after the null-space (mean) projection -- the drivers' norm.
   double rhsNorm(CCField b, CCField scratch) {
@@ -7176,6 +7206,7 @@ class CutcellMG {
   int dbgBrkWhich_ = 0, dbgBrkIter_ = -1;  // setDebugBreakdown (test hook)
   int dbgSolve_ = 0;  // solve counter for the env-gated convergence trace (mgDebugLevel() >= 2)
   long eigenEstimates_ = 0;     // estimateEigenvalues calls since construction (numEigenEstimates)
+  double dbgEigScale_ = 1.0;    // debugSetEigenScale (test hook)
   int dbgBicgBreakdowns_ = 0;   // solveBiCGStab breakdown exits (1-5), for its debug trace only
   int dbgBicgStagnations_ = 0;  // solveBiCGStab compatibility-floor exits, for its debug trace only
   // ISSUES sweep item 6: did the LAST Krylov solve give up on a non-finite recurrence

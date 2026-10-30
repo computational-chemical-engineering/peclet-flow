@@ -775,9 +775,16 @@ long Solver<Grid>::solveBalancedForceSystem(double bref, double r0) {
       mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12);
       bfpChebSet_ = true;
     }
-    long it =
-        mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_);
-    if (it >= chebMaxit_) {  // never met the stop: slow, or diverging on bounds gone stale?
+    // The bounds are always a cold estimate: the growth guard (as solvePressureSystem's) runs.
+    long it = mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_,
+                                 false, true);
+    if (mg_.chebyshevGuardTripped()) {  // the residual grew: lambda_max underestimated
+      noteChebyshevGrowthTrip(it);
+      mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12,
+                              CutcellMG::EigenStart::Cold, CutcellMG::kChebBracket);
+      copyInner(pb1_, e1_, 1, CCConst(Pb_), e_, G);
+      it += mg_.solveChebyshev(rhs1_, pb1_, chebMaxit_, chebRtol_, 2, 2, 12, bfpChebA_, bfpChebB_);
+    } else if (it >= chebMaxit_) {  // never met the stop: slow, or diverging on bounds gone stale?
       const double rfin = mg_.residualNorm(rhs1_, pb1_, r_, Ap_);
       if (!(rfin <= r0)) {  // residual growth (or non-finite): re-estimate and restart once
         mg_.estimateEigenvalues(CCConst(rhs1_), bfpChebA_, bfpChebB_, 15, 2, 2, 12);
@@ -1498,6 +1505,26 @@ void Solver<Grid>::projectSolve() {
 }
 
 template <class Grid>
+void Solver<Grid>::noteChebyshevGrowthTrip(long iters) {
+  ++chebGrowthTrips_;
+  if (chebGrowthWarned_)
+    return;
+  chebGrowthWarned_ = true;
+  int r = 0;
+#ifdef PECLET_FLOW_MPI
+  if (distributed_)
+    MPI_Comm_rank(comm_, &r);
+#endif
+  if (r == 0)
+    std::fprintf(stderr,
+                 "peclet::flow notice: a Chebyshev pressure solve on cold spectral bounds saw its "
+                 "residual grow (iteration %ld): lambda_max was underestimated; the bounds were "
+                 "re-estimated with a bracketing margin and the solve redone. Further cases are "
+                 "counted silently in diagnostics.num_pressure_chebyshev_growth_trips.\n",
+                 iters);
+}
+
+template <class Grid>
 long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
   long iters = 0;
   if (useChebyshev_) {
@@ -1520,23 +1547,49 @@ long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
       }
       chebBoundsSet_ = true;
     }
-    if (!warm) {
-      iters = mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
-    } else {
-      if (pwarm_) {  // the starting iterate is the previous phi: keep it for a redo
+    // Under the pressure warm start the starting iterate is the previous phi: kept for a redo
+    // (otherwise it is zero).
+    auto keepStart = [&]() {
+      if (pwarm_) {
         if (chebX0_.extent(0) != x1.extent(0))
           chebX0_ = CCField("chebX0", x1.extent(0));
-        Kokkos::deep_copy(chebX0_, x1);
+        Kokkos::deep_copy(CCExec(), chebX0_, x1);
       }
+    };
+    auto restoreStart = [&]() {
+      if (pwarm_)
+        Kokkos::deep_copy(CCExec(), x1, chebX0_);
+      else
+        Kokkos::deep_copy(CCExec(), x1, 0.0);
+    };
+    // A solve on COLD-estimated bounds runs the growth guard (doc/mg_depth_policy_log.md
+    // 2026-10-30): a residual above r0 at any iteration means lambda_max was underestimated
+    // (the top lies above 0.95 lmin + 1.05 lmax); the bounds are re-estimated cold with the
+    // bracketing margin and the solve is redone once from its starting iterate. Inert unless
+    // it trips.
+    auto coldSolve = [&]() {
+      keepStart();
+      long it = mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_, false,
+                                   true);
+      if (mg_.chebyshevGuardTripped()) {
+        noteChebyshevGrowthTrip(it);
+        mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12, ES::ColdKeep,
+                                CutcellMG::kChebBracket);
+        restoreStart();
+        it += mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
+      }
+      return it;
+    };
+    if (!warm) {
+      iters = coldSolve();
+    } else {
+      keepStart();
       iters = mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_, true);
       if (iters >= chebMaxit_ || mg_.chebyshevGuardTripped()) {
         ++chebColdRestarts_;
         mg_.estimateEigenvalues(CCConst(rhs1), chebA_, chebB_, 15, 2, 2, 12, ES::ColdKeep);
-        if (pwarm_)
-          Kokkos::deep_copy(x1, chebX0_);
-        else
-          Kokkos::deep_copy(x1, 0.0);
-        iters += mg_.solveChebyshev(rhs1, x1, chebMaxit_, chebRtol_, 2, 2, 12, chebA_, chebB_);
+        restoreStart();
+        iters += coldSolve();
       }
     }
   } else if (ghostProjection_) {
