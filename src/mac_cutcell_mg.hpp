@@ -6500,7 +6500,18 @@ class CutcellMG {
     lmax = 1.0;
     for (int k = 0; k < iters; ++k) {
       applyT(z, v);
-      lmax = dot(l0, v, z);
+      if (symVcycle_) {
+        // T = M^{-1} A is self-adjoint in the A inner product when M is symmetric, so the
+        // Rayleigh quotient is taken there: (Av . Tv) / (Av . v), w = A v as applyT left it, both
+        // sums in ONE reduction. It never exceeds lambda_max and its error is quadratic in the
+        // iterate's; the Euclidean v . Tv is not a Rayleigh quotient of this T (with it the true
+        // top reached 1.129 x the estimate, doc/mg_depth_policy_log.md 2026-10-29/30).
+        double wz = 0.0, wv = 0.0;
+        dotPair(l0, w, z, v, wz, wv);
+        lmax = wv > 0.0 ? wz / wv : 0.0;
+      } else {  // the trilinear V-cycle (M not symmetric): the pre-A3 estimate bit for bit
+        lmax = dot(l0, v, z);
+      }
       Kokkos::deep_copy(CCExec(), v, z);
       normalize(v);
     }
@@ -6696,6 +6707,33 @@ class CutcellMG {
 #else
     return allreduce(s, MPI_SUM_);
 #endif
+  }
+  // a . b -> ab and a . c -> ac over the inner FLUID cells in ONE lane pass and ONE allreduce of
+  // the pair (the sum order of each is dot's).
+  void dotPair(Level& lv, CCField a, CCField b, CCField c, double& ab, double& ac) {
+    C3 e = lv.ext;
+    const int g = lv.g;
+    CCField aa = a, bb = b, cc = c;
+    FPV fl = lv.AC;
+    const bool all = hostAllFluid(lv);  // H-1: no AC read
+    ab = 0.0;
+    ac = 0.0;
+    ccReduce3Lanes(
+        "mgdot2", C3{g, g, g}, C3{e.x - g, e.y - g, e.z - g},
+        KOKKOS_LAMBDA(int x, int y, int z, double& sb, double& sc) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          if (all || fl(i) > 1e-30f) {
+            sb += aa(i) * bb(i);
+            sc += aa(i) * cc(i);
+          }
+        },
+        ab, ac);
+    allreduceSum2(ab, ac
+#ifdef PECLET_FLOW_MPI
+                  ,
+                  lv.comm
+#endif
+    );
   }
   double maxabs(Level& lv, CCField a) {
     CCExec space;
