@@ -126,7 +126,7 @@ static std::vector<double> evalSharp(IbmSolver& s, const int o[3], const int ln[
     for (auto& x : B)
       x = CCField("sv_mpi_band", n);
     peclet::flow::ibmBuildDiffusionVar(B[0], B[1], B[2], B[3], B[4], B[5], B[6], e[0], e[1], e[2],
-                                       G, s.makeSharpFaceProps(c), 1.0, 1.0, 1.0);
+                                       G, s.makeSharpFaceProps(c, sv::SvRole::kImplicit), 1.0, 1.0, 1.0);
     Kokkos::fence();
     for (auto& x : B)
       pull(x);
@@ -134,7 +134,7 @@ static std::vector<double> evalSharp(IbmSolver& s, const int o[3], const int ln[
   for (int c = 0; c < 3; ++c) {
     CCField bb("sv_mpi_bb", n);
     peclet::flow::addFullStressRhs<sv::SharpFaceProps, false>(
-        c, bb, CCConst(rs), v, s.makeSharpFaceProps(c), C3{e[0], e[1], e[2]}, G, 1.0, false);
+        c, bb, CCConst(rs), v, s.makeSharpFaceProps(c, sv::SvRole::kExplicit), C3{e[0], e[1], e[2]}, G, 1.0, false);
     sv::addSharpViscousRhs(c, bb, CCConst(rs), v, sv2.geo, t, CCConst(sv2.dnn), G, 1.0, false);
     Kokkos::fence();
     pull(bb);

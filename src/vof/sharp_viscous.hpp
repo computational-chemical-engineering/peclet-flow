@@ -403,19 +403,30 @@ struct SharpGeom {
   }
 };
 
-/// The implicit band's face viscosity under the sharp interface (§5.4 a, §6): a band edge across a
-/// (a ≠ c) takes μ̄_c,E = μ(F_c(E)), the u_c row's own PLIC face fraction; every other face, and
-/// the time diagonal, are `VarFaceProps`' (cells keep μ(C)). Symmetric under (i, j) swap: the edge
-/// is resolved from max(i, j). Also the β of the explicit transpose (`addFullStressRhs`).
+/// Which half of the time split a `SharpFaceProps` feeds (§6.1, WO-5b): the implicit band
+/// (`ibmBuildDiffusionVar`) or the explicit transpose (`addFullStressRhs`).
+enum class SvRole : int { kImplicit = 0, kExplicit = 1 };
+
+/// The face viscosity under the sharp interface (§5.4 a, §6): a band edge across a (a ≠ c) takes
+/// μ̄_c,E = μ(F_c(E)), the u_c row's own PLIC face fraction; the time diagonal is `VarFaceProps`'.
+/// The cell link along c (§6.1, WO-5b): on an interfacial cell q (class ≠ kSvNone, virtual planes
+/// included) the whole normal stress 2μ(C_q) is implicit — the implicit role returns 2μ(C_q), the
+/// explicit role 0; on every other cell both roles return μ(C_q), today's split. A is unchanged.
+/// Symmetric under (i, j) swap: the edge is resolved from max(i, j), the cell from min(i, j).
 struct SharpFaceProps {
   VarFaceProps base;
   SharpGeom geo;
   int c = 0;
+  SvRole role = SvRole::kImplicit;
   KOKKOS_INLINE_FUNCTION double idiag(long i) const { return base.idiag(i); }
   KOKKOS_INLINE_FUNCTION double beta(long i, long j) const {
     const long dd = j - i, ad = (dd < 0) ? -dd : dd;
-    if (ad == geo.st[c])
-      return base.beta(i, j);
+    if (ad == geo.st[c]) {
+      const long q = (dd > 0) ? i : j;  // the cell between the two u_c faces (VarFaceProps: mu(q))
+      if (geo.cls(q) == kSvNone)
+        return base.beta(i, j);
+      return (role == SvRole::kImplicit) ? 2.0 * base.beta(i, j) : 0.0;
+    }
     const int a = (ad == 1) ? 0 : ((ad == geo.st[1]) ? 1 : 2);
     const long kk = (dd > 0) ? j : i;
     const long z = kk / geo.st[2], rr = kk - z * geo.st[2], y = rr / geo.st[1];

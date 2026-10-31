@@ -934,7 +934,8 @@ std::vector<std::vector<double>> buildBands(const Blk& b, FP fp, const double w[
   return o;
 }
 
-sv::SharpFaceProps sharpFP(const Geo& o, DV mu, int c, double rhoIdt) {
+sv::SharpFaceProps sharpFP(const Geo& o, DV mu, int c, double rhoIdt,
+                           sv::SvRole role = sv::SvRole::kImplicit) {
   VarFaceProps base;
   base.haveMu = true;
   base.mu = CCConst(mu);
@@ -944,12 +945,16 @@ sv::SharpFaceProps sharpFP(const Geo& o, DV mu, int c, double rhoIdt) {
   sp.base = base;
   sp.geo = o.g;
   sp.c = c;
+  sp.role = role;
   return sp;
 }
 
-// (e) WO-3: the implicit band.
+// (e) WO-3: the implicit band. WO-5b (§6.1): the cell link along c of an interfacial cell carries
+// 2μ(C) in the implicit role and 0 in the explicit one; implicit + explicit = 2 × 'averaged' there
+// and on every other cell link both roles equal 'averaged'.
 void testBand() {
-  long nBand = 0, nNon = 0, badNon = 0, badSym = 0, badM = 0, badCell = 0;
+  long nBand = 0, nNon = 0, badNon = 0, badSym = 0, badM = 0, badCell = 0, nCellIf = 0,
+       badSplit = 0;
   double wOr = 0;
   for (int an = 0; an < 2; ++an)
     for (double ratio : {1e-2, 1e3}) {
@@ -974,11 +979,12 @@ void testBand() {
         sv::SharpFaceProps sp = sharpFP(o, mu, c, 0.7);
         auto Av = buildBands(b, sp.base, w);
         auto As = buildBands(b, sp, w);
+        auto Ae = buildBands(b, sharpFP(o, mu, c, 0.7, sv::SvRole::kExplicit), w);
         for (int z = b.G; z < b.e[2] - b.G; ++z)
           for (int y = b.G; y < b.e[1] - b.G; ++y)
             for (int x = b.G; x < b.e[0] - b.G; ++x) {
               const long i = b.id(x, y, z);
-              bool rowBand = false;
+              bool rowBand = false, rowCell = false;
               double sum = 0;
               for (int f = 0; f < 6; ++f) {
                 const int a = f / 2, sg = f % 2;  // AW(-x) AE(+x) AS AN AB AT
@@ -986,9 +992,18 @@ void testBand() {
                 sum += -sv_;
                 badM += (sv_ > 0.0);
                 if (a == c) {
-                  badCell += (sv_ != av);
+                  int q[3] = {x, y, z};  // the cell between the two u_c faces: the lower one
+                  if (!sg)
+                    q[c] -= 1;
+                  const bool itf = hg.cl(q) != 0;
+                  nCellIf += itf;
+                  rowCell = rowCell || itf;
+                  badCell += (sv_ != (itf ? 2.0 * av : av));
+                  badSplit += (sv_ + Ae[1 + f][i] != 2.0 * av) || (!itf && Ae[1 + f][i] != av) ||
+                              (itf && Ae[1 + f][i] != 0.0);
                   continue;
                 }
+                badSplit += (Ae[1 + f][i] != sv_);
                 int k[3] = {x, y, z};
                 if (sg)
                   k[a] += 1;
@@ -1004,7 +1019,7 @@ void testBand() {
                 const double ex = -hg.mu(hg.rowFace(k, a, c, c, ow, m, al)) * w[a];
                 wOr = std::max(wOr, std::fabs(sv_ - ex) / std::fabs(ex));
               }
-              if (!rowBand)
+              if (!rowBand && !rowCell)
                 badCell += (As[0][i] != Av[0][i]);
               badM += !(std::fabs(As[0][i] - 0.7 - sum) <= 1e-13 * As[0][i]);
               // per-component symmetry with the +a neighbour (inner)
@@ -1020,11 +1035,13 @@ void testBand() {
     }
   std::printf(
       "(e) implicit band: %ld band entries (oracle %.2e), %ld non-band (%ld differ), cells/"
-      "diag %ld differ, symmetry %ld, M-matrix %ld\n",
-      nBand, wOr, nNon, badNon, badCell, badSym, badM);
+      "diag %ld differ, symmetry %ld, M-matrix %ld; split: %ld interfacial cell links, %ld "
+      "wrong\n",
+      nBand, wOr, nNon, badNon, badCell, badSym, badM, nCellIf, badSplit);
   CHECK(nBand > 500 && wOr <= 1e-14, "band entries vs oracle");
   CHECK(badNon == 0 && badCell == 0, "non-band entries bitwise 'averaged'");
   CHECK(badSym == 0 && badM == 0, "symmetric M-matrix");
+  CHECK(nCellIf > 100 && badSplit == 0, "WO-5b split: 2mu(C) implicit, 0 explicit on interfacial cells");
 }
 
 // Host transcription of the explicit band terms of the u_c rows (§5.4): sample arrays, then the
@@ -1185,7 +1202,8 @@ void testPatch() {
                 auto A = buildBands(b, sp, w);
                 DV bb("bb", b.cells);
                 addFullStressRhs<sv::SharpFaceProps, false>(
-                    c, bb, CCConst(ones), vc, sp, C3{b.e[0], b.e[1], b.e[2]}, b.G, w[c], false);
+                    c, bb, CCConst(ones), vc, sharpFP(o, mu, c, 0.0, sv::SvRole::kExplicit),
+                    C3{b.e[0], b.e[1], b.e[2]}, b.G, w[c], false);
                 sv::addSharpViscousRhs(c, bb, CCConst(ones), vc, o.g, tc, CCConst(o.dnn), b.G, w[c],
                                        false);
                 Kokkos::fence();

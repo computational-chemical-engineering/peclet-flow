@@ -1984,7 +1984,8 @@ class Solver {
   // After fullStressPrelude(): the tau_hat / D_nn fit on u^n over the owned cells, then their ghost
   // exchange (§7). Skipped when mu is globally uniform.
   void sharpViscousFit();
-  vof::SharpFaceProps makeSharpFaceProps(int c);
+  // The component-c face props of the sharp interface for one half of the split (§6.1, WO-5b).
+  vof::SharpFaceProps makeSharpFaceProps(int c, vof::SvRole role);
   // The band census of the last step (§9), LOCAL to this rank: interfacial cells, virtual-plane
   // cells, film cells among those, fit fallbacks. Zero while the sharp interface is inactive.
   vof::SharpCensus vofViscousInterfaceCensus() const;

@@ -261,7 +261,8 @@ void Solver<Grid>::addFullStressRhsComp(int c) {
   const CCConst v[3] = {CCConst(old_[0]), CCConst(old_[1]), CCConst(old_[2])};
   if (sharpActive_) {  // the band transpose with the row's own face mu, then the band terms
     addFullStressRhs<vof::SharpFaceProps, false>(c, C[c].b, CCConst(C[c].rscale), v,
-                                                 makeSharpFaceProps(c), e_, G, u_.w[c], skipLo);
+                                                 makeSharpFaceProps(c, vof::SvRole::kExplicit), e_, G,
+                                                 u_.w[c], skipLo);
     const CCConst t[3] = {CCConst(svTau_[0]), CCConst(svTau_[1]), CCConst(svTau_[2])};
     vof::addSharpViscousRhs(c, C[c].b, CCConst(C[c].rscale), v, sharpGeom_, t, CCConst(svDnn_), G,
                             u_.w[c], skipLo);
@@ -763,11 +764,12 @@ void Solver<Grid>::sharpViscousFit() {
 }
 
 template <class Grid>
-vof::SharpFaceProps Solver<Grid>::makeSharpFaceProps(int c) {
+vof::SharpFaceProps Solver<Grid>::makeSharpFaceProps(int c, vof::SvRole role) {
   vof::SharpFaceProps fp;
   fp.base = makeFaceProps(c);
   fp.geo = sharpGeom_;
   fp.c = c;
+  fp.role = role;
   return fp;
 }
 
