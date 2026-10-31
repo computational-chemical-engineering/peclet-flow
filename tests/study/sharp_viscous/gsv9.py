@@ -18,7 +18,7 @@ Kinetic energy: E = 1/2 sum_faces rho_F u^2 h^3, rho_F the solver's face density
 two cells' rho(C), face_props.hpp) -- the M-norm of the §6 analysis.
 PASS (per run): E_n <= E_0 for every n, and E_{n+100}/E_n <= 1 + 1e-10 for every n >= 200.
 
-  nice -n 10 python gsv9.py [--geom plane|film|both] [--procs 6]   (one line per run + a verdict)
+  nice -n 10 python gsv9.py [--geom plane|film|both] [--procs 6] [--mode sharp|averaged]   (one line per run + a verdict)
 """
 import argparse
 import math
@@ -82,7 +82,7 @@ def energy(vel, rho):
 
 
 def run(args):
-    geom, muR, rhoR, Dn = args
+    geom, muR, rhoR, Dn, mode = args
     import peclet.flow as pf
     lowA = muR < 1.0
     muA, muB = (muR, 1.0) if lowA else (1.0, 1.0 / muR)
@@ -103,7 +103,7 @@ def run(args):
     s.set_property_model("rho", "linear", "C", [rB, rA - rB])
     s.set_advection(False)
     s.set_pressure_pcg(True, 800, 1e-12)
-    s.diagnostics.set_vof_viscous_interface("sharp")
+    s.diagnostics.set_vof_viscous_interface(mode)
     u, v, w = solenoidal(12345)
     amp = 1e-3 * h / (dt * max(np.max(np.abs(a)) for a in (u, v, w)))  # colour CFL <= 1e-3
     for c, a in enumerate((u, v, w)):
@@ -112,6 +112,7 @@ def run(args):
     E = [energy([s.get_u(), s.get_v(), s.get_w()], rho)]
     cen = {"band_cells": 0, "virtual_cells": 0, "film_cells": 0, "fit_fallbacks": 0}
     capped = 0
+    first_cap = None
     blow = None
     for n in range(STEPS):
         try:
@@ -120,44 +121,52 @@ def run(args):
             blow = f"step {n + 1}: {str(ex)[:60]}"
             break
         s.set_vof(C0)
-        capped += int(s.diagnostics.last_pressure_iterations() >= 800)
-        c = s.diagnostics.vof_viscous_interface_census()
-        for k in cen:
-            cen[k] += c[k]
+        if s.diagnostics.last_pressure_iterations() >= 800:
+            capped += 1
+            first_cap = n + 1 if first_cap is None else first_cap
+        if mode == "sharp":
+            c = s.diagnostics.vof_viscous_interface_census()
+            for k in cen:
+                cen[k] += c[k]
         E.append(energy([s.get_u(), s.get_v(), s.get_w()], rho))
     E = np.array(E)
+    up = np.nonzero(E[1:] > E[:-1])[0]
+    first_grow = int(up[0]) + 1 if up.size else None
+    tag = "GSV9" + ("b" if geom == "plane" else "d") + ("" if mode == "sharp" else "-AVG")
+    timing = f"first_pcg_cap_step={first_cap} first_energy_growth_step={first_grow}"
     if blow is not None:
         grow = E[1:] / E[:-1]
-        return (f"GSV9{'b' if geom == 'plane' else 'd'} MISS geom={geom} muA/muB={muR:g} rhoA/rhoB={rhoR:g} "
+        return (f"{tag} MISS geom={geom} muA/muB={muR:g} rhoA/rhoB={rhoR:g} "
                 f"D_hi={Dn:g} BLOWUP at {blow} E_last/E0={E[-1] / E[0]:.3e} min_n E_n/E0={float(np.min(E) / E[0]):.3e} "
                 f"last-100-step mean growth/step={float(np.exp(np.mean(np.log(grow[-100:])))):.6f} "
-                f"pcg_capped_steps={capped}", False)
+                f"pcg_capped_steps={capped} {timing}", False)
     above = int(np.sum(E[1:] > E[0]))
     lo = min(200, max(len(E) - 101, 0))  # 200 for the 2000-step run; shorter runs are smoke tests
     gmax = float(np.max(E[lo + 100:] / E[lo:-100])) if np.all(E[lo:-100] > 0) else float("nan")
     ok = above == 0 and gmax <= 1.0 + 1e-10
-    return (f"GSV9{'b' if geom == 'plane' else 'd'} {'PASS' if ok else 'MISS'} geom={geom} "
+    return (f"{tag} {'PASS' if ok else 'MISS'} geom={geom} "
             f"muA/muB={muR:g} rhoA/rhoB={rhoR:g} D_hi={Dn:g} E_end/E0={E[-1] / E[0]:.3e} "
             f"max_n E_n/E0={float(np.max(E[1:]) / E[0]):.6f} steps_above_E0={above} "
             f"max E(n+100)/E(n),n>=200={gmax:.6f} band/step={cen['band_cells'] / STEPS:.0f} "
             f"virt/step={cen['virtual_cells'] / STEPS:.0f} film/step={cen['film_cells'] / STEPS:.0f} "
-            f"fallbacks={cen['fit_fallbacks']} pcg_capped_steps={capped}", ok)
+            f"fallbacks={cen['fit_fallbacks']} pcg_capped_steps={capped} {timing}", ok)
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--geom", choices=("plane", "film", "both"), default="both")
     p.add_argument("--procs", type=int, default=6)
+    p.add_argument("--mode", choices=("sharp", "averaged"), default="sharp")
     a = p.parse_args()
     geoms = ("plane", "film") if a.geom == "both" else (a.geom,)
-    jobs = [(g, m, r, d) for g in geoms for (m, r) in PAIRS for d in DS]
+    jobs = [(g, m, r, d, a.mode) for g in geoms for (m, r) in PAIRS for d in DS]
     res = []
     with Pool(a.procs) as pool:
         for line, ok in pool.imap_unordered(run, jobs):
             print(line, flush=True)
             res.append((line, ok))
     nfail = sum(1 for _, ok in res if not ok)
-    print(f"GSV9 {'PASS' if nfail == 0 else 'MISS'} {len(res) - nfail}/{len(res)} runs pass (geom={a.geom})")
+    print(f"GSV9{'' if a.mode == 'sharp' else '-AVG'} {'PASS' if nfail == 0 else 'MISS'} {len(res) - nfail}/{len(res)} runs pass (geom={a.geom})")
     return 1 if nfail else 0
 
 
