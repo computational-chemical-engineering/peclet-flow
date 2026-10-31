@@ -198,11 +198,21 @@ offsets of the finest-pair L∞ order (the all-pairs minimum in brackets). L∞ 
 The chosen scheme on the general case: 4.4e-5, order 1.93 (1.71), L1 2.00. At 0° and 45° the extension
 case is exact for every scheme, by symmetry.
 
-**OPEN — the full G-SV1-style 2-D sweep of the chosen scheme** (angles 0, 11.25, 22.5, 33.75, 45°;
-8 offsets; μ ratios 1e-2, 1e2, 1e-3, 1e3; N = 16…128). It was running when this note was committed.
-Results go to `bubble_column_perf/validation/highratio/apriori_sv/res_gsv1.json`; summarise with
-`python summ.py res_gsv1.json`. Default: none needed, because 3-D G-SV1 is the gate. If any
-Poiseuille least-squares order over 16–128 is below 1.8, return to the architect before WO-6.
+**Full G-SV1-style 2-D sweep of the chosen scheme** (angles 0, 11.25, 22.5, 33.75, 45°; 8 offsets;
+μ ratios 1e-2, 1e2, 1e-3, 1e3; N = 16…128; `res_gsv1.json`):
+- Couette and extension: exact at every setting (≤ 8e-9).
+- Poiseuille and general, least-squares L∞ order over 16–128: worst 1.79 at ratio 1e-2, 1.76 at 1e2,
+  1.74 at 1e-3 and 1.69 at 1e3. Seven of 160 Poiseuille cases fall below 1.8, all at 33.75°. Errors at
+  N = 128 are ≤ 7.4e-5. L1 order is 1.75–1.92.
+
+**OPEN — the 33.75° shortfall.** It is either pre-asymptotic oscillation with the offset, or an O(h)
+leak, for example from the fit's single plane.
+- Experiment: rerun N = 256 at 33.75°, all 8 offsets, ratios 1e±2 and 1e±3. If the 128→256 order is
+  ≥ 1.9, the shortfall is pre-asymptotic; G-SV1 then uses N = 24, 32, 48, 64 and is judged as written.
+- If it stays ~1.7, return to the architect before WO-6.
+- Default: proceed with WO-1…WO-5, which do not depend on this.
+- The owner-only τ̂ rule (`owner.py`) gave Poiseuille order 1.70–1.82 at 32→64. It is rejected, and the
+  band-mean rule stays.
 
 ---
 
@@ -282,10 +292,8 @@ At cell i, for component c:
   - **τ̂ at an edge sample.** The validated rule is the arithmetic mean of τ̂ over the band cells among
     E's four cells, taken in fixed index order. Band cells are the interfacial cells and their
     3×3×3 neighbours, and the fit (§5.3) runs on all of them. This is the default.
-  - **OPEN — owner-only rule.** The alternative is to take τ̂ from E's owner alone, which fits only
-    interfacial cells and is cheaper. Its 2-D check (`owner.py`, N ≤ 64) was running at commit time.
-    Adopt it only if that check shows Couette exact and Poiseuille order ≥ 1.85 at every ratio;
-    otherwise keep the band mean.
+  - Rejected: the owner-only rule (τ̂ from E's owner alone). `owner.py` gave Poiseuille order
+    1.70–1.82, below the 1.85 criterion.
   - A non-band edge keeps today's β and gets no correction, so it stays bitwise.
   - A cell sample is in the band iff its cell is interfacial; it is its own owner.
 - **Fractions** come from the owner plane (m, α), shifted to the owner cell's local coordinates
