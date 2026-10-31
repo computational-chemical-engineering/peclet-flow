@@ -1,6 +1,6 @@
 # Sharp viscous stress at a VoF interface on the staggered MAC grid — design note
 
-Status: DESIGN (architect, 2026-10-31). Branch `sharpvisc` (on `mom2`). USER 2026-10-31: "Yes give the
+Status: DESIGN (architect, 2026-10-31; amended the same day by a second pass, §5.7). Branch `sharpvisc` (on `mom2`). USER 2026-10-31: "Yes give the
 sharp interface stress for Peclet priority".
 Brief: `bubble_column_perf/validation/highratio/BRIEF_ARCH_SHARPVISC.md`; recon digest `RECON_VISCOUS.md`.
 A-priori harness (2-D MAC Stokes, committed with this note): `tests/study/sharp_viscous/`.
@@ -53,6 +53,12 @@ Builds on `doc/full_viscous_stress.md` (cited as FVS) and `doc/variable_viscosit
   - Reversed, inside the VoF band only: the premise that T is symmetric. Its proof (FVS §6) is replaced
     by a measured spectral gate.
   - Extended: register 212 ("μ on the CV's own faces"), now with exact PLIC face fractions.
+- **Follow-up rulings (§5.7, second architect pass).**
+  - τ̂ at an edge is the mean over the edge's **interfacial** cells, and the fit runs on interfacial cells
+    only. Measured like for like, the averaging rule moves the constant by ≤ 16 % and never the order.
+  - The virtual-plane tie goes to the low face. A 1-cell film gets planes, not a fallback.
+  - The 33.75° shortfall is pre-asymptotic. WO-6 proceeds with G-SV1 at N = 24–64. Whether G-SV1 is
+    judged per offset or on the offset envelope is the user's call (§12 Q13).
 
 ---
 
@@ -205,14 +211,14 @@ case is exact for every scheme, by symmetry.
   1.74 at 1e-3 and 1.69 at 1e3. Seven of 160 Poiseuille cases fall below 1.8, all at 33.75°. Errors at
   N = 128 are ≤ 7.4e-5. L1 order is 1.75–1.92.
 
-**OPEN — the 33.75° shortfall.** It is either pre-asymptotic oscillation with the offset, or an O(h)
-leak, for example from the fit's single plane.
-- Experiment: rerun N = 256 at 33.75°, all 8 offsets, ratios 1e±2 and 1e±3. If the 128→256 order is
-  ≥ 1.9, the shortfall is pre-asymptotic; G-SV1 then uses N = 24, 32, 48, 64 and is judged as written.
-- If it stays ~1.7, return to the architect before WO-6.
-- Default: proceed with WO-1…WO-5, which do not depend on this.
-- The owner-only τ̂ rule (`owner.py`) gave Poiseuille order 1.70–1.82 at 32→64. It is rejected, and the
-  band-mean rule stays.
+**CLOSED 2026-10-31 — the 33.75° shortfall (§5.7 Q-C).** It was either pre-asymptotic oscillation with
+the offset or an O(h) leak.
+- The pre-registered test: N = 256, with "128→256 order ≥ 1.9 ⇒ pre-asymptotic, G-SV1 then uses
+  N = 24, 32, 48, 64". One case reached only 1.86, so the question came back to the architect.
+- N = 512 settles it. The worst case's 256→512 order is 1.99, and e·N² saturates.
+- Ruling: pre-asymptotic. The registered consequence applies.
+- The earlier remark that owner-only τ̂ (`owner.py`, 32→64, 1.70–1.82) is worse than the band mean was
+  a confounded comparison. Like for like, the two rules have the same order (§5.7 Q-A).
 
 ---
 
@@ -282,18 +288,23 @@ At cell i, for component c:
   predicate `VofCurvature::reconstructPlanes` uses (`interfaceEps`).
   - Virtual plane: a pure cell with a face-neighbour of the opposite pure phase is also interfacial.
     Its plane is that face: m = ±e_axis, α at the face. When there are several such faces, take the
-    first axis in the order x, y, z.
+    first axis in the order x, y, z and, on that axis, the −a face before the +a face. §5.7 Q-B gives
+    the exact rule, which also covers the 1-cell film.
   - Without the virtual plane, a grid-aligned interface lying on a face would fall back to the 4-cell
     mean and fail G-SV1 at offset 0.
 - **Owner of edge E.** Among the four cells of E that are interfacial, the owner is the one with the
   smallest |m·ξ_E − α|/|m|₂. Here ξ_E is the edge midpoint in that cell's local coordinates. Ties go to
-  the lowest linear index.
+  the first cell in the fixed offset order (§5.7). That is the lowest linear index everywhere except
+  across a periodic seam.
   - E is a **band edge** iff it has an owner.
-  - **τ̂ at an edge sample.** The validated rule is the arithmetic mean of τ̂ over the band cells among
-    E's four cells, taken in fixed index order. Band cells are the interfacial cells and their
-    3×3×3 neighbours, and the fit (§5.3) runs on all of them. This is the default.
-  - Rejected: the owner-only rule (τ̂ from E's owner alone). `owner.py` gave Poiseuille order
-    1.70–1.82, below the 1.85 criterion.
+  - **τ̂ at an edge sample (§5.7 Q-A).** τ̂_E is the arithmetic mean of τ̂_K over the **interfacial**
+    cells K among E's four cells, summed in the fixed offset order. The set is never empty, because E's
+    owner is in it.
+    - The fit (§5.3) runs on interfacial cells only, with n = n_K.
+    - Superseded: the mean over all band cells (interfacial cells plus their 3×3×3 neighbours). It needs
+      fits on cells that have no plane and gives the same order.
+  - Not used: owner only (τ̂ from E's owner alone). Like for like it has the same order and a constant up
+    to 16 % larger (§5.7).
   - A non-band edge keeps today's β and gets no correction, so it stays bitwise.
   - A cell sample is in the band iff its cell is interfacial; it is its own owner.
 - **Fractions** come from the owner plane (m, α), shifted to the owner cell's local coordinates
@@ -333,6 +344,9 @@ At cell i, for component c:
   only the low side keeps the product at the natural scale.
 - **Required accuracy.** τ̂ and D̂_nn need only O(h) (first-order) accuracy: they enter conservative
   fluxes (§3.2). This is why a 9-unknown linear fit suffices and the scheme is robust at ratio 1e3.
+  - This was measured, not only argued (§5.7 Q-A). Three averaging rules at the edge (owner only,
+    interfacial mean, band mean) and three fit normals on a curved interface all give the same order.
+  - The constants differ by ≤ 16 %. No centring of the O(h) part is needed.
 
 ### 5.4 Sample stresses (exact formulas)
 
@@ -396,6 +410,142 @@ then balances it exactly: measured extension error ≤ 9e-10 at all angles. The 
    - The T-terms and the midsection term are added in the same pass.
    - The FVS §6 energy proof no longer covers the band; G-SV9 replaces it.
 3. **Collocated:** §8.
+
+### 5.7 Follow-up rulings (architect, second pass, 2026-10-31)
+
+**Evidence.** Two study scripts back these rulings.
+- `tests/study/sharp_viscous/mac2dc.py` is mac2d with one PLIC plane per mixed cell, edge owners as
+  §5.2, and a selectable fit normal. Its planar path reproduces mac2d bitwise.
+- `followup_rules.py` runs experiments E1–E3. Results are in `bubble_column_perf/validation/highratio/
+  apriori_sv/res_followup_{E1,arch2}.json`.
+
+The quantities reported are:
+- **per-offset LS**: the G-SV1-style least-squares L∞ order of each case;
+- **envelope**: the maximum error over the offsets at each N, and its LS order.
+
+**Fixed offset order.** Every tie and every summation order in §5.2 and here enumerates cells by their
+offset from the edge or cell, lexicographic in (dz, dy, dx), x fastest. Never use the global linear
+index.
+- Away from a periodic seam the offset order is the lowest-linear-index order.
+- Across a seam it stays translation-invariant, and the wrapped global index does not. Serial and
+  np > 1 then agree wherever a ghost image takes part.
+
+**Q-A — the fit normal on non-interfacial band cells.** Decided: there are no such fits.
+- **Rule.** τ̂ at a band edge is the mean over the interfacial cells among the edge's four cells (the
+  brief's candidate B).
+- **Why.** The rule removes the question, and it is what §5.3 ("stored per interfacial cell") and §7
+  ("runs on owned interfacial cells") already describe.
+- **Settled content kept.** The settled point "a mean, not the owner alone" stands. Only the set
+  averaged changes.
+
+*E1, planar, like for like.* Poiseuille at 11.25, 22.5 and 33.75°, 8 offsets, N = 16…128. Each entry
+gives μ ratio 1e-2 / 1e3.
+
+| τ̂ at E | e(128), worst | per-offset LS min | envelope LS |
+|---|---|---|---|
+| band mean (old §5.2 rule) | 2.99e-5 / 7.55e-5 | 1.79 / 1.69 | 1.98 / 1.93 |
+| **interfacial mean (chosen)** | 3.30e-5 / 7.43e-5 | 1.80 / 1.69 | 1.97 / 1.93 |
+| owner only | 3.48e-5 / 7.44e-5 | 1.81 / 1.69 | 1.99 / 1.93 |
+
+*E2, curved.* The setup:
+- a circle of radius ≈ 0.9 (κ = 1.11) centred outside the box, so the normals sweep 17–70° across it,
+  with 4 radius offsets h/4 apart;
+- two-layer azimuthal Couette (τ = 1 at r0, exact), and the same flow with an azimuthal body force
+  (curved Poiseuille);
+- μ ratios 1e-2, 1e2 and 1e3, N = 16…128.
+
+What it shows:
+- Fit normal on non-interfacial cells under the band mean: the brief's candidate A (the nearest
+  interfacial cell by plane distance), the normalised mean of the neighbouring normals, and the exact
+  normal give e·N² equal within 4 % in all 6 groups. The normal rule is immaterial.
+- Interfacial mean against band mean: e(128) within −1…+3 %, envelope LS 1.87–2.12 against 1.86–2.14.
+- Owner only: up to +10 % (Couette).
+- Every rule, including the exact normal, has per-offset LS minima of 1.61–1.84. That is fill-in (Q-C),
+  not a property of the rule.
+
+*Conclusions from E1 and E2:*
+- **The brief's centring hypothesis is refuted.** The old gap (owner 1.70–1.82 against band 1.93–1.95)
+  was confounded:
+  - `owner.py` included 33.75° and used the 32→64 pair;
+  - the band figure excluded 33.75° and used 64→128;
+  - the band mean's own like-for-like 32→64 minimum is 1.69 / 1.55.
+- The averaging moves the constant, not the order, as §3.2's dipole argument says: any O(h) flux error,
+  smooth or jagged, gives O(h²).
+
+*Stability.* `stab6` geometries, N = 32. The worst ρ(G) under the interfacial mean equals the §6 values
+within 3e-4 at every D_hi and ratio; the largest is 0.990.
+
+*Rejected:*
+- (A), keep the band and take the nearest interfacial normal: 2–3× more fits, plus a normal rule and a
+  tie rule, for no measurable gain.
+- (C), one fit per band edge with the owner's n: about 4× the fit cost, and the effect it targets is
+  ≤ 4 %.
+- Owner only: not reinstated. It is the weakest constant on the curve.
+- If the band set is ever reinstated, use (A) with the metric |m_J·ξ_K − α_J|/|m_J|₂ and ties in
+  offset order.
+
+**Q-B — the virtual-plane tie.**
+- **Phase threshold.** "Pure" uses the interfacial predicate's own threshold ε (`interfaceEps`):
+  C ≤ ε is phase 0 and C ≥ 1 − ε is phase 1.
+- **Qualifying.** A pure cell qualifies on axis a if a face-neighbour across an a-face is pure of the
+  other phase.
+  - Only interior faces count, and periodic faces, whose ghost is the image.
+  - A non-periodic physical-domain face never qualifies.
+- **Which face.** The plane goes on the first qualifying axis in the order x, y, z. On that axis it goes
+  on the −a face if the −a neighbour qualifies, else on the +a face.
+- **The plane.** In local coordinates it is ξ_a = f, with f = 0 (−a) or 1 (+a), m = σe_a and α = σf.
+  σ = +1 if the C = 1 phase lies at ξ_a < f, else −1.
+- **Determinism.** The rule reads C on a 7-point stencil inside the depth-3 colour ghosts and uses no
+  reduction, so it is bitwise np-independent.
+
+**The 1-cell film gets planes; it does not fall back.**
+- *The geometry is exact anyway.*
+  - The far face is owned at distance 0 by the opposite-phase neighbour across it, whose own virtual
+    plane lies on that face; the film's plane is at distance 1.
+  - On the near face, two coincident planes tie at distance 0.
+  - In an alternating stack (ABAB… along a), every cell's plane is on its −a face and every face is still
+    owned at distance 0.
+- *The sign of n does not matter.* The kink model and the T-terms are quadratic in n: n_a(Pe_c)·(Sn), and
+  n_a τ̂_c with τ̂ ∝ PSn. The film cell's fit is therefore the same whichever face is chosen.
+- *A fallback buys nothing.* Withholding the plane gives the same owners and adds a third cell class.
+  - What a film really lacks is a one-kink fit block. The fallback would not repair that, because the
+    neighbours' fits see the same two interfaces.
+  - That is Q8: first order locally, by design.
+- *Coverage.* G-SV10 counts film cells: virtual-plane cells whose two a-neighbours are both opposite.
+  G-SV9(d) covers stability on this geometry.
+
+**Q-C — the 2-D order shortfall: pre-asymptotic, and WO-6 proceeds.**
+- **Reading.** The brief's reading is confirmed, with one refinement: the constant does not oscillate,
+  it rises monotonically to a bound.
+  - Worst case: e·N² = 0.70, 0.73, 0.78, 1.13, 1.245, 1.258 for N = 16…512. The last doubling adds 1 %.
+  - An O(h) leak would double e·N² at every doubling.
+- **Mechanism.** The L∞ error is h² times the largest local constant on the interface, and that constant
+  depends on each cut cell's sub-cell configuration.
+  - At an irrational slope, the N cut cells sample those configurations ever more densely.
+  - The sampled maximum therefore climbs towards its supremum, and a slope fitted while it is still
+    climbing reads low.
+- **E3 (33.75°, 16 offsets, N = 16…256).** The envelope samples 16N configurations.
+
+| μ ratio | envelope e·N², N = 16 … 256 | envelope LS | per-offset LS min |
+|---|---|---|---|
+| 1e3 | 1.07, 1.14, 1.20, 1.24, 1.25 | 1.94 | 1.72 (3/16 below 1.8) |
+| 1e2 | 0.83, 0.87, 0.91, 0.94, 0.96 | 1.95 | 1.79 (1/16 below 1.8) |
+
+- **Ruling.**
+  - The N = 256 test was there to tell fill-in from a leak. Two facts answer that: the 256→512 orders of
+    the three worst cases (1.986–1.990) and the saturating envelope. The shortfall is pre-asymptotic.
+  - §3.4's pre-registered consequence applies: G-SV1 runs at N = 24, 32, 48, 64 (§11).
+  - WO-6 proceeds.
+- **Measurement definition — not mine to rule (§12 Q13, user).** The per-offset LS slope is biased low
+  for any scheme whose L∞ constant is a sampled supremum.
+  - In 2-D it reads 1.69 (planar) and 1.61 (curved, even with the exact normal), for schemes whose
+    envelope order is 1.93 and ≥ 1.86.
+  - In 3-D a plane has O(N²) cut cells, so the bias is presumably smaller. That is unmeasured.
+  - **Recommended.** Per orientation × ratio × case, take e_env(N) as the maximum over the 8 offsets and
+    the order as its LS slope over the N set. PASS at ≥ 1.8.
+  - This is still the worst-case error and drops no configuration. An O(h) term at any offset still
+    dominates it asymptotically.
+  - **Default until the user rules.** G-SV1 as written binds, and WO-6 reports the envelope beside it.
 
 ---
 
@@ -545,8 +695,15 @@ the design. Default until then: collocated stays averaged.
 - Acceptance:
   - 3-D extrusion of the 2-D harness cases (n_z = 0, z-independent fields, exact planes injected).
     τ̂, D̂_nn and every fraction equal the harness values to 1e-12 relative.
+    - The oracle is `mac2d.py` with `TAU_RULE = "mixed-avg"`, the §5.7 rule. `mac2dc.py`'s planar path
+      gives the same values bitwise.
   - Exact τ and D_nn for kinked-linear fields at 9 orientations, to ≤ 1e-11.
   - Fallback count 0 on all of them.
+  - Virtual planes (§5.7 Q-B):
+    - A 1-cell film along each axis, and an ABAB stack: every edge on a film face is owned at distance 0.
+    - The plane (m, α) follows the low-face rule.
+  - Ties in offset order with a periodic seam inside the band: owners and τ̂ are bitwise equal at np 1
+    and np 2.
 
 **WO-3. Implicit band.** `FaceProps::beta` / `ibmBuildDiffusionVar` take μ̄_c,E on band edges under
 sharp mode; cells unchanged.
@@ -602,9 +759,16 @@ slope of log e against log h over the stated resolutions.
   - Offsets k/8 cell along n, k = 0…7. μ ratio 1e-2 and 1e2.
   - Box [0,1]³ with exact face-averaged data on the ghost layer. Steady state by the production stepper
     at D_hi = 100, to a velocity-increment ≤ 1e-12·max|u|.
-  - N = 16, 24, 32, 48. Error = max |u_h − ū_face| / max|ū_face|.
+  - N = 24, 32, 48, 64: the branch §3.4 pre-registered, ruled in §5.7 Q-C. It was 16, 24, 32, 48.
+    Error = max |u_h − ū_face| / max|ū_face|.
   - PASS: order ≥ 1.8 for every orientation × offset × ratio. Couette passes as "exact" if
     e ≤ 1e-10 at every N.
+  - Reported alongside, per orientation × ratio × case:
+    - the offset envelope e_env(N) = max over the 8 offsets, its LS order, and e_env·N²;
+    - the minimum per-offset order.
+  - Which measure binds is §12 Q13. Until the user rules, the PASS line above binds.
+  - A MISS as written, with an envelope order ≥ 1.8, is reported as such and not tuned. WO-7 continues;
+    the AUTO flip (Q4) waits for Q13.
   - The 2-D a-priori version is in §3.4.
 - **G-SV2 — Hadamard–Rybczynski, κ = 1e-2, 1, 1e2.**
   - Steady Stokes: advection off, colour frozen. Periodic box L = 8R; drop driven by its buoyancy Δρg.
@@ -639,8 +803,12 @@ slope of log e against log h over the stated resolutions.
     - PASS: kinetic energy ≤ initial, and the growth ratio over any 100 steps after step 200 is
       ≤ 1 + 1e-10.
   - (c) No blow-up in G-SV3 or G-SV8.
+  - (d) Film geometry (§5.7 Q-B). As (b), with a grid-aligned 1-cell slab of the low-μ phase in place of
+    the oblique plane.
+    - The slab is normal to x, and both of its faces carry virtual planes.
+    - Same ratio pairs, D_hi values and PASS as (b).
 - **G-SV10 (census).** P1 d/h 24: fit fallbacks ≤ 0.1 % of interfacial cells per step, averaged over the
-  run. Virtual-plane cells are reported.
+  run. Virtual-plane cells are reported, and film cells among them.
 - **G-SV11 (single phase stays put).** `variable_mu`, `varmu_mpi`, `full_stress_operator{,_np2,_np4}`,
   `collocated_stability_guard` and `amr_stability_guard` pass bitwise.
 
@@ -660,7 +828,8 @@ slope of log e against log h over the stated resolutions.
 | Q8 | Thin films, under 1 cell of one phase | **fact** (census) | The fit is well-posed while every link type appears. Otherwise fallback; τ̂ = 0 is first order locally. |
 | Q9 | Plane source when σ = 0 | **fact** (does VofCurvature exist with σ = 0?) | Construct and reconstruct it in the step when sharp is active. |
 | Q10 | Curved interface: one plane per fit block (O(κh) model error) | **fact** (G-SV2 order) | Accept. If G-SV2 misses only at d/h 8–12, report it; do not add curvature terms without the architect. |
-| Q12 | τ̂ at edges: band mean (validated) or owner only (cheaper) | **fact** (`owner.py`) | Band mean. The fit runs on interfacial cells and their 3×3×3 neighbours. |
+| Q12 | τ̂ at edges: band mean, owner only, or interfacial mean | **fact** — settled by E1/E2 (§5.7 Q-A) | Interfacial mean. Fits run on interfacial cells only; all three rules have the same order. |
+| Q13 | G-SV1's measurement: per-offset LS order (as written) or the offset envelope (§5.7 Q-C) | **user preference** (what the gate means; not to be ruled after the 3-D data are in) | As written binds, and the envelope is reported beside it. Recommended: the envelope, ruled before WO-6's numbers are read. |
 | Q11 | Collocated | **user preference** (sequencing) | §8 order: full stress on collocated first; this design is not ported until then. |
 
 ---

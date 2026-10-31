@@ -249,6 +249,14 @@ def build(case, scheme, tau_mode="fit"):
                 cand = [(ci, cj) for (ci, cj) in cells if 0 <= ci <= N - 1 and 0 <= cj <= N - 1]
             own = min(cand, key=lambda q: (abs(case.phi((q[0] + 0.5) * h, (q[1] + 0.5) * h)), q))
             return tau_fit(*own)
+        if TAU_RULE == "mixed-avg":  # note section 5.7 Q-A: mean over the interfacial cells among the four
+            cs = [(ci, cj) for (ci, cj) in cells if 0 <= ci <= N - 1 and 0 <= cj <= N - 1 and mixed[ci + 1, cj + 1]]
+            if cs:
+                e = {}
+                for cc in cs:
+                    for k, v in tau_fit(*cc).items():
+                        e[k] = e.get(k, 0.0) + v / len(cs)
+                return e
         cs = [(ci, cj) for (ci, cj) in cells if 0 <= ci <= N - 1 and 0 <= cj <= N - 1 and band[ci + 1, cj + 1]]
         if not cs:
             cs = [(ci, cj) for (ci, cj) in cells if 0 <= ci <= N - 1 and 0 <= cj <= N - 1]
