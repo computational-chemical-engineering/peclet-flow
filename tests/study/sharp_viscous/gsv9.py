@@ -17,6 +17,11 @@ is exactly solenoidal with zero wall-normal velocity; its amplitude keeps the co
 Kinetic energy: E = 1/2 sum_faces rho_F u^2 h^3, rho_F the solver's face density (the mean of the
 two cells' rho(C), face_props.hpp) -- the M-norm of the §6 analysis.
 PASS (per run): E_n <= E_0 for every n, and E_{n+100}/E_n <= 1 + 1e-10 for every n >= 200.
+Pressure (WO-6a, §6.2): the production driver the rho property model selects (Chebyshev), never a
+forced CG driver, with rtol 1e-12 and a cap (PCAP) that must never bind: a capped step makes the
+run NOT JUDGED. Two growth verdicts per run (§6.2, USER Q15 pending): 'as written' above, and
+'floor-excluded', the growth ratio judged only over windows with E_n >= 1e-20 E_0 (the ratio
+below that level is reported, not judged).
 
   nice -n 10 python gsv9.py [--geom plane|film|both] [--procs 6] [--mode sharp|averaged]   (one line per run + a verdict)
 """
@@ -29,6 +34,8 @@ from multiprocessing import Pool
 import numpy as np
 
 N, STEPS = 16, 2000
+PCAP, PRTOL = 20000, 1e-12  # the Chebyshev cap must never bind (§6.2)
+FLOOR = 1e-20  # the Q15 floor: windows with E_n < FLOOR * E_0 are reported, not judged
 PAIRS = ((1e-2, 1e-3), (1e2, 1e3), (1e-3, 1e-4), (1e3, 1e4))
 DS = (0.1, 1.0, 10.0, 100.0, 1e4)
 
@@ -102,7 +109,8 @@ def run(args):
     s.set_property_model("mu", "linear", "C", [muB, muA - muB])
     s.set_property_model("rho", "linear", "C", [rB, rA - rB])
     s.set_advection(False)
-    s.set_pressure_pcg(True, 800, 1e-12)
+    # Keep the driver the rho model selected (Chebyshev); only its tolerance and cap are set.
+    s.set_pressure_chebyshev(True, PCAP, PRTOL)
     s.diagnostics.set_vof_viscous_interface(mode)
     u, v, w = solenoidal(12345)
     amp = 1e-3 * h / (dt * max(np.max(np.abs(a)) for a in (u, v, w)))  # colour CFL <= 1e-3
@@ -113,6 +121,7 @@ def run(args):
     cen = {"band_cells": 0, "virtual_cells": 0, "film_cells": 0, "fit_fallbacks": 0}
     capped = 0
     first_cap = None
+    pmax = 0
     blow = None
     for n in range(STEPS):
         try:
@@ -121,7 +130,9 @@ def run(args):
             blow = f"step {n + 1}: {str(ex)[:60]}"
             break
         s.set_vof(C0)
-        if s.diagnostics.last_pressure_iterations() >= 800:
+        pit = s.diagnostics.last_pressure_iterations()
+        pmax = max(pmax, pit)
+        if pit >= PCAP:
             capped += 1
             first_cap = n + 1 if first_cap is None else first_cap
         if mode == "sharp":
@@ -133,23 +144,35 @@ def run(args):
     up = np.nonzero(E[1:] > E[:-1])[0]
     first_grow = int(up[0]) + 1 if up.size else None
     tag = "GSV9" + ("b" if geom == "plane" else "d") + ("" if mode == "sharp" else "-AVG")
-    timing = f"first_pcg_cap_step={first_cap} first_energy_growth_step={first_grow}"
+    timing = (f"pdriver=chebyshev(rtol={PRTOL:g},cap={PCAP}) max_p_it={pmax} capped_steps={capped} "
+              f"first_cap_step={first_cap} first_energy_growth_step={first_grow}")
+    if capped:
+        return (f"{tag} NOT_JUDGED geom={geom} muA/muB={muR:g} rhoA/rhoB={rhoR:g} D_hi={Dn:g} "
+                f"(a capped pressure step) steps_run={len(E) - 1} {timing}", None, None)
     if blow is not None:
         grow = E[1:] / E[:-1]
-        return (f"{tag} MISS geom={geom} muA/muB={muR:g} rhoA/rhoB={rhoR:g} "
+        return (f"{tag} MISS/MISS geom={geom} muA/muB={muR:g} rhoA/rhoB={rhoR:g} "
                 f"D_hi={Dn:g} BLOWUP at {blow} E_last/E0={E[-1] / E[0]:.3e} min_n E_n/E0={float(np.min(E) / E[0]):.3e} "
                 f"last-100-step mean growth/step={float(np.exp(np.mean(np.log(grow[-100:])))):.6f} "
-                f"pcg_capped_steps={capped} {timing}", False)
+                f"{timing}", False, False)
     above = int(np.sum(E[1:] > E[0]))
     lo = min(200, max(len(E) - 101, 0))  # 200 for the 2000-step run; shorter runs are smoke tests
-    gmax = float(np.max(E[lo + 100:] / E[lo:-100])) if np.all(E[lo:-100] > 0) else float("nan")
+    En, Ew = E[lo:-100], E[lo + 100:]
+    win = Ew / np.where(En > 0, En, np.nan)
+    gmax = float(np.max(win)) if np.all(En > 0) else float("nan")
+    keep = En >= FLOOR * E[0]
+    gfl = float(np.max(win[keep])) if np.any(keep) else float("nan")
+    gbel = float(np.nanmax(win[~keep])) if np.any(~keep) else float("nan")
     ok = above == 0 and gmax <= 1.0 + 1e-10
-    return (f"{tag} {'PASS' if ok else 'MISS'} geom={geom} "
+    okf = above == 0 and not (gfl > 1.0 + 1e-10)  # no window above the floor: nothing to judge
+    vd = lambda b: "PASS" if b else "MISS"
+    return (f"{tag} {vd(ok)}/{vd(okf)} geom={geom} "
             f"muA/muB={muR:g} rhoA/rhoB={rhoR:g} D_hi={Dn:g} E_end/E0={E[-1] / E[0]:.3e} "
             f"max_n E_n/E0={float(np.max(E[1:]) / E[0]):.6f} steps_above_E0={above} "
-            f"max E(n+100)/E(n),n>=200={gmax:.6f} band/step={cen['band_cells'] / STEPS:.0f} "
+            f"max E(n+100)/E(n),n>=200={gmax:.6f} [E_n>=1e-20E0: {gfl:.6f}, below: {gbel:.6f}] "
+            f"band/step={cen['band_cells'] / STEPS:.0f} "
             f"virt/step={cen['virtual_cells'] / STEPS:.0f} film/step={cen['film_cells'] / STEPS:.0f} "
-            f"fallbacks={cen['fit_fallbacks']} pcg_capped_steps={capped} {timing}", ok)
+            f"fallbacks={cen['fit_fallbacks']} {timing}", ok, okf)
 
 
 def main():
@@ -162,12 +185,18 @@ def main():
     jobs = [(g, m, r, d, a.mode) for g in geoms for (m, r) in PAIRS for d in DS]
     res = []
     with Pool(a.procs) as pool:
-        for line, ok in pool.imap_unordered(run, jobs):
+        for line, ok, okf in pool.imap_unordered(run, jobs):
             print(line, flush=True)
-            res.append((line, ok))
-    nfail = sum(1 for _, ok in res if not ok)
-    print(f"GSV9{'' if a.mode == 'sharp' else '-AVG'} {'PASS' if nfail == 0 else 'MISS'} {len(res) - nfail}/{len(res)} runs pass (geom={a.geom})")
-    return 1 if nfail else 0
+            res.append((ok, okf))
+    tag = f"GSV9{'' if a.mode == 'sharp' else '-AVG'}"
+    nj = sum(1 for ok, _ in res if ok is None)
+    rc = 0
+    for k, nm in ((0, "as-written"), (1, "floor-excluded")):
+        npass = sum(1 for r in res if r[k] is True)
+        verdict = "PASS" if npass == len(res) else ("MISS" if npass + nj < len(res) else "NOT_JUDGED")
+        rc |= verdict != "PASS"
+        print(f"{tag} {nm} {verdict} {npass}/{len(res)} runs pass, {nj} not judged (geom={a.geom})")
+    return rc
 
 
 if __name__ == "__main__":
