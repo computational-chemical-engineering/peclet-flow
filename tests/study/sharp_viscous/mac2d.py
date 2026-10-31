@@ -432,6 +432,8 @@ def build(case, scheme, tau_mode="fit"):
             R.append(r); Cl.append(ntot - 1); V.append(1.0)
             R.append(ntot - 1); Cl.append(r); V.append(1.0)
     A = sp.csr_matrix((V, (R, Cl)), shape=(ntot, ntot))
+    # The fit internals of this build, for the WO-2 reference dump (wo2_reference.py); no effect on A, b.
+    build.last = dict(C=C, mixed=mixed, tauexpr=tauexpr, dnnexpr=dnnexpr, xall=xall, mac=m)
     return A, b, uidx, xall, m
 
 

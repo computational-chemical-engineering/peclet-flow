@@ -549,3 +549,14 @@ foreach(_t IN LISTS _flow_kernel_test_targets)
   endif()
 endforeach()
 
+
+# Sharp viscous stress at a VoF interface (src/vof/sharp_viscous.hpp; doc/vof_sharp_viscous_stress.md
+# WO-2..WO-4): the 2-D harness extruded (mac2d reference data), kinked-linear exactness of the fit,
+# virtual planes, periodic-seam shift invariance; the implicit band and the explicit kernel.
+add_executable(test_sharp_viscous test_sharp_viscous.cpp)
+target_include_directories(test_sharp_viscous PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../src
+                           ${PECLET_CORE_INCLUDE})
+target_compile_definitions(test_sharp_viscous PRIVATE
+                           SHARP_VISCOUS_REF="${CMAKE_CURRENT_SOURCE_DIR}/sharp_viscous_mac2d.txt")
+target_link_libraries(test_sharp_viscous PRIVATE Kokkos::kokkos)
+add_test(NAME sharp_viscous COMMAND test_sharp_viscous)
