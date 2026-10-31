@@ -4011,10 +4011,10 @@ class Solver {
 
 
   // The transported face velocity of the VoF momentum flux (doc/vof_momentum_second_order.md):
-  // 'upwind' (the default, donor cell), 'muscl_mixed' (MinMod of the mixed CV velocity; converges
+  // 'upwind' (donor cell, first order), 'muscl_mixed' (MinMod of the mixed CV velocity; converges
   // to a wrong limit at high density ratio), 'muscl_mixed_capped' (that slope times the mass-aware
   // cap; the diagnosis ablation) and 'muscl_phase' (per-phase interface-biased MC slopes + the cap:
-  // second order, bounded at any ratio). Any other name throws std::invalid_argument.
+  // second order, bounded at any ratio; the DEFAULT). Any other name throws std::invalid_argument.
   void setVofMomentumScheme(const std::string& name);
   std::string vofMomentumScheme() const;
 

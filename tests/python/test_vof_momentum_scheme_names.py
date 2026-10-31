@@ -3,7 +3,7 @@
 doc/vof_momentum_second_order.md §7, WO-2).
 
 Checks, on a solver with enable_vof_momentum (no step is taken):
-  1. the default is 'upwind';
+  1. the default is 'muscl_phase' (since 2026-10-31; note §12);
   2. every name ('upwind', 'muscl_mixed', 'muscl_mixed_capped', 'muscl_phase') round-trips through
      the getter;
   3. an unknown name raises ValueError and leaves the selection unchanged;
@@ -38,8 +38,8 @@ def main():
     s.enable_vof_momentum(1.0, 10.0)
     d = s.diagnostics
     fails = []
-    if d.vof_momentum_scheme() != "upwind":
-        fails.append(f"default is {d.vof_momentum_scheme()!r}, not 'upwind'")
+    if d.vof_momentum_scheme() != "muscl_phase":
+        fails.append(f"default is {d.vof_momentum_scheme()!r}, not 'muscl_phase'")
     for name in NAMES:
         d.set_vof_momentum_scheme(name)
         got = d.vof_momentum_scheme()
