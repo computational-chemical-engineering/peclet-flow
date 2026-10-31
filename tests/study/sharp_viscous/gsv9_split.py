@@ -155,7 +155,7 @@ def colour(a, N, Nz):
 
 def cmd_prod(a):
     import peclet.flow as pf
-    from scipy.sparse.linalg import LinearOperator, eigs
+    from scipy.sparse.linalg import ArpackNoConvergence, LinearOperator, eigs
     N = a.N
     Nz = a.Nz if a.geom == "ext" else N
     h = 1.0 / N
@@ -198,7 +198,7 @@ def cmd_prod(a):
     npc = N * N * Nz if a.incremental else 0  # the incremental state carries p (internal units, mean removed)
     nd = sum(sizes) + npc
     amp = 1e-6 * h / dt  # colour CFL ~1e-6 for a unit-max vector; the map is linear
-    stats = {"n": 0, "pit": 0, "leak": 0.0}
+    stats = {"n": 0, "pit": 0, "leak": 0.0, "msw": 0}
 
     def unpack(x):
         arrs, o = [], 0
@@ -234,6 +234,7 @@ def cmd_prod(a):
         s.set_vof(C0)
         stats["n"] += 1
         stats["pit"] = max(stats["pit"], dg.last_pressure_iterations())
+        stats["msw"] = max(stats["msw"], int(dg.last_step_timers()["momentum_sweeps"]))
         y = pack([s.get_u(), s.get_v(), s.get_w()], s.get_field("p") if npc else None) / sc
         if a.kz0:
             yp = proj(y)
@@ -250,14 +251,20 @@ def cmd_prod(a):
         x1, x2 = proj(x1), proj(x2)
     lin = np.linalg.norm(mv(0.3 * x1 + 0.7 * x2) - 0.3 * mv(x1) - 0.7 * mv(x2)) / np.linalg.norm(mv(x1))
     op = LinearOperator((nd, nd), matvec=mv, dtype=float)
-    vals = eigs(op, k=a.k, which="LM", v0=v0, ncv=a.ncv, tol=1e-9, maxiter=200, return_eigenvectors=False)
-    vals = sorted(vals, key=lambda z: -abs(z))
+    conv = 1
+    try:
+        vals = eigs(op, k=a.k, which="LM", v0=v0, ncv=a.ncv, tol=1e-9, maxiter=a.maxiter,
+                    return_eigenvectors=False)
+    except ArpackNoConvergence as ex:  # report what converged; the caller decides (G-SV9(e))
+        conv, vals = 0, ex.eigenvalues
+    vals = sorted(vals, key=lambda z: -abs(z)) if len(vals) else [complex("nan")]
     tag = "%s geom=%s%s N=%d Nz=%d mu=%g rho=%g D_hi=%g incr=%d prodsolve=%d kz0=%d p=%s" % (
         a.mode, a.geom, "(%g,%g)" % (a.ang, a.off) if a.geom == "ext" else ("/sub8" if a.sub8 else ""), N, Nz,
         muA, rA, a.D, a.incremental, a.prodsolve, a.kz0, a.pdriver)
-    print("PROD %s | rho=%.6f | top: %s | matvecs=%d max_pcg_it=%d lin=%.1e kz0_leak=%.1e solver=%s" % (
-        tag, abs(vals[0]), " ".join("%.5f%+.5fi" % (z.real, z.imag) for z in vals[:4]), stats["n"], stats["pit"],
-        lin, stats["leak"], dg.velocity_solver()), flush=True)
+    print("PROD %s | rho=%.6f | top: %s | matvecs=%d max_pcg_it=%d lin=%.1e kz0_leak=%.1e solver=%s "
+          "conv=%d ncv=%d max_momentum_sweeps=%d" % (
+              tag, abs(vals[0]), " ".join("%.5f%+.5fi" % (z.real, z.imag) for z in vals[:4]), stats["n"],
+              stats["pit"], lin, stats["leak"], dg.velocity_solver(), conv, a.ncv, stats["msw"]), flush=True)
 
 
 def main():
@@ -282,6 +289,7 @@ def main():
     q.add_argument("--pdriver", choices=("pcg", "fcg", "cheb"), default="cheb")
     q.add_argument("--k", type=int, default=4)
     q.add_argument("--ncv", type=int, default=30)
+    q.add_argument("--maxiter", type=int, default=200)
     a = p.parse_args()
     if a.cmd == "harness":
         return cmd_harness(a)
