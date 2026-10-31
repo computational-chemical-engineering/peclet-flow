@@ -38,6 +38,7 @@ void Solver<Grid>::step() {
     resolveViscousStressAuto();
   else if (fullStress_ && varProps_)
     requireFullStressScope("step");
+  resolveSharpViscous();  // the sharp interface (inert unless requested; refusals here)
 
   // The momentum-solver choice, for a configuration that never calls set_solid. set_solid is the
   // other (and historically the only) place it is made; a domain-BC case with no immersed solid
@@ -106,6 +107,9 @@ void Solver<Grid>::step() {
   // source that pumps the particles through the drag (measured in the HCS benchmark).
   if (porous_ && porousCons_)
     updateEpsRho();
+  // The sharp viscous interface: planes + band classes of this step's colour, before the bands.
+  if (sharpActive_)
+    sharpViscousGeometry();
   // Variable properties / implicit drag: rebuild the diffusion stencil from the current mu/rho
   // and drag_beta fields (the implicit-FOU path rebuilds it per Picard in buildAdvStencil*, so
   // only the non-advective path needs this).
@@ -122,6 +126,8 @@ void Solver<Grid>::step() {
   const bool fullStress = fullStressActive();
   if (fullStress)
     fullStressPrelude();
+  if (sharpActive_ && fullStress)
+    sharpViscousFit();
   if (cutcellPressure_ && incremental_) {
     fillGhosts(P_);
     if (hasBc_)

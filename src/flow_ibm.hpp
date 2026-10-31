@@ -60,6 +60,7 @@
 #include "vof/colour_field.hpp"  // VoF rung V2a: the G=2 <-> g=3 bridge + the colour ghost policy
 #include "vof/colour_bc.hpp"  // VoF rung V-BC: inflow/outflow/backflow colour + the outside mask
 #include "vof/curvature_field.hpp"  // VoF rung V3: the HF curvature cascade + PV fallback
+#include "vof/sharp_viscous.hpp"  // the sharp viscous stress at the interface (doc/vof_sharp_viscous_stress.md)
 #include "vof/momentum_advect.hpp"  // VoF rung V2b: momentum-consistent rho^c u_c transport
 #include "vof/surface_tension.hpp"  // VoF rung V4: balanced-force CSF + the capillary dt
 #include "vof/phase_change.hpp"    // VoF Part II rungs P0/P1: mass flux, plane-shift regression
@@ -1964,6 +1965,40 @@ class Solver {
   void addFullStressRhsComp(int c);
   // §5.4: reg_c = not solid and not a cut row, ghosts by the property-ghost fill incl. edges.
   void buildFullStressRegMasks();
+
+  // SHARP VISCOUS INTERFACE (doc/vof_sharp_viscous_stress.md, src/vof/sharp_viscous.hpp). Under
+  // VoF with mu = LinearMix(C) and the full stress: band edges take the PLIC face-fraction mu of
+  // the row's own face in the implicit bands and the explicit transpose, plus the interface-
+  // traction (tau) terms and the cell midsection term, all explicit on u^n; tau_hat / D_nn from a
+  // kinked least-squares fit per interfacial cell. `diagnostics.set_vof_viscous_interface(
+  // "sharp" | "averaged")`, default "averaged" (= today's operator, bitwise) until the gates pass.
+  void setVofViscousInterface(const std::string& mode);
+  std::string vofViscousInterface() const;
+  // Step head, after the viscous-stress resolution: sharpActive_ for this step; an explicit
+  // "sharp" outside the v1 scope (§1, §9) raises here, before the first mutator.
+  void resolveSharpViscous();
+  // After updateProperties()/updateVofCurvature(), before the momentum bands are built: the PLIC
+  // planes of the current colour (reconstructed here unless the curvature cascade just did) and
+  // the band classes (§5.2, §7, Q9).
+  void sharpViscousGeometry();
+  // After fullStressPrelude(): the tau_hat / D_nn fit on u^n over the owned cells, then their ghost
+  // exchange (§7). Skipped when mu is globally uniform.
+  void sharpViscousFit();
+  vof::SharpFaceProps makeSharpFaceProps(int c);
+  // The band census of the last step (§9), LOCAL to this rank: interfacial cells, virtual-plane
+  // cells, film cells among those, fit fallbacks. Zero while the sharp interface is inactive.
+  vof::SharpCensus vofViscousInterfaceCensus() const;
+  // The sharp interface's per-step state and the u^n base, by view (the operator-level MPI ctest
+  // sharp_viscous_mpi drives the step's pieces one by one and reads these back).
+  struct SharpViscousState {
+    vof::SvByte cls, fb;
+    CCField tau[3], dnn, old[3];
+    vof::SharpGeom geo;
+  };
+  SharpViscousState sharpViscousState() const {
+    return SharpViscousState{svCls_, svFb_, {svTau_[0], svTau_[1], svTau_[2]}, svDnn_,
+                             {old_[0], old_[1], old_[2]}, sharpGeom_};
+  }
 
 
   // Mirror the host motion arrays onto the device (KBs; rebuilt only when a driver changes a
@@ -5424,6 +5459,11 @@ class Solver {
   bool muUniform_ = true;    // this step's exact global test min mu == max mu (full stress skips)
   bool regDirty_ = true;     // the full-stress regular-node masks need a rebuild (geometry built)
   RegMask fsReg_[3];         // full-stress regular-node masks, 1 B/cell each (solids only)
+  bool sharpVisc_ = false;    // diagnostics.set_vof_viscous_interface("sharp") requested
+  bool sharpActive_ = false;  // ... and in force this step (resolveSharpViscous)
+  vof::SharpGeom sharpGeom_;  // this step's band geometry (views into the colour/plane blocks)
+  vof::SvByte svCls_, svFb_;  // band class / fit-fallback flag, 1 B/cell each
+  CCField svTau_[3], svDnn_;  // tau_hat (3) and D_nn per interfacial cell, dense (§12 Q2)
   CCField muField_;          // per-cell dynamic viscosity (when varProps_)
   int varRotMode_ = 0;       // rotational term under varProps: 0 chi*mu_min, 1 chi*mu(i), 2 off
   double varRotChi_ = 1.0;   // rotational coefficient scale chi

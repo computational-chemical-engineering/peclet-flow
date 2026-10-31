@@ -1067,7 +1067,10 @@ void Solver<Grid>::rebuildStencils() {
   for (int c = 0; c < 3; ++c) {
     Kokkos::deep_copy(CCExec(), C[c].rscale, 1.0);  // S4: instance-ordered fills
     Kokkos::deep_copy(CCExec(), C[c].inhom, 0.0);
-    if (varProps_ || effVarRho())
+    if (sharpActive_)  // the band edges' PLIC face-fraction mu (doc/vof_sharp_viscous_stress.md §6)
+      ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x,
+                           e_.y, e_.z, G, makeSharpFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
+    else if (varProps_ || effVarRho())
       ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x,
                            e_.y, e_.z, G, makeFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
     else
@@ -1445,8 +1448,12 @@ void Solver<Grid>::buildAdvStencilVar(int c) {
     if (!varRho_ && porous_ && porousCons_)
       updateEpsRho();  // eps ghosts are driver-filled; whole-block product has valid ghosts
   }
-  ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y, e.z,
-                       G, makeFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
+  if (sharpActive_)
+    ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y,
+                         e.z, G, makeSharpFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
+  else
+    ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y,
+                         e.z, G, makeFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
   CCExec space;
   FV AC = C[c].AC, AW = C[c].AW, AE = C[c].AE, AS = C[c].AS, AN = C[c].AN, AB = C[c].AB,
      AT = C[c].AT;

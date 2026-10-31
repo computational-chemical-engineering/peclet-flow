@@ -2181,6 +2181,41 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "vof_momentum_scheme", [](D& diag) { return diag.s->vofMomentumScheme(); },
           "The selected VoF momentum scheme (see set_vof_momentum_scheme).")
       .def(
+          "set_vof_viscous_interface",
+          [](D& diag, const std::string& mode) { diag.s->setVofViscousInterface(mode); },
+          nb::arg("mode"),
+          "The viscous stress at the VoF interface (flow doc/vof_sharp_viscous_stress.md). "
+          "'averaged' (the DEFAULT): today's operator, the cell mu(C) and the 4-cell mean on the "
+          "MAC edges, first order across an oblique interface. 'sharp': on every band edge the "
+          "row's own PLIC face-fraction viscosity (implicit band and explicit transpose), a "
+          "per-link interface-traction correction from a kinked least-squares fit of the "
+          "interface state, and the cell midsection force of the normal-stress jump 2[mu]D_nn "
+          "(explicit on u^n) - second order. 'sharp' needs the staggered Solver, VoF, mu = "
+          "LinearMix(C) (set_property_model('mu', 'linear', 'C', ...)) and the full viscous "
+          "stress; step() raises with the harmonic face viscosity, immersed solids, porous "
+          "momentum, moving scene instances or phase change. Inert for a uniform mu. Any other "
+          "mode raises ValueError.")
+      .def(
+          "vof_viscous_interface", [](D& diag) { return diag.s->vofViscousInterface(); },
+          "The selected viscous interface mode (see set_vof_viscous_interface).")
+      .def(
+          "vof_viscous_interface_census",
+          [](D& diag) {
+            const auto c = diag.s->vofViscousInterfaceCensus();
+            nb::dict d;
+            d["band_cells"] = c.band;
+            d["virtual_cells"] = c.virt;
+            d["film_cells"] = c.film;
+            d["fit_fallbacks"] = c.fallback;
+            return d;
+          },
+          "The sharp interface band of the last step, LOCAL to this rank (sum over ranks "
+          "yourself): 'band_cells' (interfacial cells, PLIC and virtual planes), "
+          "'virtual_cells' (pure cells carrying a face plane), 'film_cells' (virtual cells "
+          "whose two neighbours along the plane axis are both of the other phase) and "
+          "'fit_fallbacks' (cells whose interface fit was singular: tau = D_nn = 0, first order "
+          "locally). All zero while the sharp interface is inactive.")
+      .def(
           "set_vof_momentum_muscl", [](D& diag, bool on) { diag.s->setVofMomentumMuscl(on); },
           nb::arg("on") = true,
           "Former spelling of set_vof_momentum_scheme: on = 'muscl_mixed' (a MinMod slope of the "

@@ -212,3 +212,15 @@ foreach(np 1 2 4)
   add_test(NAME vof_advect_mpi_np${np}
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_vof_advect_mpi>)
 endforeach()
+
+# doc/vof_sharp_viscous_stress.md WO-5 (G-SV6, operator level): the sharp viscous interface --
+# band classes, fit, tau_hat/D_nn exchange, implicit band, explicit band terms -- BITWISE against
+# the single-rank evaluation, triply periodic and with y walls. np 4 must cut two axes.
+add_executable(test_sharp_viscous_mpi test_sharp_viscous_mpi.cpp)
+target_include_directories(test_sharp_viscous_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../src ${PECLET_CORE_INCLUDE})
+target_link_libraries(test_sharp_viscous_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX peclet_flow_solver_mpi)
+foreach(np 1 2 4)
+  add_test(NAME sharp_viscous_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} ${MPIEXEC_PREFLAGS} $<TARGET_FILE:test_sharp_viscous_mpi>)
+endforeach()

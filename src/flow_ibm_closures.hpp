@@ -259,6 +259,14 @@ void Solver<Grid>::addFullStressRhsComp(int c) {
   // §5.5: the low-face node of component c on a non-periodic global c-face is BC-imposed data.
   const bool skipLo = bc_[2 * c] != 0 && touchesGlobalFace(2 * c);
   const CCConst v[3] = {CCConst(old_[0]), CCConst(old_[1]), CCConst(old_[2])};
+  if (sharpActive_) {  // the band transpose with the row's own face mu, then the band terms
+    addFullStressRhs<vof::SharpFaceProps, false>(c, C[c].b, CCConst(C[c].rscale), v,
+                                                 makeSharpFaceProps(c), e_, G, u_.w[c], skipLo);
+    const CCConst t[3] = {CCConst(svTau_[0]), CCConst(svTau_[1]), CCConst(svTau_[2])};
+    vof::addSharpViscousRhs(c, C[c].b, CCConst(C[c].rscale), v, sharpGeom_, t, CCConst(svDnn_), G,
+                            u_.w[c], skipLo);
+    return;
+  }
   if (hasSolid_) {
     const RegConst reg[3] = {fsReg_[0], fsReg_[1], fsReg_[2]};
     addFullStressRhs<VarFaceProps, true>(c, C[c].b, CCConst(C[c].rscale), v, makeFaceProps(c), e_,
@@ -602,6 +610,166 @@ void Solver<Grid>::addDragDiagonal(int c) {
         const double bd = Grid::atVelocity(beta, i, sc);
         AC(i) = (MReal)((double)AC(i) + bd);
       });
+}
+
+// ---- sharp viscous interface (doc/vof_sharp_viscous_stress.md) -------------------------------
+
+template <class Grid>
+void Solver<Grid>::setVofViscousInterface(const std::string& mode) {
+  if (mode == "sharp") {
+    if constexpr (Grid::collocated)
+      throw std::runtime_error(
+          "SolverColocated.diagnostics.set_vof_viscous_interface('sharp'): the sharp viscous "
+          "interface is staggered-only (doc/vof_sharp_viscous_stress.md §8); use "
+          "peclet.flow.Solver");
+    sharpVisc_ = true;
+    return;
+  }
+  if (mode == "averaged") {
+    sharpVisc_ = false;
+    sharpActive_ = false;
+    return;
+  }
+  throw std::invalid_argument("set_vof_viscous_interface: unknown mode '" + mode +
+                              "' (expected 'sharp' or 'averaged')");
+}
+
+template <class Grid>
+std::string Solver<Grid>::vofViscousInterface() const {
+  return sharpVisc_ ? "sharp" : "averaged";
+}
+
+template <class Grid>
+void Solver<Grid>::resolveSharpViscous() {
+  sharpActive_ = false;
+  if (!sharpVisc_)
+    return;
+  const auto refuse = [](const char* why) {
+    throw std::runtime_error(std::string("set_vof_viscous_interface('sharp') ") + why +
+                             " (doc/vof_sharp_viscous_stress.md §1, §9); call "
+                             "diagnostics.set_vof_viscous_interface('averaged') for this "
+                             "configuration");
+  };
+  if (!vofEnabled_)
+    refuse("needs the VoF colour field (enable_vof)");
+  if (harmonicMu_)
+    refuse("replaces the harmonic face viscosity; it does not combine with it");
+  if (!varProps_)
+    return;  // a constant mu: nothing to sharpen (inert)
+  if (hasSolid_)
+    refuse("does not support immersed solids (v1)");
+  if (porous_)
+    refuse("does not support porous (eps-weighted) momentum");
+  if (hasMotion_)
+    refuse("does not support moving scene instances");
+  if (pcEnabled_)
+    refuse("does not support phase change ([u] != 0 breaks the kink model)");
+  if (!fullStressActive())
+    refuse("needs the full viscous stress (set_viscous_stress('auto' or 'full'))");
+  const Closure* cl = nullptr;  // the LAST closure writing mu is the one in force
+  for (const auto& c : closures_)
+    if (c.outName == "mu")
+      cl = &c;
+  if (!cl || cl->kind != ClosureKind::LinearMix || cl->in0Name != "C" || !cl->in1Name.empty())
+    refuse(
+        "supports mu = LinearMix(C) only, set_property_model('mu', 'linear', 'C', [mu_0, mu_1 - "
+        "mu_0]) (v1, §12 Q7)");
+  vof::SharpGeom& g = sharpGeom_;
+  g.p0 = cl->p[0];
+  g.p1 = cl->p[1];
+  g.muB = g.p0;         // mu(0)
+  g.muA = g.p0 + g.p1;  // mu(1)
+  if (g.muA == g.muB)
+    return;  // uniform mu: inert, the skip rule of the full stress
+  if (!(g.muA > 0.0 && g.muB > 0.0))
+    refuse("needs positive phase viscosities");
+  g.lowA = g.muA < g.muB;
+  g.mulo = g.lowA ? g.muA : g.muB;
+  g.r = g.lowA ? g.muA / g.muB : g.muB / g.muA;
+  sharpActive_ = true;
+}
+
+template <class Grid>
+void Solver<Grid>::sharpViscousGeometry() {
+  // §7 / Q9: the planes of the CURRENT colour. The curvature cascade has just reconstructed them
+  // on vofCurv_ when the single-field CSF ran this step; otherwise reconstruct them here, on the
+  // same block, with the same predicate (VofCurvature::interfaceEps).
+  const bool fresh = csfActive() && !vofBlockCsf() && !kappaFrozen_;
+  if (!fresh) {
+    bridgeColourToVof();
+    if (vofCurv_.useWorklist)
+      vofCurv_.compact(vofAdv_.colour());
+    vofCurv_.reconstructPlanes(vofAdv_.colour());
+  }
+  const std::size_t n = (std::size_t)n_;
+  if (svCls_.extent(0) != n) {
+    CCExec space;
+    svCls_ = vof::SvByte(
+        Kokkos::view_alloc(space, "peclet::flow::sharp_cls", Kokkos::WithoutInitializing), n);
+    svFb_ = vof::SvByte(Kokkos::view_alloc(space, "peclet::flow::sharp_fb"), n);
+    for (int a = 0; a < 3; ++a)
+      svTau_[a] = CCField(Kokkos::view_alloc(space, "peclet::flow::sharp_tau"), n);
+    svDnn_ = CCField(Kokkos::view_alloc(space, "peclet::flow::sharp_dnn"), n);
+  }
+  vof::SharpGeom& g = sharpGeom_;
+  const int ee[3] = {e_.x, e_.y, e_.z};
+  g.e[0] = e_.x;
+  g.e[1] = e_.y;
+  g.e[2] = e_.z;
+  g.st[0] = 1;
+  g.st[1] = e_.x;
+  g.st[2] = (long)e_.x * e_.y;
+  g.st3[0] = 1;
+  g.st3[1] = e3_.x;
+  g.st3[2] = (long)e3_.x * e3_.y;
+  g.d = kVofG - G;
+  g.col = CCConst(vofAdv_.colour());
+  for (int a = 0; a < 3; ++a)
+    g.pm[a] = CCConst(vofCurv_.planeM(a));
+  g.pa = CCConst(vofCurv_.planeAlpha());
+  g.cls = svCls_;
+  // The physical domain (§5.3, §5.7 Q-B): the cells beyond a non-periodic global face this rank
+  // touches are outside it.
+  constexpr int kOpen = 1 << 28;
+  for (int a = 0; a < 3; ++a) {
+    g.dlo[a] = (bc_[2 * a] != 0 && touchesGlobalFace(2 * a)) ? G : -kOpen;
+    g.dhi[a] = (bc_[2 * a + 1] != 0 && touchesGlobalFace(2 * a + 1)) ? ee[a] - G : kOpen;
+  }
+  g.eps = vofCurv_.interfaceEps;
+  const vof::VofMetric gm = u_.vofMetric();
+  g.gm = gm;
+  for (int a = 0; a < 3; ++a)
+    g.ell[a] = gm.h[a];
+  vof::sharpClassify(g, svCls_);
+}
+
+template <class Grid>
+void Solver<Grid>::sharpViscousFit() {
+  if (muUniform_)
+    return;  // the full stress skips every term: so does the sharp interface
+  const CCConst v[3] = {CCConst(old_[0]), CCConst(old_[1]), CCConst(old_[2])};
+  vof::sharpFit(sharpGeom_, v, svTau_[0], svTau_[1], svTau_[2], svDnn_, svFb_, C3{G, G, G},
+                C3{e_.x - G, e_.y - G, e_.z - G});
+  // §7: tau_hat at an edge on the block boundary may be a first-ghost cell's -- one exchange.
+  for (int a = 0; a < 3; ++a)
+    fillGhosts(svTau_[a]);
+  fillGhosts(svDnn_);
+}
+
+template <class Grid>
+vof::SharpFaceProps Solver<Grid>::makeSharpFaceProps(int c) {
+  vof::SharpFaceProps fp;
+  fp.base = makeFaceProps(c);
+  fp.geo = sharpGeom_;
+  fp.c = c;
+  return fp;
+}
+
+template <class Grid>
+vof::SharpCensus Solver<Grid>::vofViscousInterfaceCensus() const {
+  if (!sharpActive_ || svCls_.extent(0) != (std::size_t)n_)
+    return vof::SharpCensus{};
+  return vof::sharpCensus(sharpGeom_, svFb_, C3{G, G, G}, C3{e_.x - G, e_.y - G, e_.z - G});
 }
 
 }  // namespace peclet::flow
