@@ -761,14 +761,11 @@ slope of log e against log h over the stated resolutions.
     at D_hi = 100, to a velocity-increment ≤ 1e-12·max|u|.
   - N = 24, 32, 48, 64: the branch §3.4 pre-registered, ruled in §5.7 Q-C. It was 16, 24, 32, 48.
     Error = max |u_h − ū_face| / max|ū_face|.
-  - PASS: order ≥ 1.8 for every orientation × offset × ratio. Couette passes as "exact" if
-    e ≤ 1e-10 at every N.
-  - Reported alongside, per orientation × ratio × case:
-    - the offset envelope e_env(N) = max over the 8 offsets, its LS order, and e_env·N²;
-    - the minimum per-offset order.
-  - Which measure binds is §12 Q13. Until the user rules, the PASS line above binds.
-  - A MISS as written, with an envelope order ≥ 1.8, is reported as such and not tuned. WO-7 continues;
-    the AUTO flip (Q4) waits for Q13.
+  - **PASS (USER 2026-10-31, §12 Q13 decided):** per orientation × ratio × case, the offset envelope
+    e_env(N) = max over the 8 offsets of the max-norm error; PASS iff the LS order of e_env over
+    N = 24, 32, 48, 64 is ≥ 1.8. Couette passes as "exact" if e ≤ 1e-10 at every N (unchanged).
+  - Reported alongside, not gating: e_env·N², and the per-offset LS orders (their minimum). The
+    earlier reading "order ≥ 1.8 for every orientation × offset × ratio" is superseded.
   - The 2-D a-priori version is in §3.4.
 - **G-SV2 — Hadamard–Rybczynski, κ = 1e-2, 1, 1e2.**
   - Steady Stokes: advection off, colour frozen. Periodic box L = 8R; drop driven by its buoyancy Δρg.
@@ -784,16 +781,20 @@ slope of log e against log h over the stated resolutions.
   reported.
 - **G-SV5.** Uniform μ bitwise; non-VoF `state_hash` digests unchanged; full battery green on host and
   CUDA. 'averaged' bitwise equal to today.
-- **G-SV6.** np 1/2/4 bitwise, host and CUDA. Sharp on, P1 d/h 16 for 20 steps, plus the G-SV1
-  configuration at N = 24.
+- **G-SV6.** Sharp on, P1 d/h 16 for 20 steps, plus the G-SV1 configuration at N = 24 (walled,
+  σ = 0). **USER 2026-10-31** (replaces "np 1/2/4 bitwise" at solver level, which today's
+  'averaged' path already misses at 1.1e-15): PASS iff max|u_np − u_np1| / max|u| ≤
+  max(1e-12, 1.1 × the 'averaged' path's deviation on the same case), for np = 2 and 4, host and
+  CUDA. The operator-level ctest `sharp_viscous_mpi_np{1,2,4}` stays bitwise.
 - **G-SV7.** P1 d/h 24 ms/step ≤ 1.2 × 'averaged' (same build, same GPU).
 - **G-SV8.** P1 at ρ ratio 1e-4, μ ratio 1e-3 runs 10 t-units without blow-up.
 
 **Added.**
 
 - **G-SV1c (along mode).** Same configurations as G-SV1 with u = ε(ξn − ηt₁) and the exact pressure jump.
-  Error ≤ 1e-9 at every N. Poiseuille + extension: order ≥ 1.8.
-- **G-SV1d.** G-SV1 at μ ratio 1e-3 and 1e3 (the G-SV8 contrast). Same thresholds.
+  Error ≤ 1e-9 at every N. Poiseuille + extension: order ≥ 1.8 (the envelope order, USER 2026-10-31).
+- **G-SV1d.** G-SV1 at μ ratio 1e-3 and 1e3 (the G-SV8 contrast). Same thresholds (envelope order,
+  USER 2026-10-31).
 - **G-SV9 (stability; replaces the FVS §6 proof in the band).**
   - (a) 2-D harness: ρ(G) ≤ 1 + 1e-12 for the table in §6 at N = 16 and 32.
   - (b) 3-D homogeneous march, N = 16.
@@ -829,7 +830,7 @@ slope of log e against log h over the stated resolutions.
 | Q9 | Plane source when σ = 0 | **fact** (does VofCurvature exist with σ = 0?) | Construct and reconstruct it in the step when sharp is active. |
 | Q10 | Curved interface: one plane per fit block (O(κh) model error) | **fact** (G-SV2 order) | Accept. If G-SV2 misses only at d/h 8–12, report it; do not add curvature terms without the architect. |
 | Q12 | τ̂ at edges: band mean, owner only, or interfacial mean | **fact** — settled by E1/E2 (§5.7 Q-A) | Interfacial mean. Fits run on interfacial cells only; all three rules have the same order. |
-| Q13 | G-SV1's measurement: per-offset LS order (as written) or the offset envelope (§5.7 Q-C) | **user preference** (what the gate means; not to be ruled after the 3-D data are in) | As written binds, and the envelope is reported beside it. Recommended: the envelope, ruled before WO-6's numbers are read. |
+| Q13 | G-SV1's measurement: per-offset LS order or the offset envelope (§5.7 Q-C) | **user preference** — **DECIDED USER 2026-10-31** | The envelope order binds (§11 G-SV1); per-offset orders reported, not gating. |
 | Q11 | Collocated | **user preference** (sequencing) | §8 order: full stress on collocated first; this design is not ported until then. |
 
 ---
