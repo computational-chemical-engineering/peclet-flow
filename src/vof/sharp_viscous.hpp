@@ -235,6 +235,44 @@ struct SharpGeom {
     }
   }
 
+  /// The explicit interface-traction part of the u_row stress at E_ac(k) (§5.4 a), row ∈ {a, c}:
+  ///   n_a τ̂_c (1 − μ̄ R̄_ac) + n_c τ̂_a (1 − μ̄ R̄_ca),  μ̄ = μ(F_row(E)),
+  /// (n from the owner, τ̂ the interfacial mean). Zero on a non-band edge.
+  KOKKOS_INLINE_FUNCTION double edgeTraction(const int k[3], int a, int c, int row,
+                                             const CCConst (&tau)[3]) const {
+    int o[3];
+    double m[3], al;
+    if (!edgeOwner(k, a, c, o, m, al))
+      return 0.0;
+    double n[3] = {0.0, 0.0, 0.0};
+    vofPhysNormal(m, gm, n);
+    const double mub = mu(rowFaceFraction(k, a, c, row, o, m, al));
+    const double rac = res(linkFraction(k, a, c, o, m, al));
+    const double rca = res(linkFraction(k, c, a, o, m, al));
+    double t[3];
+    edgeTau(k, a, c, tau, t);
+    return n[a] * t[c] * (1.0 - mub * rac) + n[c] * t[a] * (1.0 - mub * rca);
+  }
+
+  /// The explicit part of the u_c stress at cell q beyond today's 2μ(C)∂_c u_c (§5.4 b):
+  ///   2(μ_A − μ_B)(C̄ − C)(∂_c u_c − D̂_nn) + 2 n_c τ̂_c (1 − μ(C̄) R(C)),
+  /// C̄ the c-midsection fraction of the cell's own plane. Zero unless the cell is interfacial.
+  KOKKOS_INLINE_FUNCTION double cellExtra(const int q[3], int c, const CCConst (&v)[3],
+                                          const CCConst (&tau)[3], CCConst dnn) const {
+    const int kc = cellClass(q);
+    if (kc == kSvNone)
+      return 0.0;
+    double m[3], al;
+    plane(q, kc, m, al);
+    double n[3] = {0.0, 0.0, 0.0};
+    vofPhysNormal(m, gm, n);
+    const double cb = plicMidsectionFraction(m, al, c), cc = colour(q);
+    const long j = idx(q);
+    const double mcc = v[c](j + st[c]) - v[c](j);
+    return 2.0 * (muA - muB) * (cb - cc) * (mcc - dnn(j)) +
+           2.0 * n[c] * tau[c](j) * (1.0 - mu(cb) * res(cc));
+  }
+
   /// One least-squares row of the kinked model (§5.3) for link ∂_a u_c with C = 1 kernel fraction
   /// `thA` and datum `mv`: coefficient of L_pq = δ_ap δ_cq + (1−θ_lo)(r−1) n_a [(Pe_c)_p n_q +
   /// (Pe_c)_q n_p], accumulated into the normal equations (upper triangle, row-major 9×9).
@@ -458,6 +496,39 @@ inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCF
         t2(i) = t[2];
         dnn(i) = dn;
         fb(i) = f;
+      });
+}
+
+/// The explicit band terms of the u_c rows over the inner cells [g, e−g)³ (§5.4): the τ-terms of
+/// the four (a, c) edges and the cell midsection + τ-terms at i and i − s_c,
+///   bb_c(i) += rs(i) · [ w_c (X(i) − X(i−s_c)) + Σ_a (Y(E_ac(i+s_a)) − Y(E_ac(i))) / (ℓ_a ℓ_c) ],
+/// a1 < a2 in that association order. The band transpose itself is `addFullStressRhs` with
+/// `SharpFaceProps`. `tau`/`dnn` ghosts filled to depth 1 incl. edges; `skipLoC` as there.
+inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)[3],
+                               const SharpGeom& gg, const CCConst (&tau)[3], CCConst dnn, int g,
+                               double wc, bool skipLoC) {
+  const SharpGeom geo = gg;
+  const int a1 = (c == 0) ? 1 : 0, a2 = (c == 2) ? 1 : 2;
+  const double f1 = 1.0 / (geo.ell[a1] * geo.ell[c]), f2 = 1.0 / (geo.ell[a2] * geo.ell[c]);
+  const CCConst v0 = v[0], v1 = v[1], v2 = v[2], t0 = tau[0], t1 = tau[1], t2 = tau[2];
+  const int lo[3] = {g + ((skipLoC && c == 0) ? 1 : 0), g + ((skipLoC && c == 1) ? 1 : 0),
+                     g + ((skipLoC && c == 2) ? 1 : 0)};
+  ccForRows3(
+      "peclet::flow::vof::sharp_viscous_rhs", C3{lo[0], lo[1], lo[2]},
+      C3{geo.e[0] - g, geo.e[1] - g, geo.e[2] - g}, KOKKOS_LAMBDA(int x, int y, int z) {
+        const CCConst vv[3] = {v0, v1, v2}, tt[3] = {t0, t1, t2};
+        const int q[3] = {x, y, z};
+        int qm[3] = {x, y, z};
+        qm[c] -= 1;
+        const double xc = geo.cellExtra(q, c, vv, tt, dnn) - geo.cellExtra(qm, c, vv, tt, dnn);
+        int p1[3] = {x, y, z}, p2[3] = {x, y, z};
+        p1[a1] += 1;
+        p2[a2] += 1;
+        const double y1 = geo.edgeTraction(p1, a1, c, c, tt) - geo.edgeTraction(q, a1, c, c, tt);
+        const double y2 = geo.edgeTraction(p2, a2, c, c, tt) - geo.edgeTraction(q, a2, c, c, tt);
+        const double t = (wc * xc + f1 * y1) + f2 * y2;
+        const long i = geo.idx(q);
+        bb(i) += rs(i) * t;
       });
 }
 

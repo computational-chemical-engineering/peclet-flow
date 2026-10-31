@@ -17,6 +17,12 @@
 //       1 : 1.5 : 2): every band-edge entry = -mu(F_c(E)) w_a of a host oracle (owner + PLIC face
 //       fraction), every non-band entry and every cell/diagonal of a row without a band edge
 //       bitwise 'averaged' (VarFaceProps), per-component symmetry bitwise, M-matrix;
+//   (f) WO-4, the explicit kernel against a host transcription (sample arrays, then the
+//       divergence; random u, tau_hat, D_nn, row scale): <= 1e-13 relative;
+//   (g) WO-4, the full operator (implicit band + band transpose + tau-terms + midsection - grad p,
+//       p the exact cell-average pressure) on exact face averages of kinked-linear Couette and
+//       extension at the 9 orientations, offsets 0 / 0.3, 4 ratios, both metrics: residual
+//       <= 1e-11 of the stress scale.
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -29,6 +35,7 @@
 #include <vector>
 
 #include "cut_cell_ibm.hpp"
+#include "full_stress.hpp"
 #include "vof/sharp_viscous.hpp"
 
 #ifndef SHARP_VISCOUS_REF
@@ -1020,6 +1027,192 @@ void testBand() {
   CHECK(badSym == 0 && badM == 0, "symmetric M-matrix");
 }
 
+// Host transcription of the explicit band terms of the u_c rows (§5.4): sample arrays, then the
+// divergence.
+double hostCellExtra(const HostGeo& h, const int q[3], int c, const std::vector<double> (&v)[3],
+                     const std::vector<double> (&tau)[3], const std::vector<double>& dnn) {
+  if (h.cl(q) == 0)
+    return 0.0;
+  double m[3], al, n[3];
+  h.plane(q, m, al);
+  h.normal(m, n);
+  double lo[3] = {0, 0, 0};
+  const double cb = HostGeo::boxFrac(m, al, c, 0.5, lo), C = h.C(q);
+  const long j = h.b->id(q[0], q[1], q[2]);
+  const double mcc = v[c][j + h.b->st[c]] - v[c][j];
+  return 2.0 * (h.muA - h.muB) * (cb - C) * (mcc - dnn[j]) +
+         2.0 * n[c] * tau[c][j] * (1.0 - h.mu(cb) * h.res(C));
+}
+double hostEdgeY(const HostGeo& h, const int k[3], int a, int c,
+                 const std::vector<double> (&tau)[3]) {
+  int o[3];
+  double m[3], al, n[3];
+  if (!h.owner(k, a, c, o, m, al))
+    return 0.0;
+  h.normal(m, n);
+  const double mub = h.mu(h.rowFace(k, a, c, c, o, m, al));
+  const double rac = h.res(h.link(k, a, c, o, m, al)), rca = h.res(h.link(k, c, a, o, m, al));
+  double t[3] = {0, 0, 0};
+  int nI = 0;
+  for (auto& q : h.cells4(k, a, c))
+    nI += h.cl(q.data()) != 0;
+  for (auto& q : h.cells4(k, a, c))
+    if (h.cl(q.data()) != 0)
+      for (int s = 0; s < 3; ++s)
+        t[s] += tau[s][h.b->id(q[0], q[1], q[2])] / nI;
+  return n[a] * t[c] * (1.0 - mub * rac) + n[c] * t[a] * (1.0 - mub * rca);
+}
+
+// (f) WO-4: the explicit kernel against the host transcription.
+void testRhsOracle() {
+  std::mt19937 rng(5);
+  std::uniform_real_distribution<double> U(-1.0, 1.0);
+  double worst = 0;
+  long nRow = 0;
+  for (int an = 0; an < 2; ++an)
+    for (double ratio : {1e-2, 1e3}) {
+      Blk b(12, 12, 12);
+      double ell[3] = {1.0, 1.0, 1.0};
+      if (an) {
+        ell[1] = 1.5;
+        ell[2] = 2.0;
+      }
+      std::vector<double> col, pm[3], pa, v[3], tau[3], dnn(b.cells), rs(b.cells);
+      sphereGeom(b, ell, col, pm, pa);
+      for (int a = 0; a < 3; ++a) {
+        v[a].resize(b.cells);
+        tau[a].resize(b.cells);
+        for (long i = 0; i < b.cells; ++i) {
+          v[a][i] = U(rng);
+          tau[a][i] = U(rng);
+        }
+      }
+      for (long i = 0; i < b.cells; ++i) {
+        dnn[i] = U(rng);
+        rs[i] = 1.0 + 0.25 * U(rng);
+      }
+      const int dlo[3] = {-kBig, -kBig, -kBig}, dhi[3] = {kBig, kBig, kBig};
+      const double muA = ratio, muB = 1.0;
+      Geo o = makeGeo(b, col, pm, pa, v, dlo, dhi, 1e-12, muA, muB, ell);
+      HostGeo hg = hostGeo(b, o, 1e-12, muA, muB, ell);
+      DV td[3] = {toDev(tau[0]), toDev(tau[1]), toDev(tau[2])}, dd = toDev(dnn), rd = toDev(rs);
+      const CCConst tc[3] = {td[0], td[1], td[2]}, vc[3] = {o.v[0], o.v[1], o.v[2]};
+      for (int c = 0; c < 3; ++c) {
+        DV bb("bb", b.cells);
+        const double wc = 1.0 / (ell[c] * ell[c]);
+        sv::addSharpViscousRhs(c, bb, CCConst(rd), vc, o.g, tc, CCConst(dd), b.G, wc, false);
+        Kokkos::fence();
+        auto bh = toHost(bb);
+        const int a1 = c == 0 ? 1 : 0, a2 = c == 2 ? 1 : 2;
+        double mx = 0, md = 0;
+        for (int z = b.G; z < b.e[2] - b.G; ++z)
+          for (int y = b.G; y < b.e[1] - b.G; ++y)
+            for (int x = b.G; x < b.e[0] - b.G; ++x) {
+              const int q[3] = {x, y, z};
+              int qm[3] = {x, y, z}, p1[3] = {x, y, z}, p2[3] = {x, y, z};
+              qm[c] -= 1;
+              p1[a1] += 1;
+              p2[a2] += 1;
+              const double X =
+                  hostCellExtra(hg, q, c, v, tau, dnn) - hostCellExtra(hg, qm, c, v, tau, dnn);
+              const double Y1 = hostEdgeY(hg, p1, a1, c, tau) - hostEdgeY(hg, q, a1, c, tau);
+              const double Y2 = hostEdgeY(hg, p2, a2, c, tau) - hostEdgeY(hg, q, a2, c, tau);
+              const long i = b.id(x, y, z);
+              const double ex =
+                  rs[i] * (wc * X + Y1 / (ell[a1] * ell[c]) + Y2 / (ell[a2] * ell[c]));
+              mx = std::max(mx, std::fabs(ex));
+              md = std::max(md, std::fabs(bh[i] - ex));
+              nRow += (ex != 0.0);
+            }
+        worst = std::max(worst, md / mx);
+      }
+    }
+  std::printf("(f) explicit kernel vs host oracle: %ld nonzero rows, worst %.2e relative\n", nRow,
+              worst);
+  CHECK(nRow > 500 && worst <= 1e-13, "explicit kernel vs host oracle");
+}
+
+// (g) WO-4: the full operator on exact face averages of kinked-linear fields (Couette and
+// extension, 9 orientations) -- implicit band + band transpose + tau-terms + midsection - grad p.
+void testPatch() {
+  const double angs[3] = {0.0, 22.5, 45.0};
+  double worst = 0;
+  long nCase = 0;
+  for (int an = 0; an < 2; ++an)
+    for (int ib = 0; ib < 3; ++ib)
+      for (int ig = 0; ig < 3; ++ig)
+        for (double off : {0.0, 0.3})
+          for (double ratio : {1e-2, 1e2, 1e-3, 1e3})
+            for (int kind = 0; kind < 2; ++kind) {
+              KCase kc{Blk(8, 8, 8), {}, {1.0, 1.0, 1.0}, {}, {}, {}, {}};
+              if (an) {
+                kc.ell[1] = 1.5;
+                kc.ell[2] = 2.0;
+              }
+              const double be = angs[ib] * kPi / 180, ga = angs[ig] * kPi / 180;
+              Kinked& K = kc.K;
+              K.n[0] = std::cos(be) * std::cos(ga);
+              K.n[1] = std::cos(be) * std::sin(ga);
+              K.n[2] = std::sin(be);
+              double t1[3] = {-std::sin(ga), std::cos(ga), 0.0};
+              for (int a = 0; a < 3; ++a)
+                K.xp[a] = kc.ell[a] * 6.0 + off * K.n[a];
+              K.muA = ratio;
+              K.muB = 1.0;
+              const double mulo = std::min(K.muA, K.muB), muhi = std::max(K.muA, K.muB);
+              for (int p = 0; p < 3; ++p)
+                for (int q = 0; q < 3; ++q)
+                  K.Llo[3 * p + q] =
+                      kind == 0 ? K.n[p] * t1[q] / mulo : K.n[p] * K.n[q] - t1[p] * t1[q];
+              setKink(K, ratio);
+              buildKinked(kc);
+              const Blk& b = kc.b;
+              const int dlo[3] = {-kBig, -kBig, -kBig}, dhi[3] = {kBig, kBig, kBig};
+              Geo o = makeGeo(b, kc.col, kc.pm, kc.pa, kc.v, dlo, dhi, 0.0, K.muA, K.muB, kc.ell);
+              DV mu = muField(b, kc.col, K.muA, K.muB);
+              const double w[3] = {1.0 / (kc.ell[0] * kc.ell[0]), 1.0 / (kc.ell[1] * kc.ell[1]),
+                                   1.0 / (kc.ell[2] * kc.ell[2])};
+              const double dnnEx = kind == 0 ? 0.0 : 1.0;
+              const double jump = 2.0 * (K.muA - K.muB) * dnnEx;  // p_A - p_B
+              const double scale = kind == 0 ? 1.0 : 2.0 * muhi;
+              const CCConst vc[3] = {o.v[0], o.v[1], o.v[2]};
+              const CCConst tc[3] = {o.tau[0], o.tau[1], o.tau[2]};
+              DV ones("rs", b.cells);
+              Kokkos::deep_copy(ones, 1.0);
+              double md = 0;
+              for (int c = 0; c < 3; ++c) {
+                sv::SharpFaceProps sp = sharpFP(o, mu, c, 0.0);
+                auto A = buildBands(b, sp, w);
+                DV bb("bb", b.cells);
+                addFullStressRhs<sv::SharpFaceProps, false>(
+                    c, bb, CCConst(ones), vc, sp, C3{b.e[0], b.e[1], b.e[2]}, b.G, w[c], false);
+                sv::addSharpViscousRhs(c, bb, CCConst(ones), vc, o.g, tc, CCConst(o.dnn), b.G, w[c],
+                                       false);
+                Kokkos::fence();
+                auto bh = toHost(bb);
+                const auto& vh = kc.v[c];
+                for (int z = b.G + 1; z < b.e[2] - b.G - 1; ++z)
+                  for (int y = b.G + 1; y < b.e[1] - b.G - 1; ++y)
+                    for (int x = b.G + 1; x < b.e[0] - b.G - 1; ++x) {
+                      const long i = b.id(x, y, z);
+                      double Ku = A[0][i] * vh[i];
+                      for (int f = 0; f < 6; ++f)
+                        Ku += A[1 + f][i] * vh[i + (f % 2 ? 1 : -1) * b.st[f / 2]];
+                      int qm[3] = {x, y, z};
+                      qm[c] -= 1;
+                      const double pi = jump * kc.col[b.id3(x, y, z)],
+                                   pm_ = jump * kc.col[b.id3(qm[0], qm[1], qm[2])];
+                      const double R = -Ku + bh[i] - w[c] * (pi - pm_);
+                      md = std::max(md, std::fabs(R));
+                    }
+              }
+              ++nCase;
+              worst = std::max(worst, md / scale);
+            }
+  std::printf("(g) operator patch test: %ld cases, worst residual %.2e of the stress scale\n",
+              nCase, worst);
+  CHECK(worst <= 1e-11, "kinked-linear patch test");
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1030,6 +1223,8 @@ int main(int argc, char** argv) {
     testVirtual();
     testSeam();
     testBand();
+    testRhsOracle();
+    testPatch();
   }
   Kokkos::finalize();
   if (failures)
