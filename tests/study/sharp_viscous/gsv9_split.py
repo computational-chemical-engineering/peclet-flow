@@ -10,7 +10,8 @@ harness : 2-D dense rho(G), G = P (M+K)^-1 (M+K-A), for two implicit splits of t
           A = sharp (§5.7 interfacial-mean tau) or averaged (today's arithmetic operator).
 prod    : the PRODUCTION step map on a 3-D case, linear with the colour frozen, by Arnoldi
           (scipy eigs) on u -> step(u). Non-incremental projection and converged solves by default
-          (RB-GS to 1e-15, the Chebyshev pressure driver to 1e-13 -- the CG drivers return wrong
+          (RB-GS to an update of 1e-15 of the first, residual stop off; the Chebyshev pressure
+          driver to 1e-13 -- the CG drivers return wrong
           fields at density ratio 1e4), so that it is the harness's G. --incremental runs the
           production incremental-rotational step on the full state (u, v, w, p), p through
           get_field/set_field("p") with its mean removed (G-SV9(e)); --prodsolve keeps gsv9.py's
@@ -185,6 +186,10 @@ def cmd_prod(a):
             True, 20000, 1e-13)
         dg.set_velocity_solver("gauss_seidel")
         dg.set_velocity_solver_params(200000, 1e-15, 2)
+        # The update stop above only binds with the residual stop off: the default residual mode
+        # (following the pressure rtol) has a stagnation guard that exits early on the stiff sharp
+        # rows after WO-5b (measured: exit residual 1.6e-4, linearity 2.5e-2 on ext N16 D_hi 1e4).
+        s.set_velocity_residual_tolerance(0.0)
     zper = a.geom == "ext"
     shp = (N, N, Nz)
     lo = [1, 1, 0 if zper else 1]  # face index 0 is the wall face (zero) on a walled axis
