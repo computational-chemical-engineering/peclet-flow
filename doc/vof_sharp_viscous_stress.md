@@ -59,6 +59,17 @@ Builds on `doc/full_viscous_stress.md` (cited as FVS) and `doc/variable_viscosit
   - The virtual-plane tie goes to the low face. A 1-cell film gets planes, not a fallback.
   - The 33.75° shortfall is pre-asymptotic. WO-6 proceeds with G-SV1 at N = 24–64. Whether G-SV1 is
     judged per offset or on the offset envelope is the user's call (§12 Q13).
+- **Third-pass rulings (§6.1–§6.4, WO-5b and WO-6s, §11, §12 Q14–Q19).**
+  - *The G-SV9(b) blow-up is not a 3-D mode.* §6's spectra kept the whole cell normal stress 2μ(C)m_cc
+    implicit. The code runs today's split, μ(C) implicit and μ(C) explicit. On that split the 2-D harness is
+    unstable too (worst ρ 1.135), and the production step agrees with it to ≤ 0.2 % at N = 16.
+  - *Fix (WO-5b).* Interfacial cells take their normal stress fully implicit; A is unchanged.
+    Harness worst ρ 0.9859.
+  - *The film blow-ups (G-SV9(d)) were the pressure solve.* The gate forced MG-PCG at density ratio ≥ 1e3.
+    With the Chebyshev driver, both paths are stable on the film (ρ ≤ 0.72).
+  - *G-SV1 goes triply periodic (USER flag).* The wall-contact error is out of scope, conditional on
+    G-SV1W.
+  - *Steady states by GMRES on the production step (WO-6s).*
 
 ---
 
@@ -367,8 +378,11 @@ All quantities below are physical. Link differences: m_ac = (u_c(·+s_a) − u_c
 
   σ⁽ᶜ⁾_i = 2μ(C_i) m_cc + 2(μ_A − μ_B)(C̄⁽ᶜ⁾_i − C_i)(m_cc − D̂_nn,i) + 2 n_c τ̂_c,i (1 − μ(C̄⁽ᶜ⁾_i) R(C_i))
 
-- **Implicit:** μ(C)·m_cc, today's band. **Explicit:** μ(C)·m_cc (today's transpose normal element) plus
-  the last two terms.
+- **Implicit (third pass, §6.1):** on an interfacial cell, the whole 2μ(C)·m_cc. **Explicit** there: the last
+  two terms only. Every other cell keeps today's split: μ(C)·m_cc implicit, μ(C)·m_cc explicit (the
+  transpose normal element). The operator is the same either way; only the split moves.
+  - Superseded: today's split on band cells too, which is what WO-1…5 implemented. G-SV9(b) found it
+    unstable at D_hi ≥ 100 (§6.1).
 - For pure cells, C̄ = C ∈ {0,1} and μ(C)R(C) = 1, so the correction vanishes exactly.
 - Algebraically, the first two terms equal 2μ(C̄⁽ᶜ⁾)m_cc + 2(μ_B−μ_A)(C̄⁽ᶜ⁾−C)D̂_nn: the face-fraction
   normal stress plus the midsection force of the pressure jump J = 2(μ_B − μ_A)D̂_nn.
@@ -553,7 +567,10 @@ within 3e-4 at every D_hi and ratio; the largest is 0.990.
 
 The predictor is (M + K)u* = (M + K − A)uⁿ + rhs, where:
 - M = ρ_F/dt, with ρ_F as today (`face_props.hpp:70`);
-- K is the implicit per-component band (cells μ(C), band edges μ̄_c,E, non-band edges unchanged);
+- K is the implicit per-component band: band edges μ̄_c,E; non-band edges unchanged; cells 2μ(C) on
+  interfacial cells and μ(C) elsewhere (§6.1). **Third-pass correction:** the spectra below were measured with
+  2μ(C) on every cell (the harness's K). The code first ran μ(C) on every cell, and that split is unstable
+  (§6.1);
 - A is the full sharp operator.
 
 Projection and rotational correction are unchanged. The steady state is A's, independent of dt.
@@ -591,6 +608,248 @@ values at D ≈ 0.3 are the slowest physical decay.
   P1 runs at D_l ≈ 0.10 (d/h 16) to 0.32 (d/h 48).
 - **No time-step limit is introduced.** If the 3-D G-SV9 finds one, stop and return to the architect.
   Do not add a cap.
+
+### 6.1 Third pass (architect, 2026-10-31): the G-SV9(b) blow-up is the cell split, not a 3-D mode
+
+**Question.** G-SV9(b) (3-D march, plane n(22.5°, 22.5°), N = 16) blows up under 'sharp' at D_hi = 100
+and 1e4 for all four ratio pairs; 'averaged' does not. The 2-D harness above had measured ρ(G) ≤ 0.99.
+
+**Evidence.** Script `tests/study/sharp_viscous/gsv9_split.py`; logs in
+`bubble_column_perf/validation/highratio/sv_impl/arch3/` (`harness16.out`, `prod3d*.out`).
+
+- **The departure.** The harness above (`stab.py`, `gsv9a.py`) builds K with
+  `blocks(…, {"xx","yy","yu","xv"})` under `CELL_VOL`. Its cell links carry the stress factor 2, so K holds
+  the whole cell normal stress 2μ(C)m_cc. The code holds half of it:
+  - the Laplacian band (`ibmBuildDiffusionVar`, cell β = μ(C)) is implicit;
+  - the normal element N_c of `src/full_stress.hpp:12` carries the other μ(C)m_cc, explicit on uⁿ;
+  - `SharpFaceProps::beta` (`src/vof/sharp_viscous.hpp:415-418`) returns `base.beta` for the cell link,
+    to both.
+
+  §5.4(b) as first written prescribes exactly this split. So the implementation follows the note, and the
+  note's stability evidence was measured on a different split.
+- **2-D harness, N = 16.** The six geometries above × four ratio pairs. Worst ρ(G) at
+  D_hi = 0.1 / 1 / 10 / 100 / 1e4:
+
+| A | K: the cell normal stress | worst ρ(G) |
+|---|---|---|
+| sharp | K2: 2μ(C) implicit on every cell (what this section measured) | 0.9955 / 0.9886 / 0.9867 / 0.9864 / 0.9864 |
+| sharp | **K1: μ(C) implicit + μ(C) explicit (the code)** | 0.9947 / 0.9813 / **1.0381 / 1.1120 / 1.1353** |
+| sharp | **Kb: 2μ(C) implicit on interfacial cells, K1 elsewhere (chosen)** | 0.9954 / 0.9883 / 0.9862 / 0.9859 / 0.9859 |
+| averaged | K1 (today) | 0.9870 / 0.8859 / 0.9307 / 0.9742 / 0.9882 |
+| averaged | Kb (not proposed) | 0.9870 / 0.8861 / 0.5793 / 0.7111 / 0.7629 |
+
+  At D_hi = 1e4, K1 exceeds 1 in 18 of the 24 cases: every oblique one, and (0°, 0.6) at ratio 1e2 and 1e3.
+  At (0°, 0.6) with ratio 1e3 / 1e4 it already does so at D_hi = 10 (1.038). The aligned (0°, 0.2) stays
+  ≤ 0.95.
+- **The production 3-D step (the discriminating test).**
+  - *Method.* Arnoldi (scipy `eigs`) on u ↦ step(u), colour frozen, converged solves (RB-GS to 1e-15, the
+    Chebyshev pressure driver to 1e-13). The projection is non-incremental, so the map is the harness's G.
+    Linearity holds to ≤ 1e-11.
+  - *Case.* The harness case (22.5°, 0.3), extruded in z: Nz = 4, z periodic, walls on x and y.
+    D_hi = 1e4.
+
+| N | μ_A/μ_B | prod. sharp | harness K1 | harness K2 | prod. averaged | harness averaged K1 |
+|---|---|---|---|---|---|---|
+| 8 | 1e-3 | 1.0004 | 1.0218 | 0.8524 | 0.8869 | 0.8909 |
+| 8 | 1e3 | 1.0963 | 1.0912 | 0.9253 | 0.9244 | 0.9321 |
+| 16 | 1e-3 | 1.0890 | 1.0905 | 0.9339 | 0.9867 | 0.9874 |
+| 16 | 1e3 | 1.0932 | 1.0936 | 0.9288 | 0.9865 | 0.9870 |
+
+  - The leading eigenvector is z-independent with u_z = 0. The k_z = 0 subspace is invariant to 3e-12 and
+    carries the same ρ.
+  - Production matches K1 to ≤ 2 % (≤ 0.2 % at N = 16), and not K2.
+  - **Verdict: no genuine 3-D mode. The departure is the measured split.**
+- **The G-SV9(b) plane itself.** n(22.5°, 22.5°), walls on all faces, exact fractions, N = 16, the same
+  Arnoldi (pressure converged in ≤ 19 iterations).
+  - Sharp: ρ = 1.042 / 1.067 at D_hi = 100 / 1e4 (μ ratio 1e-3); 1.042 / 1.069 (1e3); 1.007 / 1.033 (1e-2);
+    1.008 / 1.035 (1e2). The leading eigenvalue is ≈ −1.04 ± 0.03i: sign-alternating.
+  - ρ² is 1.01–1.14 per step, the march's measured energy growth of 1.04–1.13.
+  - Averaged: ≤ 0.983. At D_hi = 1 and 0.1, both modes give 0.838 and 0.980.
+  - N = 12 gives the same pattern, and is stable at D_hi = 10 (0.927). `gsv9.py`'s 8³-sub-sampled colour
+    gives ρ within 1e-3 of the exact-fraction colour, so the sub-sampling is immaterial.
+- **Mechanism.**
+  - With K1, the cell normal element is split evenly: K_cell = T_cell = μ(C).
+  - The symmetric part keeps the bracket K ± T ≥ 0, and at large D it reaches λ = −1 exactly on
+    irrotational fields. So on solenoidal fields 'averaged' sits just inside −1 at large D_hi (0.983–0.988).
+  - The sharp cell terms, 2Δμ(C̄−C)(m_cc − D̂_nn) and the cell τ-term, act explicitly on the same normal
+    strain, at liquid-viscosity strength. They push that cluster past −1.
+  - With the normal element implicit on a cell, K′ − (T − N) = K − T + 2N. Reaching −1 now also needs
+    N v = 0, so the cluster moves away from −1 (to ≤ 0.76 for 'averaged' under Kb). That leaves room for the
+    sharp terms.
+
+**Decision: the fix is the split, not a dt cap (WO-5b).**
+- **The rule.** Under 'sharp', on every interfacial cell (`cellClass ≠ kSvNone`, virtual-plane cells
+  included), the u_c row's cell link along c carries:
+  - 2μ(C_i) in the implicit band;
+  - 0 in the explicit normal element N_c.
+
+  The midsection and τ-terms stay explicit, as in §5.4(b). Every other cell keeps today's split.
+- **What does not change.**
+  - A itself, its steady state and every G-SV1 result.
+  - The operator-level exactness (7.6e-12) and the G-SV6 operator ctest.
+  - 'averaged', and every u_c row not adjacent along c to an interfacial cell: bitwise.
+  - Only the transient on band rows moves.
+- **Why virtual-plane cells are included.** Their cell extras vanish (C̄ = C, μ(C̄)R(C) = 1), so including
+  them only moves a normal element into the implicit band. That is the K2 direction, which is stable.
+- **Rejected.**
+  - *A dt cap.* The instability starts at D_hi ≈ 10. G-SV1 and G-SV2 run steady Stokes at D_hi = 100, by
+    design: that is the incremental predictor's large-dt capability. A cap would hide a split defect, not
+    remove it.
+  - *K2 on every cell under 'sharp'* (the literal split measured above). The margin is the same (0.9864
+    against 0.9859). But it moves the transient of every bulk row under 'sharp': in the bulk, the explicit
+    normal element is part of a transpose that sums to zero on a solenoidal uⁿ, and moving it into the
+    implicit band changes u* by O(dt) everywhere. It would also break the §5.2 property that non-band rows
+    equal 'averaged' bitwise.
+  - *Changing 'averaged'.* Kb would also widen its margin (0.763 against 0.988). But 'averaged' is stable
+    and must stay bitwise today's (G-SV5).
+- **Not settled by this pass.** Kb is measured in 2-D only; the 3-D Kb waits for WO-5b. If G-SV9(b) or (e)
+  still finds ρ > 1 after WO-5b, stop and return to the architect. Do not tune, and do not cap dt.
+
+### 6.2 Third pass: the film, the pressure driver, the growth criterion (Q2)
+
+**G-SV9(d) failed on the pressure solve, not on the split.**
+- `gsv9.py` calls `set_pressure_pcg(True, 800, 1e-12)` after the ρ property model. That overrides the
+  Chebyshev driver which `set_property_model("rho", …)` selects.
+- Both CG drivers fail above density ratio ~1e3 (flow `CLAUDE.md`, "Pressure solve"). In every blow-up the
+  PCG capped from step 1, and an unconverged projection is not a projection.
+- Production step, film geometry, N = 12, Arnoldi with converged solves (Chebyshev), D_hi = 10 / 1e4:
+
+| μ_A/μ_B (ρ_A/ρ_B) | averaged | sharp |
+|---|---|---|
+| 1e-3 (1e-4) | 0.554 / 0.495 | 0.575 / 0.523 |
+| 1e3 (1e4) | 0.554 / 0.495 | 0.576 / 0.722 |
+| 1e-2 (1e-3) | 0.535 / 0.468 | 0.555 / 0.495 |
+| 1e2 (1e3), FCG | 0.535 / 0.468 | 0.556 / 0.711 |
+
+  Both paths are stable on the film at every ratio.
+- **The CG drivers fail silently at these contrasts.** At density ratio 1e4, FCG either capped at 20 000
+  iterations or stopped on its tolerance with a wrong field: on the extruded case it gave ρ = 1.20
+  ('averaged') and 1.87 ('sharp'), where Chebyshev gives 0.987 and 1.089.
+
+**Rulings.**
+- G-SV9(d) is well-posed once the gate runs the production pressure driver. It stays a gate for 'sharp',
+  with the PASS of (b), and 'averaged' runs beside it as the control. The MISS recorded for both paths on
+  the PCG run is void, being an instrument fault. Re-judge after WO-5b.
+- `gsv9.py` must not choose the pressure driver. Delete the `set_pressure_pcg` call, keep the Chebyshev
+  driver that the ρ model selects, and give it rtol 1e-12 and a cap that never binds. Each run line reports
+  the driver and the maximum iterations, and a capped step makes the run NOT JUDGED.
+- **Production meaning.**
+  - On this evidence today's split is stable on a 1-cell film at these ratios; the blow-up was a test
+    artifact.
+  - A 1-cell film in production is a question of solver health and of accuracy (Q8: first order locally),
+    not of stability. The variable-ρ default is already Chebyshev.
+- **Package scope.**
+  - The film belongs to this package as a gate.
+  - The CG-at-high-contrast failure is documented behaviour and not this package's to fix.
+  - Recorded for the coordinator, as a separate item outside this package: a forced CG driver at density
+    ratio ≥ 1e3 returns wrong fields silently, not just slowly. A one-time warning would be cheap.
+
+**The growth criterion at the floor (USER: any change after the data is the user's call).**
+- **What the data say.** The plane D_hi = 1 MISSes are not eigen-growth.
+  - The non-incremental Arnoldi gives ρ = 0.837–0.839 for both modes and both ratio pairs.
+  - The march's window ratios above 1 (1.0019 averaged, 1.000038 sharp) occur only after E/E0 has fallen
+    below ~1e-16. Both runs end at E/E0 ≈ 1e-69. Below that level the linear map is no longer what the
+    solvers apply: absolute floors in their stop tests take over. The incremental (u, p) spectrum is in
+    §6.4. On that production map the D_hi = 1 cases give ρ = 0.976 / 0.913 'averaged' and 0.921 / 0.913
+    'sharp' (μ 1e-3 / 1e-2): stable, with margin.
+- **Proposed (USER).**
+  - Judge E(n+100)/E(n) ≤ 1 + 1e-10 only over windows with E_n ≥ 1e-20·E_0. Report the ratio below that
+    level, without judging it.
+  - Add the spectral gate G-SV9(e), which has no floor.
+  - Reason: a random initial field projects O(1/n) ≈ 1e-4 of its energy onto every eigenvector. Any mode
+    with |λ| > 1 therefore dominates long before E falls to 1e-20·E_0, so the floor rule cannot hide an
+    instability. Below 1e-20 the measurement is of the solver's stop tests, not of the scheme.
+- **Default until the user rules.** Report both verdicts. The floor-excluded one plus G-SV9(e) decides
+  sequencing; the as-written one is recorded beside it.
+
+### 6.3 Third pass: G-SV1 without walls, and the wall-contact error (Q3)
+
+**Ruling: (P), a triply periodic layered test.** Specified in §11 as G-SV1P / G-SV1cP / G-SV1dP.
+**USER**: this replaces the pre-registered walled box. Default: run (P), and keep the walled numbers as a
+reported diagnostic.
+
+- **Why not the ghost-data hook (B).** "Exact face averages on the ghost layer" cannot be fed to the
+  production stencil through a hook.
+  - The wall rows fold the ghost into the matrix as 2u_w − u_in.
+  - The colour ghosts, the planes and τ̂ in the ghost layer would all have to be exact too.
+  - A periodic topology cannot carry a non-periodic field, because the faces at x = 0 and x = 1 are one
+    unknown.
+
+  A hook would therefore be a new BC type, touching production BC code, used by nothing in production.
+- **Why not fixing the walls (W).**
+  - *The defect.* At a Dirichlet wall edge, the wall-normal shear link is the half-link [wall, first node]
+    with a box kernel, but R̄ is taken from the hat over [e−1, e+1], which reaches into the ghost.
+  - *The data in run A.* Point values were used where the half-link needs the wall-face average.
+  - *The fix.* It is well defined: a half-box R̄ and θ̄, and owners among in-domain cells only.
+  - *Why not now.* Box edges, corners and fit rank loss make the exactness tail long, and production
+    contact lines sit on no-slip walls. There the continuum solution is singular (moving contact line) or
+    a corner flow, and in neither case kinked-linear. Second order at a wall contact line is not a
+    deliverable of any viscous operator.
+- **What (P) loses, and where it goes.**
+  - No periodic flow is kinked-linear: periodicity forces τ·Σd_k/μ_k = 0, hence τ = 0.
+  - So Couette exactness and extension exactness move to operator level, as G-SV1x: the WO-4 subtest with
+    the exact pressure included.
+  - The along mode's second-order content moves to a manufactured periodic flow, G-SV1cP.
+  - Irrational normals are replaced by rational ones. Each offset then samples a finite set of sub-cell
+    configurations that does not change with N, so the per-offset slope carries no fill-in bias (§5.7 Q-C).
+  - The dense sampling of irrational slopes is still covered by the 2-D sweep (§3.4) and the 3-D extrusion
+    identity (WO-2).
+- **The wall-contact error.** Out of scope for this package: a known limitation, recorded in Q6.
+  - It stands on one condition, which is a fact, checked by G-SV1W: at a wall contact, 'sharp' must be no
+    worse than 'averaged'.
+  - If G-SV1W misses, WO-W (below) comes into scope.
+  - If G-SV9(b) still misses after WO-5b while its periodic twin G-SV9(b′) passes, the wall treatment is a
+    stability defect. Return to the architect.
+
+### 6.4 Third pass: the steady state for G-SV1 (Q4)
+
+**Ruling: GMRES on the production step's fixed-point residual (WO-6s). No production change.**
+- **The equation.** With the colour frozen, the step is an affine map S on the full state x = (u, v, w, p),
+  written S(x) = Gx + b. The steady state solves (I − G)x = b.
+  - The matvec is v ↦ v − S(v) + S(0): one production step, with S(0) computed once.
+  - p goes in and out via `get_field("p")` / `set_field("p")`, internal units both ways. The flow
+    `CLAUDE.md` names these as the checkpoint path; `get_p` is physical and must not be mixed in.
+  - The mean of p is removed on input and output.
+- **Why the fixed point is the production steady state.**
+  - At a fixed point of the incremental-rotational step, φ = χμ_min·D u* = χμ_min·L φ. Since L ≤ 0, φ = 0,
+    and then A u + G p = f.
+  - So the result is dt-independent and equal to the plain march's limit.
+  - The non-incremental projection is not equivalent. Its fixed point carries Chorin's term K M⁻¹ G φ, so it
+    must not be used for G-SV1.
+- **Settings.**
+  - GMRES(60), started from the exact face averages with p = 0. D_hi = 100, as pre-registered.
+  - Certification is the pre-registered criterion, on a plain production step: after each restart cycle,
+    the step increment must satisfy ‖S(x) − x‖_∞ ≤ 1e-12·max|u|.
+  - Cap: 3000 matvecs. A case at the cap is NOT CONVERGED and is not judged.
+  - Periodic gauge: per component, the discrete momentum Σ_faces ρ_F u_c is invariant, being 0 from rest.
+    Compare u_h with ū − ⟨ū⟩_ρF, removing the ρ_F-weighted mean of the exact face averages.
+- **Cost.**
+  - Expected 100–300 matvecs a case, against 1.7–2.4e3 plain steps. Measure the count on a 10-case pilot
+    first.
+  - The −1 cluster that makes the plain march slow (|λ| 0.98–0.99) maps to ≈ 2 in I − G, which GMRES
+    handles easily.
+- **Rejected.**
+  - *Lifting the `march_to_steady` refusal for frozen colour.* It adds a test-only state to the production
+    API, and the type-II Anderson it would run equals GMRES on a linear map.
+  - *A directly assembled steady operator.* It needs a new "apply A" surface and a saddle-point solver
+    beside the time split. It would be faithful only by a further proof.
+  - *A plain march at larger dt.* The steady state is dt-independent, but the −1 cluster slows the plain
+    march at every large D.
+- **The incremental (u, p) spectrum** (`gsv9_split.py prod --incremental`, G-SV9(b) plane, N = 16,
+  Chebyshev).
+  - It carries slow real modes that the u-only map lacks: 'averaged' 0.9946 / 0.9981 at D_hi = 100 / 1e4
+    (μ 1e-2), and 0.9997 at 1e4 (μ 1e-3). ARPACK did not converge for μ 1e-3 at D_hi = 100: a cluster
+    at 1.
+  - This is the pressure increment relaxing under the rotational coefficient χμ_min. It is why the plain
+    march needs ~2e3 steps.
+  - For GMRES the eigenvalues of I − G sit at 3e-4 … 5e-3. A few isolated ones are deflated within a few
+    iterations; a dense cluster would not be. The pilot decides.
+  - *Fallback if the pilot needs > 1000 matvecs.* The fixed point does not depend on χ: (I − χμ_min L)φ = 0
+    gives φ = 0 for every χ ≥ 0. So `diagnostics.set_variable_rotational` may be changed for the steady
+    solve only. Accept this only if the fixed point agrees with the default setting's to ≤ 1e-11·max|u|
+    on two pilot cases.
+  - Sharp plane before WO-5b: 1.046 / 1.072 (μ 1e-3) and 1.017 / 1.045 (μ 1e-2), the same mode as the
+    u-only map (≈ −1.04).
 
 ---
 
@@ -728,8 +987,77 @@ T-terms, midsection term, all on `old_`.
   - G-SV5 (uniform μ bitwise; 'averaged' bitwise; non-VoF digests unchanged);
   - G-SV6 np 1/2/4 bitwise, host and CUDA.
 
-**WO-6. Operator gates in 3-D.** G-SV1, G-SV1c, G-SV1d, G-SV9 (§11) as ctests or `tests/study` scripts
-with one-line summaries.
+**WO-5b. The split on interfacial cells (third pass, §6.1). Do it before any further WO-6 run.**
+- **Change.** `SharpFaceProps` (`src/vof/sharp_viscous.hpp:405-430`) gets a role, implicit or explicit, set
+  by `makeSharpFaceProps(c, role)` (`src/flow_ibm_closures.hpp:766`). In `beta(i, j)`, on the cell link
+  (`ad == geo.st[c]`), let q be the cell between the two u_c faces, the lower of i and j. If
+  `geo.cellClass(q) ≠ kSvNone`:
+  - the implicit role returns 2·`base.beta(i, j)`;
+  - the explicit role returns 0.
+
+  Every other link and every non-interfacial cell returns what it returns today.
+- **Call sites.**
+  - Implicit role: the two band builds, `src/flow_ibm_core.hpp:1053` and `:1434`. If the velocity
+    V-cycle derives coarse operators from these props, use the implicit role there too. The coarse operator
+    is a preconditioner, so this moves iteration counts only.
+  - Explicit role: `addFullStressRhs<vof::SharpFaceProps, false>` at `src/flow_ibm_closures.hpp:263-264`.
+  - `addSharpViscousRhs` is unchanged: the midsection and τ-terms stay explicit.
+- **Invariants.**
+  - A is unchanged: implicit + explicit = 2μ(C) m_cc on every cell, exactly as before.
+  - `beta` stays symmetric under the (i, j) swap.
+  - The classes are already filled over the whole block, ghosts included (`sharpClassify`), so np 1/2/4
+    stay bitwise.
+  - 'averaged' never constructs `SharpFaceProps`, so it is unaffected.
+- **Acceptance.**
+  1. `gsv9a.py` builds K = Kb, via `gsv9_split.py`'s `harness_case`. G-SV9(a): worst ρ ≤ 1 + 1e-12 at
+     N = 16 and 32 (N = 16 measured 0.9859). The K1 row is printed as a control and must stay > 1 at
+     D_hi = 1e4, proving the harness models what it claims.
+  2. Production, `gsv9_split.py prod --geom ext --N 16 --Nz 4 --pdriver cheb --D 1e4`, pairs 1e-3 / 1e-4 and
+     1e3 / 1e4. Sharp ρ must be ≤ 1 and within 0.01 of harness Kb for (22.5°, 0.3): 0.9347 and 0.9307.
+  3. G-SV9(e) PASS (§11).
+  4. The operator is unchanged:
+     - WO-4's exactness subtest stays at its value (7.6e-12);
+     - one G-SV1P pilot steady state, before against after, agrees to ≤ 1e-11·max|u|. The fixed point is
+       the same; only the path to it changes.
+  5. G-SV5 and G-SV11 bitwise rows pass; the `sharp_viscous_mpi_np{1,2,4}` ctest stays bitwise.
+  6. If G-SV5's "uniform μ bitwise" row breaks, gate the new branch on μ_A ≠ μ_B. Never relax the row.
+
+**WO-6. Operator gates in 3-D.** G-SV1P, G-SV1cP, G-SV1dP, G-SV1x, G-SV1W and G-SV9 (§11), as ctests or
+`tests/study` scripts with one-line summaries. Third-pass parts, in order:
+- **WO-6a (`gsv9.py`).**
+  - Delete the `set_pressure_pcg(True, 800, 1e-12)` override, so that the Chebyshev driver chosen by the ρ
+    property model runs, with rtol 1e-12 and a cap that never binds.
+  - Each run line reports the driver and the maximum iterations. A capped step makes the run NOT JUDGED.
+  - Print both growth verdicts: as written, and with the floor excluded (§6.2).
+  - Add the periodic twin (b′): normal (2,1,1), offset 0.3 cell, reported only.
+- **WO-6e (G-SV9(e)).** A one-line-per-run wrapper over `gsv9_split.py prod --incremental --pdriver cheb`,
+  with the case table of §11.
+- **WO-6s (steady driver, §6.4).**
+  - In `gsv1.py`, replace the plain march by GMRES(60) on the fixed-point residual of the production step
+    over (u, v, w, p).
+  - p goes through `get_field` / `set_field("p")`, with its mean removed.
+  - Start from the exact face averages with p = 0. Certify on a plain step: increment ≤ 1e-12·max|u|.
+    Cap 3000 matvecs.
+  - First a 10-case pilot (N = 24 and 48, both ratios, 3 normals). Record the matvec counts and the march
+    agreement: on 2 of the cases, the GMRES fixed point against a plain march to the same criterion must
+    agree to ≤ 1e-11·max|u|.
+- **WO-6p (periodic drivers).** `gsv1.py --set gsv1p | gsv1cp | gsv1dp`, as specified under G-SV1P (§11).
+  - Acceptance: the manufactured fields satisfy the continuous equations and the jump conditions to
+    ≤ 1e-12 at 100 random points.
+  - Σ_faces ρ_F u_c stays ≤ 1e-13·Σρ_F·max|u| over a run.
+  - The layered profile reproduces the analytic U to round-off.
+- **WO-6x.** Confirm that WO-4's subtest checks extension together with the exact cell-averaged pressure:
+  A ū + G p̄ = 0 on rows ≥ 3 cells from every wall. If it does not, extend it (G-SV1x).
+- **WO-6w (G-SV1W).** The walled Couette check of §11, both modes, N = 24 and 32. Steady states by WO-6s.
+
+**WO-W (parked, not scheduled; it comes into scope only if G-SV1W misses).** At a non-periodic Dirichlet
+face:
+- the wall-normal shear link of a wall edge is the half-link [wall plane, first node], so θ̄ and R̄ take the
+  half-box kernel;
+- the fit uses that link as data, with that kernel;
+- owners are drawn from in-domain cells only.
+
+A design pass comes first, because box edges and corners need their own rule.
 
 **WO-7. Physics gates.** G-SV2 (Hadamard–Rybczynski), G-SV3 (P1), G-SV4 (P2), G-SV7 (cost), G-SV8
 (robustness), G-SV10 (census). Local GPU only under
@@ -767,6 +1095,72 @@ slope of log e against log h over the stated resolutions.
   - Reported alongside, not gating: e_env·N², and the per-offset LS orders (their minimum). The
     earlier reading "order ≥ 1.8 for every orientation × offset × ratio" is superseded.
   - The 2-D a-priori version is in §3.4.
+- **Third pass (§6.3): G-SV1, G-SV1c and G-SV1d move to a triply periodic box. USER flag: a gate change
+  after data.**
+  - Default until the user rules: run the periodic gates below. The walled box with option-A data is
+    reported as a diagnostic and is not judged.
+  - The thresholds and the envelope rule are unchanged.
+- **G-SV1P — periodic layered flow (replaces G-SV1's order gate).**
+  - **Box.** [0,1]³, triply periodic, N ∈ {24, 32, 48, 64}.
+  - **Normals.** m ∈ (1,0,0), (2,1,0), (1,1,0), (0,1,2), (1,0,1), (2,1,1), (1,2,1), (1,1,2), (1,1,1).
+    - n = m/|m|; the period along n is P = 1/|m|.
+    - They cover aligned, the in-plane obliques in all three coordinate planes, the 3-D obliques with each
+      axis dominant, and both diagonals.
+    - |m|² ≤ 6, so every layer is ≥ 3.7 cells thick at N = 24.
+  - **Layers.** Phase A where frac((n·x − s0)/P) < 3/8, else B, with s0 = n·(½,½,½) + (k/8)h, k = 0…7.
+    - 3N/8 is an integer for every N above, so each offset's sub-cell configuration set is N-independent
+      and the per-offset slope has no fill-in bias.
+    - C is the exact cell volume fraction (inclusion–exclusion, as in `gsv1.py`), summed over the plane
+      family.
+  - **Ratios.** μ_A/μ_B ∈ {1e-2, 1e2}; ρ_A/ρ_B = 1/2.
+  - **Force.** f = (ρ(C) − ρ̄) g t1, with t1 the first of `gsv1.py`'s `tangents(n)` and ρ̄ the mean cell
+    density.
+    - Apply it through the closures `force_c = linear(rho, [−ρ̄ g t1_c, g t1_c])`, c = x, y, z. The fallback
+      is `set_field("force_c")` in internal units via `s.unit_scales`.
+    - The face force is the face interpolation of the cell field. Σ_faces = 0 to round-off.
+  - **Exact solution.** u = U(n·x) t1, with U periodic and piecewise quadratic: μ_k U″ = −(ρ_k − ρ̄) g, and
+    U and μU′ continuous.
+    - ū is the exact face average of U (the face kernel, as `gsv1.py`'s `avgU`).
+    - Gauge: per component, subtract the ρ_F-weighted mean of ū. From rest the discrete Σρ_F u_c stays 0.
+  - **Steady state.** WO-6s at D_hi = 100, to a step increment ≤ 1e-12·max|u|.
+  - **Error.** e = max|u_h − ū| / max|ū|.
+  - **PASS.** Per normal × ratio, the LS order of the offset envelope e_env(N) over the four N is ≥ 1.8.
+    Reported: e_env·N² and the per-offset LS orders.
+- **G-SV1dP.** G-SV1P at μ ratio 1e-3 and 1e3. Same PASS.
+- **G-SV1cP — periodic along mode (replaces G-SV1c's order rows).**
+  - **Geometry.** Same box, normals, N and offsets as G-SV1P. φ_A = 1/2: phase A where s′ mod P ∈ (P/4, 3P/4),
+    s′ = n·x − s0, so the interfaces lie where cos(b s′) = 0 with b = 2π|m|. ρ = 1.
+  - **Tangent.** t1 = t/|t|, with t the integer vector ⊥ m, a = 2π|t|, η = t1·x:
+
+| m | (1,0,0) | (2,1,0) | (1,1,0) | (0,1,2) | (1,0,1) | (2,1,1) | (1,2,1) | (1,1,2) | (1,1,1) |
+|---|---|---|---|---|---|---|---|---|---|
+| t | (0,1,0) | (−1,2,0) | (−1,1,0) | (0,−2,1) | (−1,0,1) | (−1,2,0) | (2,−1,0) | (1,−1,0) | (1,−1,0) |
+
+  - **Exact fields.**
+    - Velocity: u = −a sin(aη) cos(bs′) n + b cos(aη) sin(bs′) t1. It is smooth and solenoidal, with
+      S_nt = 0 on the interfaces: a pure along mode.
+    - Pressure: p_k = 2μ_k ab sin(aη) sin(bs′), which carries the jump 2[μ]D_nn.
+    - Force: f_k = μ_k [a(b² − a²) sin(aη) cos(bs′) n + b(3a² + b²) cos(aη) sin(bs′) t1].
+  - **Force input.** The cell field μ(C_i)·F(x_i), written to `force_c` in internal units.
+  - **Flows.**
+    - (i) This field alone.
+    - (ii) This field plus G-SV1P's layered flow on the same interfaces (ρ_A/ρ_B = 1/2 for that part).
+  - **Exact face averages.** 4×4 Gauss–Legendre per face for the smooth part; the layered part as in
+    G-SV1P. Same gauge.
+  - **PASS.** Envelope LS order ≥ 1.8 for (i) and (ii), at μ ratios 1e-2 and 1e2.
+- **G-SV1x — exactness at operator level (replaces the steady "Couette exact" and "extension ≤ 1e-9"
+  rows).**
+  - WO-4's subtest: the 9 (β, γ) orientations of G-SV1, Couette and extension.
+  - Residual ≤ 1e-11 relative to the band stress scale, on every row ≥ 3 cells from a wall.
+  - For extension the residual is A ū + G p̄, with p̄ the exact cell-averaged pressure, jump included
+    (WO-6x).
+  - Measured 7.6e-12, pending the pressure check.
+- **G-SV1W — the wall contact (reported; decides Q6 / WO-W).**
+  - Walled box, Couette 22.5° / 22.5°, offset 0, μ ratio 1e-2, N = 24 and 32. Option-A BCs, but with
+    wall-face-AVERAGED Dirichlet data.
+  - Steady state by WO-6s, both modes.
+  - PASS iff, at both N, 'sharp''s maximum error over faces within one cell of a wall ≤ 'averaged''s.
+  - First data (option A, point values, sharp): 7.18e-3 / 6.16e-3, max at the contact line.
 - **G-SV2 — Hadamard–Rybczynski, κ = 1e-2, 1, 1e2.**
   - Steady Stokes: advection off, colour frozen. Periodic box L = 8R; drop driven by its buoyancy Δρg.
   - K = F/(6πμ_out U_d R), where U_d is the drop's mean velocity relative to the box mean.
@@ -808,6 +1202,29 @@ slope of log e against log h over the stated resolutions.
     the oblique plane.
     - The slab is normal to x, and both of its faces carry virtual planes.
     - Same ratio pairs, D_hi values and PASS as (b).
+  - **Third-pass amendments (§6.1, §6.2).**
+    - **(a)** uses the production split, Kb, with K1 printed as a control (WO-5b).
+    - **(b)(d)** run the production pressure driver, never a forced CG driver (WO-6a). A capped step makes
+      the run NOT JUDGED.
+      - The first MISS records (PCG at 800 iterations) are void for (d), being an instrument fault. They
+        stand for (b), which shows the split instability.
+      - **USER**: judge the growth ratio only over windows with E_n ≥ 1e-20·E_0. Until the user rules, both
+        verdicts are reported; the floor-excluded one and (e) decide sequencing.
+    - **(b′), reported only.** The (b) march on a triply periodic box with the rational normal (2,1,1),
+      offset 0.3 cell. If (b) misses while (b′) passes, the cause is the walls (§6.3).
+    - **(e), spectral (added, not a loosening).**
+      - *Measure.* The Arnoldi ρ of the PRODUCTION incremental step map on (u, v, w, p), colour frozen,
+        mean of p removed. Chebyshev pressure to rtol 1e-13, RB-GS to rtol 1e-15:
+        `gsv9_split.py prod --incremental --pdriver cheb`.
+      - *Cases.* The (b) plane at N = 16 and the (d) film at N = 12, each with the four ratio pairs ×
+        D_hi ∈ {0.1, 1, 10, 100, 1e4}, both modes.
+      - *PASS.* ρ ≤ 1 + 1e-9 for 'sharp', with 'averaged' reported. A run whose linearity check exceeds
+        1e-10, or whose solves cap, is NOT JUDGED.
+      - *ARPACK.* Use ncv 40 and maxiter 1000. An unconverged run is re-run at ncv 80. A 'sharp' case still
+        unconverged is decided by its (b)/(d) march verdict, and is listed.
+      - *Before WO-5b.* Sharp plane ρ = 1.046 / 1.072 at D_hi = 100 / 1e4 (μ 1e-3) and 1.017 / 1.045
+        (1e-2). 'averaged' gives ≤ 0.9997, with one case (μ 1e-3, D_hi = 100) unconverged in ARPACK: a cluster
+        at 1. The film gives 0.9975–0.9982 for both modes.
 - **G-SV10 (census).** P1 d/h 24: fit fallbacks ≤ 0.1 % of interfacial cells per step, averaged over the
   run. Virtual-plane cells are reported, and film cells among them.
 - **G-SV11 (single phase stays put).** `variable_mu`, `varmu_mpi`, `full_stress_operator{,_np2,_np4}`,
@@ -819,12 +1236,12 @@ slope of log e against log h over the stated resolutions.
 
 | # | question | needs | default |
 |---|---|---|---|
-| Q1 | 3-D stability margin (2-D measured; 3-D adds a third shear plane) | **fact** (G-SV9b) | Proceed. If ρ > 1 anywhere, stop and return to the architect; do not add a dt cap. |
+| Q1 | 3-D stability margin (2-D measured; 3-D adds a third shear plane) | **fact** — ANSWERED (third pass, §6.1) | Not a 3-D mode: the cell split. WO-5b; the 3-D margin after it is Q14. |
 | Q2 | Memory for 4 extra fields at d/h ≥ 48 on 16 GB | **fact** (measure free memory at P1 d/h 48) | Dense fields. Switch to worklist storage if they exceed 10 % of free device memory. |
 | Q3 | Name and tier of the setter | **user preference** (docs/NAMING.md) | `diagnostics.set_vof_viscous_interface("sharp"\|"averaged")` until the gates pass. |
 | Q4 | AUTO = sharp after the gates | **user preference** | Yes: the user named it priority. Make it its own commit and register entry. |
 | Q5 | G-SV2 reference in a periodic box | **fact** | Gate on the self-convergence order. The HR periodic-corrected value is a 3 % sanity check. |
-| Q6 | Interfaces touching walls or contact lines (fit links cut by the wall) | **fact** (census near walls) | Drop links outside the domain. Fallback to 'facef' if the fit is singular. Report in the census. |
+| Q6 | Interfaces touching walls or contact lines (fit links cut by the wall) | **fact** (census near walls; G-SV1W) | Drop links outside the domain. Fallback to 'facef' if the fit is singular. Report in the census. Third pass: the contact-line error (hat R̄ on a half-link) is out of scope while G-SV1W passes; WO-W parked (§6.3). |
 | Q7 | Other μ closures (Table1D in C, temperature-dependent) | **user preference** (scope) | Not in v1. AUTO falls back to averaged with a notice. |
 | Q8 | Thin films, under 1 cell of one phase | **fact** (census) | The fit is well-posed while every link type appears. Otherwise fallback; τ̂ = 0 is first order locally. |
 | Q9 | Plane source when σ = 0 | **fact** (does VofCurvature exist with σ = 0?) | Construct and reconstruct it in the step when sharp is active. |
@@ -832,6 +1249,12 @@ slope of log e against log h over the stated resolutions.
 | Q12 | τ̂ at edges: band mean, owner only, or interfacial mean | **fact** — settled by E1/E2 (§5.7 Q-A) | Interfacial mean. Fits run on interfacial cells only; all three rules have the same order. |
 | Q13 | G-SV1's measurement: per-offset LS order or the offset envelope (§5.7 Q-C) | **user preference** — **DECIDED USER 2026-10-31** | The envelope order binds (§11 G-SV1); per-offset orders reported, not gating. |
 | Q11 | Collocated | **user preference** (sequencing) | §8 order: full stress on collocated first; this design is not ported until then. |
+| Q14 | 3-D margin of the Kb split (2-D measured 0.9859) | **fact** (G-SV9(e) and (b) after WO-5b) | Proceed. If ρ > 1, stop and return to the architect; no tuning, no dt cap. |
+| Q15 | G-SV9 growth ratio at the energy floor (§6.2) | **user preference** (a criterion change after data) | Report both verdicts; the floor-excluded one (E_n ≥ 1e-20·E_0) plus G-SV9(e) decide sequencing. |
+| Q16 | G-SV1/1c/1d: the walled box replaced by the periodic G-SV1P/1cP/1dP, exactness at operator level (G-SV1x) | **user preference** (a gate change after data) | Run the periodic gates; report the walled option-A numbers as a diagnostic. |
+| Q17 | Wall-contact accuracy (Q6) in this package? | **fact** (G-SV1W), then **user preference** (scope) | Out of scope; WO-W parked. A G-SV1W MISS brings it in, design pass first. |
+| Q18 | A forced MG-PCG/FCG driver at density ratio ≥ 1e3 returns wrong fields silently (§6.2) | **user preference** (scope; outside this package) | Hand it to the coordinator as a separate item. Nothing here beyond WO-6a. |
+| Q19 | WO-6s solver parameters (restart, cap, D_hi) | **fact** (the WO-6s pilot) | GMRES(60), cap 3000, D_hi = 100. The steady state is dt-independent (§6.4), so D_hi may move only on pilot evidence, with the march-agreement check. |
 
 ---
 
