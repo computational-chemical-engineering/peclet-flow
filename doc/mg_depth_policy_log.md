@@ -830,3 +830,58 @@ walled np 2, np 4 all **BITWISE** (u, v, w, p, every rank); iterations identical
 
 **Item 5a** (02848cf): perf_baseline.json zh_sphere iteration fields re-recorded from a CUDA run (6.0 at every grid;
 totals 366/494/485/959/1587); K kept (moved ≤ 3.3e-6 rel), steps unchanged.
+
+## 2026-10-31 — A3 finish (60fac53, 88d196f, cf3a2d3, 1527238): both STOP findings closed; gate mgsym5 PASS
+
+Fixes for the two STOPs of 2026-10-30 (decisions in `bubble_column_perf/gpu_diag/DECISIONS_GPU.log`, "A3 finish"
+(a)(b)(c)). Measured on host over the 53 Chebyshev ctests (`gpu_diag/mgd/sym/flip/cheb3/run.sh c53`; logs
+`cheb3/c53_{on,off,vc}.log`, trips per solve by `cheb3/trips.py`).
+
+- **(a) 60fac53 — the growth guard tests ρ_k = r·z (the M⁻¹-norm), not max|r|**, lagged one iteration: a `dotTo`
+  slot `kChebRz` and a pinned copy, read after the stop test's maxabs fence; one Allreduce of {max, sum}
+  (`maxabsWithLocalSum`, pair MPI_Op). No new synchronisation; unguarded solves bitwise.
+- **(b) 88d196f — bounds ratchet**: a growth trip's bracketed λmax persists (`chebLmaxFloor_`, `bfpLmaxFloor_`), so
+  the next warm estimate cannot fall back below it. ctest `pressure_chebyshev_bounds` case 3 (hook
+  `debugDropPressureBounds`). Negative control, ratchet off: estimates +2, restarts 1 → FAIL; on: +1, 0 → PASS.
+- **(c) cf3a2d3 — symmetric-mode cold λmax = top Ritz value of ≤ 10 PCG steps** (stop at relative change < 1e-3);
+  ColdKeep repeats the pass to build the top Ritz vector as the warm seed. λmin by the shifted power iteration
+  (unchanged); trilinear and warm paths untouched.
+- 1527238 — vof_collocated T2 at μ = 0 compares `co.faceU < max(st.faceU, 1e-16)`: both faces are round-off
+  (staggered 7.4e-18, collocated 4.8e-17).
+
+**Safety ratio s = (0.95·λmin_est + 1.05·λmax_est)/λ_true**, symmetric: cold min **1.0864**, warm min **1.0867**
+(collocated_stability_guard, est 1.0850 vs true 1.0879); was 0.9997 / 1.0035. Trilinear warm min 1.0862. **PASS.**
+
+**Trips per solve**, symmetric (on / vc arms): growth **0**, guard3 **0** over 18 131 solves (887 cold-guarded).
+vof_blocks_ns and multiphysics 0 (were 4 and 2 per test with the max norm); the collocated_stability_guard loop is
+gone (was 421 growth + 420 guard3). (a) alone removed the growth trips there; the 420 guard3 trips remained until (c).
+
+**Chebyshev V-cycles over the 53 tests: 232 854 (mgsym4) → 240 206 (+3.2 %).** Movers > 1 %:
+
+| test | Δ V-cycles | note |
+|---|---|---|
+| vof_collocated | +7341 (+13.5 %) | 0 trips; the higher, now bracketing bounds |
+| balanced_force | +147 (+1.0 %) | |
+| vof_surface_tension_mpi_np* | +30 (+3.1 %) | |
+| vof_blocks | +13 | 2 → 3 solves |
+| vof_momentum_rho_names | +9 (+8 %) | |
+| pressure_wallbounded | +6 (+1.6 %) | |
+| vof_collocated_mpi_np* | −20 (−5 %) | |
+| vof_blocks_ns_mpi | −48 (−3.7 %) | |
+| vardensity_mpi | −17 (−2.4 %) | |
+| vof_cutcell_mpi | −6 (−1.1 %) | |
+
+**Trilinear guard (coordinator decision 2026-10-31): keep the r·z growth test in all modes, no code change.** M is
+not symmetric in trilinear mode, so (a)'s monotonicity argument does not apply there and the test is a heuristic.
+Measured (53/53 pass both): r·z guard 420 growth + 439 guard3 = 859 trips over 19 022 solves (vof_collocated 221/287
+cold, collocated_stability_guard 64 + 430, balanced_force_restart 88); the old max-norm guard (temporary patch
+`cheb3/trilmax_patch.py`, reverted) 541 + 436 = 977 over 19 160. The trilinear trips predate (a). Rejected: r·z only
+when `symVcycle_`, max norm in trilinear (more code, more trips).
+
+**Gate mgsym5 at 1527238** (`sym/flip/gate5.out`): host **275/275**, digest **805e3e99a93333c7**; CUDA **273/275**,
+digest **e7edbb471ea7a742** — the two failures, scalar_cutcell_g3a/_g4, are GPU out-of-memory ("Cuda memory space
+failed to allocate"), 2/2 Passed rerun serially (`flip/gate5_rerun.log`). Digests vs mgsym4: 13 of 14 identical on
+both backends; only vof_droplet moved (host 70fc2c7ea7b0 → 289af88934b0, CUDA e5e4a0a5508a → dfc69aa6d5a3), as
+expected. vs main: porous identical, the rest as mgsym4. CA np 2/4 periodic + walled: all bitwise. G-ITER-S: M7a
+11.967 → 11.000, M7b 9.000 → 8.100, M10h 10.033 → 10.933 (≤ 11.537), growth trips 0: **PASS.** G-NP 20/20 (host 19 +
+device_sync_budget skip; CUDA 18 + bottom_direct np 2/4 skip, as mgsym4). SDFLOW PASS. **Battery green.**
