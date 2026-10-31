@@ -735,7 +735,13 @@ void Solver<Grid>::sharpViscousGeometry() {
     g.dlo[a] = (bc_[2 * a] != 0 && touchesGlobalFace(2 * a)) ? G : -kOpen;
     g.dhi[a] = (bc_[2 * a + 1] != 0 && touchesGlobalFace(2 * a + 1)) ? ee[a] - G : kOpen;
   }
-  g.eps = vofCurv_.interfaceEps;
+  // The interfacial predicate's threshold is the solver's wisp guard, whatever sigma is
+  // (coordinator D1, 2026-10-31): `vofCurv_.interfaceEps` is 0 unless set_surface_tension ran,
+  // and at 0 the round-off residue Weymouth-Yue leaves becomes 'interfacial' (walled N=24, mu
+  // ratio 1e-2: band 934 -> 5510, NaN at step 7). With sigma > 0 the two are the same value
+  // (set_surface_tension / set_vof_interface_eps keep them equal). The reconstruction above may
+  // use the smaller threshold: a plane is per-cell, so every cell this predicate admits has one.
+  g.eps = csfInterfaceEps_;
   const vof::VofMetric gm = u_.vofMetric();
   g.gm = gm;
   for (int a = 0; a < 3; ++a)

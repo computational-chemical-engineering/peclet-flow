@@ -2193,8 +2193,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "(explicit on u^n) - second order. 'sharp' needs the staggered Solver, VoF, mu = "
           "LinearMix(C) (set_property_model('mu', 'linear', 'C', ...)) and the full viscous "
           "stress; step() raises with the harmonic face viscosity, immersed solids, porous "
-          "momentum, moving scene instances or phase change. Inert for a uniform mu. Any other "
-          "mode raises ValueError.")
+          "momentum, moving scene instances or phase change. Inert for a uniform mu. A cell is "
+          "interfacial iff eps < C < 1 - eps with eps = vof_interface_eps() (the wisp guard, "
+          "default 1e-8), with or without surface tension. Any other mode raises ValueError.")
       .def(
           "vof_viscous_interface", [](D& diag) { return diag.s->vofViscousInterface(); },
           "The selected viscous interface mode (see set_vof_viscous_interface).")

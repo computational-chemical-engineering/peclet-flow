@@ -64,7 +64,7 @@ struct SharpGeom {
   SvByteConst cls;          ///< band class, solver block
   int dlo[3] = {0, 0, 0};   ///< in-domain cells: dlo <= x_a < dhi (solver coordinates)
   int dhi[3] = {0, 0, 0};
-  double eps = 0.0;           ///< the planes' interfacial threshold (`VofCurvature::interfaceEps`)
+  double eps = 0.0;           ///< interfacial threshold: the wisp guard (`set_vof_interface_eps`)
   double p0 = 0.0, p1 = 0.0;  ///< LinearMix μ(f) = p0 + p1·f (internal units)
   double muA = 0.0, muB = 0.0, mulo = 0.0, r = 1.0;  ///< μ(1), μ(0), min, μ_lo/μ_hi
   bool lowA = false;                                 ///< the C = 1 phase is the low-μ side
