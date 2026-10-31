@@ -12,7 +12,11 @@
 //   (c) virtual planes (§5.7 Q-B): a 1-cell film normal to each axis and an ABAB stack: every edge
 //       on a film face is owned at distance 0, and (m, alpha) follows the low-face rule;
 //   (d) a periodic seam inside the band (45 deg slab, offset-order ties): classes, fallbacks and
-//       tau/D_nn are bitwise invariant under a circular shift of the block by (5, 3, 2) cells.
+//       tau/D_nn are bitwise invariant under a circular shift of the block by (5, 3, 2) cells;
+//   (e) WO-3, the implicit band (sphere of tangent planes, mu ratio 1e-2 / 1e3, isotropic and
+//       1 : 1.5 : 2): every band-edge entry = -mu(F_c(E)) w_a of a host oracle (owner + PLIC face
+//       fraction), every non-band entry and every cell/diagonal of a row without a band edge
+//       bitwise 'averaged' (VarFaceProps), per-component symmetry bitwise, M-matrix;
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -24,6 +28,7 @@
 #include <string>
 #include <vector>
 
+#include "cut_cell_ibm.hpp"
 #include "vof/sharp_viscous.hpp"
 
 #ifndef SHARP_VISCOUS_REF
@@ -736,6 +741,285 @@ void testSeam() {
               diff);
   CHECK(band > 50 && diff == 0, "shift invariance across the seam");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Host oracle of the band geometry: an independent transcription of §5.2/§5.4 on host arrays.
+struct HostGeo {
+  const Blk* b;
+  std::vector<int> cls;
+  std::vector<double> col, pm[3], pa;
+  double eps, muA, muB, ell[3];
+  int cl(const int q[3]) const { return cls[b->id(q[0], q[1], q[2])]; }
+  double C(const int q[3]) const { return col[b->id3(q[0], q[1], q[2])]; }
+  double mu(double f) const { return muB + (muA - muB) * f; }
+  double res(double f) const { return f / muA + (1.0 - f) / muB; }
+  void plane(const int q[3], double m[3], double& al) const {
+    const int k = cl(q);
+    if (k == 1) {
+      const long j = b->id3(q[0], q[1], q[2]);
+      for (int a = 0; a < 3; ++a)
+        m[a] = pm[a][j];
+      al = pa[j];
+      return;
+    }
+    const int v = k - 2, ax = v / 2, side = v % 2;
+    const bool one = C(q) >= 1.0 - eps;
+    const double s = side == 0 ? (one ? -1.0 : 1.0) : (one ? 1.0 : -1.0);
+    m[0] = m[1] = m[2] = 0.0;
+    m[ax] = s;
+    al = side == 0 ? 0.0 : s;
+  }
+  void normal(const double m[3], double n[3]) const {
+    double p[3], s = 0;
+    for (int a = 0; a < 3; ++a) {
+      p[a] = m[a] / ell[a];
+      s += p[a] * p[a];
+    }
+    s = std::sqrt(s);
+    for (int a = 0; a < 3; ++a)
+      n[a] = p[a] / s;
+  }
+  // the four cells of E_ac(k), sorted by local linear index
+  std::vector<std::array<int, 3>> cells4(const int k[3], int a, int c) const {
+    std::vector<std::pair<long, std::array<int, 3>>> v;
+    for (int da = 0; da < 2; ++da)
+      for (int dc = 0; dc < 2; ++dc) {
+        std::array<int, 3> q = {k[0], k[1], k[2]};
+        q[a] -= da;
+        q[c] -= dc;
+        v.push_back({b->id(q[0], q[1], q[2]), q});
+      }
+    std::sort(v.begin(), v.end());
+    std::vector<std::array<int, 3>> o;
+    for (auto& x : v)
+      o.push_back(x.second);
+    return o;
+  }
+  bool owner(const int k[3], int a, int c, int o[3], double m[3], double& al) const {
+    bool f = false;
+    double best = 0;
+    for (auto& q : cells4(k, a, c)) {
+      if (cl(q.data()) == 0)
+        continue;
+      double mm[3], aa;
+      plane(q.data(), mm, aa);
+      double xi[3];
+      for (int s = 0; s < 3; ++s)
+        xi[s] = k[s] - q[s];
+      xi[3 - a - c] = 0.5;
+      const double d = std::fabs(mm[0] * xi[0] + mm[1] * xi[1] + mm[2] * xi[2] - aa) /
+                       std::sqrt(mm[0] * mm[0] + mm[1] * mm[1] + mm[2] * mm[2]);
+      if (!f || d < best) {
+        f = true;
+        best = d;
+        for (int s = 0; s < 3; ++s) {
+          o[s] = q[s];
+          m[s] = mm[s];
+        }
+        al = aa;
+      }
+    }
+    return f;
+  }
+  // box x box fraction in the plane x_p = xiP over [lo_s, lo_s + 1] on the two other axes s
+  static double boxFrac(const double m[3], double al, int p, double xiP, const double lo[3]) {
+    const int q = p == 0 ? 1 : 0, bb = p == 2 ? 1 : 2;
+    return sv::plicVolume(m[q], m[bb], 0.0, al - m[p] * xiP - m[q] * lo[q] - m[bb] * lo[bb]);
+  }
+  // hat (half-width 1, centred qc on axis q) x box (b from b0) in the plane x_p = xiP
+  static double hatFrac(const double m[3], double al, int p, double xiP, int q, double qc,
+                        double b0) {
+    const int bb = 3 - p - q;
+    return sv::plicVolume(m[q], m[q], m[bb], al - m[p] * xiP - m[q] * (qc - 1.0) - m[bb] * b0);
+  }
+  // row r's face at E_ac(k)
+  double rowFace(const int k[3], int a, int c, int r, const int o[3], const double m[3],
+                 double al) const {
+    const int p = (r == c) ? a : c, bb = 3 - a - c;
+    double lo[3];
+    lo[r] = k[r] - o[r] - 0.5;
+    lo[bb] = k[bb] - o[bb];
+    lo[p] = 0;
+    return boxFrac(m, al, p, k[p] - o[p], lo);
+  }
+  double link(const int k[3], int dd, int cc, const int o[3], const double m[3], double al) const {
+    return hatFrac(m, al, cc, k[cc] - o[cc], dd, k[dd] - o[dd], k[3 - dd - cc] - o[3 - dd - cc]);
+  }
+};
+
+HostGeo hostGeo(const Blk& b, const Geo& o, double eps, double muA, double muB,
+                const double ell[3]) {
+  HostGeo h;
+  h.b = &b;
+  h.cls = toHost(o.cls);
+  h.col = toHost(o.col);
+  for (int a = 0; a < 3; ++a) {
+    h.pm[a] = toHost(o.pm[a]);
+    h.ell[a] = ell[a];
+  }
+  h.pa = toHost(o.pa);
+  h.eps = eps;
+  h.muA = muA;
+  h.muB = muB;
+  return h;
+}
+
+// A sphere of tangent planes (one plane per cut cell, so owners choose between planes).
+void sphereGeom(const Blk& b, const double ell[3], std::vector<double>& col,
+                std::vector<double> (&pm)[3], std::vector<double>& pa) {
+  const double cen[3] = {7.3 * ell[0], 6.7 * ell[1], 7.1 * ell[2]}, R = 3.1;
+  col.assign(b.cells3, 0.0);
+  pa.assign(b.cells3, 0.0);
+  for (int a = 0; a < 3; ++a)
+    pm[a].assign(b.cells3, 0.0);
+  for (int z = -1; z <= b.e[2]; ++z)
+    for (int y = -1; y <= b.e[1]; ++y)
+      for (int x = -1; x <= b.e[0]; ++x) {
+        const int I[3] = {x, y, z};
+        double n[3], s = 0;
+        for (int a = 0; a < 3; ++a) {
+          n[a] = ell[a] * (I[a] + 0.5) - cen[a];
+          s += n[a] * n[a];
+        }
+        s = std::sqrt(s);
+        double m[3], al = R;
+        for (int a = 0; a < 3; ++a) {
+          n[a] /= s;
+          m[a] = n[a] * ell[a];
+          al += n[a] * cen[a] - m[a] * I[a];
+        }
+        const long j = b.id3(x, y, z);
+        const double C = sv::plicVolume(m[0], m[1], m[2], al);
+        col[j] = C;
+        if (C > 1e-12 && C < 1.0 - 1e-12) {
+          for (int a = 0; a < 3; ++a)
+            pm[a][j] = m[a];
+          pa[j] = al;
+        }
+      }
+}
+
+DV muField(const Blk& b, const std::vector<double>& col, double muA, double muB) {
+  std::vector<double> mu(b.cells);
+  for (int z = 0; z < b.e[2]; ++z)
+    for (int y = 0; y < b.e[1]; ++y)
+      for (int x = 0; x < b.e[0]; ++x)
+        mu[b.id(x, y, z)] = muB + (muA - muB) * col[b.id3(x, y, z)];
+  return toDev(mu, "mu");
+}
+
+struct Bands {
+  DV A[7];  // AC, AW, AE, AS, AN, AB, AT
+  explicit Bands(long n) {
+    for (auto& x : A)
+      x = DV("band", n);
+  }
+};
+template <class FP>
+std::vector<std::vector<double>> buildBands(const Blk& b, FP fp, const double w[3]) {
+  Bands B(b.cells);
+  ibmBuildDiffusionVar(B.A[0], B.A[1], B.A[2], B.A[3], B.A[4], B.A[5], B.A[6], b.e[0], b.e[1],
+                       b.e[2], b.G, fp, w[0], w[1], w[2]);
+  Kokkos::fence();
+  std::vector<std::vector<double>> o;
+  for (auto& x : B.A)
+    o.push_back(toHost(x));
+  return o;
+}
+
+sv::SharpFaceProps sharpFP(const Geo& o, DV mu, int c, double rhoIdt) {
+  VarFaceProps base;
+  base.haveMu = true;
+  base.mu = CCConst(mu);
+  base.msc = o.g.st[c];
+  base.rhoIdtC = rhoIdt;
+  sv::SharpFaceProps sp;
+  sp.base = base;
+  sp.geo = o.g;
+  sp.c = c;
+  return sp;
+}
+
+// (e) WO-3: the implicit band.
+void testBand() {
+  long nBand = 0, nNon = 0, badNon = 0, badSym = 0, badM = 0, badCell = 0;
+  double wOr = 0;
+  for (int an = 0; an < 2; ++an)
+    for (double ratio : {1e-2, 1e3}) {
+      Blk b(12, 12, 12);
+      double ell[3] = {1.0, 1.0, 1.0};
+      if (an) {
+        ell[1] = 1.5;
+        ell[2] = 2.0;
+      }
+      const double w[3] = {1.0 / (ell[0] * ell[0]), 1.0 / (ell[1] * ell[1]),
+                           1.0 / (ell[2] * ell[2])};
+      std::vector<double> col, pm[3], pa, v[3];
+      sphereGeom(b, ell, col, pm, pa);
+      for (auto& x : v)
+        x.assign(b.cells, 0.0);
+      const int dlo[3] = {-kBig, -kBig, -kBig}, dhi[3] = {kBig, kBig, kBig};
+      const double muA = ratio, muB = 1.0;
+      Geo o = makeGeo(b, col, pm, pa, v, dlo, dhi, 1e-12, muA, muB, ell);
+      HostGeo hg = hostGeo(b, o, 1e-12, muA, muB, ell);
+      DV mu = muField(b, col, muA, muB);
+      for (int c = 0; c < 3; ++c) {
+        sv::SharpFaceProps sp = sharpFP(o, mu, c, 0.7);
+        auto Av = buildBands(b, sp.base, w);
+        auto As = buildBands(b, sp, w);
+        for (int z = b.G; z < b.e[2] - b.G; ++z)
+          for (int y = b.G; y < b.e[1] - b.G; ++y)
+            for (int x = b.G; x < b.e[0] - b.G; ++x) {
+              const long i = b.id(x, y, z);
+              bool rowBand = false;
+              double sum = 0;
+              for (int f = 0; f < 6; ++f) {
+                const int a = f / 2, sg = f % 2;  // AW(-x) AE(+x) AS AN AB AT
+                const double sv_ = As[1 + f][i], av = Av[1 + f][i];
+                sum += -sv_;
+                badM += (sv_ > 0.0);
+                if (a == c) {
+                  badCell += (sv_ != av);
+                  continue;
+                }
+                int k[3] = {x, y, z};
+                if (sg)
+                  k[a] += 1;
+                int ow[3];
+                double m[3], al;
+                if (!hg.owner(k, a, c, ow, m, al)) {
+                  ++nNon;
+                  badNon += (sv_ != av);
+                  continue;
+                }
+                ++nBand;
+                rowBand = true;
+                const double ex = -hg.mu(hg.rowFace(k, a, c, c, ow, m, al)) * w[a];
+                wOr = std::max(wOr, std::fabs(sv_ - ex) / std::fabs(ex));
+              }
+              if (!rowBand)
+                badCell += (As[0][i] != Av[0][i]);
+              badM += !(std::fabs(As[0][i] - 0.7 - sum) <= 1e-13 * As[0][i]);
+              // per-component symmetry with the +a neighbour (inner)
+              for (int a = 0; a < 3; ++a) {
+                int q[3] = {x, y, z};
+                q[a] += 1;
+                if (q[a] >= b.e[a] - b.G)
+                  continue;
+                badSym += (As[2 + 2 * a][i] != As[1 + 2 * a][b.id(q[0], q[1], q[2])]);
+              }
+            }
+      }
+    }
+  std::printf(
+      "(e) implicit band: %ld band entries (oracle %.2e), %ld non-band (%ld differ), cells/"
+      "diag %ld differ, symmetry %ld, M-matrix %ld\n",
+      nBand, wOr, nNon, badNon, badCell, badSym, badM);
+  CHECK(nBand > 500 && wOr <= 1e-14, "band entries vs oracle");
+  CHECK(badNon == 0 && badCell == 0, "non-band entries bitwise 'averaged'");
+  CHECK(badSym == 0 && badM == 0, "symmetric M-matrix");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -745,6 +1029,7 @@ int main(int argc, char** argv) {
     testKinked();
     testVirtual();
     testSeam();
+    testBand();
   }
   Kokkos::finalize();
   if (failures)

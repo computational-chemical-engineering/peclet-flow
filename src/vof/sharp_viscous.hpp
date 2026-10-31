@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <Kokkos_Core.hpp>
 
+#include "face_props.hpp"
 #include "mac_cutcell.hpp"
 #include "peclet/core/vof/plic_regions.hpp"
 #include "policy.hpp"
@@ -361,6 +362,31 @@ struct SharpGeom {
     for (int p = 0; p < 3; ++p)
       tau[p] = mulo * (sn[p] - n[p] * nsn);
     return true;
+  }
+};
+
+/// The implicit band's face viscosity under the sharp interface (§5.4 a, §6): a band edge across a
+/// (a ≠ c) takes μ̄_c,E = μ(F_c(E)), the u_c row's own PLIC face fraction; every other face, and
+/// the time diagonal, are `VarFaceProps`' (cells keep μ(C)). Symmetric under (i, j) swap: the edge
+/// is resolved from max(i, j). Also the β of the explicit transpose (`addFullStressRhs`).
+struct SharpFaceProps {
+  VarFaceProps base;
+  SharpGeom geo;
+  int c = 0;
+  KOKKOS_INLINE_FUNCTION double idiag(long i) const { return base.idiag(i); }
+  KOKKOS_INLINE_FUNCTION double beta(long i, long j) const {
+    const long dd = j - i, ad = (dd < 0) ? -dd : dd;
+    if (ad == geo.st[c])
+      return base.beta(i, j);
+    const int a = (ad == 1) ? 0 : ((ad == geo.st[1]) ? 1 : 2);
+    const long kk = (dd > 0) ? j : i;
+    const long z = kk / geo.st[2], rr = kk - z * geo.st[2], y = rr / geo.st[1];
+    const int k[3] = {(int)(rr - y * geo.st[1]), (int)y, (int)z};
+    int o[3];
+    double m[3], al;
+    if (!geo.edgeOwner(k, a, c, o, m, al))
+      return base.beta(i, j);
+    return geo.mu(geo.rowFaceFraction(k, a, c, c, o, m, al));
   }
 };
 
