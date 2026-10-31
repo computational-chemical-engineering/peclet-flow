@@ -8,13 +8,23 @@ a default.
 
 A-priori evidence: `tests/study/vof_mom2/apriori1d.py` (numpy, host, ~10 s; committed with this note).
 
+**Status 2026-10-31.** Implemented (WO-1..5) and **`'muscl_phase'` is the default** (USER 2026-10-29:
+the default flips only if all of its gates pass; they did — §12). **The diagnosis of §2 is REFUTED**
+for the 3D wrong limit by its own falsification gate G-D (2026-10-29): `'muscl_mixed_capped'` at P1
+d/h 16 gave Re 39.659 with the cap active (0.91 faces/step), above the pre-registered refutation
+threshold 39.50. The emptying-CV ("stayer debit") kick is therefore NOT the cause of `'muscl_mixed'`'s
++3 % wrong limit; **that mechanism is OPEN.** The scheme does not rest on §2: its gates (§9, §12)
+judge it directly. §2 is kept as the hypothesis that was tested, with the measured 1D facts.
+
 ## 0. Summary
 
-The opt-in MinMod MUSCL (`momentumMuscl`) converges to a wrong limit because it extrapolates the
-*mixed* control-volume velocity to the outgoing flux slab: on a control volume (CV) a sweep empties
-of liquid, the departing liquid takes a velocity the matter left behind (gas) has to pay for, and
-that payment lands on gas-scale mass — a velocity error with gain `rho_l/rho_g`. It is the very
-O(Δρ) inconsistency this rung removed, re-introduced at sub-cell scale.
+The opt-in MinMod MUSCL (`momentumMuscl`, now `'muscl_mixed'`) converges to a wrong limit at P1
+(+3.0 / +3.1 % at d/h 16 / 24). This note attributed it to the extrapolation of the *mixed*
+control-volume velocity to the outgoing flux slab: on a control volume (CV) a sweep empties of
+liquid, the departing liquid takes a velocity the matter left behind (gas) has to pay for, with
+gain `rho_l/rho_g` (§2). **G-D refuted that attribution in 3D** (status above): removing the kick by
+the mass-aware cap left the wrong limit in place. Why `'muscl_mixed'` converges to a wrong limit is
+OPEN. The kick itself is real in the uniform-gate round-off growth and in the 1D table of §2.4.
 
 The design, `'muscl_phase'`: each phase's mass flux carries that phase's own face velocity,
 reconstructed from the one CV velocity with an interface-biased, MC-limited (TVD) slope, and a
@@ -34,7 +44,17 @@ the frozen dilation term; the recovery floor; surface tension and curvature; fac
 time integration; the collocated solver itself; AMR; the energy twin `energy_advect.hpp`
 (`energyMuscl` — see §6.3; it is NOT changed here); Snellius.
 
-## 2. Diagnosis — why MinMod on the mixed velocity converges to a wrong limit
+## 2. Diagnosis — why MinMod on the mixed velocity converges to a wrong limit (REFUTED by G-D)
+
+> **REFUTED 2026-10-29 for the 3D wrong limit; mechanism OPEN.** G-D (§9) predicted that the
+> mass-aware cap alone (`'muscl_mixed_capped'`) removes the bias: CONFIRMED if Re16 < 38.99,
+> REFUTED if Re16 >= 39.50. Measured at P1 d/h 16: Re 39.659 (`'muscl_mixed'` 39.740, `'upwind'`
+> 35.327, reference 38.60), cap active on 0.91 faces/step (max 16), `floored` 0. The cap bounds the
+> stayer debit of §2.2 by construction (§4.3), and the +3 % stayed, so §2.2 is not its cause and
+> §2.3's closing argument ("the logic is closed") does not hold. What §2 still establishes, as
+> measurement: uniform-gate round-off grows at 1e4 under `'muscl_mixed'` (ctest `vof_momentum`
+> K7, 50 steps: 1.3e-7 host, 6.5e-8 CUDA) and the cap removes that growth (`'muscl_mixed_capped'`
+> 7.8e-16 / 8.9e-16, upwind's level); the 1D table of §2.4. No replacement mechanism is claimed here.
 
 ### 2.1 The update, split into what stays and what moves
 
@@ -248,7 +268,8 @@ d-neighbour holds the other phase): one-sided or zero slopes, i.e. O(h) face err
 O(h). The numerical viscosity there is `~|u| h` on a set of measure `O(h)` per unit interface area, so
 the dissipation error is O(h^2) — global second order, first order in L-infinity on the band (1D:
 L1 order 1.95, L-infinity order about 1.2). This is why Basilisk converges fast with zero minority
-slopes, and why the mixed-velocity bias of §2 is the only obstruction.
+slopes. (The claim made here at design time, that the mixed-velocity bias of §2 is the only
+obstruction, fell with G-D; see §2.)
 
 ### 4.8 Cut cells, ghosts, and the flag
 
@@ -329,7 +350,8 @@ is no such amplification; this note's analysis says there is. Not changed here �
   `vof_momentum_diagnostics()['capped']`. `set_vof_momentum_muscl(on)` stays, as the old spelling of
   `set_vof_momentum_scheme('muscl_mixed' | 'upwind')` (NAMING.md §0: additive since 1.0.0; its
   docstring names the canonical setter; one row in NAMING.md's divergence table).
-- The default stays `'upwind'`. Changing it is a later decision recorded with the user (§10, U-2).
+- The default stayed `'upwind'` until the recorded user decision (§10, U-2); since 2026-10-31 it is
+  `'muscl_phase'` (§12).
 
 ## 8. Work orders (dependency order; one commit each; named paths only)
 
@@ -400,7 +422,8 @@ the cap"); this note's status line with the gate numbers and a row in `doc/READM
   run detect it; if a path does not fill the layer, extend that path's fill by one layer (no change
   for other schemes) and say so in the commit.
 - **F-2 (fact).** Whether 3D confirms the diagnosis (G-D). *Default:* proceed with `muscl_phase`
-  whatever G-D says; G-D only gates §2 and the default conversation.
+  whatever G-D says; G-D only gates §2 and the default conversation. **Answered: REFUTED**
+  (2026-10-29, §2); the wrong-limit mechanism of `'muscl_mixed'` is OPEN.
 - **F-3 (fact).** Re averaging noise against a small `e32`. *Default:* NOT JUDGED as in G-M2-3,
   escalate; no extra runs invented by the implementer.
 - **F-4 (fact).** Time error may cap the observed order: backward Euler is the settled integrator,
@@ -415,19 +438,56 @@ the cap"); this note's status line with the gate numbers and a row in `doc/READM
 - **U-1 (user preference).** Public name and tier. *Default:* diagnostics tier,
   `set_vof_momentum_scheme` with the four names of §7.
 - **U-2 (user preference).** Flip the default to `'muscl_phase'`. *Default:* stays `'upwind'`;
-  recommend the flip if G-M2-1..9 PASS, as a recorded user decision.
+  recommend the flip if G-M2-1..9 PASS, as a recorded user decision. **Decided** (USER 2026-10-29:
+  flip only if all of its gates pass); flipped 2026-10-31 (§12).
 - **U-3 (user preference).** Retire `'muscl_mixed'`. *Default:* keep while opt-in (it is G-D's control);
   deprecate under NAMING §0 with the default flip.
 
 ## 11. Register entry (text for `suite/docs/DECISIONS.md`)
 
-- **VoF momentum flux at second order = per-phase interface-biased MC slopes plus a mass-aware cap
-  (`'muscl_phase'`, opt-in until a recorded default decision); NEVER a slope of the mixed
-  control-volume velocity without the cap.** The matter a sweep leaves behind in a CV pays for any
-  extra momentum the outgoing matter takes; with a mixed slope that payment is liquid momentum on gas
-  mass (gain rho_l/rho_g), which made the MinMod opt-in converge to a wrong limit (P1 +3.0/+3.1 % at
-  d/h 16/24) and grow uniform-gate noise at 1e4. **Rejected:** MinMod/MC of the mixed velocity (1D:
-  order 0.17 at 1e4, MC diverges); Basilisk-faithful two momenta + unlimited slopes (no maximum
-  principle in 3D, +9 exchanges/step); Zalesak FCT on u (two passes, extra halo); exact donor mass
-  from widened PLIC ghosts (+9 % reconstruction or +9 exchanges/step).
-  <sub>architect 2026-10-29; flow doc/vof_momentum_second_order.md; tests/study/vof_mom2/apriori1d.py</sub>
+As landed 2026-10-31 (the design-time text claimed the §2 mechanism; G-D refuted it, so it is gone):
+
+- **The VoF momentum flux defaults to `'muscl_phase'`: per-phase interface-biased MC slopes of the
+  one CV velocity plus a mass-aware cap; NEVER a slope of the mixed control-volume velocity without
+  the cap.** Second order, a per-sweep discrete maximum principle at any density ratio, the
+  uniform-velocity identity bit-exact; P1 (ratio ~1e3) from rest at t60, d/h 16/24/32/48: 37.443 /
+  38.001 / 38.289 / 38.523 against 38.60 (pairwise orders 1.62 / 2.28 / 3.44); P2 d/h 48 within
+  0.03 % of upwind; 0.70x upwind's cost at P1 d/h 24. **Rejected:** `'upwind'` as the default (first
+  order: P1 d/h 16 35.33, d/h 24 36.41); `'muscl_mixed'` (MinMod of the mixed velocity; converges to
+  a wrong limit, P1 +3.0/+3.1 % at d/h 16/24 — mechanism OPEN: the cap-only ablation G-D, 39.659 at
+  d/h 16, refuted the emptying-CV explanation); MC of the mixed velocity without the cap (1D:
+  diverges); Basilisk-faithful two momenta + unlimited slopes (no maximum principle in 3D, +9
+  exchanges/step); Zalesak FCT on u (two passes, extra halo); exact donor mass from widened PLIC
+  ghosts (+9 % reconstruction or +9 exchanges/step).
+  <sub>USER 2026-10-29 (flip iff all gates pass); flow doc/vof_momentum_second_order.md §9, §12;
+  bubble_column_perf/validation/highratio/DECISIONS.log</sub>
+
+## 12. Measured results and the default (2026-10-31)
+
+All gates of §9, pre-registered, judged on flow `mom2` (`9e70a30`, the scheme commits before the
+rebase onto main `4b59f52`) with `validation/highratio/pec/run_hr_scheme.py`, local RTX 5080.
+
+| gate | verdict | measured |
+|---|---|---|
+| G-M2-1 | PASS | `max|u - U| == 0.0` bitwise, all four schemes, ratios 1..1e4, slab / tilted / sphere (ctest `vof_momentum`, `vof_cutcell`) |
+| G-M2-2 | PASS | ratio 1e4, 50 steps (ctest `vof_momentum` K7, host / CUDA): `'muscl_phase'` 8.9e-16 / 1.0e-15, `'muscl_mixed_capped'` 7.8e-16 / 8.9e-16, upwind 7.8e-16 / 8.9e-16 (`'muscl_mixed'` 1.3e-7 / 6.5e-8, printed) |
+| G-M2-3 | PASS | P1 from rest, t60: d/h 16 / 24 / 32 / 48 = 37.443 / 38.001 / 38.289 / 38.523; `e = Re - 38.60` one sign; pairwise orders 1.62 / 2.28 / 3.44; `|e24|` 1.55 %; d/h 48 = Basilisk L8 (38.517) + 0.02 % |
+| G-M2-4 | PASS | P2 d/h 48 (t30 -> 40 from the d/h 24 dump): Re 8.0701 vs upwind 8.0674 (0.03 %); `floored` 0, `capped` 0; dt_min 1.6347e-5 s vs upwind's sampled minimum 1.7745e-5 s, an upper bound on its per-step minimum: ratio >= 0.92 |
+| G-M2-5 | PASS | default `'upwind'` unchanged: battery green host + CUDA, state_hash digests == main (re-run after the rebase: host 278/278, 805e3e99a93333c7; CUDA 278/278 with three GPU-OOM serial reruns, e7edbb471ea7a742) |
+| G-M2-6 | PASS | P1 d/h 24: 56.65 vs 81.41 ms/step (0.70x; shared GPU, noisy) |
+| G-M2-7..9 | PASS | ctests `vof_momentum_slab` (oracle within 1 %, order, ratio independence, positive control), `vof_momentum_mpi` (np 1/2/4 bitwise), single phase `capped == 0` |
+| G-M2-10 | PASS | `vofmom_sync_budget`: fences and View allocations per step equal to upwind's |
+| G-D | REFUTED | P1 d/h 16 `'muscl_mixed_capped'` 39.659 (cap 0.91 faces/step); §2 |
+
+For comparison at P1: `'upwind'` d/h 16 35.327, d/h 24 36.406 (first order); `'muscl_mixed'` d/h 16
+39.740, d/h 24 39.79 (wrong limit). The observed P1 order of `'muscl_phase'` (1–1.6 over the free
+three-point fits) is attributed in the campaign to the interface viscous-stress error, which is
+outside this note (`doc/vof_sharp_viscous_stress.md`, branch `sharpvisc`); the averaging-bracket
+spread of the Basilisk reference (L7 arithmetic 38.569 / geometric 39.727 / harmonic 41.174) puts
+the P1 reference in a 38.5–39.2 band.
+
+**The default flip** (flow `eeb77d0`, on `mom2land` = `mom2` rebased onto main `4b59f52`):
+`vof::MomentumConsistentAdvector::momentumScheme = MomentumScheme::MusclPhase`. No state_hash
+digest moves (14/14 lines equal on host and CUDA): no state_hash case calls `enable_vof_momentum`. `'upwind'` stays
+selectable by `diagnostics.set_vof_momentum_scheme('upwind')`; `set_vof_momentum_muscl(on)` stays the
+former spelling (`'muscl_mixed'` / `'upwind'`).

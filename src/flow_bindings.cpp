@@ -2145,16 +2145,15 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           [](D& diag, const std::string& name) { diag.s->setVofMomentumScheme(name); },
           nb::arg("name"),
           "The transported face velocity of the VoF momentum flux (flow "
-          "doc/vof_momentum_second_order.md). 'upwind': donor cell, convex at every "
-          "density ratio, first order (the default until 2026-10-31). 'muscl_mixed': a MinMod slope of the MIXED control-volume "
-          "velocity; on a volume a sweep empties of liquid the departing liquid's extra momentum "
-          "is debited from the gas left behind (gain rho_l/rho_g), so it converges to a WRONG "
-          "limit at high ratio (P1, ratio ~1e3: +3.0/+3.1 % at d/h 16/24). 'muscl_mixed_capped': "
+          "doc/vof_momentum_second_order.md). 'upwind': donor cell, convex at every density "
+          "ratio, first order (the default until 2026-10-31). 'muscl_mixed': a MinMod slope of "
+          "the MIXED control-volume velocity; it converges to a WRONG limit at high ratio (P1, "
+          "ratio ~1e3: +3.0/+3.1 % at d/h 16/24; the mechanism is open). 'muscl_mixed_capped': "
           "that slope times the mass-aware cap (the diagnosis ablation). 'muscl_phase': each "
           "phase's mass flux carries its own face velocity from an interface-biased MC slope, "
           "scaled by the cap - second order, a discrete maximum principle at any ratio, the "
-          "uniform-velocity identity bit-exact; the DEFAULT. vof_momentum_diagnostics()['capped'] counts the "
-          "faces the cap scaled in the last step. Any other name raises ValueError.")
+          "uniform-velocity identity bit-exact; the DEFAULT. vof_momentum_diagnostics()['capped'] "
+          "counts the faces the cap scaled in the last step. Any other name raises ValueError.")
       .def(
           "vof_momentum_scheme", [](D& diag) { return diag.s->vofMomentumScheme(); },
           "The selected VoF momentum scheme (see set_vof_momentum_scheme).")

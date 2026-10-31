@@ -21,6 +21,7 @@ suite-wide contracts are in `../../docs/`.
 | [collocated_paper_plan.md](collocated_paper_plan.md) | 2026-08 … 09 | Live paper plan and results tracker for that work. |
 | [fluid_only_constraint_plan.md](fluid_only_constraint_plan.md) | 2026-08 | The production fluid-only constraint (the `"ghost"` scheme) — design plan, with parts still open. |
 | [variable_viscosity_projection.md](variable_viscosity_projection.md) | 2026-07 | The variable-viscosity momentum operator and the rotational-incremental projection it needs. |
+| [vof_momentum_second_order.md](vof_momentum_second_order.md) | 2026-10-29 … 10-31 | The VoF momentum flux at second order: `'muscl_phase'` (per-phase interface-biased MC slopes + a mass-aware cap), the DEFAULT since 2026-10-31; its gates and measured P1/P2 numbers (§12). Its §2 diagnosis of `'muscl_mixed'`'s wrong limit is REFUTED (G-D); mechanism open. |
 | [full_viscous_stress.md](full_viscous_stress.md) | 2026-10 | The full deviatoric stress at variable μ (staggered; the default since WO-7, `set_viscous_stress("auto")`): the transpose term as conservative MAC stress elements, explicit on uⁿ; gates G0–G7 and the rejected alternatives. |
 | [variable_density_projection.md](variable_density_projection.md) | 2026-07 … 09 | Variable density: momentum, projection scaling, the pressure driver, and (§4) the rank-aware domain-BC repair. |
 | [porous_drag_scheme.md](porous_drag_scheme.md) | 2026-07 … 09 | The volume-averaged (porous) CFD-DEM fluid scheme — the gas phase of `peclet.coupling` with `porous=True`. |

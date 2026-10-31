@@ -91,12 +91,12 @@
 /// ## The transported velocity in the flux
 ///
 /// `momentumScheme` selects the face velocity `u^` (design: `doc/vof_momentum_second_order.md`):
-/// - `Upwind`: plain donor-cell, `u^ = u_don` (the default until 2026-10-31). The update is then convex at every
-///   density ratio — the reason the ratio-1e4 uniform gate is flat.
+/// - `Upwind`: plain donor-cell, `u^ = u_don` (the default until 2026-10-31). The update is then
+///   convex at every density ratio — the reason the ratio-1e4 uniform gate is flat.
 /// - `MusclMixed`: a MinMod slope of the MIXED control-volume velocity. Kept as an opt-in and as
-///   the diagnosis control; it converges to a WRONG limit at high ratio (note §2): on a CV a sweep
-///   empties of liquid, the extra momentum the departing liquid takes is debited from the gas left
-///   behind, a velocity error with gain `rho_l/rho_g`.
+///   the diagnosis control; it converges to a WRONG limit at high ratio (P1 +3 %). Why is OPEN:
+///   the note's §2 blamed the emptying-CV "stayer debit" (gain `rho_l/rho_g`), but the cap-only
+///   ablation G-D (`MusclMixedCapped`) kept the wrong limit, which refutes that (note §2).
 /// - `MusclMixedCapped`: the same MinMod slope times the mass-aware cap `theta` of note §4.3 (the
 ///   diagnosis ablation, gate G-D). `uL == uG`, so it reuses the upwind update kernel.
 /// - `MusclPhase`: each phase's mass flux carries its OWN face velocity, `uL` for the liquid and
@@ -300,15 +300,17 @@ class MomentumConsistentAdvector {
   /// means "use `rhoFloorFrac * min(rho_g, rho_l)`".
   double rhoFloor = 0.0;
   double rhoFloorFrac = 1e-6;
-  /// The transported face velocity of the momentum flux; `MusclPhase` by default (note §12). See the file header,
-  /// "The transported velocity in the flux", and `doc/vof_momentum_second_order.md`.
+  /// The transported face velocity of the momentum flux; `MusclPhase` by default (note §12). See
+  /// the file header, "The transported velocity in the flux", and
+  /// `doc/vof_momentum_second_order.md`.
   ///
-  /// The measured history behind the default (MinMod of the mixed velocity, `MusclMixed`): on the
+  /// The measured history of the former opt-in (MinMod of the mixed velocity, `MusclMixed`): on the
   /// uniform-velocity gate at ratio 1e4, 50 steps, double-storage build, its error grew
   /// `3.3e-16 -> 6.1e-16 -> 4.3e-14 -> 5.1e-13 -> 2.2e-10` over steps 10..50, while upwind stayed
   /// FLAT at `3.3e-16 ... 6.7e-16`; at P1 it converged to a wrong limit (+3.0 / +3.1 % at d/h
-  /// 16 / 24). The note's §2 derives both from one term: the stayer debit with gain `rho_l/rho_g`.
-  /// `MusclPhase` removes it (per-phase slopes + the mass-aware cap).
+  /// 16 / 24). The cap removes the noise growth (`MusclMixedCapped` stays at upwind's level) but
+  /// NOT the wrong limit (G-D refuted the note's §2 attribution of both to the stayer debit; the
+  /// limit's mechanism is OPEN). `MusclPhase` (per-phase slopes + the cap) passes both gates.
   MomentumScheme momentumScheme = MomentumScheme::MusclPhase;
   /// Ablation: use the PRESSURE-cell frozen dilation flag `H(C^n - 1/2)` on the shifted CV instead
   /// of the structural analogue `H(C^{e,n} - 1/2)`. See the file header, point 4.

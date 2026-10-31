@@ -426,6 +426,11 @@ ablations on `s.diagnostics`. Ref §9; rung record `doc/history/vof_workorders*.
 - **The WY dilation flag is frozen once per step** (per sweep, exact conservation silently dies); so
   is the momentum-consistency coefficient, which uses donor-cell upwind (MUSCL amplifies density
   ratio). `enable_vof_momentum`: variable ρ, staggered, explicit advection, no solid, not porous.
+- **The VoF momentum flux is `'muscl_phase'` by default** (since 2026-10-31,
+  `diagnostics.set_vof_momentum_scheme`): per-phase interface-biased MC slopes + a mass-aware cap,
+  second order, bounded at any ratio; `'upwind'` is first order. **NEVER a slope of the mixed CV
+  velocity without the cap** (`'muscl_mixed'`: wrong limit +3 % at ratio 1e3; why is OPEN, the note's
+  emptying-CV diagnosis was refuted by G-D). `doc/vof_momentum_second_order.md` §12.
 - **Scope — say it to users:** staggered is the reference; collocated is all-fluid, ratio ~10 with
   motion (exact at rest at 1000). Colliding markers are rated since 2026-09-25
   (`doc/vof_overlap_design.md`). **Never assemble the block force from the union colour** (it
