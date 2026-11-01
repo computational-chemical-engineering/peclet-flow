@@ -1,6 +1,6 @@
 # Sharp viscous stress at a VoF interface on the staggered MAC grid — design note
 
-Status: DESIGN (architect, 2026-10-31; amended the same day by a second pass, §5.7). Branch `sharpvisc` (on `mom2`). USER 2026-10-31: "Yes give the
+Status: DESIGN (architect, 2026-10-31; amended the same day by a second pass, §5.7; third pass §6.1–§6.4; fourth pass 2026-11-01, §6.5–§6.7). Branch `sharpvisc` (on `mom2`). USER 2026-10-31: "Yes give the
 sharp interface stress for Peclet priority".
 Brief: `bubble_column_perf/validation/highratio/BRIEF_ARCH_SHARPVISC.md`; recon digest `RECON_VISCOUS.md`.
 A-priori harness (2-D MAC Stokes, committed with this note): `tests/study/sharp_viscous/`.
@@ -853,6 +853,179 @@ reported diagnostic.
 
 ---
 
+### 6.5 Fourth pass (architect, 2026-11-01): the periodic twin G-SV9(b′) (Q1)
+
+**Data.** (b′) = the (b) march on a triply periodic box, m = (2,1,1), two plane families per period
+(layer fraction 0.5), N = 16 (`R/gsv9b/pplane_*.out`, R = `validation/highratio/sv_impl/rb7`).
+- 'sharp': every D_hi ≥ 100 blows up within 15–24 steps. Production Arnoldi (converged solves,
+  incremental, μ 1e-2 / ρ 1e-3, D_hi 100): ρ = 1.4868, real negative, linearity 8.2e-12.
+- 'averaged': the μ 1e-3/ρ 1e-4 pair and its inverse grow ~1.06/step at D_hi 10…1e4; the other
+  pairs plateau at window ratios 1.00000–1.00025.
+
+**Instrument findings (settled).**
+1. *The plateau is the translation subspace, not a mode of the scheme.* In a periodic box the three
+   uniform fields are exact eigenvectors with λ = 1 (zero stress, zero divergence, zero fit). Σρ_F u_c
+   is conserved only to the momentum-solve residual, and the march runs the production default solve
+   (§6.6), which exits above tolerance at D ≥ 10: each step deposits momentum, the undamped translation
+   modes accumulate it, and E plateaus or creeps (1.00005–1.00025 per 100 steps). **Fix (WO-6a′):** on a
+   periodic box `gsv9.py` judges E′ = E − Σ_c (Σ_F ρ_F u_c)² / (2 Σ_F ρ_F), the energy of the
+   M-orthogonal complement of the translations (an invariant subspace of any momentum-conserving step);
+   E is still printed. `gsv9_split.py prod` on a periodic box deflates the three translations
+   (project them out of every Arnoldi vector, M-orthogonally) so that ρ is not pinned at 1.
+2. *The geometry is outside the operator's envelope as specified.* Each layer is P/2 = 1/(2√6) = 3.27
+   cells thick at N = 16, and the band is half the box (2048 of 4096 cells). The fit block of every
+   interfacial cell reaches ±2.45 h along n (§5.3), so it contains the other interface. The model is
+   still exact for parallel layers (each link's θ̄ comes from its own owner), but §6 and §6.1 never
+   measured stability with two interfaces inside one fit/stencil reach.
+
+**Discriminators (architect, host, N = 16 unless stated; production u-only map, non-incremental,
+converged solves: RB-GS update stop 1e-12, residual stop off; Chebyshev 1e-13; D_hi = 100;
+`gsv9_split.py prod --geom pplane [--roll|--frac|--m]`; logs `sv_impl/arch4/disc_*.out`).**
+
+| case | mode, μ_A/μ_B, ρ_A/ρ_B | gas layer / liquid layer (cells) | ρ | leading λ |
+|---|---|---|---|---|
+| E1 (b′) | sharp, 1e-2, 1e-3 | 3.27 / 3.27 | 1.4558 | −1.4558 (double) |
+| E2 E1 rolled (5,3,7) cells | sharp, 1e-2, 1e-3 | 3.27 / 3.27 | **1.455803 (identical)** | identical |
+| E7 frac 0.75 | sharp, 1e-2, 1e-3 | 4.90 / 1.63 | 1.2057 | −1.2057 (double) |
+| E8 frac 0.25 | sharp, 1e-2, 1e-3 | 1.63 / 4.90 | 1.0000 (translations), next 0.969 | stable |
+| E4 N = 24 | sharp, 1e-2, 1e-3 | 4.90 / 4.90 | 1.2019 | −1.2019 (double) |
+| E5 (b′) | **averaged**, 1e-3, 1e-4 | 3.27 / 3.27 | **1.0652** | +1.0652 ± 0.0014i, −1.018 ± 0.042i |
+| E6 (b′), incremental | **averaged**, 1e-3, 1e-4 | 3.27 / 3.27 | 1.0212 | −1.0206 ± 0.037i |
+| E3 walled, one plane m = (2,1,1) | sharp, 1e-2, 1e-3 | half box | running (`disc_E3_wall211.out`) | ≤ 1: two interfaces in reach are the trigger; > 1: one oblique interface is enough at this normal, so (b)'s pass is geometry-dependent. The rulings below hold either way. |
+
+**Verdict: a genuine mode of the composite split, not an implementation departure.**
+- *Not the seam.* A whole-cell translation leaves the spectrum identical to 6 digits (E2). Every seam
+  hypothesis (SvRole, explicit element, SharpFaceProps, τ̂ wrap, halo) would break that invariance.
+- *Not only the instrument.* The plateau is (finding 1), the blow-up is not: E1/E5 are converged,
+  linear (lin ≤ 3e-9), and above 1 by 6–46 %.
+- *Not specific to 'sharp'.* Today's production operator ('averaged') has a growing mode on the same
+  geometry at the extreme contrast (E5, E6), and the (b′) march shows it from D_hi = 1 (window ratio
+  1.31–1.71 per 100 steps at μ 1e3 / ρ 1e4).
+- *The argument that failed.* FVS §6 proves only the predictor: X = (M+K)⁻¹(M−T) is self-adjoint and a
+  contraction in the (M+K)-norm. The projection P is a contraction in the M-norm. PX is bounded by
+  neither when K/M varies by orders of magnitude between coupled unknowns. 2×2 example: M = I,
+  K = diag(100, 0.01), T = [[0,1],[1,0]] (K ± T ≥ 0), ‖X‖_M = 1.40. FVS §6 itself lists the composite as
+  unproven and left it to large-dt gates. §6 and §6.1 measured walled geometries with one interface, where
+  it happened to hold (≤ 0.99). A layered periodic box puts every gas face within a few cells of
+  liquid-strength edge coupling (interface edges carry μ_hi-scale β against ρ_lo/dt), and there it does not
+  hold. The sharp explicit terms (§6.1 mechanism) add to the same non-normality. That is why 'sharp' goes
+  unstable at μ 1e2 contrast where 'averaged' does not.
+- *Production regime.* On (b′) 'sharp' passes the march at D_hi = 0.1, 1 and 10 at every pair. That
+  includes μ 1e3 / ρ 1e4, where 'averaged' grows from D_hi = 1. P1/P2 run at D_l 0.10–0.32. So in the
+  production range 'sharp' is no worse than today, and better at the extreme pair. The defect bites the
+  large-D_hi capability that §6 claimed, which was proved for neither mode.
+
+**Rulings.**
+- **No dt cap, no tuning** (the §6 rule stands; a cap would need a USER ruling and is not proposed).
+- **G-SV9(b′) stays reported-only**, as pre-registered. The STOP is resolved: (b) and (d), the binding
+  march gates, pass after WO-5b. Their pass is no longer read as "unconditionally stable": the note's
+  claim is narrowed to "stable on the gate geometries; the composite is unproven for both modes"
+  (register text §13 to say so).
+- **WO-6 proceeds** (GMRES needs only I − G nonsingular; λ = −1.46 gives 2.46). **WO-7 proceeds** at
+  production dt.
+- **New reported gate G-SV9(f), the onset (WO-6f).** The (b′) march and the E1/E5 Arnoldi, with the
+  WO-6a′ deflation, at D_hi ∈ {0.1, 0.3, 1, 3, 10, 30, 100}, both modes, the four pairs, frac 0.5 and 0.75,
+  N = 16. Report the smallest unstable D_hi per mode and pair. **STOP → architect if 'sharp' is unstable at
+  D_hi ≤ 3 on any case where 'averaged' is stable.** That is the production-relevant claim.
+- **The composite instability is a separate package (Q23), not this one.** It is in today's default
+  ('averaged', register 272's split), which must stay bitwise here (G-SV5). It needs its own design pass:
+  a periodic layered 2-D harness first (the harness is walled today); then a split whose composite is
+  provably contractive. Candidates, none decided: the transpose implicit on band rows only (a coupled
+  band solve), or an M-norm-contractive predictor. Production relevance is a USER priority call: thin
+  gas/liquid layers of 2–5 cells at μ ≥ 1e3, ρ ≥ 1e4 contrasts and D ≥ 1. Default: the coordinator logs it,
+  and this package does not wait for it.
+
+### 6.6 Fourth pass: the momentum solve inside the steady gates (Q2)
+
+**Facts.** Under VoF with variable ρ/μ the velocity V-cycle is refused (register 212); RB-GS runs with
+the residual stop that follows the pressure rtol, and a stagnation exit. At D_hi = 100 it cannot meet
+that stop: the smooth and translation modes of M + K contract by ≈ 1 − 1/(1 + 6D) per sweep, ~2e4 sweeps
+per 1e-13 (measured 19 500). It exits at 1.7× its scale. The step map is then neither affine nor
+momentum-conserving, and GMRES, which needs an affine map, diverged on G-SV1P (1,1,1) k5/k6 (iterate
+×200, CFL refusal). Converged momentum: the same cases in 63 matvecs, one cycle.
+
+**Why converging is not a selective rescue.** The steady state is A u + G p = f (§6.4); the momentum
+solver is not in it. It only sets the path, and the converged solve makes the map affine so that GMRES
+can find that state. A certified fixed point of the default map is the same state in exact arithmetic
+(at a fixed point the warm-start residual is zero), but its certificate is weak: an inexact step barely
+moves the smooth modes, so a small increment does not bound their residual. The pilot's ~4-digit
+default-vs-converged agreement is that weakness, measured.
+
+**Rule (binding).**
+- Every steady gate — G-SV1P/1cP/1dP, G-SV1W, the walled G-SV1 diagnostic, G-SV2 — and the WO-6p
+  invariance check run **every** production step of the steady solve (S(0), every matvec, every
+  certificate step) with `gsv1.py --converged-momentum`: RB-GS, residual stop off
+  (`set_velocity_residual_tolerance(0)`), update stop 1e-13, cap never binding; pressure by the driver
+  the ρ model selects, rtol 1e-13, cap never binding. Same setting for both modes, every case, every N.
+- **Certificate:** on that converged step, ‖S(x) − x‖∞ ≤ 1e-12·max|u| (unchanged).
+- **Reported, not judged:** the increment of one production-default step from the certified state.
+  Expected ≤ 1e-11·max|u|; a larger value is listed (it would mean the default exit does not even hold a
+  steady state).
+- Marches (G-SV9(b)(b′)(d), G-SV3, G-SV8) keep the production default: they judge the production path.
+  G-SV9(e) keeps its converged solves (1e-13).
+- **Reruns.** Every G-SV1P/1dP/1cP result from `R/host2.sh` and `R/gsv1/cuda.sh` taken with the default
+  solve is void for judging (kept as a diagnostic); rerun the full sets under the rule. The WO-6p
+  invariance pilot (`pilot_conv`) already runs converged and stands.
+- **Cost, and the only allowed lever (Q19).** ~2e4 sweeps per matvec at D_hi = 100. D_hi may drop to 10
+  for ALL cases of a gate only if a 4-case pilot (both ratios, N = 48) shows ≥ 2× less total sweep count
+  and fixed points agreeing with D_hi = 100 to ≤ 1e-11·max|u|. Default: D_hi = 100.
+
+**The stagnation exit in production (coordinator Q20): not this package.** It is documented behaviour
+above D ≈ 4 (flow `CLAUDE.md`, velocity solve). P1/P2 run at D_l 0.10–0.32, gas D ≈ 1.5–5 at air–water
+contrasts. WO-7's logging is released: per step, the momentum exit residual over its tolerance. If more
+than 1 % of P1/P2 steps exit above tolerance, Q20 becomes its own package (a variable-μ velocity solver;
+register 212 is the architect's to revisit). Default: proceed. §6.5 adds what the periodic twin says
+about it.
+
+### 6.7 Fourth pass: G-SV2 fully specified (Q3)
+
+Replaces the G-SV2 bullet of §11 (the pre-registered parts — κ set, L = 8R, d/h set, the
+self-convergence order ≥ 1.8, the 3 % sanity — are unchanged; the rest was unstated).
+
+- **Box and grid.** [0, L]³, L = 8R, triply periodic, isotropic h. d = 2R, d/h ∈ {8, 12, 16, 24, 32},
+  so N = 4·d/h ∈ {32, 48, 64, 96, 128}.
+- **Drop.** Phase A (C = 1) is the sphere |x − x_c| < R, x_c = (L/2, L/2, L/2): a cell vertex at every N,
+  so each level samples the same symmetry class. Rejected: a per-N or random offset, which adds an
+  O(h²) configuration noise that varies non-smoothly with N and spoils a 3-parameter fit on 5 points.
+- **Colour.** C_i is the exact z-chord average over 32×32 midpoint sub-columns of cell i: the length of
+  [z_c − s, z_c + s] ∩ [z_i, z_i + h], s = √max(R² − (x−x_c)² − (y−y_c)², 0), over h. Cells with all 8
+  corners inside (outside) are exactly 1 (0). Frozen: reset after every step.
+- **σ = 0.** The frozen colour holds the shape; HR is shape-exact for any σ (its normal-stress jump is a
+  constant, absorbed by the pressure as a step), and CSF would add spurious currents to U_d.
+- **Properties.** ρ = 1 in both phases. Stokes has no inertia and the steady state is ρ-independent
+  (§6.4); a density contrast adds a variable-ρ projection that changes nothing at steady state and makes
+  the gauge ρ_F-weighted. μ = LinearMix(C): μ_B = μ_out = 1, μ_A = κ μ_out, κ ∈ {1e-2, 1, 1e2}. κ = 1 is
+  uniform μ, so 'sharp' is skipped bitwise there: it is the control of the forcing and the base scheme.
+- **Force (Boussinesq buoyancy, Hasimoto convention).** Cell field f_z = Δρg (C_i − φ_h), φ_h the mean of
+  C_i; f_x = f_y = 0. Write it with `set_field("force_z")` in internal units (`s.unit_scales`); the face
+  force is the face interpolation, Σ = 0 to round-off. This is a force ΔρgV_h on the drop,
+  V_h = h³ΣC_i, plus a uniform −Δρgφ_h over the whole box: exactly Hasimoto's periodic-array
+  distribution, so **F = Δρg V_h**. Rejected: F = (ρ_d − ρ̄)gV = ΔρgV(1 − φ), the net body force on the
+  drop region. It differs by O(φ) = 0.8 % and is not the convention of the periodic correction below.
+- **Amplitude.** Δρg = 1e-3·(h/dt)·9μ_out K_HR/(2R²): colour CFL ≈ 1e-3 at the unbounded HR speed (the
+  problem is linear; the CFL refusal must never fire).
+- **Steady solve.** WO-6s GMRES(60) under the §6.6 rule, from u = 0, p = 0. D_hi = μ_hi dt/(ρh²) = 100,
+  μ_hi = max(κ, 1)·μ_out. Certificate 1e-12·max|u|; cap 3000 matvecs (at the cap: NOT CONVERGED, not
+  judged). Advection off. Modes: 'sharp' (gated) and 'averaged' (reported).
+- **U_d.** U_d = Σ_i C_i w̄_i / Σ_i C_i − ⟨w⟩, with w̄_i = ½(w on the −z and +z faces of cell i) and ⟨w⟩
+  the mean over all z-faces (zero by momentum invariance at uniform ρ; subtracted anyway). For a drop,
+  (1/V)∫_drop u dV is the translation velocity exactly: in the drop frame ∫u dV = ∮x(u·n)dS = 0. The
+  discrete functional errs by O(h²) (O(h⁴|∇u|) per cut cell, O(R²/h²) cut cells).
+- **K** = F/(6π μ_out U_d R_h), R_h = (3V_h/4π)^{1/3}.
+- **PASS ('sharp', κ = 1e-2 and 1e2).** Fit K(h) = K∞ + C h^p by unweighted nonlinear least squares over
+  all five levels, p bounded to [0.5, 4]: p ≥ 1.8, and |K∞ − K_per|/K_per ≤ 3 % with
+  K_per = K_HR/(1 − 1.7601 K_HR φ^{1/3}), K_HR = (2 + 3κ)/(3(1 + κ)), φ = π/384 (φ^{1/3} = 0.20149).
+  K_per = 0.8788 (κ = 1e-2), 1.1829 (κ = 1), 1.5416 (κ = 1e2).
+- **κ = 1** must pass the same criteria. If it misses, G-SV2 is NOT JUDGED (instrument or base scheme,
+  not the sharp operator) and returns to the architect.
+- **Reported, not judged:** K per level; the same fit over the four finest levels (12–32); 'averaged''s
+  p and K∞; matvecs per case. A five-level MISS with a four-level pass is Q10 (curvature pre-asymptotic at
+  d/h 8): reported, and the user rules; it is not a PASS.
+- **Where.** d/h 8–16 host; d/h 24, 32 CUDA under `heavy.lock`. Script `tests/study/sharp_viscous/gsv2.py`,
+  one line per case plus a verdict line, re-using `gsv1.py`'s GMRES driver.
+
+---
+
 ## 7. MPI, halo, device, cost
 
 - **Planes.**
@@ -1050,6 +1223,22 @@ T-terms, midsection term, all on `old_`.
   A ū + G p̄ = 0 on rows ≥ 3 cells from every wall. If it does not, extend it (G-SV1x).
 - **WO-6w (G-SV1W).** The walled Couette check of §11, both modes, N = 24 and 32. Steady states by WO-6s.
 
+**Fourth-pass work orders (§6.5–§6.7), in order.**
+- **WO-6q (rerun under the §6.6 rule).** `gsv1.py`'s GMRES driver takes `--converged-momentum` for
+  S(0), every matvec and the certificate step, unconditionally in every steady set (remove the option's
+  default-off path for gated sets). Add the reported default-step increment. Rerun G-SV1P/1dP/1cP
+  (N 24/32 host, 48/64 CUDA) and G-SV1W. Acceptance: the WO-6p invariance Σρ_F u_c ≤ 1e-13·Σρ_F·max|u|
+  on every case; no case judged from a default-solve run.
+- **WO-6a′ (periodic energy).** `gsv9.py` on a periodic box judges E′ (§6.5 finding 1) and prints E;
+  `gsv9_split.py prod` on a periodic box M-orthogonally projects the three translations out of every
+  Arnoldi vector. Acceptance: E8 (`--frac 0.25`) then reports ρ = 0.969 ± 1e-3 instead of 1.0000;
+  the (b′) D_hi = 10 'sharp' lines no longer plateau.
+- **WO-6f (G-SV9(f), the onset; reported).** As specified in §6.5. One line per case, plus a table of
+  the smallest unstable D_hi per mode × pair × frac.
+- **WO-G2 (G-SV2).** `tests/study/sharp_viscous/gsv2.py`, as §6.7; re-uses `gsv1.py`'s GMRES driver.
+  Acceptance before the gate: at κ = 1, d/h 8 and 12, Σ force = 0 to 1e-14 relative, momentum
+  invariant ≤ 1e-13, CFL ≤ 1.1e-3.
+
 **WO-W (parked, not scheduled; it comes into scope only if G-SV1W misses).** At a non-periodic Dirichlet
 face:
 - the wall-normal shear link of a wall edge is the half-link [wall plane, first node], so θ̄ and R̄ take the
@@ -1161,7 +1350,8 @@ slope of log e against log h over the stated resolutions.
   - Steady state by WO-6s, both modes.
   - PASS iff, at both N, 'sharp''s maximum error over faces within one cell of a wall ≤ 'averaged''s.
   - First data (option A, point values, sharp): 7.18e-3 / 6.16e-3, max at the contact line.
-- **G-SV2 — Hadamard–Rybczynski, κ = 1e-2, 1, 1e2.**
+- **G-SV2 — Hadamard–Rybczynski, κ = 1e-2, 1, 1e2. Fully specified in §6.7 (fourth pass), which
+  binds; the summary below is kept for the record.**
   - Steady Stokes: advection off, colour frozen. Periodic box L = 8R; drop driven by its buoyancy Δρg.
   - K = F/(6πμ_out U_d R), where U_d is the drop's mean velocity relative to the box mean.
   - d/h = 8, 12, 16, 24, 32. "Drag error order" is the self-convergence order: fit K(h) = K∞ + C h^p
@@ -1255,6 +1445,10 @@ slope of log e against log h over the stated resolutions.
 | Q17 | Wall-contact accuracy (Q6) in this package? | **fact** (G-SV1W), then **user preference** (scope) | Out of scope; WO-W parked. A G-SV1W MISS brings it in, design pass first. |
 | Q18 | A forced MG-PCG/FCG driver at density ratio ≥ 1e3 returns wrong fields silently (§6.2) | **user preference** (scope; outside this package) | Hand it to the coordinator as a separate item. Nothing here beyond WO-6a. |
 | Q19 | WO-6s solver parameters (restart, cap, D_hi) | **fact** (the WO-6s pilot) | GMRES(60), cap 3000, D_hi = 100. The steady state is dt-independent (§6.4), so D_hi may move only on pilot evidence, with the march-agreement check. |
+| Q20 | The RB-GS stagnation exit in production (§6.6) | **fact** (WO-7 exit-residual log) | Not this package. Opens its own package if > 1 % of P1/P2 steps exit above tolerance. |
+| Q21 | Steady gates: one momentum-solve setting (§6.6) | settled (fourth pass) | Converged momentum (1e-13, residual stop off) for every step of every steady gate; default-solve G-SV1P/1dP/1cP results void, rerun. |
+| Q22 | G-SV2 parameters (§6.7) | settled (fourth pass) | ρ uniform, σ = 0, Boussinesq force, F = ΔρgV_h, vertex-centred drop, U_d = C-weighted drop mean. |
+| Q23 | Composite (predictor × M-orthogonal projection) instability at high contrast, layered geometry, D ≥ 1 — in 'averaged' too (§6.5) | **user preference** (priority; separate package) | Logged for the coordinator; own architect pass (periodic layered harness first). This package proceeds; G-SV9(f) reports the onset, and 'sharp' worse than 'averaged' at D_hi ≤ 3 is a STOP. |
 
 ---
 
@@ -1282,7 +1476,9 @@ band changes only on band edges (face-fraction β); cells keep μ(C). Everything
 
 **Reverses, in the VoF band only:** the premise of register 272 (FVS §6) that T is symmetric because β is
 component-independent. β is now component-dependent there and T is not symmetric. Stability is
-established by the measured spectral gate G-SV9, not by the energy proof. Register 272's choices (full
+established by the measured spectral gate G-SV9, not by the energy proof. The composite of predictor
+and projection is unproven for both modes, and a layered periodic case is unstable at D_hi ≥ 100
+('sharp') and ≥ 1 ('averaged', μ 1e3 / ρ 1e4); see §6.5 and Q23. Register 272's choices (full
 stress, explicit conservative transpose on uⁿ, no product form, no Picard placement) stand.
 
 **Why:** 2-D a-priori, N = 16–128, 0–45°, all offsets, μ ratio 1e-3–1e3:

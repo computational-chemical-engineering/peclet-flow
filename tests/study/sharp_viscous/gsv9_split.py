@@ -133,10 +133,17 @@ def colour(a, N, Nz):
         C2 = np.array([[case.frac_cell(i * h, j * h) for j in range(N)] for i in range(N)])
         return np.asfortranarray(np.repeat(C2[:, :, None], Nz, axis=2))
     if a.geom == "pplane":  # gsv9.py's (b') periodic twin: m = (2,1,1), two planes per period, offset 0.3
-        sys.path.insert(0, HERE)
-        import gsv9
-        gsv9.N = N
-        return gsv9.colour("pplane", a.muA < 1.0)
+        # (architect round 4: --m, --frac generalise it; m = (2,1,1), frac 0.5 is gsv9.colour("pplane"));
+        # --roll translates the colour by whole cells: on a periodic grid the step map must be
+        # conjugate to the unrolled one (identical spectrum) unless the seam is treated differently.
+        from gsv1 import layered_fractions
+        m = np.array(a.m if a.m else (2.0, 1.0, 1.0), float)
+        nrm = m / np.linalg.norm(m)
+        P = 1.0 / float(np.linalg.norm(m))
+        C = layered_fractions(nrm, float(nrm @ np.full(3, 0.5)) + 0.3 / N, P, a.frac * P, 0.0, N)
+        if a.roll:
+            C = np.roll(C, a.roll, axis=(0, 1, 2))
+        return np.asfortranarray(C)
     if a.geom == "film":
         lowA = a.muA < 1.0
         C = np.zeros((N, N, N)) if lowA else np.ones((N, N, N))
@@ -144,6 +151,8 @@ def colour(a, N, Nz):
         return np.asfortranarray(C)
     b = g = math.radians(22.5)
     n = np.array([math.cos(b) * math.cos(g), math.cos(b) * math.sin(g), math.sin(b)])
+    if a.m:  # architect round 4: the walled single plane with another normal (e.g. the (b') m = (2,1,1))
+        n = np.array(a.m, float) / np.linalg.norm(a.m)
     x0 = np.array([0.5 * N + 0.3 * c for c in n])  # index units, as gsv9.py
     if a.sub8:
         sys.path.insert(0, HERE)
@@ -264,7 +273,9 @@ def cmd_prod(a):
         conv, vals = 0, ex.eigenvalues
     vals = sorted(vals, key=lambda z: -abs(z)) if len(vals) else [complex("nan")]
     tag = "%s geom=%s%s N=%d Nz=%d mu=%g rho=%g D_hi=%g incr=%d prodsolve=%d kz0=%d p=%s mom_tol=%g" % (
-        a.mode, a.geom, "(%g,%g)" % (a.ang, a.off) if a.geom == "ext" else ("/sub8" if a.sub8 else ""), N, Nz,
+        a.mode, a.geom, "(%g,%g)" % (a.ang, a.off) if a.geom == "ext" else (("/sub8" if a.sub8 else "") + (
+            "/m=%s" % (a.m,) if a.m else "") + ("/frac=%g" % a.frac if a.geom == "pplane" else "") + (
+            "/roll=%s" % (a.roll,) if a.roll else "")), N, Nz,
         muA, rA, a.D, a.incremental, a.prodsolve, a.kz0, a.pdriver, a.mom_tol)
     print("PROD %s | rho=%.6f | top: %s | matvecs=%d max_pcg_it=%d lin=%.1e kz0_leak=%.1e solver=%s "
           "conv=%d ncv=%d max_momentum_sweeps=%d" % (
@@ -297,6 +308,9 @@ def main():
     q.add_argument("--maxiter", type=int, default=200)
     # the RB-GS update stop (residual stop off); G-SV9(e) runs 1e-13 (coordinator F1, 2026-11-01)
     q.add_argument("--mom-tol", type=float, default=1e-15)
+    q.add_argument("--m", type=lambda t: tuple(float(x) for x in t.split(",")), default=None)
+    q.add_argument("--frac", type=float, default=0.5)  # pplane layer fraction of phase A
+    q.add_argument("--roll", type=lambda t: tuple(int(x) for x in t.split(",")), default=None)
     a = p.parse_args()
     if a.cmd == "harness":
         return cmd_harness(a)
