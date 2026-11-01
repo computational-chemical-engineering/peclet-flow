@@ -12,7 +12,8 @@ there, so it is run once). Force (Boussinesq, Hasimoto): the cell field f_z = dr
 phi_h = mean C_i, written with set_field("force_z") in internal units; F = drg V_h, V_h = h^3 sum C_i.
 drg = 1e-3 (h/dt) 9 mu_out K_HR / (2 R^2) (colour CFL ~1e-3 at the unbounded HR speed).
 Steady Stokes (advection off) by gsv1.py's WO-6s GMRES(60) under the §6.6 rule (converged momentum on
-every step), from u = 0, p = 0; D_hi = mu_hi dt / (rho h^2) = 100, mu_hi = max(kappa, 1) mu_out;
+every step, RB-GS update stop 1e-15 = gsv1.MOM_UTOL, coordinator decision 2026-11-01; rows taken at a
+looser stop are void and rerun), from u = 0, p = 0; D_hi = mu_hi dt / (rho h^2) = 100, mu_hi = max(kappa, 1) mu_out;
 certificate 1e-12 max|u|; cap 3000 matvecs (at the cap: NOT CONVERGED, not judged).
 U_d = sum_i C_i wbar_i / sum_i C_i - <w>, wbar_i the mean of w on the -z and +z faces of cell i, <w> the
 mean over all z-faces. K = F / (6 pi mu_out U_d R_h), R_h = (3 V_h / 4 pi)^(1/3).
@@ -177,6 +178,8 @@ def load(path):
             ln = ln.strip()
             if ln:
                 r = json.loads(ln)
+                if r.get("mom_utol", 1.0) > gsv1.MOM_UTOL:  # taken at a looser update stop: void, rerun
+                    continue
                 out[(r["kappa"], r["doh"], r["mode"])] = r
     return out
 

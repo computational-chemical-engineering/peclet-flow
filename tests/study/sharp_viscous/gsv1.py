@@ -9,7 +9,8 @@ cycle begins with a PLAIN production step: its increment S(x) - x is the residua
 certificate, ||S(x) - x||_inf <= 1e-12 max|u| over u (the pre-registered criterion); cap 3000
 steps, a case at the cap is NOT CONVERGED. Pressure: the production driver (Chebyshev under
 variable rho, MG-PCG under uniform rho at np 1) with rtol 1e-13 and a cap of 20000. Momentum (§6.6 rule,
-WO-6q, binding): every step of every steady set runs the converged solve (RB-GS update stop 1e-13,
+WO-6q, binding): every step of every steady set runs the converged solve (RB-GS update stop 1e-15 --
+coordinator decision 2026-11-01, superseding §6.6's 1e-13 --
 residual stop off, cap 200000 sweeps); one production-default step from the certified state is
 taken afterwards and its increment reported ('inc_default_step', expected <= 1e-11, not judged).
 
@@ -368,15 +369,16 @@ PSETS = {  # name: (kinds, mu ratios)
 RHO_A_LAYERED = 0.5  # rho_A / rho_B = 1/2, rho_B = 1 (G-SV1P)
 PCAP, PRTOL = 20000, 1e-13  # the production pressure driver's cap (never binds) and rtol (§6.6 rule)
 # §6.6 rule (binding, fourth pass): EVERY production step of every steady gate (S(0), every matvec, every
-# certificate step) runs the converged momentum solve -- RB-GS update stop 1e-13 with the residual stop
+# certificate step) runs the converged momentum solve -- RB-GS update stop 1e-15 (coordinator decision
+# 2026-11-01, superseding §6.6's 1e-13: at 1e-13 the translation mode leaves ~(1+6D) x stop) with the residual stop
 # off, a sweep cap that never binds. The production-default solve (flow_ibm.hpp member defaults:
 # 200 sweeps, update stop off, residual stop following the pressure rtol) is used for ONE reported step
 # from the certified state only (its increment, expected <= 1e-11 max|u|, is reported, not judged).
-MOM_CAP, MOM_UTOL = 200000, 1e-13
+MOM_CAP, MOM_UTOL = 200000, 1e-15
 DEF_MOM_ITERS, DEF_MOM_RES = 200, -1.0
 
 
-def _set_mom_utol(v):  # Pool initializer: the run's update stop (default the §6.6 rule's 1e-13)
+def _set_mom_utol(v):  # Pool initializer: the run's update stop (default the rule's 1e-15)
     global MOM_UTOL
     MOM_UTOL = float(v)
 
@@ -918,7 +920,7 @@ def cmd_prun(a):
         kinds, ratios = PSETS[a.set]
         keys = [(a.set, kd, m, k, r, n, a.mode, "gmres") for n in Ns for r in ratios for kd in kinds
                 for m in NORMALS for k in range(8)]
-    done = pload(a.out)
+    done = {k: r for k, r in pload(a.out).items() if r.get("mom_utol", 1.0) <= a.mom_utol}  # looser-stop rows redo
     todo = [kk for kk in keys if kk not in done]
     print(f"GSV1RUN set={a.set} N={a.N} total={len(keys)} todo={len(todo)} mom_utol={a.mom_utol:g}", flush=True)
     with Pool(a.procs, initializer=_set_mom_utol, initargs=(a.mom_utol,)) as pool, open(a.out, "a") as f:

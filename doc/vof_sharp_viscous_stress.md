@@ -957,6 +957,10 @@ default-vs-converged agreement is that weakness, measured.
   certificate step) with `gsv1.py --converged-momentum`: RB-GS, residual stop off
   (`set_velocity_residual_tolerance(0)`), update stop 1e-13, cap never binding; pressure by the driver
   the ρ model selects, rtol 1e-13, cap never binding. Same setting for both modes, every case, every N.
+- **Coordinator decision 2026-11-01 (supersedes the 1e-13 update stop above):** every steady gate runs the
+  update stop **1e-15** (residual stop off, pressure rtol 1e-13; a sweep-cap hit is NOT CONVERGED, listed);
+  the invariance threshold ≤ 1e-13 is unchanged. At 1e-13 the translation mode leaves ~(1+6D)×stop
+  (2.35e-13, gsv1p m100 k3 1e-2 N24); at 1e-15 the pilot gives ≤ 3e-14.
 - **Certificate:** on that converged step, ‖S(x) − x‖∞ ≤ 1e-12·max|u| (unchanged).
 - **Reported, not judged:** the increment of one production-default step from the certified state.
   Expected ≤ 1e-11·max|u|; a larger value is listed (it would mean the default exit does not even hold a
@@ -1446,7 +1450,7 @@ slope of log e against log h over the stated resolutions.
 | Q18 | A forced MG-PCG/FCG driver at density ratio ≥ 1e3 returns wrong fields silently (§6.2) | **user preference** (scope; outside this package) | Hand it to the coordinator as a separate item. Nothing here beyond WO-6a. |
 | Q19 | WO-6s solver parameters (restart, cap, D_hi) | **fact** (the WO-6s pilot) | GMRES(60), cap 3000, D_hi = 100. The steady state is dt-independent (§6.4), so D_hi may move only on pilot evidence, with the march-agreement check. |
 | Q20 | The RB-GS stagnation exit in production (§6.6) | **fact** (WO-7 exit-residual log) | Not this package. Opens its own package if > 1 % of P1/P2 steps exit above tolerance. |
-| Q21 | Steady gates: one momentum-solve setting (§6.6) | settled (fourth pass) | Converged momentum (1e-13, residual stop off) for every step of every steady gate; default-solve G-SV1P/1dP/1cP results void, rerun. |
+| Q21 | Steady gates: one momentum-solve setting (§6.6) | settled (fourth pass) | Converged momentum (update stop 1e-15 per the coordinator decision of 2026-11-01, superseding 1e-13; residual stop off) for every step of every steady gate; default-solve G-SV1P/1dP/1cP results void, rerun. |
 | Q22 | G-SV2 parameters (§6.7) | settled (fourth pass) | ρ uniform, σ = 0, Boussinesq force, F = ΔρgV_h, vertex-centred drop, U_d = C-weighted drop mean. |
 | Q23 | Composite (predictor × M-orthogonal projection) instability at high contrast, layered geometry, D ≥ 1 — in 'averaged' too (§6.5) | **user preference** (priority; separate package) | Logged for the coordinator; own architect pass (periodic layered harness first). This package proceeds; G-SV9(f) reports the onset, and 'sharp' worse than 'averaged' at D_hi ≤ 3 is a STOP. |
 
