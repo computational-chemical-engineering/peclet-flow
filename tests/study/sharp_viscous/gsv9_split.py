@@ -19,7 +19,8 @@ prod    : the PRODUCTION step map on a 3-D case, linear with the colour frozen, 
           fractions, z periodic, walls on x and y; --kz0 restricts to z-independent fields with
           u_z = 0, the harness subspace); 'plane' = the G-SV9(b) plane n(22.5,22.5), offset 0.3,
           walls on all faces, exact fractions (--sub8 = gsv9.py's 8^3 sub-sampled colour);
-          'film' = the G-SV9(d) slab.
+          'film' = the G-SV9(d) slab. 'pplane' = the (b') periodic twin; there the three translations
+          are deflated M-orthogonally from every Arnoldi vector (WO-6a', §6.5).
 
   nice -n 10 python gsv9_split.py harness [--N 16]
   nice -n 10 python gsv9_split.py prod --geom ext --N 16 --Nz 4 --mode sharp --pair 1e-3,1e-4 --D 1e4 [--kz0]
@@ -213,6 +214,23 @@ def cmd_prod(a):
     nd = sum(sizes) + npc
     amp = 1e-6 * h / dt  # colour CFL ~1e-6 for a unit-max vector; the map is linear
     stats = {"n": 0, "pit": 0, "leak": 0.0, "msw": 0}
+    # WO-6a' (§6.5 finding 1): on the triply periodic box the three uniform translations are exact
+    # lambda = 1 eigenvectors of any momentum-conserving step; deflate them M-orthogonally (M = the
+    # solver's face density rho_F, the mean of the two cells' rho(C)) out of every Arnoldi vector, so
+    # that the reported rho is that of the invariant complement and is not pinned at 1.
+    if a.geom == "pplane":
+        rho_c = 1.0 + (rA - 1.0) * C0
+        wts = [(0.5 * (rho_c + np.roll(rho_c, 1, axis=c))).ravel(order="F") for c in range(3)]
+        offs = np.cumsum([0] + sizes)
+
+        def deflate(x):
+            x = np.array(x, dtype=float, copy=True)
+            for c in range(3):
+                seg = x[offs[c]:offs[c + 1]]
+                seg -= float(wts[c] @ seg) / float(np.sum(wts[c]))
+            return x
+    else:
+        deflate = lambda x: x
 
     def unpack(x):
         arrs, o = [], 0
@@ -237,7 +255,7 @@ def cmd_prod(a):
         return pack(u)
 
     def mv(x):
-        x = np.real(np.asarray(x)).ravel()
+        x = deflate(np.real(np.asarray(x)).ravel())
         sc = amp / max(np.max(np.abs(x)), 1e-300)
         for c, A in enumerate(unpack(x * sc)):
             s.set_velocity(c, np.asfortranarray(A))
@@ -254,13 +272,13 @@ def cmd_prod(a):
             yp = proj(y)
             stats["leak"] = max(stats["leak"], float(np.linalg.norm(y - yp) / max(np.linalg.norm(y), 1e-300)))
             y = yp
-        return y
+        return deflate(y)
 
     rng = np.random.default_rng(7)
-    v0 = rng.standard_normal(nd)
+    v0 = deflate(rng.standard_normal(nd))
     if a.kz0:
         v0 = proj(v0)
-    x1, x2 = rng.standard_normal(nd), rng.standard_normal(nd)
+    x1, x2 = deflate(rng.standard_normal(nd)), deflate(rng.standard_normal(nd))
     if a.kz0:
         x1, x2 = proj(x1), proj(x2)
     lin = np.linalg.norm(mv(0.3 * x1 + 0.7 * x2) - 0.3 * mv(x1) - 0.7 * mv(x2)) / np.linalg.norm(mv(x1))
@@ -275,7 +293,7 @@ def cmd_prod(a):
     tag = "%s geom=%s%s N=%d Nz=%d mu=%g rho=%g D_hi=%g incr=%d prodsolve=%d kz0=%d p=%s mom_tol=%g" % (
         a.mode, a.geom, "(%g,%g)" % (a.ang, a.off) if a.geom == "ext" else (("/sub8" if a.sub8 else "") + (
             "/m=%s" % (a.m,) if a.m else "") + ("/frac=%g" % a.frac if a.geom == "pplane" else "") + (
-            "/roll=%s" % (a.roll,) if a.roll else "")), N, Nz,
+            "/roll=%s" % (a.roll,) if a.roll else "") + ("/deflated" if a.geom == "pplane" else "")), N, Nz,
         muA, rA, a.D, a.incremental, a.prodsolve, a.kz0, a.pdriver, a.mom_tol)
     print("PROD %s | rho=%.6f | top: %s | matvecs=%d max_pcg_it=%d lin=%.1e kz0_leak=%.1e solver=%s "
           "conv=%d ncv=%d max_momentum_sweeps=%d" % (

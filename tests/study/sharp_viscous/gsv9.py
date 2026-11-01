@@ -16,7 +16,11 @@ with; its colour stage at the tail is discarded), so the march is the linear ope
               where frac((n.x - s0)/P) < 1/2, exact cell fractions (gsv1.layered_fractions). The
               initial field is the periodic MAC curl of a random edge potential with each
               component's rho_F-weighted mean removed (the momentum invariant of the periodic box,
-              which no step can decay; DECISION, reported); E sums every face.
+              which no step can decay; DECISION, reported); E sums every face. WO-6a' (§6.5): on the
+              periodic box the verdicts judge E' = E - sum_c (sum_F rho_F u_c)^2/(2 sum_F rho_F), the
+              energy of the M-orthogonal complement of the translations (the inexact default momentum
+              solve deposits momentum, which the undamped translations accumulate); E is reported.
+              --frac sets the layer fraction, --D the D_hi list, --pairs the PAIRS indices (WO-6f).
 mu_A/mu_B = 1e-2, 1e2, 1e-3, 1e3 with rho_A/rho_B = 1e-3, 1e3, 1e-4, 1e4 (the high-mu phase has
 mu = rho = 1); D_hi = mu_hi dt/(rho_hi h^2) in {0.1, 1, 10, 100, 1e4}; 2000 steps.
 Initial field: the discrete MAC curl of a random edge vector potential (zero on the walls), so it
@@ -59,14 +63,14 @@ def plane_fractions(n, nrm, x0, sub=8):
     return np.asfortranarray(out)
 
 
-def colour(geom, lowA):
+def colour(geom, lowA, frac=0.5):
     if geom == "pplane":
         from gsv1 import layered_fractions
         m = np.array((2.0, 1.0, 1.0))
         nrm = m / np.linalg.norm(m)
         P = 1.0 / float(np.linalg.norm(m))
         s0 = float(nrm @ np.full(3, 0.5)) + 0.3 / N
-        return np.asfortranarray(layered_fractions(nrm, s0, P, 0.5 * P, 0.0, N))
+        return np.asfortranarray(layered_fractions(nrm, s0, P, frac * P, 0.0, N))
     if geom == "plane":
         b = g = math.radians(22.5)
         nrm = (math.cos(b) * math.cos(g), math.cos(b) * math.sin(g), math.sin(b))
@@ -116,6 +120,16 @@ def energy_periodic(vel, rho):
     return sum(0.5 * float(np.sum(rf * np.asarray(vel[c]) ** 2)) for c, rf in enumerate(rho_face_periodic(rho))) / N**3
 
 
+def energy_periodic_deflated(vel, rho):
+    """WO-6a' (§6.5 finding 1): E' = E - sum_c (sum_F rho_F u_c)^2 / (2 sum_F rho_F), the energy of the
+    M-orthogonal complement of the three translations (exact lambda = 1 eigenvectors of any
+    momentum-conserving step on a periodic box). Same h^3 = 1/N^3 normalisation as energy_periodic."""
+    e = energy_periodic(vel, rho)
+    for c, rf in enumerate(rho_face_periodic(rho)):
+        e -= float(np.sum(rf * np.asarray(vel[c]))) ** 2 / (2.0 * float(np.sum(rf))) / N**3
+    return e
+
+
 def energy(vel, rho):
     e = 0.0
     for c in range(3):
@@ -127,7 +141,7 @@ def energy(vel, rho):
 
 
 def run(args):
-    geom, muR, rhoR, Dn, mode = args
+    geom, muR, rhoR, Dn, mode, frac = args
     import peclet.flow as pf
     lowA = muR < 1.0
     muA, muB = (muR, 1.0) if lowA else (1.0, 1.0 / muR)
@@ -142,7 +156,7 @@ def run(args):
     s.set_mu(1.0)
     s.set_pressure_geometry(np.full((N, N, N), 1.0, order="F"))
     s.enable_vof()
-    C0 = colour(geom, lowA)
+    C0 = colour(geom, lowA, frac)
     s.set_vof(C0)
     s.set_property_model("mu", "linear", "C", [muB, muA - muB])
     s.set_property_model("rho", "linear", "C", [rB, rA - rB])
@@ -154,7 +168,7 @@ def run(args):
     if geom == "pplane":
         u, v, w = solenoidal_periodic(12345)
         u, v, w = (a - float(np.sum(rf * a)) / float(np.sum(rf)) for a, rf in zip((u, v, w), rho_face_periodic(rho)))
-        en = energy_periodic
+        en = energy_periodic_deflated  # judged (WO-6a'); E itself is reported
     else:
         u, v, w = solenoidal(12345)
         en = energy
@@ -162,6 +176,7 @@ def run(args):
     for c, a in enumerate((u, v, w)):
         s.set_velocity(c, np.asfortranarray(amp * a))
     E = [en([s.get_u(), s.get_v(), s.get_w()], rho)]
+    Efull = [energy_periodic([s.get_u(), s.get_v(), s.get_w()], rho)] if geom == "pplane" else None
     cen = {"band_cells": 0, "virtual_cells": 0, "film_cells": 0, "fit_fallbacks": 0}
     capped = 0
     first_cap = None
@@ -183,12 +198,22 @@ def run(args):
             c = s.diagnostics.vof_viscous_interface_census()
             for k in cen:
                 cen[k] += c[k]
-        E.append(en([s.get_u(), s.get_v(), s.get_w()], rho))
+        vel = [s.get_u(), s.get_v(), s.get_w()]
+        E.append(en(vel, rho))
+        if Efull is not None:
+            Efull.append(energy_periodic(vel, rho))
     E = np.array(E)
+    rep = ""
+    if Efull is not None:  # E reported, E' judged (WO-6a')
+        Ef = np.array(Efull)
+        lo_ = min(200, max(len(Ef) - 101, 0))
+        wf = Ef[lo_ + 100:] / Ef[lo_:-100] if len(Ef) > 101 else np.array([np.nan])
+        rep = (f"[judged E'=E-translations; reported E: E_end/E0={Ef[-1] / Ef[0]:.6f} "
+               f"max E(n+100)/E(n)={float(np.max(wf)):.6f}] frac={frac:g} ")
     up = np.nonzero(E[1:] > E[:-1])[0]
     first_grow = int(up[0]) + 1 if up.size else None
     tag = "GSV9" + {"plane": "b", "film": "d", "pplane": "b'"}[geom] + ("" if mode == "sharp" else "-AVG")
-    timing = (f"pdriver=chebyshev(rtol={PRTOL:g},cap={PCAP}) max_p_it={pmax} capped_steps={capped} "
+    timing = (f"{rep}pdriver=chebyshev(rtol={PRTOL:g},cap={PCAP}) max_p_it={pmax} capped_steps={capped} "
               f"first_cap_step={first_cap} first_energy_growth_step={first_grow}")
     if capped:
         return (f"{tag} NOT_JUDGED geom={geom} muA/muB={muR:g} rhoA/rhoB={rhoR:g} D_hi={Dn:g} "
@@ -224,9 +249,13 @@ def main():
     p.add_argument("--geom", choices=("plane", "film", "pplane", "both"), default="both")
     p.add_argument("--procs", type=int, default=6)
     p.add_argument("--mode", choices=("sharp", "averaged"), default="sharp")
+    p.add_argument("--frac", type=float, default=0.5)  # pplane layer fraction of phase A (WO-6f: 0.5, 0.75)
+    p.add_argument("--D", type=lambda t: tuple(float(x) for x in t.split(",")), default=DS)  # D_hi list
+    p.add_argument("--pairs", type=lambda t: tuple(int(x) for x in t.split(",")), default=None)  # PAIRS indices
     a = p.parse_args()
     geoms = ("plane", "film") if a.geom == "both" else (a.geom,)
-    jobs = [(g, m, r, d, a.mode) for g in geoms for (m, r) in PAIRS for d in DS]
+    pairs = PAIRS if a.pairs is None else tuple(PAIRS[i] for i in a.pairs)
+    jobs = [(g, m, r, d, a.mode, a.frac) for g in geoms for (m, r) in pairs for d in a.D]
     res = []
     with Pool(a.procs) as pool:
         for line, ok, okf in pool.imap_unordered(run, jobs):
