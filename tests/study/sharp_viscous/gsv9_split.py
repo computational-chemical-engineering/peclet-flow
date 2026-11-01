@@ -132,6 +132,11 @@ def colour(a, N, Nz):
         h = case.h
         C2 = np.array([[case.frac_cell(i * h, j * h) for j in range(N)] for i in range(N)])
         return np.asfortranarray(np.repeat(C2[:, :, None], Nz, axis=2))
+    if a.geom == "pplane":  # gsv9.py's (b') periodic twin: m = (2,1,1), two planes per period, offset 0.3
+        sys.path.insert(0, HERE)
+        import gsv9
+        gsv9.N = N
+        return gsv9.colour("pplane", a.muA < 1.0)
     if a.geom == "film":
         lowA = a.muA < 1.0
         C = np.zeros((N, N, N)) if lowA else np.ones((N, N, N))
@@ -164,9 +169,9 @@ def cmd_prod(a):
     s = pf.Solver((N, N, Nz), extent=(1.0, 1.0, Nz * h))
     s.set_dt(dt)
     for f in ("-x", "+x", "-y", "+y"):
-        s.set_domain_bc(f, "wall")
+        s.set_domain_bc(f, "periodic" if a.geom == "pplane" else "wall")
     for f in ("-z", "+z"):
-        s.set_domain_bc(f, "periodic" if a.geom == "ext" else "wall")
+        s.set_domain_bc(f, "periodic" if a.geom in ("ext", "pplane") else "wall")
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_pressure_geometry(np.full((N, N, Nz), 1.0, order="F"))
@@ -185,14 +190,14 @@ def cmd_prod(a):
         {"pcg": s.set_pressure_pcg, "fcg": s.set_pressure_fcg, "cheb": s.set_pressure_chebyshev}[a.pdriver](
             True, 20000, 1e-13)
         dg.set_velocity_solver("gauss_seidel")
-        dg.set_velocity_solver_params(200000, 1e-15, 2)
+        dg.set_velocity_solver_params(200000, a.mom_tol, 2)
         # The update stop above only binds with the residual stop off: the default residual mode
         # (following the pressure rtol) has a stagnation guard that exits early on the stiff sharp
         # rows after WO-5b (measured: exit residual 1.6e-4, linearity 2.5e-2 on ext N16 D_hi 1e4).
         s.set_velocity_residual_tolerance(0.0)
     zper = a.geom == "ext"
     shp = (N, N, Nz)
-    lo = [1, 1, 0 if zper else 1]  # face index 0 is the wall face (zero) on a walled axis
+    lo = [0, 0, 0] if a.geom == "pplane" else [1, 1, 0 if zper else 1]  # face index 0 is the wall face (zero) on a walled axis
     sls = [tuple(slice(lo[c], None) if d == c else slice(None) for d in range(3)) for c in range(3)]
     sizes = [int(np.prod([n - (lo[c] if d == c else 0) for d, n in enumerate(shp)])) for c in range(3)]
     npc = N * N * Nz if a.incremental else 0  # the incremental state carries p (internal units, mean removed)
@@ -258,9 +263,9 @@ def cmd_prod(a):
     except ArpackNoConvergence as ex:  # report what converged; the caller decides (G-SV9(e))
         conv, vals = 0, ex.eigenvalues
     vals = sorted(vals, key=lambda z: -abs(z)) if len(vals) else [complex("nan")]
-    tag = "%s geom=%s%s N=%d Nz=%d mu=%g rho=%g D_hi=%g incr=%d prodsolve=%d kz0=%d p=%s" % (
+    tag = "%s geom=%s%s N=%d Nz=%d mu=%g rho=%g D_hi=%g incr=%d prodsolve=%d kz0=%d p=%s mom_tol=%g" % (
         a.mode, a.geom, "(%g,%g)" % (a.ang, a.off) if a.geom == "ext" else ("/sub8" if a.sub8 else ""), N, Nz,
-        muA, rA, a.D, a.incremental, a.prodsolve, a.kz0, a.pdriver)
+        muA, rA, a.D, a.incremental, a.prodsolve, a.kz0, a.pdriver, a.mom_tol)
     print("PROD %s | rho=%.6f | top: %s | matvecs=%d max_pcg_it=%d lin=%.1e kz0_leak=%.1e solver=%s "
           "conv=%d ncv=%d max_momentum_sweeps=%d" % (
               tag, abs(vals[0]), " ".join("%.5f%+.5fi" % (z.real, z.imag) for z in vals[:4]), stats["n"],
@@ -274,7 +279,7 @@ def main():
     h.add_argument("--N", type=int, default=16)
     h.add_argument("--procs", type=int, default=12)
     q = sp.add_parser("prod")
-    q.add_argument("--geom", choices=("ext", "plane", "film"), default="ext")
+    q.add_argument("--geom", choices=("ext", "plane", "film", "pplane"), default="ext")
     q.add_argument("--N", type=int, default=16)
     q.add_argument("--Nz", type=int, default=4)
     q.add_argument("--ang", type=float, default=22.5)
@@ -290,6 +295,8 @@ def main():
     q.add_argument("--k", type=int, default=4)
     q.add_argument("--ncv", type=int, default=30)
     q.add_argument("--maxiter", type=int, default=200)
+    # the RB-GS update stop (residual stop off); G-SV9(e) runs 1e-13 (coordinator F1, 2026-11-01)
+    q.add_argument("--mom-tol", type=float, default=1e-15)
     a = p.parse_args()
     if a.cmd == "harness":
         return cmd_harness(a)

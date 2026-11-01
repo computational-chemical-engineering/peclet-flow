@@ -1,8 +1,10 @@
 """G-SV9 (e) (doc/vof_sharp_viscous_stress.md §11, third-pass amendment; WO-6e): the spectral gate.
 
 The Arnoldi spectral radius of the PRODUCTION incremental step map on (u, v, w, p), colour frozen,
-mean of p removed, Chebyshev pressure to rtol 1e-13, RB-GS to rtol 1e-15:
-`gsv9_split.py prod --incremental --pdriver cheb`, one process per run.
+mean of p removed, Chebyshev pressure to rtol 1e-13, RB-GS to an update stop of 1e-13 with the
+residual stop off (coordinator F1, 2026-11-01: 1e-15 sits below the RB-GS round-off floor at
+D_hi 1e4 and hits the sweep cap; the linearity check certifies the stop):
+`gsv9_split.py prod --incremental --pdriver cheb --mom-tol 1e-13`, one process per run.
 Cases: the (b) plane (n(22.5, 22.5), offset 0.3, walls, exact fractions) at N = 16 and the (d)
 film at N = 12, each with the four ratio pairs x D_hi in {0.1, 1, 10, 100, 1e4}, both modes.
 PASS: rho <= 1 + 1e-9 for every 'sharp' run; 'averaged' is reported. A run whose linearity check
@@ -10,7 +12,10 @@ exceeds 1e-10, or whose solves cap (pressure 20000, momentum 200000 sweeps), is 
 ARPACK: ncv 40, maxiter 1000; an unconverged run is re-run at ncv 80; a 'sharp' run still
 unconverged is decided by its (b)/(d) march verdict and listed (UNCONVERGED).
 
-  nice -n 10 python gsv9e.py [--procs 10] [--build BUILD_DIR]   (one line per run + a verdict)
+  nice -n 10 python gsv9e.py [--procs 10] [--build BUILD_DIR] [--pilot]   (one line per run + a verdict)
+--pilot runs only the stiffest case (plane, D_hi 1e4, mu 1e-3 / rho 1e-4, sharp); linearity
+> 1e-10 there stops the table (coordinator, 2026-11-01).
+The momentum cap test is conservative: 'momentum_sweeps' is summed over the three components.
 """
 import argparse
 import os
@@ -24,13 +29,14 @@ PAIRS = ((1e-2, 1e-3), (1e2, 1e3), (1e-3, 1e-4), (1e3, 1e4))
 DS = (0.1, 1.0, 10.0, 100.0, 1e4)
 GEOMS = (("plane", 16), ("film", 12))
 PCAP, MCAP = 20000, 200000
+MTOL = 1e-13  # RB-GS update stop (coordinator F1)
 RX = re.compile(r"\| rho=(\S+) \|.*max_pcg_it=(\d+) lin=(\S+) .*conv=(\d) ncv=(\d+) max_momentum_sweeps=(\d+)")
 
 
 def prod(geom, N, mode, mu, rho, D, ncv, env):
     cmd = [sys.executable, os.path.join(HERE, "gsv9_split.py"), "prod", "--geom", geom, "--N", str(N),
            "--mode", mode, "--pair", f"{mu:g},{rho:g}", "--D", f"{D:g}", "--incremental", "--pdriver", "cheb",
-           "--ncv", str(ncv), "--maxiter", "1000"]
+           "--ncv", str(ncv), "--maxiter", "1000", "--mom-tol", f"{MTOL:g}"]
     out = subprocess.run(cmd, capture_output=True, text=True, env=env)
     line = next((x for x in out.stdout.splitlines() if x.startswith("PROD")), None)
     if line is None:
@@ -63,10 +69,13 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--procs", type=int, default=10)
     p.add_argument("--build", default=os.environ.get("PYTHONPATH", ""))
+    p.add_argument("--pilot", action="store_true")
     a = p.parse_args()
     env = dict(os.environ, PYTHONPATH=a.build, OMP_NUM_THREADS="1", OMP_PROC_BIND="false")
     jobs = [(g, N, m, mu, r, D, env) for m in ("sharp", "averaged") for (g, N) in GEOMS
             for (mu, r) in PAIRS for D in DS]
+    if a.pilot:
+        jobs = [j for j in jobs if j[:6] == ("plane", 16, "sharp", 1e-3, 1e-4, 1e4)]
     res = []
     with ThreadPool(a.procs) as pool:
         for tag, v, info in pool.imap_unordered(run, jobs):
