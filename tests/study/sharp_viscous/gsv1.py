@@ -834,9 +834,18 @@ def _run_any(key):
     if key[0] == "gsv1w":
         return run_wcase(key)
     if key[7] != "march":
-        return run_pcase(key[:7], steady=key[7])
-    rg, ug = run_pcase(key[:7], steady="gmres", want_state=True)
-    rm, um = run_pcase(key[:7], steady="march", want_state=True)
+        try:
+            return run_pcase(key[:7], steady=key[7], converged_momentum=CONV_MOM)
+        except RuntimeError as ex:  # a production step refused the iterate (e.g. the colour-CFL guard):
+            # the case is NOT CONVERGED (as a capped case), recorded and listed, never judged
+            nan = float("nan")
+            pset, kind, m, k, ratio, N, mode = key[:7]
+            return {"set": pset, "kind": kind, "m": list(m), "k": k, "ratio": ratio, "N": N, "mode": mode,
+                    "steady": key[7], "status": "step_error", "error": str(ex)[:200], "steps": -1, "cycles": -1,
+                    "inc": nan, "err": nan, "err_gauged": nan, "at_xi": nan, "mom": nan, "force_sum_rel": nan,
+                    "max_p_it": -1, "max_momentum_residual": nan, "secs": 0.0, "converged_momentum": CONV_MOM}
+    rg, ug = run_pcase(key[:7], steady="gmres", want_state=True, converged_momentum=CONV_MOM)
+    rm, um = run_pcase(key[:7], steady="march", want_state=True, converged_momentum=CONV_MOM)
     cs = PCase(*key[1:6])
     C, rho, _, ex, _, _ = cs.build()
     U = float(np.max(np.abs(ug)))
@@ -845,7 +854,12 @@ def _run_any(key):
     return rm
 
 
+CONV_MOM = False  # run --converged-momentum: the WO-6p invariance instrument (coordinator F1, 2026-11-01)
+
+
 def cmd_prun(a):
+    global CONV_MOM
+    CONV_MOM = bool(a.converged_momentum)
     Ns = [int(v) for v in a.N.split(",")]
     if a.set == "gsv1w":
         keys = [("gsv1w", "couette", 22.5, 22.5, 0, 1e-2, n, md) for n in Ns for md in ("sharp", "averaged")]
@@ -910,7 +924,7 @@ def cmd_ptable(a):
                         print(f"{name.upper()} {kd} ratio={r:g} m={''.join(map(str, m))} {mode} N={','.join(map(str, Ns))} "
                               f"min_offset_order={min(orders) if orders else float('nan'):.2f} "
                               f"env={','.join(f'{e:.2e}' for e in env)} env_order={envo:.2f} "
-                              f"envN2={','.join(f'{e * n * n:.3g}' for e, n in zip(env, Ns))} {verdict} (pending USER Q16)")
+                              f"envN2={','.join(f'{e * n * n:.3g}' for e, n in zip(env, Ns))} {verdict}")
     w = {(r["N"], r["mode"]): r for r in res.values() if r["set"] == "gsv1w"}
     if w:
         Ns = sorted({n for n, _ in w})
@@ -997,6 +1011,9 @@ def main():
     r.add_argument("--procs", type=int, default=4)
     r.add_argument("--mode", choices=("sharp", "averaged"), default="sharp")
     r.add_argument("--out", required=True)
+    # WO-6p's momentum invariant assumes an exact solve: RB-GS update stop 1e-15, residual stop off
+    # (coordinator F1). The steady-state gates keep the production default (omit the flag).
+    r.add_argument("--converged-momentum", action="store_true")
     t = sp.add_parser("table")
     t.add_argument("--out", required=True)
     sp.add_parser("check")
