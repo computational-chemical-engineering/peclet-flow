@@ -9,6 +9,14 @@ with; its colour stage at the tail is discarded), so the march is the linear ope
               (C = 1, phase A, on the side n.(x - x0) < 0);
   (d) film:   a grid-aligned 1-cell slab of the low-mu phase normal to x (cells x = N/2), both of
               its faces carrying virtual planes.
+  (b') pplane: the periodic twin, reported only (§11 third-pass amendment, WO-6a): a TRIPLY PERIODIC
+              box with the rational normal m = (2,1,1), n = m/|m|, period P = 1/|m| along n; two
+              parallel planes per period, the first at offset 0.3 cell (s0 = n.(1/2,1/2,1/2) + 0.3 h),
+              the second half a period further (layer fraction 0.5, coordinator 2026-11-01): phase A
+              where frac((n.x - s0)/P) < 1/2, exact cell fractions (gsv1.layered_fractions). The
+              initial field is the periodic MAC curl of a random edge potential with each
+              component's rho_F-weighted mean removed (the momentum invariant of the periodic box,
+              which no step can decay; DECISION, reported); E sums every face.
 mu_A/mu_B = 1e-2, 1e2, 1e-3, 1e3 with rho_A/rho_B = 1e-3, 1e3, 1e-4, 1e4 (the high-mu phase has
 mu = rho = 1); D_hi = mu_hi dt/(rho_hi h^2) in {0.1, 1, 10, 100, 1e4}; 2000 steps.
 Initial field: the discrete MAC curl of a random edge vector potential (zero on the walls), so it
@@ -23,7 +31,7 @@ run NOT JUDGED. Two growth verdicts per run (§6.2, USER Q15 pending): 'as writt
 'floor-excluded', the growth ratio judged only over windows with E_n >= 1e-20 E_0 (the ratio
 below that level is reported, not judged).
 
-  nice -n 10 python gsv9.py [--geom plane|film|both] [--procs 6] [--mode sharp|averaged]   (one line per run + a verdict)
+  nice -n 10 python gsv9.py [--geom plane|film|pplane|both] [--procs 6] [--mode sharp|averaged]   (one line per run + a verdict)
 """
 import argparse
 import math
@@ -52,6 +60,13 @@ def plane_fractions(n, nrm, x0, sub=8):
 
 
 def colour(geom, lowA):
+    if geom == "pplane":
+        from gsv1 import layered_fractions
+        m = np.array((2.0, 1.0, 1.0))
+        nrm = m / np.linalg.norm(m)
+        P = 1.0 / float(np.linalg.norm(m))
+        s0 = float(nrm @ np.full(3, 0.5)) + 0.3 / N
+        return np.asfortranarray(layered_fractions(nrm, s0, P, 0.5 * P, 0.0, N))
     if geom == "plane":
         b = g = math.radians(22.5)
         nrm = (math.cos(b) * math.cos(g), math.cos(b) * math.sin(g), math.sin(b))
@@ -78,6 +93,29 @@ def solenoidal(seed):
     return u[:N], v[:, :N], w[:, :, :N]  # the -c face of every cell; the +wall face is 0
 
 
+def solenoidal_periodic(seed):
+    """u = curl(psi) on the periodic MAC grid (index units): psi_x at (i+1/2, j, k), psi_y at
+    (i, j+1/2, k), psi_z at (i, j, k+1/2); face c index i is the -c face of cell i."""
+    r = np.random.default_rng(seed)
+    px, py, pz = (r.standard_normal((N, N, N)) for _ in range(3))
+    d = lambda a, ax: np.roll(a, -1, axis=ax) - a
+    u = d(pz, 1) - d(py, 2)
+    v = d(px, 2) - d(pz, 0)
+    w = d(py, 0) - d(px, 1)
+    div = d(u, 0) + d(v, 1) + d(w, 2)
+    assert np.max(np.abs(div)) < 1e-12
+    return u, v, w
+
+
+def rho_face_periodic(rho):
+    """The solver's face density: the mean of the two cells, face c index i between cells i-1 and i."""
+    return [0.5 * (rho + np.roll(rho, 1, axis=c)) for c in range(3)]
+
+
+def energy_periodic(vel, rho):
+    return sum(0.5 * float(np.sum(rf * np.asarray(vel[c]) ** 2)) for c, rf in enumerate(rho_face_periodic(rho))) / N**3
+
+
 def energy(vel, rho):
     e = 0.0
     for c in range(3):
@@ -99,7 +137,7 @@ def run(args):
     s = pf.Solver((N, N, N), extent=(1.0, 1.0, 1.0))
     s.set_dt(dt)  # FIRST: the first set_dt pins the internal time scale (set_dt docstring)
     for f in ("-x", "+x", "-y", "+y", "-z", "+z"):
-        s.set_domain_bc(f, "wall")
+        s.set_domain_bc(f, "periodic" if geom == "pplane" else "wall")
     s.set_rho(1.0)
     s.set_mu(1.0)
     s.set_pressure_geometry(np.full((N, N, N), 1.0, order="F"))
@@ -112,12 +150,18 @@ def run(args):
     # Keep the driver the rho model selected (Chebyshev); only its tolerance and cap are set.
     s.set_pressure_chebyshev(True, PCAP, PRTOL)
     s.diagnostics.set_vof_viscous_interface(mode)
-    u, v, w = solenoidal(12345)
+    rho = rB + (rA - rB) * C0
+    if geom == "pplane":
+        u, v, w = solenoidal_periodic(12345)
+        u, v, w = (a - float(np.sum(rf * a)) / float(np.sum(rf)) for a, rf in zip((u, v, w), rho_face_periodic(rho)))
+        en = energy_periodic
+    else:
+        u, v, w = solenoidal(12345)
+        en = energy
     amp = 1e-3 * h / (dt * max(np.max(np.abs(a)) for a in (u, v, w)))  # colour CFL <= 1e-3
     for c, a in enumerate((u, v, w)):
         s.set_velocity(c, np.asfortranarray(amp * a))
-    rho = rB + (rA - rB) * C0
-    E = [energy([s.get_u(), s.get_v(), s.get_w()], rho)]
+    E = [en([s.get_u(), s.get_v(), s.get_w()], rho)]
     cen = {"band_cells": 0, "virtual_cells": 0, "film_cells": 0, "fit_fallbacks": 0}
     capped = 0
     first_cap = None
@@ -139,11 +183,11 @@ def run(args):
             c = s.diagnostics.vof_viscous_interface_census()
             for k in cen:
                 cen[k] += c[k]
-        E.append(energy([s.get_u(), s.get_v(), s.get_w()], rho))
+        E.append(en([s.get_u(), s.get_v(), s.get_w()], rho))
     E = np.array(E)
     up = np.nonzero(E[1:] > E[:-1])[0]
     first_grow = int(up[0]) + 1 if up.size else None
-    tag = "GSV9" + ("b" if geom == "plane" else "d") + ("" if mode == "sharp" else "-AVG")
+    tag = "GSV9" + {"plane": "b", "film": "d", "pplane": "b'"}[geom] + ("" if mode == "sharp" else "-AVG")
     timing = (f"pdriver=chebyshev(rtol={PRTOL:g},cap={PCAP}) max_p_it={pmax} capped_steps={capped} "
               f"first_cap_step={first_cap} first_energy_growth_step={first_grow}")
     if capped:
@@ -177,7 +221,7 @@ def run(args):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--geom", choices=("plane", "film", "both"), default="both")
+    p.add_argument("--geom", choices=("plane", "film", "pplane", "both"), default="both")
     p.add_argument("--procs", type=int, default=6)
     p.add_argument("--mode", choices=("sharp", "averaged"), default="sharp")
     a = p.parse_args()
