@@ -1,21 +1,23 @@
 // flow — ctest `cg_guard_mpi` (np 1, 2, 4): the exit check of the two CG pressure drivers (Q18).
 //
-// Above a density ratio of ~1e3 the V-cycle preconditioner turns indefinite and MG-PCG / flexible
-// CG either cap or stop "converged" on their recurrence residual with a field that is not a
-// projection. The check recomputes the TRUE residual once per CG solve and counts a solve whose
-// true residual exceeds max(10 rtol, 1e-8) r0, or that capped or broke down
-// (diagnostics.num_pressure_unconverged_solves); it never changes x, the iteration or the stop.
-// Case: a 16^3 box, walls at +-y, periodic x and z, a tilted two-layer VoF colour (a 22.5 degree
-// line in x-y, extruded in z; frozen: re-set after every step), rho and mu by LinearMix from C,
-// Stokes, a fixed pseudo-random initial velocity, 3 steps, rtol 1e-10, cap 400 (the reproduction
-// of validation/highratio/q18, cell units).
-// Gates, at every np (each rank checks its own copy; the allreduced MIN and MAX must agree):
-//   G1  FCG at ratio 1e4: the count is >= 1 and the same on every rank; the last checked true
-//       residual is bitwise the same on every rank;
+// Under the trilinear V-cycle (set_pressure_vcycle_symmetric(False), the pre-A3 preconditioner),
+// above a density ratio of ~1e3 that preconditioner turns indefinite and MG-PCG / flexible CG
+// either cap or stop "converged" on their recurrence residual with a field that is not a
+// projection; the default SPD V-cycle (A3) keeps them converged there. The check recomputes the
+// TRUE residual once per CG solve and counts a solve whose true residual exceeds max(10 rtol, 1e-8)
+// r0, or that capped or broke down (diagnostics.num_pressure_unconverged_solves); it never changes
+// x, the iteration or the stop. Case: a 16^3 box, walls at +-y, periodic x and z, a tilted
+// two-layer VoF colour (a 22.5 degree line in x-y, extruded in z; frozen: re-set after every step),
+// rho and mu by LinearMix from C, Stokes, a fixed pseudo-random initial velocity, 3 steps, rtol
+// 1e-10, cap 400 (the reproduction of validation/highratio/q18, cell units). Gates, at every np
+// (each rank checks its own copy; the allreduced MIN and MAX must agree):
+//   G1  FCG at ratio 1e5 on the trilinear V-cycle: the count is >= 1 and the same on every rank;
+//       the last checked true residual is bitwise the same on every rank;
 //   G2  Chebyshev at ratio 1e4 (the variable-density default): the count stays 0;
 //   G3  PCG at ratio 1 (uniform density): the count stays 0 and every true residual is <= 1
 //       (the exit meets its own tolerance);
-//   G4  (rank 0, a single-rank solver, the device-resident PCG and the host FCG) G1 and G3 again.
+//   G4  (rank 0, a single-rank solver, the device-resident PCG and the host FCG) G1 and G3 again;
+//   G5  FCG at ratio 1e4 on the default SPD V-cycle: the count stays 0 (no false alarm).
 #include <mpi.h>
 
 #include <cmath>
@@ -59,7 +61,7 @@ struct Result {
 };
 
 static Result run(IbmSolver& s, Driver d, double ratio, int ox, int oy, int oz, int lnx, int lny,
-                  int lnz) {
+                  int lnz, bool trilinear = false) {
   const double muRatio = ratio / 10.0;
   s.setDt(1e4 * (ratio > 1.0 ? ratio / muRatio : 1.0));
   for (int f = 2; f < 4; ++f)
@@ -79,6 +81,8 @@ static Result run(IbmSolver& s, Driver d, double ratio, int ox, int oy, int oz, 
   s.setPropertyModel("mu", peclet::flow::ClosureKind::LinearMix, "C", "", {1.0, muRatio - 1.0});
   s.setPropertyModel("rho", peclet::flow::ClosureKind::LinearMix, "C", "", {1.0, ratio - 1.0});
   s.setAdvection(false);
+  if (trilinear)
+    s.setPressureVcycleSymmetric(false);
   if (d == kPcg)  // LAST: the density model re-selects Chebyshev
     s.setPressurePcg(true, MAXIT, RTOL);
   else if (d == kFcg)
@@ -139,10 +143,10 @@ int main(int argc, char** argv) {
     {
       IbmSolver s(lnx, lny, lnz);
       s.initMpi(dec, MPI_COMM_WORLD);
-      const Result r = run(s, kFcg, 1e4, ox, oy, oz, lnx, lny, lnz);
+      const Result r = run(s, kFcg, 1e5, ox, oy, oz, lnx, lny, lnz, true);
       const bool same =
           sameOnAll((double)r.count, MPI_COMM_WORLD) && sameOnAll(r.lastTrue, MPI_COMM_WORLD);
-      check(r.count >= 1 && same, "G1 FCG ratio 1e4: flagged, same on all ranks", r);
+      check(r.count >= 1 && same, "G1 FCG ratio 1e5 trilinear: flagged, same", r);
     }
     {
       IbmSolver s(lnx, lny, lnz);
@@ -158,15 +162,22 @@ int main(int argc, char** argv) {
       check(r.count == 0 && r.maxTrue <= 1.0 && sameOnAll(r.maxTrue, MPI_COMM_WORLD),
             "G3 PCG uniform rho: silent, true <= tol", r);
     }
+    {
+      IbmSolver s(lnx, lny, lnz);
+      s.initMpi(dec, MPI_COMM_WORLD);
+      const Result r = run(s, kFcg, 1e4, ox, oy, oz, lnx, lny, lnz);
+      check(r.count == 0 && sameOnAll((double)r.count, MPI_COMM_WORLD),
+            "G5 FCG ratio 1e4 SPD V-cycle: silent", r);
+    }
     if (rank == 0) {  // G4: single-rank solvers (no initMpi)
       int f4 = 0;
       for (int k = 0; k < 2; ++k) {
         IbmSolver s(N, N, N);
-        const Result r =
-            k == 0 ? run(s, kFcg, 1e4, 0, 0, 0, N, N, N) : run(s, kPcg, 1.0, 0, 0, 0, N, N, N);
+        const Result r = k == 0 ? run(s, kFcg, 1e5, 0, 0, 0, N, N, N, true)
+                                : run(s, kPcg, 1.0, 0, 0, 0, N, N, N);
         const bool ok = k == 0 ? r.count >= 1 : (r.count == 0 && r.maxTrue <= 1.0);
         std::printf("  %-44s count %ld  last true %.3e  max true %.3e  %s\n",
-                    k == 0 ? "G4 single-rank FCG ratio 1e4: flagged"
+                    k == 0 ? "G4 single-rank FCG ratio 1e5 trilinear: flagged"
                            : "G4 single-rank PCG uniform rho: silent",
                     r.count, r.lastTrue, r.maxTrue, ok ? "OK" : "FAIL");
         f4 += ok ? 0 : 1;

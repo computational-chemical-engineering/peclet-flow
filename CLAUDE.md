@@ -248,7 +248,9 @@ you want). Detail and numbers for every bullet: ref §6.
   FCG at 1e4, true residual 3e8× its tolerance, measured before A3): every PCG/FCG solve re-checks
   its TRUE residual once and warns + counts one above max(10 rtol, 1e-8)·r0 or capped
   (`diagnostics.num_pressure_unconverged_solves`, `last_pressure_true_residual()`; results bitwise
-  unchanged; ctest `cg_guard_mpi`).
+  unchanged; ctest `cg_guard_mpi`). Since A3 the failure needs the trilinear V-cycle
+  (`set_pressure_vcycle_symmetric(False)`: FCG at 1e5 flagged, true residual 5e10× tol); on the
+  default SPD V-cycle FCG/PCG at 1e4 stay silent (true residual ≤ 5× tol).
 - **Operator storage precision** (`MReal`; double by default, +12 % step time) covers the pressure
   hierarchy, momentum stencil, K/M/X/Nbc/R/D_rescale and the ghost overlay. Float = **invalid, not
   degraded** on a high-contrast bed (`../docs/SCALING_ISSUES.md` #1). Ctest `no_float_operator_casts`

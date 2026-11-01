@@ -1043,10 +1043,11 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "recurrence residual while the TRUE residual max|b - A x| (the stop test's norm and "
           "mean removal) exceeded max(10 rtol, 1e-8) * r0 -- the floor keeps a round-off-limited "
           "solve at a near-machine rtol silent. Each is also reported on "
-          "stderr (the first, then the 10th, 100th, ...). Above a density ratio of ~1e3 the "
-          "V-cycle preconditioner turns indefinite and both CG drivers can stop 'converged' on a "
-          "field that is not a projection; Chebyshev, the variable-density default, is healthy "
-          "there. The check reads the result only: fields and iteration counts are unchanged. "
+          "stderr (the first, then the 10th, 100th, ...). Under the trilinear V-cycle "
+          "(set_pressure_vcycle_symmetric(False)) above a density ratio of ~1e3 the preconditioner "
+          "turns indefinite and both CG drivers can stop 'converged' on a field that is not a "
+          "projection; the default SPD V-cycle keeps them healthy there. The check reads the "
+          "result only: fields and iteration counts are unchanged. "
           "Identical on every rank.")
       .def(
           "last_pressure_true_residual", [](D& diag) { return diag.s->lastPressureTrueResidual(); },

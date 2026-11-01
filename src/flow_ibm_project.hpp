@@ -1705,27 +1705,30 @@ void Solver<Grid>::checkCgExit(CCField rhs1, CCField x1, long iters, const char*
     MPI_Comm_rank(comm_, &r);
 #endif
   if (r == 0)
-    std::fprintf(stderr,
-                 "peclet::flow: the %s pressure solve did not converge (%s; true residual "
-                 "max|b - A x| = %.3g x the stop tolerance rtol*r0, limit %.3g, rtol %.1e) -- the "
-                 "field it returned is not a projection. %ld such solve%s so far "
-                 "(diagnostics.num_pressure_unconverged_solves; next report at %ld). Both CG "
-                 "drivers fail above a density ratio of ~1e3; the variable-density default is "
-                 "set_pressure_chebyshev.\n",
-                 which,
-                 failed               ? "broke down"
-                 : iters >= pcgMaxit_ ? "capped"
-                                      : "stopped on its recurrence residual",
-                 lastPressureTrueResidual_, limit, pcgRtol_, numPressureUnconvergedSolves_,
-                 numPressureUnconvergedSolves_ == 1 ? "" : "s", cgGuardNextReport_);
+    std::fprintf(
+        stderr,
+        "peclet::flow: the %s pressure solve did not converge (%s; true residual "
+        "max|b - A x| = %.3g x the stop tolerance rtol*r0, limit %.3g, rtol %.1e) -- the "
+        "field it returned is not a projection. %ld such solve%s so far "
+        "(diagnostics.num_pressure_unconverged_solves; next report at %ld). Chebyshev, the "
+        "variable-density default, is healthy at high density contrast "
+        "(set_pressure_chebyshev).\n",
+        which,
+        failed               ? "broke down"
+        : iters >= pcgMaxit_ ? "capped"
+                             : "stopped on its recurrence residual",
+        lastPressureTrueResidual_, limit, pcgRtol_, numPressureUnconvergedSolves_,
+        numPressureUnconvergedSolves_ == 1 ? "" : "s", cgGuardNextReport_);
 }
 
 template <class Grid>
 void Solver<Grid>::noteCgContrast() {
   // Q18 (b): once per explicit set_pressure_pcg/_fcg selection, at its first solve under
   // variable density, name Chebyshev if the density contrast is in the regime where both CG
-  // drivers fail. One min/max reduction, at most once per selection.
-  if (!cgContrastPending_ || !varRho_ || rhoField_.extent(0) == 0)
+  // drivers fail: above ~1e3 under the trilinear V-cycle (set_pressure_vcycle_symmetric(False)).
+  // The default SPD V-cycle (A3) keeps them healthy there, so it stays silent. One min/max
+  // reduction, at most once per selection.
+  if (!cgContrastPending_ || !varRho_ || rhoField_.extent(0) == 0 || mg_.symmetricVcycle())
     return;
   cgContrastPending_ = false;
   CCConst f = CCConst(rhoField_);
@@ -1754,13 +1757,15 @@ void Solver<Grid>::noteCgContrast() {
   }
 #endif
   if (r == 0 && mn > 0.0 && mx >= 1e3 * mn)
-    std::fprintf(stderr,
-                 "peclet::flow: set_pressure_%s selected under variable density with "
-                 "rho_max/rho_min = %.3g. Both CG drivers fail above a density ratio of ~1e3 (the "
-                 "V-cycle preconditioner turns indefinite); Chebyshev, the variable-density "
-                 "default, is healthy there (set_pressure_chebyshev). Unconverged CG solves are "
-                 "reported and counted (diagnostics.num_pressure_unconverged_solves).\n",
-                 useFcg_ ? "fcg" : "pcg", mx / mn);
+    std::fprintf(
+        stderr,
+        "peclet::flow: set_pressure_%s selected under variable density with "
+        "rho_max/rho_min = %.3g and the trilinear V-cycle (set_pressure_vcycle_symmetric(False)). "
+        "Both CG drivers fail above a density ratio of ~1e3 with that V-cycle (the "
+        "preconditioner turns indefinite); Chebyshev, the variable-density "
+        "default, is healthy there (set_pressure_chebyshev). Unconverged CG solves are "
+        "reported and counted (diagnostics.num_pressure_unconverged_solves).\n",
+        useFcg_ ? "fcg" : "pcg", mx / mn);
 }
 
 template <class Grid>
