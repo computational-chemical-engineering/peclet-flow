@@ -1095,10 +1095,10 @@ slope of log e against log h over the stated resolutions.
   - Reported alongside, not gating: e_env·N², and the per-offset LS orders (their minimum). The
     earlier reading "order ≥ 1.8 for every orientation × offset × ratio" is superseded.
   - The 2-D a-priori version is in §3.4.
-- **Third pass (§6.3): G-SV1, G-SV1c and G-SV1d move to a triply periodic box. USER flag: a gate change
-  after data.**
-  - Default until the user rules: run the periodic gates below. The walled box with option-A data is
-    reported as a diagnostic and is not judged.
+- **Third pass (§6.3): G-SV1, G-SV1c and G-SV1d move to a triply periodic box. DECIDED USER 2026-11-01
+  (§12 Q16).**
+  - The periodic gates below (G-SV1P/1cP/1dP, envelope order per Q13) plus G-SV1x bind. The walled box
+    with option-A data is reported as a diagnostic and is not judged.
   - The thresholds and the envelope rule are unchanged.
 - **G-SV1P — periodic layered flow (replaces G-SV1's order gate).**
   - **Box.** [0,1]³, triply periodic, N ∈ {24, 32, 48, 64}.
@@ -1208,8 +1208,8 @@ slope of log e against log h over the stated resolutions.
       the run NOT JUDGED.
       - The first MISS records (PCG at 800 iterations) are void for (d), being an instrument fault. They
         stand for (b), which shows the split instability.
-      - **USER**: judge the growth ratio only over windows with E_n ≥ 1e-20·E_0. Until the user rules, both
-        verdicts are reported; the floor-excluded one and (e) decide sequencing.
+      - **DECIDED USER 2026-11-01 (§12 Q15)**: the growth ratio is judged only over windows with
+        E_n ≥ 1e-20·E_0. The as-written ratio is still reported, not judged.
     - **(b′), reported only.** The (b) march on a triply periodic box with the rational normal (2,1,1),
       offset 0.3 cell. If (b) misses while (b′) passes, the cause is the walls (§6.3).
     - **(e), spectral (added, not a loosening).**
@@ -1250,8 +1250,8 @@ slope of log e against log h over the stated resolutions.
 | Q13 | G-SV1's measurement: per-offset LS order or the offset envelope (§5.7 Q-C) | **user preference** — **DECIDED USER 2026-10-31** | The envelope order binds (§11 G-SV1); per-offset orders reported, not gating. |
 | Q11 | Collocated | **user preference** (sequencing) | §8 order: full stress on collocated first; this design is not ported until then. |
 | Q14 | 3-D margin of the Kb split (2-D measured 0.9859) | **fact** (G-SV9(e) and (b) after WO-5b) | Proceed. If ρ > 1, stop and return to the architect; no tuning, no dt cap. |
-| Q15 | G-SV9 growth ratio at the energy floor (§6.2) | **user preference** (a criterion change after data) | Report both verdicts; the floor-excluded one (E_n ≥ 1e-20·E_0) plus G-SV9(e) decide sequencing. |
-| Q16 | G-SV1/1c/1d: the walled box replaced by the periodic G-SV1P/1cP/1dP, exactness at operator level (G-SV1x) | **user preference** (a gate change after data) | Run the periodic gates; report the walled option-A numbers as a diagnostic. |
+| Q15 | G-SV9 growth ratio at the energy floor (§6.2) | **user preference** — **DECIDED USER 2026-11-01** | Judge the growth ratio only over windows with E_n ≥ 1e-20·E_0; the as-written ratio is reported. |
+| Q16 | G-SV1/1c/1d: the walled box replaced by the periodic G-SV1P/1cP/1dP, exactness at operator level (G-SV1x) | **user preference** — **DECIDED USER 2026-11-01** | The periodic gates (envelope order, Q13) + G-SV1x bind; the walled option-A numbers are a diagnostic only. |
 | Q17 | Wall-contact accuracy (Q6) in this package? | **fact** (G-SV1W), then **user preference** (scope) | Out of scope; WO-W parked. A G-SV1W MISS brings it in, design pass first. |
 | Q18 | A forced MG-PCG/FCG driver at density ratio ≥ 1e3 returns wrong fields silently (§6.2) | **user preference** (scope; outside this package) | Hand it to the coordinator as a separate item. Nothing here beyond WO-6a. |
 | Q19 | WO-6s solver parameters (restart, cap, D_hi) | **fact** (the WO-6s pilot) | GMRES(60), cap 3000, D_hi = 100. The steady state is dt-independent (§6.4), so D_hi may move only on pilot evidence, with the march-agreement check. |
