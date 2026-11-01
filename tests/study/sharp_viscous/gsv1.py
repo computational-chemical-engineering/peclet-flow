@@ -8,7 +8,10 @@ with its mean removed in and out. GMRES(60) solves (I - G) x = b with the matvec
 cycle begins with a PLAIN production step: its increment S(x) - x is the residual and the
 certificate, ||S(x) - x||_inf <= 1e-12 max|u| over u (the pre-registered criterion); cap 3000
 steps, a case at the cap is NOT CONVERGED. Pressure: the production driver (Chebyshev under
-variable rho, MG-PCG under uniform rho at np 1) with rtol 1e-12 and a cap of 20000 (as WO-6a).
+variable rho, MG-PCG under uniform rho at np 1) with rtol 1e-13 and a cap of 20000. Momentum (§6.6 rule,
+WO-6q, binding): every step of every steady set runs the converged solve (RB-GS update stop 1e-13,
+residual stop off, cap 200000 sweeps); one production-default step from the certified state is
+taken afterwards and its increment reported ('inc_default_step', expected <= 1e-11, not judged).
 
 PERIODIC GATES (USER Q16 pending: they replace the walled box; WO-6p):
   gsv1p   G-SV1P layered flow: m in NORMALS, n = m/|m|, P = 1/|m|; phase A where
@@ -242,12 +245,14 @@ def run_case(key):
         s.set_body_force(tuple(amp * cs.t))
     s.set_pressure_pcg(True, PCAP, PRTOL)  # uniform rho: the single-rank default driver
     s.diagnostics.set_vof_viscous_interface("sharp")
+    converge_momentum(s)  # §6.6 rule
     for comp in range(3):
         s.set_velocity(comp, np.asfortranarray(ex[comp]))
     U = float(np.max(np.abs(ex)))
     Smap = StepMap(s, C, N)  # the steady state by WO-6s (GMRES on the fixed-point residual)
     x0 = np.concatenate([ex[c].ravel(order="F") for c in range(3)] + [np.zeros(N**3)])
     xs, status, it, inc, _ = gmres_steady(Smap, x0, 3 * N**3, U)
+    inc_def = default_step_increment(Smap, xs, 3 * N**3)
     prev = np.stack([xs[c * N**3:(c + 1) * N**3].reshape((N, N, N), order="F") for c in range(3)])
     e = np.abs(prev - ex) / U
     err = float(np.max(e))
@@ -262,6 +267,7 @@ def run_case(key):
     return {"kind": kind, "beta": beta, "gamma": gamma, "k": k, "ratio": ratio, "N": N, "status": status, "steps": it,
                 "inc": inc, "err": err, "at_comp": int(am[0]), "at_cell": [int(v) for v in am[1:]],
                 "at_walldist": float(wd[am]), "at_xi": float(xin[am]), "wallmap": wallmap, "wximap": wximap,
+                "inc_default_step": inc_def, "max_momentum_sweeps": Smap.max_msw, "converged_momentum": True,
                 "secs": round(time.time() - t0, 1)}
 
 
@@ -360,7 +366,45 @@ PSETS = {  # name: (kinds, mu ratios)
     "gsv1cp": (("along", "along+layered"), (1e-2, 1e2)),
 }
 RHO_A_LAYERED = 0.5  # rho_A / rho_B = 1/2, rho_B = 1 (G-SV1P)
-PCAP, PRTOL = 20000, 1e-12  # the production pressure driver's cap (never binds) and rtol (as WO-6a)
+PCAP, PRTOL = 20000, 1e-13  # the production pressure driver's cap (never binds) and rtol (§6.6 rule)
+# §6.6 rule (binding, fourth pass): EVERY production step of every steady gate (S(0), every matvec, every
+# certificate step) runs the converged momentum solve -- RB-GS update stop 1e-13 with the residual stop
+# off, a sweep cap that never binds. The production-default solve (flow_ibm.hpp member defaults:
+# 200 sweeps, update stop off, residual stop following the pressure rtol) is used for ONE reported step
+# from the certified state only (its increment, expected <= 1e-11 max|u|, is reported, not judged).
+MOM_CAP, MOM_UTOL = 200000, 1e-13
+DEF_MOM_ITERS, DEF_MOM_RES = 200, -1.0
+
+
+def _set_mom_utol(v):  # Pool initializer: the run's update stop (default the §6.6 rule's 1e-13)
+    global MOM_UTOL
+    MOM_UTOL = float(v)
+
+
+def converge_momentum(s):
+    # RB-GS by name (§6.6 rule); under VoF with variable mu it is also what 'auto' resolves to
+    # (the V-cycle is refused, register 212), so this only pins the uniform-mu controls (G-SV2 kappa = 1).
+    s.diagnostics.set_velocity_solver("gauss_seidel")
+    s.diagnostics.set_velocity_solver_params(MOM_CAP, MOM_UTOL, 2)
+    s.set_velocity_residual_tolerance(0.0)
+
+
+def default_momentum(s):
+    s.diagnostics.set_velocity_solver("auto")
+    s.diagnostics.set_velocity_solver_params(DEF_MOM_ITERS, 0.0, 2)
+    s.set_velocity_residual_tolerance(DEF_MOM_RES)
+
+
+def default_step_increment(S, xs, nu):
+    """The reported production-default step from the certified state xs: max|S_def(xs) - xs|_u / max|xs_u|."""
+    default_momentum(S.s)
+    try:
+        y = S(xs)
+        return float(np.max(np.abs((y - xs)[:nu]))) / max(float(np.max(np.abs(xs[:nu]))), 1e-300)
+    except RuntimeError:
+        return float("nan")
+    finally:
+        converge_momentum(S.s)
 GM_RESTART, GM_CAP = 60, 3000  # WO-6s defaults (§12 Q19)
 Pl = np.polynomial.Polynomial
 
@@ -660,7 +704,7 @@ def plain_march(S, x0, nu, cap=MAX_STEPS, tol=TOL):
         x = Sx
 
 
-def run_pcase(key, steady="gmres", want_state=False, converged_momentum=False):
+def run_pcase(key, steady="gmres", want_state=False):
     pset, kind, m, k, ratio, N, mode = key
     os.environ.setdefault("OMP_PROC_BIND", "false")
     import peclet.flow as pf
@@ -701,9 +745,7 @@ def run_pcase(key, steady="gmres", want_state=False, converged_momentum=False):
     else:  # uniform rho: the single-rank default driver, MG-PCG
         s.set_pressure_pcg(True, PCAP, PRTOL)
     s.diagnostics.set_vof_viscous_interface(mode)
-    if converged_momentum:  # DIAGNOSTIC only: the RB-GS update stop 1e-15 with the residual stop off
-        s.diagnostics.set_velocity_solver_params(200000, 1e-15, 2)
-        s.set_velocity_residual_tolerance(0.0)
+    converge_momentum(s)  # §6.6 rule: unconditional in every steady set
     s.update_properties()
     fsum = max(abs(float(np.sum(np.asarray(s.get_field("force_" + a))))) for a in "xyz")
     fmax = max(float(np.max(np.abs(np.asarray(s.get_field("force_" + a))))) for a in "xyz")
@@ -716,6 +758,8 @@ def run_pcase(key, steady="gmres", want_state=False, converged_momentum=False):
     else:
         xs, status, steps, inc = plain_march(S, x0, nu)
         cycles = 0
+    vsolver = s.diagnostics.velocity_solver()
+    inc_def = default_step_increment(S, xs, nu)
     uh = np.stack([xs[c * N**3:(c + 1) * N**3].reshape((N, N, N), order="F") for c in range(3)])
     e = np.abs(uh - exg) / U
     uhg = cs.gauge(uh, rho)  # reported beside: u_h with its own rho_F-weighted mean removed
@@ -729,7 +773,8 @@ def run_pcase(key, steady="gmres", want_state=False, converged_momentum=False):
            "err": float(np.max(e)), "err_gauged": err_g, "at_comp": int(am[0]), "at_cell": [int(v) for v in am[1:]],
            "at_xi": float(dist), "mom": S.mom, "force_sum_rel": fsum / max(fmax, 1e-300),
            "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "secs": round(time.time() - t0, 1),
-           "max_momentum_residual": S.max_mres, "converged_momentum": converged_momentum}
+           "max_momentum_residual": S.max_mres, "converged_momentum": True, "mom_utol": MOM_UTOL,
+           "velocity_solver": vsolver, "inc_default_step": inc_def}
     if want_state:
         return out, uh
     return out
@@ -786,18 +831,21 @@ def run_wcase(key):
     s.set_advection(False)
     s.set_pressure_pcg(True, PCAP, PRTOL)  # uniform rho: the single-rank default driver
     s.diagnostics.set_vof_viscous_interface(mode)
+    converge_momentum(s)  # §6.6 rule
     S = StepMap(s, C, N)
     nu = 3 * N**3
     x0 = np.concatenate([ex[c].ravel(order="F") for c in range(3)] + [np.zeros(N**3)])
     U = float(np.max(np.abs(ex)))
     xs, status, steps, inc, cycles = gmres_steady(S, x0, nu, U)
+    inc_def = default_step_increment(S, xs, nu)
     uh = np.stack([xs[c * N**3:(c + 1) * N**3].reshape((N, N, N), order="F") for c in range(3)])
     e = np.abs(uh - ex) / U
     wd = wall_dist(N)
     return {"set": pset, "kind": kind, "beta": beta, "gamma": gamma, "k": k, "ratio": ratio, "N": N,
             "mode": mode, "status": status, "steps": steps, "cycles": cycles, "inc": inc, "err": float(np.max(e)),
             "err_wall1": float(np.max(e[wd <= 1.0])), "err_interior": float(np.max(e[wd > 1.0])),
-            "max_p_it": S.max_pit, "secs": round(time.time() - t0, 1)}
+            "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "converged_momentum": True,
+            "mom_utol": MOM_UTOL, "inc_default_step": inc_def, "secs": round(time.time() - t0, 1)}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -835,7 +883,7 @@ def _run_any(key):
         return run_wcase(key)
     if key[7] != "march":
         try:
-            return run_pcase(key[:7], steady=key[7], converged_momentum=CONV_MOM)
+            return run_pcase(key[:7], steady=key[7])
         except RuntimeError as ex:  # a production step refused the iterate (e.g. the colour-CFL guard):
             # the case is NOT CONVERGED (as a capped case), recorded and listed, never judged
             nan = float("nan")
@@ -843,9 +891,10 @@ def _run_any(key):
             return {"set": pset, "kind": kind, "m": list(m), "k": k, "ratio": ratio, "N": N, "mode": mode,
                     "steady": key[7], "status": "step_error", "error": str(ex)[:200], "steps": -1, "cycles": -1,
                     "inc": nan, "err": nan, "err_gauged": nan, "at_xi": nan, "mom": nan, "force_sum_rel": nan,
-                    "max_p_it": -1, "max_momentum_residual": nan, "secs": 0.0, "converged_momentum": CONV_MOM}
-    rg, ug = run_pcase(key[:7], steady="gmres", want_state=True, converged_momentum=CONV_MOM)
-    rm, um = run_pcase(key[:7], steady="march", want_state=True, converged_momentum=CONV_MOM)
+                    "max_p_it": -1, "max_momentum_residual": nan, "secs": 0.0, "converged_momentum": True,
+                    "mom_utol": MOM_UTOL, "inc_default_step": nan}
+    rg, ug = run_pcase(key[:7], steady="gmres", want_state=True)
+    rm, um = run_pcase(key[:7], steady="march", want_state=True)
     cs = PCase(*key[1:6])
     C, rho, _, ex, _, _ = cs.build()
     U = float(np.max(np.abs(ug)))
@@ -854,12 +903,7 @@ def _run_any(key):
     return rm
 
 
-CONV_MOM = False  # run --converged-momentum: the WO-6p invariance instrument (coordinator F1, 2026-11-01)
-
-
 def cmd_prun(a):
-    global CONV_MOM
-    CONV_MOM = bool(a.converged_momentum)
     Ns = [int(v) for v in a.N.split(",")]
     if a.set == "gsv1w":
         keys = [("gsv1w", "couette", 22.5, 22.5, 0, 1e-2, n, md) for n in Ns for md in ("sharp", "averaged")]
@@ -876,8 +920,8 @@ def cmd_prun(a):
                 for m in NORMALS for k in range(8)]
     done = pload(a.out)
     todo = [kk for kk in keys if kk not in done]
-    print(f"GSV1RUN set={a.set} N={a.N} total={len(keys)} todo={len(todo)}", flush=True)
-    with Pool(a.procs) as pool, open(a.out, "a") as f:
+    print(f"GSV1RUN set={a.set} N={a.N} total={len(keys)} todo={len(todo)} mom_utol={a.mom_utol:g}", flush=True)
+    with Pool(a.procs, initializer=_set_mom_utol, initargs=(a.mom_utol,)) as pool, open(a.out, "a") as f:
         for r in pool.imap_unordered(_run_any, todo, chunksize=1):
             f.write(json.dumps(r) + "\n")
             f.flush()
@@ -887,6 +931,28 @@ def cmd_prun(a):
 
 def cmd_ptable(a):
     res = pload(a.out)
+    # WO-6q: no case is judged from a default-solve run (§6.6 rule): rows without the converged
+    # momentum solve at the rule's update stop are void, counted here and dropped.
+    void = [k for k, r in res.items() if not (r.get("converged_momentum") is True and r.get("mom_utol", 1.0) <= MOM_UTOL)]
+    if void:
+        print(f"GSV1-VOID {len(void)} rows without the §6.6 converged momentum solve dropped (not judged)")
+    res = {k: r for k, r in res.items() if k not in void}
+    pr = [r for r in res.values() if r["set"] != "gsv1w" and r["status"] == "ok"]
+    if pr:  # WO-6q acceptance: the WO-6p invariance on every case
+        mm = max(r["mom"] for r in pr)
+        nbad = sum(1 for r in pr if not r["mom"] <= 1e-13)
+        print(f"WO6Q-INVARIANCE cases={len(pr)} max sum rho_F u_c/(sum rho_F max|u|)={mm:.2e} (<= 1e-13) "
+              f"over={nbad} {'PASS' if nbad == 0 else 'MISS'}")
+    ok_rows = [r for r in res.values() if r["status"] == "ok"]
+    idf = [r.get("inc_default_step", float("nan")) for r in ok_rows]
+    if idf:
+        big = [r for r, v in zip(ok_rows, idf) if not v <= 1e-11]
+        print(f"GSV1-DEFAULT-STEP (reported) max increment/max|u|={float(np.nanmax(idf)):.2e} over 1e-11: {len(big)}")
+        for r in big[:20]:
+            print(f"  default-step increment {r.get('inc_default_step', float('nan')):.2e}: {pline(r)[9:120]}")
+    nc = [r for r in res.values() if r["status"] != "ok"]
+    for r in nc:  # NOT CONVERGED (cap, step refusal): listed, never judged
+        print(f"GSV1-NOTCONV {pline(r)[9:160]}")
     # pilot: matvec counts and the march agreement
     gm = [r for r in res.values() if r["set"] == "gsv1p" and r.get("steady") == "gmres"]
     for r in res.values():
@@ -1011,9 +1077,10 @@ def main():
     r.add_argument("--procs", type=int, default=4)
     r.add_argument("--mode", choices=("sharp", "averaged"), default="sharp")
     r.add_argument("--out", required=True)
-    # WO-6p's momentum invariant assumes an exact solve: RB-GS update stop 1e-15, residual stop off
-    # (coordinator F1). The steady-state gates keep the production default (omit the flag).
+    # Accepted for old command lines and ignored: the converged momentum solve is unconditional in
+    # every steady set (§6.6 rule, WO-6q; there is no default-solve path any more).
     r.add_argument("--converged-momentum", action="store_true")
+    r.add_argument("--mom-utol", type=float, default=MOM_UTOL)  # the converged solve's RB-GS update stop
     t = sp.add_parser("table")
     t.add_argument("--out", required=True)
     sp.add_parser("check")
