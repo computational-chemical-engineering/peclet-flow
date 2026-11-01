@@ -648,6 +648,7 @@ void Solver<Grid>::setPressurePcg(bool on, int maxit, double rtol) {
   bfpChebSet_ = false;
   pcgMaxit_ = maxit;
   pcgRtol_ = rtol;
+  cgContrastPending_ = true;  // Q18 (b): the high-contrast notice, at the first solve
 }
 
 template <class Grid>
@@ -661,6 +662,7 @@ void Solver<Grid>::setPressureFcg(bool on, int maxit, double rtol) {
     useChebyshev_ = false;  // genuine selection (the pair is exclusive)
   pcgMaxit_ = maxit;
   pcgRtol_ = rtol;
+  cgContrastPending_ = true;  // Q18 (b): the high-contrast notice, at the first solve
 }
 
 template <class Grid>

@@ -2517,6 +2517,8 @@ class CutcellMG {
     // stop reference is set (setStopReference; only the balanced-force projection sets it).
     // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
     const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
+    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
+    cgStopRtol_ = rtol;
     int it = 0;
     // Env-gated convergence trace (PECLET_FLOW_MG_DEBUG>=2): |b|inf, r0 and the per-iteration
     // residual, so a decomposition-dependent iteration count can be read as a rate (preconditioner
@@ -3179,6 +3181,8 @@ class CutcellMG {
     // or the caller's FULL right-hand-side norm when one is set (setStopReference; only the
     // balanced-force projection sets it). Unset, rref IS r0: `rtol * rref` is the old test bitwise.
     const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
+    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
+    cgStopRtol_ = rtol;
     int it = 0;
     if (trace)
       printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
@@ -3439,6 +3443,8 @@ class CutcellMG {
     // stop reference is set (setStopReference; only the balanced-force projection sets it).
     // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
     const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
+    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
+    cgStopRtol_ = rtol;
     int it = 0;
     if (trace)
       printf("[mg] fcg solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0,
@@ -6883,6 +6889,28 @@ class CutcellMG {
     removeMean(l0, r);
     return maxabs(l0, r);
   }
+  // Q18: the TRUE residual of the last PCG/FCG solve relative to its stop test,
+  // max|P(b - A x)| / (rtol * rref) -- the stop test's own norm, mean removal and scale (rref is
+  // r0 or the caller's stop reference), with the same fine operator the driver applied (the star
+  // overlay included). < 1 means the exit really meets the tolerance; the recurrence residual the
+  // driver tests drifts from it when the V-cycle preconditioner is indefinite (high density
+  // contrast), and the driver can stop "converged" on a field that is not a projection. Reads x,
+  // writes only the scratch r and Ap: one matvec and the r0 reductions, collective under MPI
+  // (every rank gets the same value). 0 when the last solve had a zero right-hand side.
+  double cgTrueResidual(CCField b, CCField x, CCField r, CCField Ap,
+                        const StarOverlay* star = nullptr, int nStar = 0, C3 nnStar = C3{0, 0, 0}) {
+    if (!(cgStopRef_ > 0.0) || !(cgStopRtol_ > 0.0))
+      return 0.0;
+    Level& l0 = lv_[0];
+    OverlayScope overlay(overlaySolve_, star != nullptr);
+    matvecOverlap(l0, Ap, x);
+    if (star)
+      starApplyDelta(Ap, CCConst(x), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
+    Kokkos::deep_copy(CCExec(), r, b);
+    axpy(r, -1.0, Ap);
+    removeMean(l0, r);
+    return maxabs(l0, r) / (cgStopRtol_ * cgStopRef_);
+  }
   // reductions / mean removal over inner FLUID cells (AC>tiny) of a level.
   double dot(Level& lv, CCField a, CCField b) {
     CCExec space;
@@ -7476,13 +7504,14 @@ class CutcellMG {
   mutable bool facPending_ = false;  // X: a side factor was launched and not yet joined
   long prefactorLaunches_ = 0;       // X: side factors launched (diagnostics)
   double dirPivotTol_ = kBottomPivotTol;
-  double stopRef_ = -1.0;                 // see setStopReference
-  bool zeroGuess_ = false;                // see setZeroInitialGuess
-  CCField guessV1_;                       // E: phi^n (setProjectedGuess)
-  int guessHist_ = 0;                     // E: 0 none, 1 span{phi^n}, 2 span{phi^n, phi^{n-1}}
-  double guessC1_ = 0.0, guessC2_ = 0.0;  // E: the last guess's coefficients (trace)
-  CCField guessX0_, guessTA_, guessTB_;   // E trace buffers (PECLET_FLOW_MG_DEBUG >= 2 only)
-  std::vector<double> lvTime_;            // per-level V-cycle wall time (mgDebugLevel() >= 3)
+  double stopRef_ = -1.0;                      // see setStopReference
+  double cgStopRef_ = 0.0, cgStopRtol_ = 0.0;  // Q18: the last PCG/FCG attempt's rref and rtol
+  bool zeroGuess_ = false;                     // see setZeroInitialGuess
+  CCField guessV1_;                            // E: phi^n (setProjectedGuess)
+  int guessHist_ = 0;                          // E: 0 none, 1 span{phi^n}, 2 span{phi^n, phi^{n-1}}
+  double guessC1_ = 0.0, guessC2_ = 0.0;       // E: the last guess's coefficients (trace)
+  CCField guessX0_, guessTA_, guessTB_;        // E trace buffers (PECLET_FLOW_MG_DEBUG >= 2 only)
+  std::vector<double> lvTime_;                 // per-level V-cycle wall time (mgDebugLevel() >= 3)
   int lvCycles_ = 0;
   // Zero-gradient (Neumann) coarse ghost before the prolongation on wall/inflow faces — the WO-H
   // symmetry repair (see applyNeumannGhost). ON by default; `setCoarseGhost(false)` restores the

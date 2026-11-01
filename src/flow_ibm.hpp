@@ -1384,6 +1384,18 @@ class Solver {
   }
 
 
+  // Q18: the exit check of the two CG drivers (MG-PCG, flexible CG). After every PCG/FCG
+  // pressure solve -- the main and the balanced-force projection -- the TRUE residual
+  // max|P(b - A x)| is recomputed once and divided by the stop test's own threshold rtol * r0
+  // (CutcellMG::cgTrueResidual). Above max(kCgGuardFactor, kCgGuardFloor / rtol), or capped /
+  // broken down, the solve counts as UNCONVERGED: a warning goes to stderr (rank 0; the first, then the 10th, 100th, ...), and
+  // numPressureUnconvergedSolves() counts it. The check never touches x, the iteration or the
+  // stopping rule. lastPressureTrueResidual() is the last checked ratio (0 when the last solve was
+  // not a CG solve or had a zero right-hand side).
+  double lastPressureTrueResidual() const { return lastPressureTrueResidual_; }
+  long numPressureUnconvergedSolves() const { return numPressureUnconvergedSolves_; }
+
+
   // The pressure multigrid's per-level coarsening ratio, one {rx, ry, rz} per level
   // (doc/anisotropic_metric.md §5).  On an isotropic domain this is today's table; on a stretched
   // one the aspect rule defers an axis while it is at least the aspect threshold (2) times
@@ -2677,6 +2689,10 @@ class Solver {
   long solvePressureSystem(CCField rhs1, CCField x1);
   // Count a cold-bounds Chebyshev growth-guard firing; the first one prints a stderr notice.
   void noteChebyshevGrowthTrip(long iters);
+  // Q18: the CG exit check (see lastPressureTrueResidual) and the one-time high-contrast notice.
+  void checkCgExit(CCField rhs1, CCField x1, long iters, const char* which,
+                   const StarOverlay* star);
+  void noteCgContrast();
 
 
   // The projection's constraint divergence of a face field (`out` on the g=2 block, inner cells):
@@ -5011,6 +5027,19 @@ class Solver {
   // porous and V-cycle setters) drops it. bfpLmaxFloor_: the same for the balanced-force
   // pre-projection's own bounds, dropped when they are re-estimated from scratch.
   double chebLmaxFloor_ = 0.0, bfpLmaxFloor_ = 0.0;
+  // Q18: the CG exit check. A solve is UNCONVERGED when its true residual exceeds
+  // max(kCgGuardFactor * rtol, kCgGuardFloor) * r0. Measured (z-extruded tilted two-layer VoF box,
+  // 16x16x4, walls in x/y, ratios 1..1e4; validation/highratio/q18): healthy exits sit at <= 0.9 x
+  // rtol*r0 for rtol 1e-8, the wrong fields at 3e8..3e10 x; at rtol 1e-13 the TRUE residual of a
+  // correct field (divergence at the Chebyshev level) floors at 2.6e-14 (ratio 1) .. 3.4e-11
+  // (ratio 1e3) relative -- round-off, which a factor alone would report. The floor keeps such
+  // solves silent: a true residual below 1e-8 * r0 is not a wrong field.
+  static constexpr double kCgGuardFactor = 10.0;
+  static constexpr double kCgGuardFloor = 1e-8;
+  double lastPressureTrueResidual_ = 0.0;
+  long numPressureUnconvergedSolves_ = 0;
+  long cgGuardNextReport_ = 1;      // the next count at which the warning prints (1, 10, 100, ...)
+  bool cgContrastPending_ = false;  // an explicit PCG/FCG selection awaits its contrast notice
   CCField chebX0_;             // the solve's starting iterate under the pressure warm start
   int nLevels_ = 0;             // pressure-MG depth, 0 = AUTO (doc/mg_depth_policy.md §3.1)
   bool pressGraphAmg_ = false;

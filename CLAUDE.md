@@ -244,6 +244,11 @@ you want). Detail and numbers for every bullet: ref §6.
   density ratio 10³, MG-PCG, 50 steps: 11.8 iterations/step, max 14, no cap; trilinear P: 229, 13 of
   50 capped at 800). NEVER reintroduce a prolongation that is not c·Rᵀ under a CG driver because
   'trilinear is more accurate'. Guard: ctest `mg_vcycle_symmetry`.
+- **A CG driver that stops "converged" on a wrong field is reported, not returned silently** (Q18:
+  FCG at 1e4, true residual 3e8× its tolerance, measured before A3): every PCG/FCG solve re-checks
+  its TRUE residual once and warns + counts one above max(10 rtol, 1e-8)·r0 or capped
+  (`diagnostics.num_pressure_unconverged_solves`, `last_pressure_true_residual()`; results bitwise
+  unchanged; ctest `cg_guard_mpi`).
 - **Operator storage precision** (`MReal`; double by default, +12 % step time) covers the pressure
   hierarchy, momentum stencil, K/M/X/Nbc/R/D_rescale and the ghost overlay. Float = **invalid, not
   degraded** on a high-contrast bed (`../docs/SCALING_ISSUES.md` #1). Ctest `no_float_operator_casts`

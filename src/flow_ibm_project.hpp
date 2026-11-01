@@ -801,14 +801,19 @@ long Solver<Grid>::solveBalancedForceSystem(double bref, double r0) {
     }
     return it;
   }
+  long it;
   if (useFcg_) {
     if (zp1_.extent(0) != n1_)
       zp1_ = CCField("zp1", n1_);
-    return mg_.solveFCG(rhs1_, pb1_, r_, pp_, z_, zp1_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12, nullptr,
-                        0, C3{nx_, ny_, nz_});
-  }
-  return mg_.solvePCG(rhs1_, pb1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12, nullptr, 0,
+    it = mg_.solveFCG(rhs1_, pb1_, r_, pp_, z_, zp1_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12, nullptr,
+                      0, C3{nx_, ny_, nz_});
+  } else {
+    it = mg_.solvePCG(rhs1_, pb1_, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12, nullptr, 0,
                       C3{nx_, ny_, nz_});
+  }
+  checkCgExit(rhs1_, pb1_, it, useFcg_ ? "balanced-force flexible-CG" : "balanced-force MG-PCG",
+              nullptr);
+  return it;
 }
 
 template <class Grid>
@@ -1667,11 +1672,95 @@ long Solver<Grid>::solvePressureSystem(CCField rhs1, CCField x1) {
       zp1_ = CCField("zp1", n1_);
     iters = mg_.solveFCG(rhs1, x1, r_, pp_, z_, zp1_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
                          fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
+    checkCgExit(rhs1, x1, iters, "flexible-CG", fluidOnlyMode_ == 2 ? &starOv_ : nullptr);
   } else {
     iters = mg_.solvePCG(rhs1, x1, r_, pp_, z_, Ap_, pcgMaxit_, pcgRtol_, 2, 2, 12,
                          fluidOnlyMode_ == 2 ? &starOv_ : nullptr, nStar_, C3{nx_, ny_, nz_});
+    checkCgExit(rhs1, x1, iters, "MG-PCG", fluidOnlyMode_ == 2 ? &starOv_ : nullptr);
   }
   return iters;
+}
+
+template <class Grid>
+void Solver<Grid>::checkCgExit(CCField rhs1, CCField x1, long iters, const char* which,
+                               const StarOverlay* star) {
+  // Q18 (a). Everything read here is global -- the iteration count, the breakdown flag and the
+  // allreduced residual ratio -- so every rank takes the same decision and keeps the same count.
+  // `star` is the overlay the driver's fine matvec carried (mode B's main solve only).
+  noteCgContrast();
+  const bool failed = mg_.lastSolveFailed();
+  lastPressureTrueResidual_ =
+      mg_.cgTrueResidual(rhs1, x1, r_, Ap_, star, star ? nStar_ : 0, C3{nx_, ny_, nz_});
+  const bool capped = iters >= pcgMaxit_ || failed;
+  const double limit = std::max(kCgGuardFactor, kCgGuardFloor / pcgRtol_);
+  if (!capped && lastPressureTrueResidual_ <= limit)  // NaN-safe: a NaN ratio reports
+    return;
+  ++numPressureUnconvergedSolves_;
+  if (numPressureUnconvergedSolves_ < cgGuardNextReport_)
+    return;
+  cgGuardNextReport_ *= 10;
+  int r = 0;
+#ifdef PECLET_FLOW_MPI
+  if (distributed_)
+    MPI_Comm_rank(comm_, &r);
+#endif
+  if (r == 0)
+    std::fprintf(stderr,
+                 "peclet::flow: the %s pressure solve did not converge (%s; true residual "
+                 "max|b - A x| = %.3g x the stop tolerance rtol*r0, limit %.3g, rtol %.1e) -- the "
+                 "field it returned is not a projection. %ld such solve%s so far "
+                 "(diagnostics.num_pressure_unconverged_solves; next report at %ld). Both CG "
+                 "drivers fail above a density ratio of ~1e3; the variable-density default is "
+                 "set_pressure_chebyshev.\n",
+                 which,
+                 failed               ? "broke down"
+                 : iters >= pcgMaxit_ ? "capped"
+                                      : "stopped on its recurrence residual",
+                 lastPressureTrueResidual_, limit, pcgRtol_, numPressureUnconvergedSolves_,
+                 numPressureUnconvergedSolves_ == 1 ? "" : "s", cgGuardNextReport_);
+}
+
+template <class Grid>
+void Solver<Grid>::noteCgContrast() {
+  // Q18 (b): once per explicit set_pressure_pcg/_fcg selection, at its first solve under
+  // variable density, name Chebyshev if the density contrast is in the regime where both CG
+  // drivers fail. One min/max reduction, at most once per selection.
+  if (!cgContrastPending_ || !varRho_ || rhoField_.extent(0) == 0)
+    return;
+  cgContrastPending_ = false;
+  CCConst f = CCConst(rhoField_);
+  const C3 e = e_;
+  double ext[2] = {-1e300, -1e300};  // {max rho, max -rho}: two single reducers, no combined one
+  for (int k = 0; k < 2; ++k) {
+    const double sg = k == 0 ? 1.0 : -1.0;
+    Kokkos::parallel_reduce(
+        "peclet::flow::cg_rho_extrema",
+        MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+          const long i = (long)x + (long)y * e.x + (long)z * (long)e.x * e.y;
+          acc = Kokkos::fmax(acc, sg * f(i));
+        },
+        Kokkos::Max<double>(ext[k]));
+  }
+  double mx = ext[0], mn = -ext[1];
+  int r = 0;
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    double g[2] = {-mn, mx}, o[2];
+    MPI_Allreduce(g, o, 2, MPI_DOUBLE, MPI_MAX, comm_);
+    mn = -o[0];
+    mx = o[1];
+    MPI_Comm_rank(comm_, &r);
+  }
+#endif
+  if (r == 0 && mn > 0.0 && mx >= 1e3 * mn)
+    std::fprintf(stderr,
+                 "peclet::flow: set_pressure_%s selected under variable density with "
+                 "rho_max/rho_min = %.3g. Both CG drivers fail above a density ratio of ~1e3 (the "
+                 "V-cycle preconditioner turns indefinite); Chebyshev, the variable-density "
+                 "default, is healthy there (set_pressure_chebyshev). Unconverged CG solves are "
+                 "reported and counted (diagnostics.num_pressure_unconverged_solves).\n",
+                 useFcg_ ? "fcg" : "pcg", mx / mn);
 }
 
 template <class Grid>

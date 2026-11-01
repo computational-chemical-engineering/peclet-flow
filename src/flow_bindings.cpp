@@ -1035,6 +1035,28 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "redone once from its starting iterate; the first such case prints a stderr notice. "
           "Expected 0; a solve that does not trip is unchanged bit for bit. "
           "doc/mg_depth_policy_log.md 2026-10-30.")
+      .def_prop_ro(
+          "num_pressure_unconverged_solves",
+          [](D& diag) { return diag.s->numPressureUnconvergedSolves(); },
+          "How many MG-PCG / flexible-CG pressure solves (main and balanced-force projection) "
+          "since construction ended UNCONVERGED: capped, broken down, or stopped on their "
+          "recurrence residual while the TRUE residual max|b - A x| (the stop test's norm and "
+          "mean removal) exceeded max(10 rtol, 1e-8) * r0 -- the floor keeps a round-off-limited "
+          "solve at a near-machine rtol silent. Each is also reported on "
+          "stderr (the first, then the 10th, 100th, ...). Above a density ratio of ~1e3 the "
+          "V-cycle preconditioner turns indefinite and both CG drivers can stop 'converged' on a "
+          "field that is not a projection; Chebyshev, the variable-density default, is healthy "
+          "there. The check reads the result only: fields and iteration counts are unchanged. "
+          "Identical on every rank.")
+      .def(
+          "last_pressure_true_residual", [](D& diag) { return diag.s->lastPressureTrueResidual(); },
+          "The last MG-PCG / flexible-CG pressure solve's TRUE residual max|b - A x| divided by "
+          "its stop tolerance rtol * r0 (r0 the initial residual, or the balanced-force "
+          "projection's full right-hand side): <= 1 means the exit really meets the tolerance; "
+          "above max(10, 1e-8 / rtol) the solve counts in num_pressure_unconverged_solves. "
+          "Unit-free. Not updated "
+          "by Chebyshev or ghost-projection (BiCGStab) solves; 0 before the first CG solve and "
+          "after one with a zero right-hand side.")
       .def(
           "pressure_solve_failed", [](D& diag) { return diag.s->pressureSolveFailed(); },
           "Did the last pressure solve break down on a non-finite recurrence scalar (a "
