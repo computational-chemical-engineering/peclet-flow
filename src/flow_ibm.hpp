@@ -1989,6 +1989,9 @@ class Solver {
   // The band census of the last step (§9), LOCAL to this rank: interfacial cells, virtual-plane
   // cells, film cells among those, fit fallbacks. Zero while the sharp interface is inactive.
   vof::SharpCensus vofViscousInterfaceCensus() const;
+  // The last step's fit (§5.3), LOCAL inner block, x-fastest: tau_hat x/y/z and D_nn (internal
+  // units) and the fallback flag as 0/1. All five empty while the sharp interface is inactive.
+  std::array<std::vector<double>, 5> vofViscousInterfaceFit();
   // The sharp interface's per-step state and the u^n base, by view (the operator-level MPI ctest
   // sharp_viscous_mpi drives the step's pieces one by one and reads these back).
   struct SharpViscousState {

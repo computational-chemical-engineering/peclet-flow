@@ -2217,6 +2217,22 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "'fit_fallbacks' (cells whose interface fit was singular: tau = D_nn = 0, first order "
           "locally). All zero while the sharp interface is inactive.")
       .def(
+          "vof_viscous_interface_fit",
+          [](D& diag) {
+            auto f = diag.s->vofViscousInterfaceFit();
+            const char* key[5] = {"tau_x", "tau_y", "tau_z", "dnn", "fallback"};
+            nb::dict d;
+            for (int k = 0; k < 5; ++k)
+              if (!f[k].empty())
+                d[key[k]] = field_out(*diag.s, std::move(f[k]));
+            return d;
+          },
+          "The sharp interface fit of the last step (doc/vof_sharp_viscous_stress.md §5.3), "
+          "LOCAL to this rank, as (nx, ny, nz) arrays: 'tau_x', 'tau_y', 'tau_z' (the interface "
+          "traction tau_hat) and 'dnn' (D_nn_hat), both in internal units, zero off the band, "
+          "and 'fallback' (1 where the fit was singular). Empty while the sharp interface is "
+          "inactive. A read-out for verification; it changes nothing.")
+      .def(
           "set_vof_momentum_muscl", [](D& diag, bool on) { diag.s->setVofMomentumMuscl(on); },
           nb::arg("on") = true,
           "Former spelling of set_vof_momentum_scheme: on = 'muscl_mixed' (a MinMod slope of the "

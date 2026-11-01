@@ -780,6 +780,25 @@ vof::SharpCensus Solver<Grid>::vofViscousInterfaceCensus() const {
   return vof::sharpCensus(sharpGeom_, svFb_, C3{G, G, G}, C3{e_.x - G, e_.y - G, e_.z - G});
 }
 
+template <class Grid>
+std::array<std::vector<double>, 5> Solver<Grid>::vofViscousInterfaceFit() {
+  std::array<std::vector<double>, 5> out;
+  if (!sharpActive_ || svCls_.extent(0) != (std::size_t)n_)
+    return out;
+  for (int a = 0; a < 3; ++a)
+    out[a] = gatherInner(svTau_[a]);
+  out[3] = gatherInner(svDnn_);
+  CCExec space;
+  CCField f(Kokkos::view_alloc(space, "peclet::flow::sharp_fb_out", Kokkos::WithoutInitializing),
+            (std::size_t)n_);
+  const vof::SvByte fb = svFb_;
+  Kokkos::parallel_for(
+      "peclet::flow::sharp_fb_out", Kokkos::RangePolicy<CCExec>(space, 0, (long)n_),
+      KOKKOS_LAMBDA(long i) { f(i) = fb(i) ? 1.0 : 0.0; });
+  out[4] = gatherInner(f);
+  return out;
+}
+
 }  // namespace peclet::flow
 
 #endif  // PECLET_FLOW_FLOW_IBM_CLOSURES_HPP
