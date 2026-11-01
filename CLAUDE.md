@@ -55,16 +55,16 @@ single-rank module byte-identical). Another backend = another prefix and another
 ## Test
 
 ```bash
-ctest --test-dir build_dev -N                                   # 252 registered, nothing hidden
+ctest --test-dir build_dev -N                                   # 285 registered, nothing hidden
 OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure -LE bench
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-252 registered / **248 with `-LE bench`** (counted 2026-10-19 on `fff1e20`): 64 from `tests/kokkos`
+285 registered / **281 with `-LE bench`** (counted 2026-11-01 on `dddb941`, host and CUDA alike): 71 from `tests/kokkos`
 (`bench_rbgs`, `vof_timing`, `bench_scalar_cutcell`, `bench_bottom_factor` carry `bench` — instruments,
-not gates), 148 from `tests/kokkos_mpi` (48 cases at np = 1, 2, 4 + two np = 8 rungs + `bottom_direct_mpi` at np = 2, 4, host only), and 40 Python ctests on the
+not gates), 166 from `tests/kokkos_mpi` (cases at np = 1, 2, 4 — a few at a subset — + three np = 8 rungs), and 48 Python ctests on the
 module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_operator_casts`,
-`iteration_order`, and 24 `scalar_cutcell_*` gates; the six `_g6_*` take 20–35 min each).
+`iteration_order`, and 33 `scalar_cutcell_*` gates; the six `_g6_*` take 20–35 min each).
 
 - **Threads per rank must divide the cores per L3 (CCD) domain; prefer one rank per L3 domain**
   (`doc/vof_distributed_partition_design.md` §4(d)): a rank whose threads straddle two CCDs runs its
