@@ -265,7 +265,7 @@ void Solver<Grid>::addFullStressRhsComp(int c) {
                                                  u_.w[c], skipLo);
     const CCConst t[3] = {CCConst(svTau_[0]), CCConst(svTau_[1]), CCConst(svTau_[2])};
     vof::addSharpViscousRhs(c, C[c].b, CCConst(C[c].rscale), v, sharpGeom_, t, CCConst(svDnn_), G,
-                            u_.w[c], skipLo);
+                            u_.w[c], skipLo, svRhsList_, svRhsN_);
     return;
   }
   if (hasSolid_) {
@@ -713,6 +713,8 @@ void Solver<Grid>::sharpViscousGeometry() {
     svDnn_ = CCField(Kokkos::view_alloc(space, "peclet::flow::sharp_dnn"), n);
     svList_ = vof::SvList(
         Kokkos::view_alloc(space, "peclet::flow::sharp_list", Kokkos::WithoutInitializing), n);
+    svRhsList_ = vof::SvList(
+        Kokkos::view_alloc(space, "peclet::flow::sharp_rhs_list", Kokkos::WithoutInitializing), n);
   }
   vof::SharpGeom& g = sharpGeom_;
   const int ee[3] = {e_.x, e_.y, e_.z};
@@ -750,6 +752,7 @@ void Solver<Grid>::sharpViscousGeometry() {
   for (int a = 0; a < 3; ++a)
     g.ell[a] = gm.h[a];
   vof::sharpClassify(g, svCls_);
+  svRhsN_ = vof::sharpRhsCompact(g, G, svRhsList_);
 }
 
 template <class Grid>

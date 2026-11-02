@@ -702,32 +702,102 @@ inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCF
 ///   bb_c(i) += rs(i) · [ w_c (X(i) − X(i−s_c)) + Σ_a (Y(E_ac(i+s_a)) − Y(E_ac(i))) / (ℓ_a ℓ_c) ],
 /// a1 < a2 in that association order. The band transpose itself is `addFullStressRhs` with
 /// `SharpFaceProps`. `tau`/`dnn` ghosts filled to depth 1 incl. edges; `skipLoC` as there.
+/// On a device it runs over `list[0, nl)` (`sharpRhsCompact`: every cell whose terms can be
+/// nonzero), on the host over the box; a cell the list leaves out has every term exactly 0.
 inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)[3],
                                const SharpGeom& gg, const CCConst (&tau)[3], CCConst dnn, int g,
-                               double wc, bool skipLoC) {
+                               double wc, bool skipLoC, SvList list, long nl) {
   const SharpGeom geo = gg;
   const int a1 = (c == 0) ? 1 : 0, a2 = (c == 2) ? 1 : 2;
   const double f1 = 1.0 / (geo.ell[a1] * geo.ell[c]), f2 = 1.0 / (geo.ell[a2] * geo.ell[c]);
   const CCConst v0 = v[0], v1 = v[1], v2 = v[2], t0 = tau[0], t1 = tau[1], t2 = tau[2];
   const int lo[3] = {g + ((skipLoC && c == 0) ? 1 : 0), g + ((skipLoC && c == 1) ? 1 : 0),
                      g + ((skipLoC && c == 2) ? 1 : 0)};
-  ccForRows3(
-      "peclet::flow::vof::sharp_viscous_rhs", C3{lo[0], lo[1], lo[2]},
-      C3{geo.e[0] - g, geo.e[1] - g, geo.e[2] - g}, KOKKOS_LAMBDA(int x, int y, int z) {
-        const CCConst vv[3] = {v0, v1, v2}, tt[3] = {t0, t1, t2};
-        const int q[3] = {x, y, z};
-        int qm[3] = {x, y, z};
-        qm[c] -= 1;
-        const double xc = geo.cellExtra(q, c, vv, tt, dnn) - geo.cellExtra(qm, c, vv, tt, dnn);
-        int p1[3] = {x, y, z}, p2[3] = {x, y, z};
-        p1[a1] += 1;
-        p2[a2] += 1;
-        const double y1 = geo.edgeTraction(p1, a1, c, c, tt) - geo.edgeTraction(q, a1, c, c, tt);
-        const double y2 = geo.edgeTraction(p2, a2, c, c, tt) - geo.edgeTraction(q, a2, c, c, tt);
-        const double t = (wc * xc + f1 * y1) + f2 * y2;
-        const long i = geo.idx(q);
-        bb(i) += rs(i) * t;
-      });
+  const auto body = KOKKOS_LAMBDA(int x, int y, int z) {
+    const CCConst vv[3] = {v0, v1, v2}, tt[3] = {t0, t1, t2};
+    const int q[3] = {x, y, z};
+    int qm[3] = {x, y, z};
+    qm[c] -= 1;
+    const double xc = geo.cellExtra(q, c, vv, tt, dnn) - geo.cellExtra(qm, c, vv, tt, dnn);
+    int p1[3] = {x, y, z}, p2[3] = {x, y, z};
+    p1[a1] += 1;
+    p2[a2] += 1;
+    const double y1 = geo.edgeTraction(p1, a1, c, c, tt) - geo.edgeTraction(q, a1, c, c, tt);
+    const double y2 = geo.edgeTraction(p2, a2, c, c, tt) - geo.edgeTraction(q, a2, c, c, tt);
+    const double t = (wc * xc + f1 * y1) + f2 * y2;
+    const long i = geo.idx(q);
+    bb(i) += rs(i) * t;
+  };
+  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
+    if (nl <= 0)
+      return;
+    const int lc = lo[c];
+    Kokkos::parallel_for(
+        "peclet::flow::vof::sharp_viscous_rhs", Kokkos::RangePolicy<CCExec>(CCExec(), 0, nl),
+        KOKKOS_LAMBDA(long r) {
+          const long i = list(r);
+          const long z = i / geo.st[2], rr = i - z * geo.st[2], y = rr / geo.st[1];
+          const int q[3] = {(int)(rr - y * geo.st[1]), (int)y, (int)z};
+          if (q[c] < lc)
+            return;  // skipLoC: the BC-imposed low-face node
+          body(q[0], q[1], q[2]);
+        });
+    return;
+  }
+  ccForRows3("peclet::flow::vof::sharp_viscous_rhs", C3{lo[0], lo[1], lo[2]},
+             C3{geo.e[0] - g, geo.e[1] - g, geo.e[2] - g}, body);
+}
+
+/// The cells of the inner box [g, e−g)³ whose band terms (`addSharpViscousRhs`) can be nonzero
+/// for some component: those with an interfacial cell in their 3×3×3 block (the cells i, i − s_c
+/// and the eight further cells of the four edges all lie in it). Compacted into `list` in linear
+/// order; returns their number. Device only (the host runs the box); 0 on the host.
+inline long sharpRhsCompact(const SharpGeom& gg, int g, SvList list) {
+  if constexpr (Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
+    return 0;
+  } else {
+    const SharpGeom geo = gg;
+    const int nx = geo.e[0] - 2 * g, ny = geo.e[1] - 2 * g, nz = geo.e[2] - 2 * g;
+    if (nx <= 0 || ny <= 0 || nz <= 0)
+      return 0;
+    long nl = 0;
+    Kokkos::parallel_scan(
+        "peclet::flow::vof::sharp_rhs_compact",
+        Kokkos::RangePolicy<CCExec>(CCExec(), 0, (long)nx * ny * nz),
+        KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+          const int q[3] = {g + (int)(r % nx), g + (int)((r / nx) % ny),
+                            g + (int)(r / ((long)nx * ny))};
+          bool hit = false;
+          for (int dz = -1; dz <= 1 && !hit; ++dz)
+            for (int dy = -1; dy <= 1 && !hit; ++dy)
+              for (int dx = -1; dx <= 1 && !hit; ++dx) {
+                const int p[3] = {q[0] + dx, q[1] + dy, q[2] + dz};
+                hit = geo.cellClass(p) != kSvNone;
+              }
+          if (hit) {
+            if (final)
+              list(upd) = geo.idx(q);
+            ++upd;
+          }
+        },
+        nl);
+    return nl;
+  }
+}
+
+/// `addSharpViscousRhs` with its own worklist (the unit and MPI tests).
+inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)[3],
+                               const SharpGeom& gg, const CCConst (&tau)[3], CCConst dnn, int g,
+                               double wc, bool skipLoC) {
+  SvList list;
+  long nl = 0;
+  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
+    list = SvList(Kokkos::view_alloc(CCExec(), "peclet::flow::vof::sharp_rhs_list",
+                                     Kokkos::WithoutInitializing),
+                  (std::size_t)gg.e[0] * gg.e[1] * gg.e[2]);
+    nl = sharpRhsCompact(gg, g, list);
+  }
+  addSharpViscousRhs(c, bb, rs, v, gg, tau, dnn, g, wc, skipLoC, list, nl);
 }
 
 /// The census of the band (§9, G-SV10) over [lo, hi), LOCAL to this block: interfacial cells, the
