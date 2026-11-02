@@ -52,6 +52,13 @@ using SvByteConst = Kokkos::View<const std::uint8_t*, CCMem>;
 /// + side`: a pure cell carrying the virtual plane on its −a (side 0) or +a (side 1) face.
 constexpr std::uint8_t kSvNone = 0, kSvPlane = 1, kSvVirtual0 = 2;
 
+/// The fit (§5.3) as items and rows (`SharpGeom::fitItem`): 27 block cells of 3 normal links, then
+/// 144 edges of 2 shear links; 369 rows; 45 + 9 normal-equation entries (upper triangle + rhs).
+constexpr int kSvNormalItems = 27, kSvItems = 27 + 144, kSvRows = 81 + 288, kSvEntries = 45 + 9;
+
+/// The compacted interfacial cells of a fit (local linear indices), the device fit's worklist.
+using SvList = Kokkos::View<long*, CCMem>;
+
 /// The band geometry and the closure constants, by value into every kernel.
 struct SharpGeom {
   int e[3] = {0, 0, 0};     ///< solver block extents
@@ -275,18 +282,23 @@ struct SharpGeom {
 
   /// One least-squares row of the kinked model (§5.3) for link ∂_a u_c with C = 1 kernel fraction
   /// `thA` and datum `mv`: coefficient of L_pq = δ_ap δ_cq + (1−θ_lo)(r−1) n_a [(Pe_c)_p n_q +
-  /// (Pe_c)_q n_p], accumulated into the normal equations (upper triangle, row-major 9×9).
-  KOKKOS_INLINE_FUNCTION void fitRow(int a, int c, double thA, double mv, const double n[3],
-                                     double N[81], double rhs[9]) const {
+  /// (Pe_c)_q n_p] (`fitCoef`), accumulated into the normal equations (upper triangle, row-major
+  /// 9×9) by `fitRow`.
+  KOKKOS_INLINE_FUNCTION void fitCoef(int a, int c, double thA, const double n[3],
+                                      double co[9]) const {
     const double thlo = lowA ? thA : 1.0 - thA;
     const double kk = (1.0 - thlo) * (r - 1.0) * n[a];
     double pc[3];
     for (int p = 0; p < 3; ++p)
       pc[p] = ((p == c) ? 1.0 : 0.0) - n[c] * n[p];
-    double co[9];
     for (int p = 0; p < 3; ++p)
       for (int q = 0; q < 3; ++q)
         co[3 * p + q] = ((p == a && q == c) ? 1.0 : 0.0) + kk * (pc[p] * n[q] + pc[q] * n[p]);
+  }
+  KOKKOS_INLINE_FUNCTION void fitRow(int a, int c, double thA, double mv, const double n[3],
+                                     double N[81], double rhs[9]) const {
+    double co[9];
+    fitCoef(a, c, thA, n, co);
     for (int s = 0; s < 9; ++s) {
       rhs[s] += co[s] * mv;
       for (int t = s; t < 9; ++t)
@@ -294,64 +306,89 @@ struct SharpGeom {
     }
   }
 
+  /// The rows of item `it` of the fit of K (§5.3), in the fit's fixed order: item it < 27 is block
+  /// cell it = 9(dz+1) + 3(dy+1) + (dx+1) (offset order) with its normal links ∂_c u_c, c = x, y, z
+  /// (θ̄ = C); item 27 + u is edge u = 48 pr + (its offset-order index in orientation pr, (a, c) =
+  /// (0,1), (0,2), (1,2)) of the 3×3×3 block with its shear links ∂_a u_c then ∂_c u_a (θ̄ from the
+  /// edge's own owner). Writes (a, c, θ̄, datum) per row; returns the row count, 3 or 2, and 0 when
+  /// the sample is outside the domain.
+  KOKKOS_INLINE_FUNCTION int fitItem(const int K[3], int it, const CCConst (&v)[3], int ra[3],
+                                     int rc[3], double th[3], double mv[3]) const {
+    if (it < kSvNormalItems) {
+      const int q[3] = {K[0] + it % 3 - 1, K[1] + (it / 3) % 3 - 1, K[2] + it / 9 - 1};
+      if (!inDomain(q))
+        return 0;
+      const double tq = colour(q);
+      const long j = idx(q);
+      for (int c = 0; c < 3; ++c) {
+        ra[c] = rc[c] = c;
+        th[c] = tq;
+        mv[c] = v[c](j + st[c]) - v[c](j);
+      }
+      return 3;
+    }
+    const int u = it - kSvNormalItems, pr = u / 48, l = u % 48;
+    const int a = (pr == 2) ? 1 : 0, c = (pr == 0) ? 1 : 2, b = 3 - a - c;
+    const int ex = (b == 0) ? 3 : 4, ey = (b == 1) ? 3 : 4;  // the b extent is 3, the others 4
+    const int k[3] = {K[0] - 1 + l % ex, K[1] - 1 + (l / ex) % ey, K[2] - 1 + l / (ex * ey)};
+    if (!edgeInDomain(k, a, c))
+      return 0;
+    int o[3];
+    double mm[3], aa;
+    double tac, tca;
+    if (edgeOwner(k, a, c, o, mm, aa)) {
+      tac = linkFraction(k, a, c, o, mm, aa);
+      tca = linkFraction(k, c, a, o, mm, aa);
+    } else {
+      tac = tca = edgePhase(k, a, c);
+    }
+    const long j = idx(k);
+    ra[0] = a;
+    rc[0] = c;
+    th[0] = tac;
+    mv[0] = (ell[c] / ell[a]) * (v[c](j) - v[c](j - st[a]));
+    ra[1] = c;
+    rc[1] = a;
+    th[1] = tca;
+    mv[1] = (ell[a] / ell[c]) * (v[a](j) - v[a](j - st[c]));
+    return 2;
+  }
+
   /// The fit of interfacial cell (X, Y, Z) (§5.3): L, the low-μ-side gradient, from the 81 normal
   /// links of the 3×3×3 block and the 288 shear links of its 144 edges (θ̄ from each edge's own
   /// owner), unit weights, Cholesky. Outputs τ̂ = μ_lo P(S n), D̂_nn = n·L n. False = fallback
-  /// (smallest pivot < 1e-10·trace/9): the caller stores τ̂ = D̂ = 0.
+  /// (smallest pivot < 1e-10·trace/9): the caller stores τ̂ = D̂ = 0. One thread; the device runs
+  /// the same rows, sums and solve on a team (`sharpFit`).
   KOKKOS_INLINE_FUNCTION bool fitCell(const int K[3], const CCConst (&v)[3], double tau[3],
                                       double& dnn) const {
-    double m[3], al;
-    plane(K, cellClass(K), m, al);
     double n[3] = {0.0, 0.0, 0.0};
-    vofPhysNormal(m, gm, n);
+    fitNormal(K, n);
     double N[81], rhs[9];
     for (int s = 0; s < 81; ++s)
       N[s] = 0.0;
     for (int s = 0; s < 9; ++s)
       rhs[s] = 0.0;
-    // Normal links ∂_c u_c of the block cells (θ̄ = C_j), offset order, components x, y, z.
-    for (int dz = -1; dz <= 1; ++dz)
-      for (int dy = -1; dy <= 1; ++dy)
-        for (int dx = -1; dx <= 1; ++dx) {
-          const int q[3] = {K[0] + dx, K[1] + dy, K[2] + dz};
-          if (!inDomain(q))
-            continue;
-          const double th = colour(q);
-          const long j = idx(q);
-          for (int c = 0; c < 3; ++c)
-            fitRow(c, c, th, v[c](j + st[c]) - v[c](j), n, N, rhs);
-        }
-    // Shear links of every edge of every block cell: orientations (a, c) = (0,1), (0,2), (1,2);
-    // per orientation the edges in offset order; per edge ∂_a u_c then ∂_c u_a.
-    for (int pr = 0; pr < 3; ++pr) {
-      const int a = (pr == 2) ? 1 : 0, c = (pr == 0) ? 1 : 2, b = 3 - a - c;
-      int lo[3], hi[3];
-      for (int s = 0; s < 3; ++s) {
-        lo[s] = K[s] - 1;
-        hi[s] = (s == b) ? K[s] + 1 : K[s] + 2;
-      }
-      for (int kz = lo[2]; kz <= hi[2]; ++kz)
-        for (int ky = lo[1]; ky <= hi[1]; ++ky)
-          for (int kx = lo[0]; kx <= hi[0]; ++kx) {
-            const int k[3] = {kx, ky, kz};
-            if (!edgeInDomain(k, a, c))
-              continue;
-            int o[3];
-            double mm[3], aa;
-            double tac, tca;
-            if (edgeOwner(k, a, c, o, mm, aa)) {
-              tac = linkFraction(k, a, c, o, mm, aa);
-              tca = linkFraction(k, c, a, o, mm, aa);
-            } else {
-              tac = tca = edgePhase(k, a, c);
-            }
-            const long j = idx(k);
-            const double mac = (ell[c] / ell[a]) * (v[c](j) - v[c](j - st[a]));
-            const double mca = (ell[a] / ell[c]) * (v[a](j) - v[a](j - st[c]));
-            fitRow(a, c, tac, mac, n, N, rhs);
-            fitRow(c, a, tca, mca, n, N, rhs);
-          }
+    for (int it = 0; it < kSvItems; ++it) {
+      int ra[3], rc[3];
+      double th[3], mv[3];
+      const int nr = fitItem(K, it, v, ra, rc, th, mv);
+      for (int q = 0; q < nr; ++q)
+        fitRow(ra[q], rc[q], th[q], mv[q], n, N, rhs);
     }
+    return fitSolve(N, rhs, n, mulo, tau, dnn);
+  }
+
+  /// The physical unit normal of interfacial cell K's own plane (the fit's n).
+  KOKKOS_INLINE_FUNCTION void fitNormal(const int K[3], double n[3]) const {
+    double m[3], al;
+    plane(K, cellClass(K), m, al);
+    vofPhysNormal(m, gm, n);
+  }
+
+  /// The solve of the fit's normal equations N (upper triangle, row-major 9×9, overwritten) and
+  /// right-hand side, then τ̂ and D̂_nn (see `fitCell`). False = fallback.
+  KOKKOS_INLINE_FUNCTION static bool fitSolve(double N[81], const double rhs[9], const double n[3],
+                                              double mulo, double tau[3], double& dnn) {
     // Cholesky N = R^T R (upper R in place), pivot test against the trace.
     double tr = 0.0;
     for (int s = 0; s < 9; ++s)
@@ -478,14 +515,154 @@ inline void sharpClassify(const SharpGeom& gg, SvByte cls) {
       });
 }
 
+/// Team scratch of the device fit, one team per interfacial cell: per row its 9 coefficients, its
+/// datum and whether it is present, and the 54 accumulated entries (about 31 KB).
+using SvScrD = Kokkos::View<double*, CCExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+using SvScrI = Kokkos::View<int*, CCExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+struct SvFitScratch {
+  SvScrD co, mv, ent;
+  SvScrI ok;
+  static std::size_t shmem() {
+    return SvScrD::shmem_size(9 * kSvRows) + SvScrD::shmem_size(kSvRows) +
+           SvScrD::shmem_size(kSvEntries) + SvScrI::shmem_size(kSvRows);
+  }
+  template <class Member>
+  KOKKOS_INLINE_FUNCTION explicit SvFitScratch(const Member& tm)
+      : co(tm.team_scratch(0), 9 * kSvRows)
+      , mv(tm.team_scratch(0), kSvRows)
+      , ent(tm.team_scratch(0), kSvEntries)
+      , ok(tm.team_scratch(0), kSvRows) {}
+};
+
+/// `SharpGeom::fitCell` of cell K on a whole team (the shape of `curvFallbackTeam`): (1) the lanes
+/// map the 171 items to their rows' coefficients and data (`fitItem`, `fitCoef`); (2) ENTRY-
+/// PARALLEL accumulation: lane e sums normal-equation entry e over the present rows in row order,
+/// from 0.0, with `fitRow`'s expression; (3) one lane solves (`fitSolve`) and stores. Each entry is
+/// the one-thread body's sum, row for row in the same order; under nvcc's FMA contraction the
+/// per-lane expression may round differently from the single-thread fold (the WO-3 precedent of
+/// `curvFallbackTeam`), so the device fit agrees with the host one to round-off, not bitwise.
+/// Every lane must call it (it holds team barriers).
+template <class Member>
+KOKKOS_INLINE_FUNCTION void sharpFitTeam(const Member& tm, const SvFitScratch& sc,
+                                         const SharpGeom& g, const int K[3],
+                                         const CCConst (&v)[3], long i, CCField t0, CCField t1,
+                                         CCField t2, CCField dnn, SvByte fb) {
+  double n[3] = {0.0, 0.0, 0.0};
+  g.fitNormal(K, n);  // every lane: deterministic, no broadcast
+  Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, kSvItems), [&](const int it) {
+    int ra[3], rc[3];
+    double th[3], mv[3];
+    const int nr = g.fitItem(K, it, v, ra, rc, th, mv);
+    const int r0 = (it < kSvNormalItems) ? 3 * it : 81 + 2 * (it - kSvNormalItems);
+    const int nmax = (it < kSvNormalItems) ? 3 : 2;
+    for (int q = 0; q < nmax; ++q) {
+      sc.ok(r0 + q) = (q < nr) ? 1 : 0;
+      if (q < nr) {
+        double co[9];
+        g.fitCoef(ra[q], rc[q], th[q], n, co);
+        for (int e = 0; e < 9; ++e)
+          sc.co(9 * (r0 + q) + e) = co[e];
+        sc.mv(r0 + q) = mv[q];
+      }
+    }
+  });
+  tm.team_barrier();
+  Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, kSvEntries), [&](const int e) {
+    double acc = 0.0;
+    if (e >= 45) {  // rhs[s] += co[s] * mv
+      const int s = e - 45;
+      for (int r = 0; r < kSvRows; ++r)
+        if (sc.ok(r))
+          acc += sc.co(9 * r + s) * sc.mv(r);
+    } else {  // N[9 s + t] += co[s] * co[t], t >= s, e row-major over the upper triangle
+      int s = 0, t = e;
+      while (t >= 9 - s) {
+        t -= 9 - s;
+        ++s;
+      }
+      t += s;
+      for (int r = 0; r < kSvRows; ++r)
+        if (sc.ok(r))
+          acc += sc.co(9 * r + s) * sc.co(9 * r + t);
+    }
+    sc.ent(e) = acc;
+  });
+  tm.team_barrier();
+  Kokkos::single(Kokkos::PerTeam(tm), [&]() {
+    double N[81], rhs[9];
+    for (int s = 0; s < 81; ++s)
+      N[s] = 0.0;
+    int e = 0;
+    for (int s = 0; s < 9; ++s)
+      for (int t = s; t < 9; ++t)
+        N[9 * s + t] = sc.ent(e++);
+    for (int s = 0; s < 9; ++s)
+      rhs[s] = sc.ent(45 + s);
+    double t[3] = {0.0, 0.0, 0.0}, dn = 0.0;
+    std::uint8_t f = 0;
+    if (!SharpGeom::fitSolve(N, rhs, n, g.mulo, t, dn)) {
+      t[0] = t[1] = t[2] = 0.0;
+      dn = 0.0;
+      f = 1;
+    }
+    t0(i) = t[0];
+    t1(i) = t[1];
+    t2(i) = t[2];
+    dnn(i) = dn;
+    fb(i) = f;
+  });
+}
+
 /// The τ̂/D̂_nn fit (§5.3) over the cells [lo, hi) of the solver block: interfacial cells get their
 /// fit (τ̂ = D̂ = 0 and `fb = 1` on a fallback), every other cell τ̂ = D̂ = 0, `fb = 0`. Velocity
-/// ghosts (incl. the (a, c) edges) must be filled to depth 2.
+/// ghosts (incl. the (a, c) edges) must be filled to depth 2. On a device one pass zeroes the range
+/// and compacts its interfacial cells into `list` (>= the range's cell count), then one team per
+/// listed cell fits it (`sharpFitTeam`); the host runs one thread per cell over the range.
 inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCField t1, CCField t2,
-                     CCField dnn, SvByte fb, C3 lo, C3 hi) {
+                     CCField dnn, SvByte fb, C3 lo, C3 hi, SvList list) {
   const SharpGeom g = gg;
   const CCConst v0 = v[0], v1 = v[1], v2 = v[2];
   CCExec space;
+  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
+    const int nx = hi.x - lo.x, ny = hi.y - lo.y, nz = hi.z - lo.z;
+    const long region = (long)nx * ny * nz;
+    long nb = 0;
+    Kokkos::parallel_scan(
+        "peclet::flow::vof::sharp_fit_compact", Kokkos::RangePolicy<CCExec>(space, 0, region),
+        KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+          const int q[3] = {lo.x + (int)(r % nx), lo.y + (int)((r / nx) % ny),
+                            lo.z + (int)(r / ((long)nx * ny))};
+          const long i = g.idx(q);
+          if (final) {
+            t0(i) = 0.0;
+            t1(i) = 0.0;
+            t2(i) = 0.0;
+            dnn(i) = 0.0;
+            fb(i) = 0;
+          }
+          if (g.cellClass(q) != kSvNone) {
+            if (final)
+              list(upd) = i;
+            ++upd;
+          }
+        },
+        nb);
+    if (nb == 0)
+      return;
+    using Policy = Kokkos::TeamPolicy<CCExec>;
+    Policy pol(space, (int)nb, kVofWarp);
+    pol.set_scratch_size(0, Kokkos::PerTeam(SvFitScratch::shmem()));
+    Kokkos::parallel_for(
+        "peclet::flow::vof::sharp_fit", pol, KOKKOS_LAMBDA(const Policy::member_type& tm) {
+          const long i = list(tm.league_rank());
+          const long z = i / g.st[2], rr = i - z * g.st[2], y = rr / g.st[1];
+          const int K[3] = {(int)(rr - y * g.st[1]), (int)y, (int)z};
+          const CCConst vv[3] = {v0, v1, v2};
+          const SvFitScratch sc(tm);
+          sharpFitTeam(tm, sc, g, K, vv, i, t0, t1, t2, dnn, fb);
+        });
+    return;
+  }
   Kokkos::parallel_for(
       "peclet::flow::vof::sharp_fit",
       MDRange3<CCExec>(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}),
@@ -508,6 +685,16 @@ inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCF
         dnn(i) = dn;
         fb(i) = f;
       });
+}
+
+/// `sharpFit` with its own worklist (the unit tests; the solver keeps one per block).
+inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCField t1, CCField t2,
+                     CCField dnn, SvByte fb, C3 lo, C3 hi) {
+  const long cells = (long)(hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z);
+  SvList list(Kokkos::view_alloc(CCExec(), "peclet::flow::vof::sharp_list",
+                                 Kokkos::WithoutInitializing),
+              cells > 0 ? cells : 1);
+  sharpFit(gg, v, t0, t1, t2, dnn, fb, lo, hi, list);
 }
 
 /// The explicit band terms of the u_c rows over the inner cells [g, e−g)³ (§5.4): the τ-terms of

@@ -711,6 +711,8 @@ void Solver<Grid>::sharpViscousGeometry() {
     for (int a = 0; a < 3; ++a)
       svTau_[a] = CCField(Kokkos::view_alloc(space, "peclet::flow::sharp_tau"), n);
     svDnn_ = CCField(Kokkos::view_alloc(space, "peclet::flow::sharp_dnn"), n);
+    svList_ = vof::SvList(
+        Kokkos::view_alloc(space, "peclet::flow::sharp_list", Kokkos::WithoutInitializing), n);
   }
   vof::SharpGeom& g = sharpGeom_;
   const int ee[3] = {e_.x, e_.y, e_.z};
@@ -756,7 +758,7 @@ void Solver<Grid>::sharpViscousFit() {
     return;  // the full stress skips every term: so does the sharp interface
   const CCConst v[3] = {CCConst(old_[0]), CCConst(old_[1]), CCConst(old_[2])};
   vof::sharpFit(sharpGeom_, v, svTau_[0], svTau_[1], svTau_[2], svDnn_, svFb_, C3{G, G, G},
-                C3{e_.x - G, e_.y - G, e_.z - G});
+                C3{e_.x - G, e_.y - G, e_.z - G}, svList_);
   // §7: tau_hat at an edge on the block boundary may be a first-ghost cell's -- one exchange.
   for (int a = 0; a < 3; ++a)
     fillGhosts(svTau_[a]);
