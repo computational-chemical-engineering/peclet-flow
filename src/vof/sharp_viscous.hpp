@@ -544,9 +544,9 @@ struct SvFitScratch {
 /// Every lane must call it (it holds team barriers).
 template <class Member>
 KOKKOS_INLINE_FUNCTION void sharpFitTeam(const Member& tm, const SvFitScratch& sc,
-                                         const SharpGeom& g, const int K[3],
-                                         const CCConst (&v)[3], long i, CCField t0, CCField t1,
-                                         CCField t2, CCField dnn, SvByte fb) {
+                                         const SharpGeom& g, const int K[3], const CCConst (&v)[3],
+                                         long i, CCField t0, CCField t1, CCField t2, CCField dnn,
+                                         SvByte fb) {
   double n[3] = {0.0, 0.0, 0.0};
   g.fitNormal(K, n);  // every lane: deterministic, no broadcast
   Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, kSvItems), [&](const int it) {
@@ -661,39 +661,39 @@ inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCF
           const SvFitScratch sc(tm);
           sharpFitTeam(tm, sc, g, K, vv, i, t0, t1, t2, dnn, fb);
         });
-    return;
-  }
-  Kokkos::parallel_for(
-      "peclet::flow::vof::sharp_fit",
-      MDRange3<CCExec>(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}),
-      KOKKOS_LAMBDA(int x, int y, int z) {
-        const int q[3] = {x, y, z};
-        const long i = g.idx(q);
-        double t[3] = {0.0, 0.0, 0.0}, dn = 0.0;
-        std::uint8_t f = 0;
-        if (g.cellClass(q) != kSvNone) {
-          const CCConst vv[3] = {v0, v1, v2};
-          if (!g.fitCell(q, vv, t, dn)) {
-            t[0] = t[1] = t[2] = 0.0;
-            dn = 0.0;
-            f = 1;
+  } else {
+    Kokkos::parallel_for(
+        "peclet::flow::vof::sharp_fit",
+        MDRange3<CCExec>(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const int q[3] = {x, y, z};
+          const long i = g.idx(q);
+          double t[3] = {0.0, 0.0, 0.0}, dn = 0.0;
+          std::uint8_t f = 0;
+          if (g.cellClass(q) != kSvNone) {
+            const CCConst vv[3] = {v0, v1, v2};
+            if (!g.fitCell(q, vv, t, dn)) {
+              t[0] = t[1] = t[2] = 0.0;
+              dn = 0.0;
+              f = 1;
+            }
           }
-        }
-        t0(i) = t[0];
-        t1(i) = t[1];
-        t2(i) = t[2];
-        dnn(i) = dn;
-        fb(i) = f;
-      });
+          t0(i) = t[0];
+          t1(i) = t[1];
+          t2(i) = t[2];
+          dnn(i) = dn;
+          fb(i) = f;
+        });
+  }
 }
 
 /// `sharpFit` with its own worklist (the unit tests; the solver keeps one per block).
 inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCField t1, CCField t2,
                      CCField dnn, SvByte fb, C3 lo, C3 hi) {
   const long cells = (long)(hi.x - lo.x) * (hi.y - lo.y) * (hi.z - lo.z);
-  SvList list(Kokkos::view_alloc(CCExec(), "peclet::flow::vof::sharp_list",
-                                 Kokkos::WithoutInitializing),
-              cells > 0 ? cells : 1);
+  SvList list(
+      Kokkos::view_alloc(CCExec(), "peclet::flow::vof::sharp_list", Kokkos::WithoutInitializing),
+      cells > 0 ? cells : 1);
   sharpFit(gg, v, t0, t1, t2, dnn, fb, lo, hi, list);
 }
 
@@ -742,10 +742,10 @@ inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)
             return;  // skipLoC: the BC-imposed low-face node
           body(q[0], q[1], q[2]);
         });
-    return;
+  } else {
+    ccForRows3("peclet::flow::vof::sharp_viscous_rhs", C3{lo[0], lo[1], lo[2]},
+               C3{geo.e[0] - g, geo.e[1] - g, geo.e[2] - g}, body);
   }
-  ccForRows3("peclet::flow::vof::sharp_viscous_rhs", C3{lo[0], lo[1], lo[2]},
-             C3{geo.e[0] - g, geo.e[1] - g, geo.e[2] - g}, body);
 }
 
 /// The cells of the inner box [g, e−g)³ whose band terms (`addSharpViscousRhs`) can be nonzero
