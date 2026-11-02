@@ -521,33 +521,44 @@ inline void sharpClassify(const SharpGeom& gg, SvByte cls) {
       });
 }
 
-/// Team scratch of the device fit, one team per interfacial cell: per row its 9 coefficients, its
-/// datum and whether it is present, and the 54 accumulated entries (about 31 KB).
+/// The device fit walks its items in chunks of `kSvChunkItems` (rows of a chunk: at most 91, the
+/// first chunk's 27 block cells x 3 + 5 edges x 2).
+constexpr int kSvChunkItems = 32, kSvChunkRows = 3 * kSvNormalItems + 2 * (kSvChunkItems - 27);
+
+/// The first row of item `it` (row order of `SharpGeom::fitItem`); `kSvItems` gives `kSvRows`.
+KOKKOS_INLINE_FUNCTION constexpr int svItemRow(int it) {
+  return (it < kSvNormalItems) ? 3 * it : 3 * kSvNormalItems + 2 * (it - kSvNormalItems);
+}
+
+/// Team scratch of the device fit, one team per interfacial cell: per row of the current chunk
+/// its 9 coefficients, its datum and whether it is present, and the 54 running entries (8 KB).
 using SvScrD = Kokkos::View<double*, CCExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
 using SvScrI = Kokkos::View<int*, CCExec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
 struct SvFitScratch {
   SvScrD co, mv, ent;
   SvScrI ok;
   static std::size_t shmem() {
-    return SvScrD::shmem_size(9 * kSvRows) + SvScrD::shmem_size(kSvRows) +
-           SvScrD::shmem_size(kSvEntries) + SvScrI::shmem_size(kSvRows);
+    return SvScrD::shmem_size(9 * kSvChunkRows) + SvScrD::shmem_size(kSvChunkRows) +
+           SvScrD::shmem_size(kSvEntries) + SvScrI::shmem_size(kSvChunkRows);
   }
   template <class Member>
   KOKKOS_INLINE_FUNCTION explicit SvFitScratch(const Member& tm)
-      : co(tm.team_scratch(0), 9 * kSvRows)
-      , mv(tm.team_scratch(0), kSvRows)
+      : co(tm.team_scratch(0), 9 * kSvChunkRows)
+      , mv(tm.team_scratch(0), kSvChunkRows)
       , ent(tm.team_scratch(0), kSvEntries)
-      , ok(tm.team_scratch(0), kSvRows) {}
+      , ok(tm.team_scratch(0), kSvChunkRows) {}
 };
 
-/// `SharpGeom::fitCell` of cell K on a whole team (the shape of `curvFallbackTeam`): (1) the lanes
-/// map the 171 items to their rows' coefficients and data (`fitItem`, `fitCoef`); (2) ENTRY-
-/// PARALLEL accumulation: lane e sums normal-equation entry e over the present rows in row order,
-/// from 0.0, with `fitRow`'s expression; (3) one lane solves (`fitSolve`) and stores. Each entry is
-/// the one-thread body's sum, row for row in the same order; under nvcc's FMA contraction the
-/// per-lane expression may round differently from the single-thread fold (the WO-3 precedent of
-/// `curvFallbackTeam`), so the device fit agrees with the host one to round-off, not bitwise.
-/// Every lane must call it (it holds team barriers).
+/// `SharpGeom::fitCell` of cell K on a whole team (the shape of `curvFallbackTeam`), per chunk of
+/// items in item order: (1) the lanes map the chunk's items to their rows' coefficients and data
+/// (`fitItem`, `fitCoef`); (2) ENTRY-PARALLEL accumulation: lane e continues the running sum of
+/// normal-equation entry e (from 0.0 before the first chunk) over the chunk's present rows in row
+/// order, with `fitRow`'s expression; then (3) one lane solves (`fitSolve`) and stores. Each entry
+/// is the one-thread body's sum, row for row in the same order (the running sum is stored and
+/// reloaded, never re-associated); under nvcc's FMA contraction the per-lane expression may round
+/// differently from the single-thread fold (the WO-3 precedent of `curvFallbackTeam`), so the
+/// device fit agrees with the host one to round-off, not bitwise. Every lane must call it (it holds
+/// team barriers).
 template <class Member>
 KOKKOS_INLINE_FUNCTION void sharpFitTeam(const Member& tm, const SvFitScratch& sc,
                                          const SharpGeom& g, const int K[3], const CCConst (&v)[3],
@@ -555,45 +566,50 @@ KOKKOS_INLINE_FUNCTION void sharpFitTeam(const Member& tm, const SvFitScratch& s
                                          SvByte fb) {
   double n[3] = {0.0, 0.0, 0.0};
   g.fitNormal(K, n);  // every lane: deterministic, no broadcast
-  Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, kSvItems), [&](const int it) {
-    int ra[3], rc[3];
-    double th[3], mv[3];
-    const int nr = g.fitItem(K, it, v, ra, rc, th, mv);
-    const int r0 = (it < kSvNormalItems) ? 3 * it : 81 + 2 * (it - kSvNormalItems);
-    const int nmax = (it < kSvNormalItems) ? 3 : 2;
-    for (int q = 0; q < nmax; ++q) {
-      sc.ok(r0 + q) = (q < nr) ? 1 : 0;
-      if (q < nr) {
-        double co[9];
-        g.fitCoef(ra[q], rc[q], th[q], n, co);
-        for (int e = 0; e < 9; ++e)
-          sc.co(9 * (r0 + q) + e) = co[e];
-        sc.mv(r0 + q) = mv[q];
+  Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, kSvEntries),
+                       [&](const int e) { sc.ent(e) = 0.0; });
+  for (int i0 = 0; i0 < kSvItems; i0 += kSvChunkItems) {
+    const int i1 = (i0 + kSvChunkItems < kSvItems) ? i0 + kSvChunkItems : kSvItems;
+    const int rb = svItemRow(i0), nrow = svItemRow(i1) - rb;
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, i0, i1), [&](const int it) {
+      int ra[3], rc[3];
+      double th[3], mv[3];
+      const int nr = g.fitItem(K, it, v, ra, rc, th, mv);
+      const int r0 = svItemRow(it) - rb, nmax = svItemRow(it + 1) - svItemRow(it);
+      for (int q = 0; q < nmax; ++q) {
+        sc.ok(r0 + q) = (q < nr) ? 1 : 0;
+        if (q < nr) {
+          double co[9];
+          g.fitCoef(ra[q], rc[q], th[q], n, co);
+          for (int e = 0; e < 9; ++e)
+            sc.co(9 * (r0 + q) + e) = co[e];
+          sc.mv(r0 + q) = mv[q];
+        }
       }
-    }
-  });
-  tm.team_barrier();
-  Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, kSvEntries), [&](const int e) {
-    double acc = 0.0;
-    if (e >= 45) {  // rhs[s] += co[s] * mv
-      const int s = e - 45;
-      for (int r = 0; r < kSvRows; ++r)
-        if (sc.ok(r))
-          acc += sc.co(9 * r + s) * sc.mv(r);
-    } else {  // N[9 s + t] += co[s] * co[t], t >= s, e row-major over the upper triangle
-      int s = 0, t = e;
-      while (t >= 9 - s) {
-        t -= 9 - s;
-        ++s;
+    });
+    tm.team_barrier();
+    Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, kSvEntries), [&](const int e) {
+      double acc = sc.ent(e);
+      if (e >= 45) {  // rhs[s] += co[s] * mv
+        const int s = e - 45;
+        for (int r = 0; r < nrow; ++r)
+          if (sc.ok(r))
+            acc += sc.co(9 * r + s) * sc.mv(r);
+      } else {  // N[9 s + t] += co[s] * co[t], t >= s, e row-major over the upper triangle
+        int s = 0, t = e;
+        while (t >= 9 - s) {
+          t -= 9 - s;
+          ++s;
+        }
+        t += s;
+        for (int r = 0; r < nrow; ++r)
+          if (sc.ok(r))
+            acc += sc.co(9 * r + s) * sc.co(9 * r + t);
       }
-      t += s;
-      for (int r = 0; r < kSvRows; ++r)
-        if (sc.ok(r))
-          acc += sc.co(9 * r + s) * sc.co(9 * r + t);
-    }
-    sc.ent(e) = acc;
-  });
-  tm.team_barrier();
+      sc.ent(e) = acc;
+    });
+    tm.team_barrier();  // the chunk's rows are consumed before the next chunk overwrites them
+  }
   Kokkos::single(Kokkos::PerTeam(tm), [&]() {
     double N[81], rhs[9];
     for (int s = 0; s < 81; ++s)
