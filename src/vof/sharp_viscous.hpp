@@ -466,6 +466,12 @@ struct SharpFaceProps {
     }
     const int a = (ad == 1) ? 0 : ((ad == geo.st[1]) ? 1 : 2);
     const long kk = (dd > 0) ? j : i;
+    // Not a band edge (none of its four cells k, k - s_a, k - s_c, k - s_a - s_c interfacial):
+    // edgeOwner's answer, read without decoding k.
+    const long sa = geo.st[a], sc = geo.st[c];
+    if (geo.cls(kk) == kSvNone && geo.cls(kk - sa) == kSvNone && geo.cls(kk - sc) == kSvNone &&
+        geo.cls(kk - sa - sc) == kSvNone)
+      return base.beta(i, j);
     const long z = kk / geo.st[2], rr = kk - z * geo.st[2], y = rr / geo.st[1];
     const int k[3] = {(int)(rr - y * geo.st[1]), (int)y, (int)z};
     int o[3];
