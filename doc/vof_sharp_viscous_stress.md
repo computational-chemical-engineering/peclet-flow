@@ -1028,6 +1028,241 @@ self-convergence order ≥ 1.8, the 3 % sanity — are unchanged; the rest was u
 - **Where.** d/h 8–16 host; d/h 24, 32 CUDA under `heavy.lock`. Script `tests/study/sharp_viscous/gsv2.py`,
   one line per case plus a verdict line, re-using `gsv1.py`'s GMRES driver.
 
+### 6.8 Fifth pass (architect, 2026-11-04): three instruments that could not deliver a verdict
+
+Brief: `validation/highratio/BRIEF_ARCH_SHARPVISC5.md`. Discriminating runs on `build_host_rb` (no rebuild):
+scripts and logs in `validation/highratio/sv_impl/arch5/` (`exp_a.py`, `exp_b.py`, `exp_c*.py`, `*.log`,
+`b*.jsonl`). **Verdict.**
+- **A and C are instrument faults, settled by measurement.** Each gets a corrected instrument below. A
+  also undoes a coordinator rule that the steady gates' FINAL verdicts silently depend on.
+- **B: the instrument is faulty (measured), but whether the operator also contributes is OPEN.** It
+  waits on two N48 runs that were running at commit (`arch5/b.jsonl`, `b2.jsonl`). The default is
+  stated at the end of B.
+- The pass was stopped at the coordinator's context limit.
+
+#### A. G-SV9(e): the momentum stop, not the momentum solve
+
+**Facts (EXP-A, `arch5/a_d100.log`, `a_d10000.log`).** The pilot case (walled plane, N16, sharp,
+μ 1e-3 / ρ 1e-4, incremental, Chebyshev 1e-13), one matvec. The inputs are the pilot's first random
+vector x1 and x_s, which is 30 power steps from x1 and stands in for the Arnoldi's converged vectors.
+The reference is a FIXED 64000 sweeps per component, which repeats to 9.7e-14 (u) and 1e-16 (p).
+Relative max-norm difference to the reference, D_hi = 1e4 (D_hi = 1e2 gives the same picture):
+
+| momentum setting | sweeps (3 comps) | CPU s | x1: u / p | x_s: u / p |
+|---|---|---|---|---|
+| fixed 500 / component | 1500 | 0.07 | 3.6e-10 / 3.0e-11 | 1.3e-11 / 2.4e-14 |
+| fixed 1000 | 3000 | 0.12 | 8.5e-14 / 1.2e-16 | 3.1e-14 / 7e-20 |
+| fixed 2000 … 32000 | 6000 … 96000 | 0.22 … 3.3 | 9.7e-14 / 2e-16 (= the floor) | 3e-14 / 6e-19 |
+| update stop 1e-13, cap 2e5 (**the pilot**) | 400585 | 14.3 | **4.2e-12 / 4.7e-13** | 1.6e-12 / 1.7e-15 |
+| update stop 1e-13, cap 2e4 | 40585 | 1.46 | 4.2e-12 / 4.7e-13 (identical) | 1.6e-12 |
+| update stop 1e-11 / 1e-9, cap 2e5 | 400462 / 400339 | 14.3 | 4.2e-10 / 4.2e-8 | 1.5e-10 / 1.5e-8 |
+
+**Diagnosis.**
+1. *Every component reaches its round-off floor within ~1000 sweeps, at D_hi 1e2 and at 1e4.* The (e)
+   box is walled on all faces, so the slowest mode of M + K is Dirichlet-bounded. Once D(πh)² ≫ 1, the
+   Gauss–Seidel contraction per sweep is 1 − O((πh)²), whatever D is. §6.6's (1+6D) estimate applies to
+   the translation modes of a PERIODIC box. It does not apply to (e), so D-independence is expected.
+2. *The update stop is not a convergence criterion* (`flow_ibm_core.hpp:1576–1590`: stop when
+   `du ≤ velTol·du0`, where du is the max increment of the colour-1 half-sweep and du0 is its value on
+   the first sweep). The level it can reach is floor/du0, and that level is a property of the warm start,
+   not of the solution.
+   - Two components never meet 1e-13·du0. They sit at the floor from about sweep 1000 and then run the
+     other ~199 000 sweeps to the cap: the cap is 98 % of the cost (caps of 2e4 and 2e5 give identical
+     outputs). That is the "D-independent 14.3 s per matvec".
+   - The third component meets the stop after ~585 sweeps, before it has converged. The increment
+     under-reads the slow-mode error by about 40×, so its matvec error is 40 × tol (4.2e-12, 4.2e-10,
+     4.2e-8 at tol 1e-13, 1e-11, 1e-9). That is 40× above the floor, and it is set by the stop itself.
+3. *Consequences for the pilot.* Its map was accurate to ~4e-12 (u) and ~5e-13 (p), and linear to
+   2.8e-13. The cap verdict NOT_JUDGED is a false alarm: the components that capped are the converged
+   ones. No property of the operator is involved.
+
+**Is ρ = 0.999726 (lin 2.8e-13, conv 1) enough on its own?** The evidence is strong. The margin is
+2.7e-4 and the map perturbation is ≤ 4e-12, so crossing 1 would need an eigenvalue condition number
+above ~1e7. But the run was taken under a stop the instrument violates by construction, and the rerun
+under the corrected instrument costs ~3 h. **Rule: judge from the rerun, not from this argument.** The
+old pilot line stays as a diagnostic.
+
+**Corrected (e) instrument (binding once USER Q24 accepts it; default: accept).**
+- *Momentum:* RB-GS with a FIXED count, N_A = 2000 sweeps per component: `set_velocity_solver_params(2000,
+  0.0, 2)`, residual stop off. This is twice the measured convergence count. A fixed-count Gauss–Seidel
+  is an exactly linear map, with no stopping decision, so the linearity check measures round-off and
+  nothing else.
+- *Certificate per run, before ARPACK.* It replaces the momentum half of "whose solves cap":
+  - (i) linearity ≤ 1e-10 (unchanged);
+  - (ii) doubling: for x1 and x_s (30 power steps), ‖y(2N_A) − y(N_A)‖∞ ≤ 1e-12·‖y(N_A)‖∞, separately for
+    u and for p.
+  - If (ii) fails, double N_A once and repeat. A second failure is NOT JUDGED (listed). Print both
+    doubling numbers on the PROD line.
+- *Unchanged:*
+  - Chebyshev 20000 / 1e-13. A pressure-cap hit is still NOT JUDGED; the pilot measured max_p_it 16.
+  - ARPACK ncv 40, maxiter 1000, re-run at ncv 80.
+  - PASS ρ ≤ 1 + 1e-9 for 'sharp', with 'averaged' reported.
+- *Cost:* 6000 sweeps (0.22 s) plus the Chebyshev solve, about 0.3 s per matvec at N16, against 14.3 s
+  now. The pilot (~3.6e4 matvecs) takes ~3 h. The 80-run table runs on 8 host processes in ≲ 1.5 days.
+  Order: the pilot first; then the plane cases, then the film cases.
+
+**The same rule in the steady gates (affects FINAL verdicts: USER Q25).** The coordinator rule of
+2026-11-01, "a sweep-cap hit → NOT CONVERGED, listed", is implemented neither by `gsv1.py table` nor by
+`w6judge.py`. These judged rows have a component at the 200000 cap:
+
+| gate | capped rows |
+|---|---|
+| G-SV1P | 71 / 432 |
+| G-SV1dP | 38 / 400 |
+| G-SV1cP | 59 / 510 |
+| G-SV1W | 4 / 4 |
+| G-SV2 | 15 / 25 |
+
+As written, the rule would void G-SV1W and most of G-SV2, both FINAL PASS in the interim verdict. EXP-A
+shows that the rule is the thing at fault, not the table:
+- A capped component is at its floor. The cap costs time, not accuracy.
+- A steady certificate is a plain step warm-started at the iterate. Its momentum solve therefore starts
+  within its own residual of the answer and cannot make an unconverged state look converged.
+- What remains of the stop's error is ~40 × 1e-15 relative on the component that stops early. That is
+  ten orders below the errors being judged.
+
+**Ruling:** retire the cap rule for the steady gates. The pre-registered certificate governs,
+unchanged. The momentum cap count stays a reported column. WO-A5b confirms the ruling on periodic
+geometry, where the translation modes are slower (§6.6).
+
+#### B. G-SV1cP: the forcing's representation, not the operator
+
+**The manufactured problem is consistent.**
+- div u = 0, and μ_kΔu − ∇p_k + μ_kF = 0 in each phase.
+- On Γ (cos bs′ = 0): S_nt = 0 and −p + 2μD_nn = 0 on both sides (`gsv1.py check` agrees).
+- The net force is exactly zero, in the continuum and on the lattice.
+  - μ(C_i)·cos(bs′_i) is a function of m·i mod N, and sin(aη_i) is a wavenumber-1 sinusoid in t·i mod N.
+  - The map i ↦ (m·i, t·i) mod N is equidistributed up to characters whose order divides gcd(m×t) ≤ 2.
+    No such character cancels a wavenumber-1 sinusoid for N > 2.
+- The measured 4.4e-9 (`force_sum_rel`, max over cells at N48 (1,1,1)) is the coherent round-off of the
+  inclusion–exclusion `cube_frac`. That function returns fractions 1 − 6e-12 for full cubes (measured),
+  with the same sign across a band of ~5e3 cells, weighted by [μ]F. It contributes ≲ 1e-12 per step to
+  the invariance column. It is not the O(1) error.
+
+**What is wrong (fact).** f = μ_kF jumps by [μ]F_t at Γ, where F_t = ±b(3a² + b²)cos(aη) is at its maximum.
+- The instrument writes the cell field μ(C_i)F(x_i). The solver puts it on a face as ½(f_{i−1} + f_i),
+  so μ is weighted by the 2h-wide mean (C_{i−1} + C_i)/2.
+- The face's control volume holds μ at its own fraction C_CV. On band faces the two differ by
+  O([μ]F): measured at 25 % (m (1,1,0)) to 84 % (m (2,1,1), N8) of max|f|.
+- Along a normal line the error has zero sum, so it is a force-dipole layer of moment O(h²[μ]|F|). That
+  gives a velocity error of O(h²|F|/k): relative ~4(kh)² with |F| ≈ k²|u|·(3a² + b²)/(a² + b²). It is
+  second order with an O(1)–O(4) constant, 0.96 at N24 for (1,1,0).
+- It depends on how the sub-cell configuration cuts the cells, hence the 20× spread over the eight
+  offsets.
+
+**"Identical at 1e-2 and 1e2" is a symmetry of the instrument, not evidence.**
+- With φ_A = ½ and f ∝ μ, swapping the phases is a half-period shift along n. That shift equals a
+  whole-cell translation by (N/2)e_q for any q with m_q odd, together with u → −u.
+- Ratio r → 1/r is that swap combined with a constant rescaling of μ, which leaves u unchanged.
+- So the 1e-2 and 1e2 rows are one problem. They agree to every printed digit except at k = 0, where
+  faces lie on Γ and the tie is broken differently (0.0453 vs 0.0383 for (1,0,0)).
+
+**Discriminator (EXP-B, `arch5/b.jsonl`, `b2.jsonl`).** m (1,1,0), k = 3, ratio 1e2, the worst row.
+- The consistent force is the face-control-volume average of μ(x)F(x) over L³ sub-cubes per CV, with
+  exact sub-cube fractions from a residue table. It is turned into cell fields by inverting the solver's
+  face mean along each line.
+
+| variant | N24 | N48 |
+|---|---|---|
+| instrument as is | 0.956 | 0.302 |
+| uniform μ, no jump at all (gauged error) | 0.035 | not run |
+| consistent force, L = 2 / 4 / 8 | 0.1509 / 0.1527 / 0.1532 | L = 4: running (`b.jsonl` line 6) |
+| consistent force L = 4, mode 'averaged' | 0.349 | — |
+| m (2,1,1) k 3: as is / uniform μ / consistent L = 4 (stiff placement; uniform spread 0.238) | 0.121 / 0.059 / **0.230** | consistent: running (`b2.jsonl`) |
+| m (2,1,0) k 3: as is / consistent L = 4 | 0.113 / **0.270** | — |
+
+**Reading (B is OPEN).**
+- *(1,1,0).* The consistent force removes 84 % of the error (0.956 → 0.153), and the result is
+  converged in L.
+- *(2,1,1) and (2,1,0).* It roughly doubles the error (0.12 → 0.23, 0.11 → 0.27). So the error left is
+  NOT the smooth-truncation level (ctrl 0.035 / 0.059) on any of the three normals.
+- *Two explanations survive:*
+  - (a) The operator's own error at the D_nn jump. Its sign relative to the old forcing error happened
+    to cancel on (2,1,x).
+  - (b) The "consistent" target is not the force the sharp operator's control volume actually balances,
+    for example if its CV moment or its pressure sampling differs from the plain staggered CV.
+- 'averaged' with the same force gives 0.349 on (1,1,0), against 0.153 for 'sharp'. Sharp is better, but
+  the gap does not separate (a) from (b).
+- **The run that settles it** is the N48 pair now running: consistent L = 4 at (1,1,0) and (2,1,1), k 3.
+  An observed order (N24 → 48) ≥ 1.8 on both means (a) is a pre-asymptotic constant: adopt WO-B5 and
+  judge. An order ≤ 1.5 on either means (a) or (b) with first-order content: STOP → architect, with the
+  operator's per-face residual of the exact along mode as the next instrument.
+- **Default meanwhile:** G-SV1cP stays NOT JUDGED and its N64 stays HELD. The facts below stand either
+  way: the forcing error, the r ↔ 1/r symmetry, the net force, the invariance.
+
+**Corrected G-SV1cP instrument (WO-B5; conditional on the N48 pair above; USER Q27, a post-data
+change of the force input; default: accept if the N48 pair shows order ≥ 1.8).** The target is a face force consistent with the face control volume, for both kinds.
+- Fractions: from the residue table of the sub-grid. It is exact; equal residues get bit-equal values,
+  so the lattice cancellation of the net force holds exactly.
+- *Target face force,* per component c and face F:
+  - g_F = (1/L³)Σ over the L³ sub-cubes of the CV of [μ(C_s)F(x_s) + (ρ(C_s) − ρ̄)g t1_c], with L = 4.
+  - The CV of face i along c covers sub-indices [L·i − L/2, L·i + L/2) along c, and [L·j, L·j + L) across.
+  - The layered term is present only in 'along+layered'. ρ̄ is the exact volume mean.
+  - Measured L-dependence: 0.3 % in err between L = 4 and 8.
+- *Inversion* of the solver's face mean ½(f_{i−1} + f_i) along every line (periodic, N even):
+  - The map is singular on the alternating mode, so each line's alternating sum S = Σ_F(−1)^F g_F is
+    first removed from the target, as r_F = α(−1)^F w_F + β w_F.
+  - w_F = 1 on faces whose CV lies fully in the high-μ phase (C_CV ≥ 1 − 1e-9, or ≤ 1e-9 when μ_B is
+    the high one); α and β are fixed by Σ(−1)^F r_F = S and Σr_F = 0.
+  - Then f = IFFT(FFT(g − r)/(½(1 + e^{−2πik/N}))) along the line, with the Nyquist coefficient zero.
+- *Why stiff faces:* the residual (measured 0.5–1.3 % of max|f| at N24) then acts on the stiff phase,
+  where its response is μ_lo/μ_hi smaller.
+  - Spreading it uniformly instead made (2,1,1) worse (0.238 at N24): the residual then drives the weak
+    phase.
+  - Every line has fully stiff faces for the nine normals at N ≥ 24 (checked at N24 for four of them).
+  - A line without any is an error, not a fallback.
+- *Reported per row:* max|r|/max|g|, and max over components of |Σ_F f_F|/max|f| (expected ≤ 1e-13).
+- *Invariance (WO-6p column) for 1cP:* judged on the certifying step's output, |Σρ_F u_c|/(Σρ_F max|u|) ≤
+  1e-13. The max over all restart steps is reported.
+  - Reason: from x0 (p = 0, far from the along-mode pressure) the first restart's du0 is O(U). Its
+    update stop then leaves a translation error of ~(1+6D)·40·1e-15·du0 ~ 1e-12. That measures the stop,
+    not the step's invariant; it is the 201/510 MISS.
+- Exact solution, gauge, N set, offsets, normals, PASS: unchanged. All old 1cP rows are void for judging
+  (kept as diagnostic). G-SV1cP N64 stays HELD until WO-B5's host rows are in.
+
+#### C. G-SV1dP μ 1e3: the refusal is the step's OUTPUT, advected at the tail
+
+**Facts (EXP-C, `arch5/c3.log`, m (2,1,0), k 2, N24).**
+- The head pre-check sees the input. Every Krylov input has CFL 0.0088, the exact solution's (the
+  Krylov scaling bounds max|u_in| by U).
+- The refusal comes at Krylov vector j = 19 of cycle 0, from `WyAdvector::enforceCfl` inside
+  `advectVof()` at the tail of the step, i.e. on the projected output. The message lacks the head
+  check's "Rejected at the HEAD"; the solver velocity after the throw is max 274 = 65 U.
+- The step amplifies the Krylov vectors' pressure part (internal units) into velocity: max|y_u|/U is
+  5–14 for j = 15–18, and 65 at j = 19 with max|p_in|/U = 0.76.
+- The colour advected at the tail is discarded by `set_vof(C0)`. **The refusal carries no information
+  about the operator or the fixed point.**
+
+**Rule (one for all rows; an instrument repair, no gate change).**
+- Every evaluation of S inside the GMRES driver (S(0), Krylov matvecs, restart steps) that the
+  colour-CFL guard refuses is re-evaluated by affinity at the reduced amplitude σ′ = σ·0.01/CFL_out.
+  CFL_out is `s.vof_max_courant()` read right after the throw, which then reflects the refused step's
+  output velocity.
+- The step is set entirely by the (u, p, C) the StepMap writes, plus warm starts converged to 1e-13, so
+  the retry is exact to round-off.
+- The **certifying step stays a plain, unscaled production step**. If it refuses, the row is NOT
+  CONVERGED (listed): the fixed point itself would then be over the cap.
+- The rule is a bitwise no-op for every evaluation that did not refuse. The 400 converged G-SV1dP rows
+  and every G-SV1P/1cP row are unchanged. Only the 32 refused rows (and any N64 row that refuses) are
+  rerun.
+- *Rejected:*
+  - Freezing the colour: it already is frozen. The guard protects an advection whose result the
+    instrument throws away, and there is no production lever short of a production change.
+  - Raising `set_vof_cfl_limit`: a production setting, and the momentum-consistent advector refuses
+    ≥ 0.5.
+  - Lowering the amplitude for all rows: not bitwise, so every row would be rerun.
+  - Equilibrating p in the Krylov basis (Q30): it would also cure the 65× gain, but it changes every row.
+
+**Evidence that the rule suffices (EXP-C2, `arch5/c_scaled*.log`).** Two rows, run with the rule:
+- (1,0,0) k 3, 1e3, N24 (refused in the gate): two Krylov evaluations rescaled (CFL_out 0.276, 0.259).
+  It converged in one cycle, inc 3.2e-14, err 0.0138, in line with the non-refused offsets (≤ 0.0357).
+- (2,1,0) k 2: no further refusal. Restarted GMRES is converging slowly, inc 1.5e-8 → 3.7e-11 over
+  cycles 1–3, and was still running at commit (`c_scaled.log`).
+- If it reaches the 3000 cap, it is NOT CONVERGED under the rule, and Q30 (p-scaling) is the lever for
+  the whole set.
+- **C is settled.** The refusal is the tail advection of a non-physical output, and the retry rule
+  removes it.
+
 ---
 
 ## 7. MPI, halo, device, cost
@@ -1243,6 +1478,59 @@ T-terms, midsection term, all on `old_`.
   Acceptance before the gate: at κ = 1, d/h 8 and 12, Σ force = 0 to 1e-14 relative, momentum
   invariant ≤ 1e-13, CFL ≤ 1.1e-3.
 
+**Fifth-pass work orders (§6.8; study scripts only, no production code; in this order).**
+
+- **WO-A5 (G-SV9(e), fixed-count momentum).** Files: `gsv9_split.py prod` and `gsv9e.py`.
+  - *Option.* `gsv9_split.py prod --mom-fixed N` sets `set_velocity_solver_params(N, 0.0, 2)` with the
+    residual stop off. `gsv9e.py` passes `--mom-fixed 2000` and drops `--mom-tol`.
+  - *Doubling certificate (§6.8 A (ii)).* Run it before `eigs`, on x1 and x_s (30 power steps), at N and
+    2N. Print `dbl_u=… dbl_p=…` on the PROD line.
+  - *Verdict logic.* Retire the momentum half of the cap test; keep the pressure half (`pit ≥ 20000` →
+    NOT JUDGED). Doubling > 1e-12 → rerun at 2N once, then NOT JUDGED.
+  - *Acceptance:*
+    - On the pilot case: dbl_u, dbl_p ≤ 1e-12 (EXP-A: ≤ 9.7e-14), and per-matvec CPU ≤ 0.5 s.
+    - Linearity ≤ 1e-10.
+    - `exp_a.py`'s fixed-2000 row is reproduced to 2 digits.
+  - *Then:* the pilot (`gsv9e.py --pilot`), then the full table. The old pilot line is a diagnostic.
+- **WO-A5b (steady gates: the cap rule, spot check).**
+  - *Table.* `gsv1.py table`, `gsv2.py table` and `w6judge.py` print a momentum-cap column: the count of
+    rows with `max_momentum_sweeps ≥ 200000`, reported and NOT voiding.
+  - *Spot check.* `gsv1.py`/`gsv2.py` take `--mom-fixed N` (same meaning as WO-A5). Rerun four capped
+    rows with `--mom-fixed 20000`; on a periodic box the translation modes need ~1.1e4 sweeps at D_hi 100
+    (§6.6):
+    - G-SV2 κ 1e2, d/h 8;
+    - G-SV1P (1,1,0) 1e-2, N24, one capped k;
+    - G-SV1dP (1,1,0) 1e-3, N24 (406671 sweeps);
+    - G-SV1W N24 'sharp'.
+  - *Acceptance:*
+    - |Δerr|/err ≤ 1e-8 (G-SV2: |ΔK|/K ≤ 1e-8) and the certificate ≤ 1e-12 on all four.
+    - A larger difference is a STOP → architect: the caps would then matter, and Q25's ruling falls.
+- **WO-B5 (G-SV1cP consistent force; only after the §6.8 B N48 pair shows order ≥ 1.8).** File: `gsv1.py`'s `PCase.build` for 'along' and
+  'along+layered', as §6.8 B. `arch5/exp_b.py` (`consistent_force`, `fine_fractions`, the `stiff` branch)
+  is the reference implementation; port it, do not re-derive it.
+  - L = 4, and the per-row reports listed in §6.8 B.
+  - *Invariance:* judged on the certifying step, with the max over restarts reported.
+  - *Acceptance:*
+    - `gsv1.py check` grows a `cvforce` line. It requires:
+      - the L = 4 vs L = 8 face force ≤ 2e-2·max|f| at N24 for (2,1,1) k 3 (the band term is O(h/L²));
+      - Σ_F f_F ≤ 1e-13·max|f|·N³ per component;
+      - every line has fully stiff faces, at all nine normals × N ∈ {24, 32, 48, 64}.
+    - EXP-B's (1,1,0) k 3 N24 r 1e2 row is reproduced: err 0.1527 ± 0.001.
+  - *Then:* rerun G-SV1cP N24/32/48 on host (both kinds, both ratios, the eight offsets), and N64 on CUDA
+    under `heavy.lock`. Judge as pre-registered (envelope LS order ≥ 1.8).
+- **WO-C5 (GMRES refusal retry).** File: `gsv1.py` `gmres_steady` (and the copy inside `gsv2.py`, if it
+  has one): the §6.8 C rule.
+  - Per row, report `rescaled` (count) and `max_gain` (max CFL_out/CFL_in over evaluations).
+  - *Acceptance:*
+    - (a) A row that never refused — G-SV1dP (1,0,0) k 0, 1e3, N24 — reproduces its jsonl err, inc and
+      steps bitwise.
+    - (b) On a refused row, the rescaled evaluation matches the same scaled input evaluated with no
+      preceding refusal to ≤ 1e-13 relative.
+  - *Then:* rerun the 32 refused G-SV1dP rows (N24–48 host). N64: apply the rule to the in-flight CUDA set
+    only for rows that refuse.
+  - A row that reaches the 3000-step cap is NOT CONVERGED (listed); its normal × ratio is NOT JUDGED at
+    that N, as now.
+
 **WO-W (parked, not scheduled; it comes into scope only if G-SV1W misses).** At a non-periodic Dirichlet
 face:
 - the wall-normal shear link of a wall edge is the half-link [wall plane, first node], so θ̄ and R̄ take the
@@ -1319,7 +1607,8 @@ slope of log e against log h over the stated resolutions.
   - **Error.** e = max|u_h − ū| / max|ū|.
   - **PASS.** Per normal × ratio, the LS order of the offset envelope e_env(N) over the four N is ≥ 1.8.
     Reported: e_env·N² and the per-offset LS orders.
-- **G-SV1dP.** G-SV1P at μ ratio 1e-3 and 1e3. Same PASS.
+- **G-SV1dP.** G-SV1P at μ ratio 1e-3 and 1e3. Same PASS. Fifth pass (§6.8 C): a step refused by the colour-CFL guard inside
+  the GMRES driver is re-evaluated by affinity (WO-C5). The certifying step stays plain.
 - **G-SV1cP — periodic along mode (replaces G-SV1c's order rows).**
   - **Geometry.** Same box, normals, N and offsets as G-SV1P. φ_A = 1/2: phase A where s′ mod P ∈ (P/4, 3P/4),
     s′ = n·x − s0, so the interfaces lie where cos(b s′) = 0 with b = 2π|m|. ρ = 1.
@@ -1335,6 +1624,8 @@ slope of log e against log h over the stated resolutions.
     - Pressure: p_k = 2μ_k ab sin(aη) sin(bs′), which carries the jump 2[μ]D_nn.
     - Force: f_k = μ_k [a(b² − a²) sin(aη) cos(bs′) n + b(3a² + b²) cos(aη) sin(bs′) t1].
   - **Force input.** The cell field μ(C_i)·F(x_i), written to `force_c` in internal units.
+    **Fifth pass (§6.8 B):** this input carries an O([μ]F) band error (measured 25–84 % of max|f|). The
+    face-CV-consistent force (WO-B5) replaces it if the §6.8 B N48 pair passes (Q26/Q27). Until then G-SV1cP is NOT JUDGED.
   - **Flows.**
     - (i) This field alone.
     - (ii) This field plus G-SV1P's layered flow on the same interfaces (ρ_A/ρ_B = 1/2 for that part).
@@ -1414,6 +1705,8 @@ slope of log e against log h over the stated resolutions.
         D_hi ∈ {0.1, 1, 10, 100, 1e4}, both modes.
       - *PASS.* ρ ≤ 1 + 1e-9 for 'sharp', with 'averaged' reported. A run whose linearity check exceeds
         1e-10, or whose solves cap, is NOT JUDGED.
+      - **Fifth pass (§6.8 A, USER Q24 pending; default adopted):** momentum fixed at 2000 RB-GS sweeps per
+        component, doubling certificate in place of the momentum cap test (WO-A5).
       - *ARPACK.* Use ncv 40 and maxiter 1000. An unconverged run is re-run at ncv 80. A 'sharp' case still
         unconverged is decided by its (b)/(d) march verdict, and is listed.
       - *Before WO-5b.* Sharp plane ρ = 1.046 / 1.072 at D_hi = 100 / 1e4 (μ 1e-3) and 1.017 / 1.045
@@ -1453,6 +1746,13 @@ slope of log e against log h over the stated resolutions.
 | Q21 | Steady gates: one momentum-solve setting (§6.6) | settled (fourth pass) | Converged momentum (update stop 1e-15 per the coordinator decision of 2026-11-01, superseding 1e-13; residual stop off) for every step of every steady gate; default-solve G-SV1P/1dP/1cP results void, rerun. |
 | Q22 | G-SV2 parameters (§6.7) | settled (fourth pass) | ρ uniform, σ = 0, Boussinesq force, F = ΔρgV_h, vertex-centred drop, U_d = C-weighted drop mean. |
 | Q23 | Composite (predictor × M-orthogonal projection) instability at high contrast, layered geometry, D ≥ 1 — in 'averaged' too (§6.5) | **user preference** (priority; separate package) | Logged for the coordinator; own architect pass (periodic layered harness first). This package proceeds; G-SV9(f) reports the onset, and 'sharp' worse than 'averaged' at D_hi ≤ 3 is a STOP. |
+| Q24 | G-SV9(e): fixed-count momentum (N_A = 2000) and the doubling certificate replace "RB-GS to 1e-13/1e-15 … or whose solves cap ⇒ NOT JUDGED" (momentum half; §6.8 A) | **user preference** (a post-data change to a pre-registered instrument) | Accept. It is stricter: the measured map error falls from 4e-12 to ≤ 1e-13, and the solve is certified directly. Judge (e) from the WO-A5 rerun, not from the old pilot. |
+| Q25 | Steady gates: retire the coordinator rule "a sweep-cap hit → NOT CONVERGED" (never implemented by the tables; 71/38/59/4/15 capped rows in G-SV1P/1dP/1cP/1W/G-SV2) | **user preference** (it touches FINAL verdicts), then **fact** (WO-A5b) | Retire it. G-SV1W and G-SV2 stay FINAL unless WO-A5b's spot check differs by more than 1e-8 (then STOP → architect). |
+| Q26 | G-SV1cP after WO-B5: does the operator's remaining along-mode error converge at envelope order ≥ 1.8? | **fact**: the N48 pair running in `arch5/` (consistent force, (1,1,0) and (2,1,1), k 3), then the WO-B5 rerun | If the observed N24→48 order is ≥ 1.8 on both, adopt WO-B5, rerun and judge. If either is ≤ 1.5, STOP → architect (operator per-face residual next). Meanwhile G-SV1cP is NOT JUDGED and N64 HELD. |
+| Q27 | G-SV1cP force input: the face-CV-consistent force (§6.8 B) replaces "the cell field μ(C_i)F(x_i)"; invariance judged on the certifying step | **user preference** (a post-data change to an instrument) | Accept. The old input measures its own forcing: 84 % of the worst row's error goes when the force is made consistent, with the operator unchanged. |
+| Q28 | Uniform-μ controls end with a mean velocity of 1.4–1.7 % of max\|u\| (EXP-B ctrl: err vs err_gauged; `mom` 1.4e-2, 1.7e-2). A momentum-conserving step started from a gauged x0 should not produce that | **fact** (one instrumented ctrl run, `mom` per restart step) | Not blocking: no gate judges a uniform-μ ctrl row, and G-SV2 κ = 1 subtracts ⟨w⟩. Investigate before any uniform-μ control is cited as evidence of momentum conservation. |
+| Q29 | Steady gates on fixed-count momentum for cost (the certifying step runs to the 2e5 cap when its warm start is the answer)? | **fact** (time saved at N64) + **user preference** | No, for the sets in flight (one setting within a gate). Reconsider for the next campaign. |
+| Q30 | GMRES basis scaling: the step turns the Krylov vectors' p part (internal units) into velocity with gain up to 65 (§6.8 C), so restarted GMRES needs 5–8 cycles on (2,1,0), (1,2,1), (2,1,1) | **fact** | No change: it is not needed for a verdict. If WO-C5 leaves NOT CONVERGED rows, scale p by μ_hi,int/h_int in the unknowns for ALL rows of the affected set, as its own instrument change. |
 
 ---
 
