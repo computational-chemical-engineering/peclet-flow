@@ -9,6 +9,12 @@ Cases: the (b) plane (n(22.5, 22.5), offset 0.3, walls, exact fractions) at N = 
 film at N = 12, each with the four ratio pairs x D_hi in {0.1, 1, 10, 100, 1e4}, both modes.
 PASS: rho <= 1 + 1e-9 for every 'sharp' run; 'averaged' is reported. A run whose linearity check
 exceeds 1e-10, or whose solves cap (pressure 20000, momentum 200000 sweeps), is NOT JUDGED.
+
+FIFTH PASS (§6.8 A, WO-A5; USER Q24 pending, default adopted) supersedes the momentum half above:
+the momentum runs a FIXED N_A = 2000 RB-GS sweeps per component (`--mom-fixed 2000`, update and
+residual stops off), and the momentum cap test is replaced by the doubling certificate printed on the
+PROD line (dbl_u, dbl_p <= 1e-12 on x1 and x_s); a failure reruns the case at 2 N_A once, a second
+failure is NOT JUDGED. The pressure half stays (max_p_it >= 20000 -> NOT JUDGED). Order: plane, then film.
 ARPACK: ncv 40, maxiter 1000; an unconverged run is re-run at ncv 80; a 'sharp' run still
 unconverged is decided by its (b)/(d) march verdict and listed (UNCONVERGED).
 
@@ -28,41 +34,49 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PAIRS = ((1e-2, 1e-3), (1e2, 1e3), (1e-3, 1e-4), (1e3, 1e4))
 DS = (0.1, 1.0, 10.0, 100.0, 1e4)
 GEOMS = (("plane", 16), ("film", 12))
-PCAP, MCAP = 20000, 200000
-MTOL = 1e-13  # RB-GS update stop (coordinator F1)
-RX = re.compile(r"\| rho=(\S+) \|.*max_pcg_it=(\d+) lin=(\S+) .*conv=(\d) ncv=(\d+) max_momentum_sweeps=(\d+)")
+PCAP = 20000  # the pressure half of the cap test (the momentum half: the doubling certificate)
+N_A, DBL = 2000, 1e-12  # WO-A5: fixed RB-GS sweeps per component; the doubling certificate's bound
+RX = re.compile(r"\| rho=(\S+) \|.*max_pcg_it=(\d+) lin=(\S+) .*conv=(\d) ncv=(\d+) max_momentum_sweeps=(\d+)"
+                r" dbl_u=(\S+) dbl_p=(\S+) mom_fixed=(\d+) cpu_per_mv=(\S+)")
 
 
-def prod(geom, N, mode, mu, rho, D, ncv, env):
+def prod(geom, N, mode, mu, rho, D, ncv, env, nfix=N_A):
     cmd = [sys.executable, os.path.join(HERE, "gsv9_split.py"), "prod", "--geom", geom, "--N", str(N),
            "--mode", mode, "--pair", f"{mu:g},{rho:g}", "--D", f"{D:g}", "--incremental", "--pdriver", "cheb",
-           "--ncv", str(ncv), "--maxiter", "1000", "--mom-tol", f"{MTOL:g}"]
+           "--ncv", str(ncv), "--maxiter", "1000", "--mom-fixed", str(nfix)]
     out = subprocess.run(cmd, capture_output=True, text=True, env=env)
     line = next((x for x in out.stdout.splitlines() if x.startswith("PROD")), None)
     if line is None:
         return None, (out.stderr.strip().splitlines() or ["no output"])[-1][:160]
     m = RX.search(line)
     return dict(rho=float(m.group(1)), pit=int(m.group(2)), lin=float(m.group(3)), conv=int(m.group(4)),
-                ncv=int(m.group(5)), msw=int(m.group(6))), line
+                ncv=int(m.group(5)), msw=int(m.group(6)), du=float(m.group(7)), dp=float(m.group(8)),
+                nfix=int(m.group(9)), cpu=float(m.group(10))), line
 
 
 def run(job):
     geom, N, mode, mu, rho, D, env = job
-    r, line = prod(geom, N, mode, mu, rho, D, 40, env)
-    if r is not None and not r["conv"]:
-        r, line = prod(geom, N, mode, mu, rho, D, 80, env)
+    nfix = N_A
+    r, line = prod(geom, N, mode, mu, rho, D, 40, env, nfix)
+    if r is not None and max(r["du"], r["dp"]) > DBL:  # doubling failed: rerun once at 2 N_A
+        nfix = 2 * N_A
+        r, line = prod(geom, N, mode, mu, rho, D, 40, env, nfix)
+    dbl_ok = r is not None and max(r["du"], r["dp"]) <= DBL
+    if r is not None and dbl_ok and not r["conv"]:
+        r, line = prod(geom, N, mode, mu, rho, D, 80, env, nfix)
     tag = f"GSV9e {mode:8s} geom={geom} N={N} mu={mu:g} rho={rho:g} D_hi={D:g}"
     if r is None:
         return tag, "ERROR", line
-    capped = r["pit"] >= PCAP or r["msw"] >= MCAP
-    if r["lin"] > 1e-10 or capped:
+    capped = r["pit"] >= PCAP  # the momentum half is the doubling certificate (WO-A5)
+    if r["lin"] > 1e-10 or capped or not dbl_ok:
         v = "NOT_JUDGED"
     elif not r["conv"]:
         v = "UNCONVERGED"
     else:
         v = "PASS" if r["rho"] <= 1.0 + 1e-9 else "MISS"
     return tag, v, (f"rho={r['rho']:.6f} lin={r['lin']:.1e} ncv={r['ncv']} conv={r['conv']} "
-                    f"max_p_it={r['pit']} max_momentum_sweeps={r['msw']}")
+                    f"max_p_it={r['pit']} max_momentum_sweeps={r['msw']} dbl_u={r['du']:.1e} dbl_p={r['dp']:.1e} "
+                    f"N_A={r['nfix']} cpu_per_mv={r['cpu']:.3f}")
 
 
 def main():
@@ -72,7 +86,7 @@ def main():
     p.add_argument("--pilot", action="store_true")
     a = p.parse_args()
     env = dict(os.environ, PYTHONPATH=a.build, OMP_NUM_THREADS="1", OMP_PROC_BIND="false")
-    jobs = [(g, N, m, mu, r, D, env) for m in ("sharp", "averaged") for (g, N) in GEOMS
+    jobs = [(g, N, m, mu, r, D, env) for (g, N) in GEOMS for m in ("sharp", "averaged")
             for (mu, r) in PAIRS for D in DS]
     if a.pilot:
         jobs = [j for j in jobs if j[:6] == ("plane", 16, "sharp", 1e-3, 1e-4, 1e4)]

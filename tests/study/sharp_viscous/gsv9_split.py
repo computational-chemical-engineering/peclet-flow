@@ -30,6 +30,7 @@ import argparse
 import math
 import os
 import sys
+import time
 
 import numpy as np
 
@@ -200,7 +201,10 @@ def cmd_prod(a):
         {"pcg": s.set_pressure_pcg, "fcg": s.set_pressure_fcg, "cheb": s.set_pressure_chebyshev}[a.pdriver](
             True, 20000, 1e-13)
         dg.set_velocity_solver("gauss_seidel")
-        dg.set_velocity_solver_params(200000, a.mom_tol, 2)
+        if a.mom_fixed:  # WO-A5 (§6.8 A): a FIXED sweep count per component, update stop off -- an exactly linear map
+            dg.set_velocity_solver_params(a.mom_fixed, 0.0, 2)
+        else:
+            dg.set_velocity_solver_params(200000, a.mom_tol, 2)
         # The update stop above only binds with the residual stop off: the default residual mode
         # (following the pressure rtol) has a stagnation guard that exits early on the stiff sharp
         # rows after WO-5b (measured: exit residual 1.6e-4, linearity 2.5e-2 on ext N16 D_hi 1e4).
@@ -281,7 +285,45 @@ def cmd_prod(a):
     x1, x2 = deflate(rng.standard_normal(nd)), deflate(rng.standard_normal(nd))
     if a.kz0:
         x1, x2 = proj(x1), proj(x2)
+    cpu0 = time.process_time()
     lin = np.linalg.norm(mv(0.3 * x1 + 0.7 * x2) - 0.3 * mv(x1) - 0.7 * mv(x2)) / np.linalg.norm(mv(x1))
+    cpu_mv = (time.process_time() - cpu0) / 4.0
+    dbl = ""
+    nu = nd - npc
+    if a.mom_fixed:
+        # WO-A5 doubling certificate (§6.8 A (ii)), before ARPACK: for x1 and x_s (30 power steps of the map from
+        # x1), max|y(2N) - y(N)| <= 1e-12 max|y(N)|, separately for u and for p. gsv9e.py judges it and reruns at 2N.
+        xs = x1.copy()
+        for _ in range(30):
+            y = mv(xs)
+            xs = y / np.linalg.norm(y)
+        du = dp = 0.0
+        for x in (x1, xs):
+            y1 = mv(x)
+            dg.set_velocity_solver_params(2 * a.mom_fixed, 0.0, 2)
+            y2 = mv(x)
+            dg.set_velocity_solver_params(a.mom_fixed, 0.0, 2)
+            d = y2 - y1
+            du = max(du, float(np.max(np.abs(d[:nu]))) / max(float(np.max(np.abs(y1[:nu]))), 1e-300))
+            if npc:
+                dp = max(dp, float(np.max(np.abs(d[nu:]))) / max(float(np.max(np.abs(y1[nu:]))), 1e-300))
+        dbl = " dbl_u=%.1e dbl_p=%.1e mom_fixed=%d cpu_per_mv=%.3f" % (du, dp, a.mom_fixed, cpu_mv)
+        if a.ref_check:  # WO-A5 acceptance: y(x1) at N against a fixed REF-sweep reference (exp_a.py's fixed rows)
+            y1 = mv(x1)
+            dg.set_velocity_solver_params(a.ref_check, 0.0, 2)
+            yr = mv(x1)
+            dg.set_velocity_solver_params(a.mom_fixed, 0.0, 2)
+            d = y1 - yr
+            print("REFCHK lin=%.1e%s | fixed %d vs %d: du %.2e dp %.2e" % (
+                lin, dbl, a.mom_fixed, a.ref_check, float(np.max(np.abs(d[:nu]))) / float(np.max(np.abs(yr[:nu]))),
+                float(np.max(np.abs(d[nu:]))) / float(np.max(np.abs(yr[nu:]))) if npc else 0.0), flush=True)
+            return 0
+        if max(du, dp) > 1e-12:  # the run cannot be judged at this N: skip ARPACK (gsv9e.py reruns at 2N once)
+            print("PROD %s geom=%s N=%d D_hi=%g | rho=nan | top: - | matvecs=%d max_pcg_it=%d lin=%.1e kz0_leak=0.0e+00 "
+                  "solver=%s conv=0 ncv=%d max_momentum_sweeps=%d%s dbl_fail=1" % (
+                      a.mode, a.geom, N, a.D, stats["n"], stats["pit"], lin, dg.velocity_solver(), a.ncv, stats["msw"],
+                      dbl), flush=True)
+            return 0
     op = LinearOperator((nd, nd), matvec=mv, dtype=float)
     conv = 1
     try:
@@ -298,7 +340,7 @@ def cmd_prod(a):
     print("PROD %s | rho=%.6f | top: %s | matvecs=%d max_pcg_it=%d lin=%.1e kz0_leak=%.1e solver=%s "
           "conv=%d ncv=%d max_momentum_sweeps=%d" % (
               tag, abs(vals[0]), " ".join("%.5f%+.5fi" % (z.real, z.imag) for z in vals[:4]), stats["n"],
-              stats["pit"], lin, stats["leak"], dg.velocity_solver(), conv, a.ncv, stats["msw"]), flush=True)
+              stats["pit"], lin, stats["leak"], dg.velocity_solver(), conv, a.ncv, stats["msw"]) + dbl, flush=True)
 
 
 def main():
@@ -326,6 +368,9 @@ def main():
     q.add_argument("--maxiter", type=int, default=200)
     # the RB-GS update stop (residual stop off); G-SV9(e) runs 1e-13 (coordinator F1, 2026-11-01)
     q.add_argument("--mom-tol", type=float, default=1e-15)
+    # WO-A5 (§6.8 A): fixed RB-GS sweeps per component (0 = off: the update stop above); G-SV9(e) runs 2000
+    q.add_argument("--mom-fixed", type=int, default=0)
+    q.add_argument("--ref-check", type=int, default=0)  # WO-A5 acceptance only (needs --mom-fixed); no ARPACK
     q.add_argument("--m", type=lambda t: tuple(float(x) for x in t.split(",")), default=None)
     q.add_argument("--frac", type=float, default=0.5)  # pplane layer fraction of phase A
     q.add_argument("--roll", type=lambda t: tuple(int(x) for x in t.split(",")), default=None)
