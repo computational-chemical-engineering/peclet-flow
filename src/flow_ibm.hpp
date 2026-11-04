@@ -5161,6 +5161,14 @@ class Solver {
   std::shared_ptr<GridHaloTopology<3>> velHalo_;  // g=2 velocity-block topology
   std::shared_ptr<GridHalo<double>> velDev_;      // g=2 velocity-block ghost exchange
   std::shared_ptr<GridHalo<MReal>> velDevF_;      // float twin (momentum-stencil ring, CA sweeps)
+  // The sharp interface's fit fields (tau_hat x 3, D_nn) in ONE exchange: a depth-kSvHaloDepth
+  // topology of the velocity block, stacked 4 x at stride n (doc/vof_sharp_viscous_stress.md §7).
+  // Built at the first fit after a (re)decomposition (collective: sharpActive_ is global).
+  std::shared_ptr<GridHaloTopology<3>> svHalo_;
+  std::shared_ptr<GridHalo<double>> svDev_;
+  // The reads reach one ghost cell, edge ghosts included (edgeTau, cellExtra at q - s_c; review
+  // F1): proved by the bitwise gates, not assumed (sharp_viscous_mpi_np*, the np-4 trajectory).
+  static constexpr int kSvHaloDepth = 1;
   bool caMomentum_ = false;  // communication-avoiding momentum sweeps (setCommAvoiding, extent>=4)
   bool momStencilDirty_[3] = {true, true, true};  // per-component: stencil ring needs an exchange
   std::shared_ptr<peclet::core::decomp::BlockDecomposer<3>>
@@ -5474,7 +5482,8 @@ class Solver {
   bool sharpAutoNotice_ = false;     // the one-time AUTO-fallback notice was printed
   vof::SharpGeom sharpGeom_;  // this step's band geometry (views into the colour/plane blocks)
   vof::SvByte svCls_, svFb_;  // band class / fit-fallback flag, 1 B/cell each
-  CCField svTau_[3], svDnn_;  // tau_hat (3) and D_nn per interfacial cell, dense (§12 Q2)
+  CCField svFit_;             // tau_hat x 3 then D_nn, 4 n contiguous (one exchange, §7) ...
+  CCField svTau_[3], svDnn_;  // ... and its four n-subviews, dense (§12 Q2)
   vof::SvList svList_;        // the fit's worklist of interfacial cells (8 B/cell)
   vof::SvList svRhsList_;     // the band-term worklist (sharpRhsCompact), 8 B/cell
   long svRhsN_ = 0;           // ... and its length this step

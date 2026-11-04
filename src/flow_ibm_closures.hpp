@@ -742,9 +742,13 @@ void Solver<Grid>::sharpViscousGeometry() {
     svCls_ = vof::SvByte(
         Kokkos::view_alloc(space, "peclet::flow::sharp_cls", Kokkos::WithoutInitializing), n);
     svFb_ = vof::SvByte(Kokkos::view_alloc(space, "peclet::flow::sharp_fb"), n);
+    svFit_ = CCField(Kokkos::view_alloc(space, "peclet::flow::sharp_fit"), 4 * n);
     for (int a = 0; a < 3; ++a)
-      svTau_[a] = CCField(Kokkos::view_alloc(space, "peclet::flow::sharp_tau"), n);
-    svDnn_ = CCField(Kokkos::view_alloc(space, "peclet::flow::sharp_dnn"), n);
+      svTau_[a] = Kokkos::subview(svFit_, std::make_pair(a * n, (a + 1) * n));
+    svDnn_ = Kokkos::subview(svFit_, std::make_pair(3 * n, 4 * n));
+#ifdef PECLET_FLOW_MPI
+    svDev_.reset();  // the stacked exchange's stride is n
+#endif
     svList_ = vof::SvList(
         Kokkos::view_alloc(space, "peclet::flow::sharp_list", Kokkos::WithoutInitializing), n);
     svRhsList_ = vof::SvList(
@@ -797,6 +801,22 @@ void Solver<Grid>::sharpViscousFit() {
   vof::sharpFit(sharpGeom_, v, svTau_[0], svTau_[1], svTau_[2], svDnn_, svFb_, C3{G, G, G},
                 C3{e_.x - G, e_.y - G, e_.z - G}, svList_);
   // §7: tau_hat at an edge on the block boundary may be a first-ghost cell's -- one exchange.
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    if (!svDev_) {  // the four fields stacked at stride n, ghosts within kSvHaloDepth
+      int rank = 0;
+      MPI_Comm_rank(comm_, &rank);
+      svHalo_ = std::make_shared<GridHaloTopology<3>>();
+      svHalo_->buildTopology(*dec_, rank, G, {true, true, true}, comm_,
+                             peclet::core::halo::Neighborhood::Full, kSvHaloDepth);
+      svDev_ = std::make_shared<GridHalo<double>>();
+      svDev_->setLabel("sharp fit");
+      svDev_->init(*svHalo_, 4, (long)n_);
+    }
+    svDev_->exchange(svFit_);
+    return;
+  }
+#endif
   for (int a = 0; a < 3; ++a)
     fillGhosts(svTau_[a]);
   fillGhosts(svDnn_);

@@ -180,6 +180,8 @@ void Solver<Grid>::initMpi(const peclet::core::decomp::BlockDecomposer<3>& dec, 
   // (rank-uniform: the decomposition is replicated), gated by `set_comm_avoiding`.
   velDevF_ = std::make_shared<GridHalo<MReal>>();
   velDevF_->init(*velHalo_);
+  svDev_.reset();  // the sharp fit's stacked exchange follows the partition (rebuilt at the fit)
+  svHalo_.reset();
   long minExt = std::numeric_limits<long>::max();
   for (const auto& s : dec.sizes())
     for (int k = 0; k < 3; ++k)
