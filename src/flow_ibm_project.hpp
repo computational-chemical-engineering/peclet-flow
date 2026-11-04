@@ -128,6 +128,16 @@ void Solver<Grid>::step() {
     fullStressPrelude();
   if (sharpActive_ && fullStress)
     sharpViscousFit();
+  // Review F6: a globally uniform mu skips the transpose (and the fit), so the sharp cell link's
+  // WO-5b split -- 2 mu implicit, 0 explicit -- would leave mu d_cc u_c too much. Only reachable
+  // with interfacial cells everywhere at one colour (a uniform "mixture" C): the interface is
+  // inert this step and the bands built above are rebuilt without it (the implicit-FOU path
+  // builds them per Picard below, after this).
+  if (sharpActive_ && fullStress && muUniform_) {
+    sharpActive_ = false;
+    if (!implicitAdv())
+      rebuildStencils();
+  }
   if (cutcellPressure_ && incremental_) {
     fillGhosts(P_);
     if (hasBc_)

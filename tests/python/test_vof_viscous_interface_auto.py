@@ -7,7 +7,8 @@ interface is in force iff diagnostics.vof_viscous_interface_census()['band_cells
   1. the default is 'auto', and every mode round-trips; an unknown one raises ValueError and leaves
      the selection unchanged;
   2. 'auto' -> sharp on the staggered Solver with VoF, mu = LinearMix(C) and the full stress;
-     'sharp' -> sharp; 'averaged' -> not;
+     'sharp' -> sharp; 'averaged' -> not; a uniform mixture colour (mu globally uniform, every
+     cell interfacial) leaves 'auto' inert and bitwise 'averaged' (review F6);
   3. 'auto' -> averaged, with ONE stderr notice over two steps, for: the Laplacian viscous stress,
      an immersed solid, porous momentum, phase change, the harmonic face viscosity, and
      SolverColocated; silently for a uniform mu (LinearMix with mu_1 = mu_0);
@@ -135,6 +136,27 @@ def main():
         except RuntimeError as e:
             check("set_vof_viscous_interface('sharp')" in str(e), f"{label}, 'sharp' raises: {e}")
 
+    # a uniform "mixture" colour (every cell interfacial, mu globally uniform at the step head):
+    # the transpose is skipped, so the sharp interface must be inert -- 'auto' bitwise 'averaged'
+    # (review F6; before the fix 'auto' differed and its census read 1728 band cells). One step:
+    # the colour transport moves C off exact uniformity at round-off, and mu with it.
+    x = (np.arange(N) + 0.5) / N
+    X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
+
+    def mixture(t, m):
+        t.set_vof(np.asfortranarray(np.full((N, N, N), 0.5)))
+        for c, A in enumerate((Y, Z, X)):
+            t.set_velocity(c, np.asfortranarray(0.01 * np.sin(2.0 * np.pi * A)))
+        t.set_vof_viscous_interface(m)
+
+    got = {}
+    for m in ("auto", "averaged"):
+        t = build(pf, setup=lambda u, m=m: mixture(u, m))
+        band, _ = run(t, 1)
+        got[m] = (band, b"".join(np.ascontiguousarray(a).tobytes()
+                                for a in (t.get_u(), t.get_v(), t.get_w(), t.get_p())))
+    check(got["auto"][0] == 0 and got["auto"][1] == got["averaged"][1],
+          f"uniform mixture C, 'auto': band_cells {got['auto'][0]}, bitwise 'averaged'")
     # uniform mu: silent and inert
     band, err = run(build(pf, mu1=1.0), 2)
     check(band == 0 and NOTICE not in err, f"uniform mu, 'auto': band_cells {band}, no notice")
