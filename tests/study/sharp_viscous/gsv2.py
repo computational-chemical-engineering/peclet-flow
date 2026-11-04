@@ -148,7 +148,7 @@ def run_case(key):
             "mom": S.mom, "fsum_rel_abs": fsum_abs, "fsum_rel_max": fsum_max, "cfl": umax * dt / h,
             "inc_default_step": inc_def, "velocity_solver": vsolver, "mom_utol": gsv1.MOM_UTOL,
             "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "secs": round(time.time() - t0, 1),
-            "rescaled": S.rescaled, "max_gain": S.max_gain, **({"mom_fixed": gsv1.MOM_FIXED} if gsv1.MOM_FIXED else {})}
+            "rescaled": S.rescaled, "max_gain": S.max_gain, **S.tie, **({"mom_fixed": gsv1.MOM_FIXED} if gsv1.MOM_FIXED else {})}
 
 
 def _run(key):
@@ -167,7 +167,7 @@ def line(r):
             f"cycles={r['cycles']} inc={r['inc']:.1e} K={r['K']:.6f} Ud/U_hr={r['Ud'] / r['U_hr']:.6f} "
             f"mom={r['mom']:.1e} fsum(abs)={r['fsum_rel_abs']:.1e} fsum(max)={r['fsum_rel_max']:.1e} "
             f"cfl={r['cfl']:.2e} inc_def={r['inc_default_step']:.1e} vsolver={r['velocity_solver']} "
-            f"max_p_it={r['max_p_it']} max_msw={r['max_momentum_sweeps']} {r['secs']}s")
+            f"max_p_it={r['max_p_it']} max_msw={r['max_momentum_sweeps']} {gsv1.tie_str(r)} {r['secs']}s")
 
 
 def load(path):

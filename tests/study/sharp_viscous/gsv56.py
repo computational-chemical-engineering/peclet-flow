@@ -25,6 +25,8 @@ import sys
 
 import numpy as np
 
+from gsv1 import tie_init, tie_read, tie_str  # G-SV12 owner-tie census (WO-9.4)
+
 
 def parse():
     p = argparse.ArgumentParser()
@@ -151,6 +153,7 @@ def main():
     if a.mode == "sharp" or hasattr(s, "set_vof_viscous_interface"):  # absent on a pre-sharp build
         s.set_vof_viscous_interface(a.mode)  # explicit both ways: the default 'auto' is sharp here
     cen = {"band_cells": 0, "virtual_cells": 0, "film_cells": 0, "fit_fallbacks": 0}
+    tie = tie_init()
     for _ in range(a.steps):
         if a.case == "p1":
             lm = s.vof_step_limits()
@@ -162,6 +165,7 @@ def main():
             c = s.diagnostics.vof_viscous_interface_census()
             for k in cen:
                 cen[k] += c[k]
+            tie_read(s, tie, comm)
     if comm is not None:
         for k in cen:
             cen[k] = comm.allreduce(cen[k])
@@ -180,7 +184,7 @@ def main():
     npr = 1 if comm is None else comm.Get_size()
     print(f"GSV56 case={a.case} mode={a.mode} mu_uniform={a.mu_uniform} np={npr} steps={a.steps} "
           f"census/step band={cen['band_cells'] / a.steps:.1f} virt={cen['virtual_cells'] / a.steps:.1f} "
-          f"film={cen['film_cells'] / a.steps:.1f} fallbacks={cen['fit_fallbacks']} "
+          f"film={cen['film_cells'] / a.steps:.1f} fallbacks={cen['fit_fallbacks']} {tie_str(tie)} "
           f"max|u|={float(np.max(np.abs(loc['u']))):.6e} sha={hs}")
 
 

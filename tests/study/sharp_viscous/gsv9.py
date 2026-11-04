@@ -45,6 +45,8 @@ from multiprocessing import Pool
 
 import numpy as np
 
+from gsv1 import tie_init, tie_read, tie_str  # G-SV12 owner-tie census (WO-9.4)
+
 N, STEPS = 16, 2000
 PCAP, PRTOL = 20000, 1e-12  # the Chebyshev cap must never bind (§6.2)
 FLOOR = 1e-20  # the Q15 floor: windows with E_n < FLOOR * E_0 are reported, not judged
@@ -178,6 +180,7 @@ def run(args):
     E = [en([s.get_u(), s.get_v(), s.get_w()], rho)]
     Efull = [energy_periodic([s.get_u(), s.get_v(), s.get_w()], rho)] if geom == "pplane" else None
     cen = {"band_cells": 0, "virtual_cells": 0, "film_cells": 0, "fit_fallbacks": 0}
+    tie = tie_init()
     capped = 0
     first_cap = None
     pmax = 0
@@ -198,6 +201,7 @@ def run(args):
             c = s.diagnostics.vof_viscous_interface_census()
             for k in cen:
                 cen[k] += c[k]
+            tie_read(s, tie)
         vel = [s.get_u(), s.get_v(), s.get_w()]
         E.append(en(vel, rho))
         if Efull is not None:
@@ -214,7 +218,7 @@ def run(args):
     first_grow = int(up[0]) + 1 if up.size else None
     tag = "GSV9" + {"plane": "b", "film": "d", "pplane": "b'"}[geom] + ("" if mode == "sharp" else "-AVG")
     timing = (f"{rep}pdriver=chebyshev(rtol={PRTOL:g},cap={PCAP}) max_p_it={pmax} capped_steps={capped} "
-              f"first_cap_step={first_cap} first_energy_growth_step={first_grow}")
+              f"first_cap_step={first_cap} first_energy_growth_step={first_grow} {tie_str(tie)}")
     if capped:
         return (f"{tag} NOT_JUDGED geom={geom} muA/muB={muR:g} rhoA/rhoB={rhoR:g} D_hi={Dn:g} "
                 f"(a capped pressure step) steps_run={len(E) - 1} {timing}", None, None)

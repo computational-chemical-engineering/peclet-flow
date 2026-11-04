@@ -593,6 +593,36 @@ class PCase:
 # ---------------------------------------------------------------------------------------------
 # The steady driver (WO-6s, note §6.4): GMRES(60) on the production step's fixed-point residual
 # ---------------------------------------------------------------------------------------------
+def tie_init():
+    """G-SV12 owner-tie census (WO-9.4, study only): max over steps of 'tied_edges' and 'max_tie_spread', min
+    of 'min_untied_gap'; 'tie_reads' counts the steps read (0 on a build without the owner-set keys)."""
+    return {"tied_max": 0, "spread_max": 0.0, "gap_min": float("inf"), "tie_reads": 0}
+
+
+def tie_read(s, acc, comm=None):
+    """Read the census after one step into acc (rank-local keys: summed / max / min over ranks under comm)."""
+    dg = s.diagnostics
+    if not hasattr(dg, "vof_viscous_interface_census"):
+        return
+    c = dg.vof_viscous_interface_census()
+    if "tied_edges" not in c:
+        return
+    t, sp, g = int(c["tied_edges"]), float(c["max_tie_spread"]), float(c["min_untied_gap"])
+    if comm is not None:
+        from mpi4py import MPI
+        t, sp, g = comm.allreduce(t), comm.allreduce(sp, op=MPI.MAX), comm.allreduce(g, op=MPI.MIN)
+    acc["tied_max"] = max(acc["tied_max"], t)
+    acc["spread_max"] = max(acc["spread_max"], sp)
+    acc["gap_min"] = min(acc["gap_min"], g)
+    acc["tie_reads"] += 1
+
+
+def tie_str(r):
+    if "tie_reads" not in r:
+        return "tied=n/a"
+    return f"tied={r['tied_max']} spread={r['spread_max']:.1e} gap={r['gap_min']:.1e} reads={r['tie_reads']}"
+
+
 class StepMap:
     """S: x = (u, v, w, p) -> one production step, colour frozen (set_vof(C0) after the step); p
     through get_field/set_field("p") in internal units, its mean removed on input and output."""
@@ -604,6 +634,7 @@ class StepMap:
         # the refused step's CFL_out (vof_max_courant() read right after the throw)
         self.max_gain, self.rescaled, self.refused_cfl = 0.0, 0, float("nan")
         self.rf = rho_face(rho) if rho is not None else None
+        self.tie = tie_init()
         self.rfs = [float(np.sum(f)) for f in self.rf] if self.rf is not None else None
 
     def gauge(self, x):
@@ -637,6 +668,7 @@ class StepMap:
         if cin > 0.0:
             self.max_gain = max(self.max_gain, float(dg.vof_last_courant()) / cin)
         s.set_vof(self.C0)
+        tie_read(s, self.tie)
         self.steps += 1
         self.max_pit = max(self.max_pit, int(dg.last_pressure_iterations()))
         self.max_msw = max(self.max_msw, int(dg.last_step_timers()["momentum_sweeps"]))
@@ -816,7 +848,7 @@ def run_pcase(key, steady="gmres", want_state=False):
            "at_xi": float(dist), "mom": S.mom, "force_sum_rel": fsum / max(fmax, 1e-300),
            "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "secs": round(time.time() - t0, 1),
            "max_momentum_residual": S.max_mres, "converged_momentum": True, "mom_utol": MOM_UTOL,
-           "velocity_solver": vsolver, "inc_default_step": inc_def, "rescaled": S.rescaled, "max_gain": S.max_gain}
+           "velocity_solver": vsolver, "inc_default_step": inc_def, "rescaled": S.rescaled, "max_gain": S.max_gain, **S.tie}
     if MOM_FIXED:
         out["mom_fixed"] = MOM_FIXED
     if want_state:
@@ -890,7 +922,7 @@ def run_wcase(key):
             "err_wall1": float(np.max(e[wd <= 1.0])), "err_interior": float(np.max(e[wd > 1.0])),
             "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "converged_momentum": True,
             "rescaled": S.rescaled, "max_gain": S.max_gain, **({"mom_fixed": MOM_FIXED} if MOM_FIXED else {}),
-            "mom_utol": MOM_UTOL, "inc_default_step": inc_def, "secs": round(time.time() - t0, 1)}
+            "mom_utol": MOM_UTOL, "inc_default_step": inc_def, "secs": round(time.time() - t0, 1), **S.tie}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -920,7 +952,7 @@ def pline(r):
              f"mom={r['mom']:.1e} fsum={r['force_sum_rel']:.1e} at_xi/h={r['at_xi']:.2f}")
     return (f"GSV1CASE {r['set']} {r['kind']} {geo} k={r['k']} ratio={r['ratio']:g} N={r['N']} {r['mode']} "
             f"{r.get('steady', 'gmres')} {r['status']} steps={r['steps']} cycles={r['cycles']} inc={r['inc']:.1e} "
-            f"err={r['err']:.3e} err_g={r.get('err_gauged', float('nan')):.3e} {extra} max_p_it={r['max_p_it']} max_mres={r.get('max_momentum_residual', -1):.1e} {r['secs']}s")
+            f"err={r['err']:.3e} err_g={r.get('err_gauged', float('nan')):.3e} {extra} max_p_it={r['max_p_it']} max_mres={r.get('max_momentum_residual', -1):.1e} {tie_str(r)} {r['secs']}s")
 
 
 def _run_any(key):
