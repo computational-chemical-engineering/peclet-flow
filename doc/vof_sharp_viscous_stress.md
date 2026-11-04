@@ -70,6 +70,11 @@ Builds on `doc/full_viscous_stress.md` (cited as FVS) and `doc/variable_viscosit
   - *G-SV1 goes triply periodic (USER flag).* The wall-contact error is out of scope, conditional on
     G-SV1W.
   - *Steady states by GMRES on the production step (WO-6s).*
+- **Seventh-pass ruling (§5.8, WO-9, G-SV12, §12 Q31–Q34).** Edge-owner ties are resolved by averaging
+  the edge outputs over the *owner set*: every interfacial cell within τ_own = 1e-6 cells of the
+  closest plane. No single-owner tie-break can be reflection-equivariant at a symmetric colour field,
+  and round-off decided the near ties: `mirror_symmetry` 3e-5–8e-5, now required ≤ 1e-12. Tie-free
+  edges are bitwise unchanged.
 
 ---
 
@@ -303,11 +308,18 @@ At cell i, for component c:
     the exact rule, which also covers the 1-cell film.
   - Without the virtual plane, a grid-aligned interface lying on a face would fall back to the 4-cell
     mean and fail G-SV1 at offset 0.
-- **Owner of edge E.** Among the four cells of E that are interfacial, the owner is the one with the
-  smallest |m·ξ_E − α|/|m|₂. Here ξ_E is the edge midpoint in that cell's local coordinates. Ties go to
-  the first cell in the fixed offset order (§5.7). That is the lowest linear index everywhere except
-  across a periodic seam.
-  - E is a **band edge** iff it has an owner.
+- **Owner set of edge E (seventh pass, §5.8).** For each of the four cells of E that is interfacial,
+  d = |m·ξ_E − α|/|m|₂, with ξ_E the edge midpoint in that cell's local coordinates. The owner set
+  T_E is every interfacial cell of E with d ≤ d_min + τ_own, τ_own = 1e-6 (index units, absolute).
+  Every per-edge output below (face fractions, link fractions, the kink normal inside the T-term) is
+  evaluated with each member of T_E as "the owner" and **averaged over T_E** (§5.8 gives the exact
+  formulas). Wherever §5 says "the owner", read "each member of T_E, then the mean". A tie-free edge
+  (|T_E| = 1) is the single-owner operator bit for bit.
+  - Superseded (seventh pass): "the owner is the one with the smallest distance; ties go to the
+    first cell in the fixed offset order". No single-owner tie-break can be reflection-equivariant at
+    a symmetric colour field, and round-off decided the near ties (§5.8, `mirror_symmetry` 3e-5–8e-5).
+  - E is a **band edge** iff it has an owner, i.e. iff T_E is non-empty (some cell of E is
+    interfacial). The predicate is unchanged.
   - **τ̂ at an edge sample (§5.7 Q-A).** τ̂_E is the arithmetic mean of τ̂_K over the **interfacial**
     cells K among E's four cells, summed in the fixed offset order. The set is never empty, because E's
     owner is in it.
@@ -340,6 +352,9 @@ At cell i, for component c:
     the explicit T-term on that face, each ~μ_hi/(2μ_lo) times the traction, cancel; G-SV9(d)/(e)
     run the film at both ratio signs.
 - **Physical normal.** n = `vofPhysNormal(m)` of the owner, used for the kink model and the T-terms.
+- At an edge whose owner set has several members, the fractions and the normal above are formed
+  per member and averaged as §5.8 specifies (the T-term as a per-member product, never from averaged
+  fractions).
 
 ### 5.3 Interface state: τ̂ and D̂_nn (one least-squares fit per interfacial cell K)
 
@@ -454,9 +469,16 @@ The quantities reported are:
 - **per-offset LS**: the G-SV1-style least-squares L∞ order of each case;
 - **envelope**: the maximum error over the offsets at each N, and its LS order.
 
-**Fixed offset order.** Every tie and every summation order in §5.2 and here enumerates cells by their
+**Fixed offset order.** Every summation order in §5.2 and here enumerates cells by their
 offset from the edge or cell, lexicographic in (dz, dy, dx), x fastest. Never use the global linear
 index.
+- **Amended (seventh pass, §5.8): no owner tie is broken by this order any more.** An owner tie is
+  resolved by the mean over the owner set; the offset order only fixes the order of that sum (and of
+  the τ̂ mean). For two members the sum is order-free (IEEE addition commutes); for three or four
+  the order moves the result at round-off only. The virtual-plane face choice (Q-B) is a separate
+  rule and is unchanged.
+- Superseded: "every tie … enumerates cells by their offset". A fixed tie order is translation-
+  invariant (which is why it was chosen, for np-independence) but not reflection-equivariant.
 - Away from a periodic seam the offset order is the lowest-linear-index order.
 - Across a seam it stays translation-invariant, and the wrapped global index does not. Serial and
   np > 1 then agree wherever a ghost image takes part.
@@ -577,6 +599,187 @@ within 3e-4 at every D_hi and ratio; the largest is 0.990.
   - This is still the worst-case error and drops no configuration. An O(h) term at any offset still
     dominates it asymptotically.
   - **Default until the user rules.** G-SV1 as written binds, and WO-6 reports the envelope beside it.
+
+### 5.8 Seventh pass (architect, 2026-11-04): edge-owner ties — the owner set and its mean
+
+**Evidence.** `bubble_column_perf/validation/highratio/land/MIRROR_DIAG.md` (WO-M; DIAG patch
+`land/mirror_diag.patch`, driver `land/mirror_diag.py`).
+- The sharp default fails `mirror_symmetry`. Velocity defect, A against mirrored B: 3.08e-5
+  (structured VoF, cy = 3.0), 7.87e-5 (block VoF, cy = 3.0), 3.76e-5 (cy = 6.0, clear of the walls).
+- The whole defect is the owner tie in `SharpGeom::edgeOwner` (`src/vof/sharp_viscous.hpp`, the strict
+  `dist < best`). Two mechanisms, each necessary:
+  - *exact ties* (bit-equal d) when the blob's own symmetry plane lies on a grid face, broken towards
+    the −y cell in A and in B, which are not mirror images;
+  - *near ties* (0 < |Δd| ≤ 1e-12): the same geometric ties perturbed by arithmetic that is not
+    reflection-equivariant (ξ = δ against 1 − δ, the octant undo in `plicAlpha`, MYC sum order).
+- Near ties arise without a y-symmetry plane on a face as well: S = 2, cy = 3.3 has 12 exact and 14
+  near ties on xz edges (x/z symmetries of the sampled colour) and a defect of 5.06e-5.
+- The defect does not shrink with h (S = 1 → 2: 6.68e-5 → 5.91e-5).
+- At a tied edge the candidates' fractions or normals differ by up to 0.335 (N = 24): an O(1) local
+  change of the operator.
+- "Near ties as ties" combined with B's tie order mirrored: 1.8e-15 – 2.9e-15 in every row. That is two
+  rules, one in A and one in B, not one rule.
+- Ruled out as causes: the virtual-plane tie (0 virtual cells in the test) and the τ̂ summation order
+  (inert at the printed digits).
+
+**Finding 1 — no single-owner rule can pass.**
+- Let M′ be the reflection about the blob's own symmetry plane (a grid face), M the test's domain
+  mirror, and T = M∘M′ the translation between them.
+- The test checks Op(M C) = M Op(C) at C = C_A. Since M C_A = T C_A and Op is translation-equivariant
+  (offset order), this says Op(C_A) = M′ Op(C_A): at an M′-symmetric colour the operator must be
+  M′-symmetric.
+- At an edge E on the symmetry plane, the tied candidates are M′-images of each other. M′ swaps them, so a
+  rule that returns one of them returns the other for the mirrored input. No tie-break satisfies the
+  invariant: not a fixed order, not a mirrored order, not any secondary key.
+- **A symmetric combination of the tied candidates is necessary.**
+- Example: for a mirror pair across the plane y = e_y through E, the u_c row's T-term at an a = y edge is
+  ±n_y τ̂_c (1 − μ̄R̄_ac), with the sign decided by the tie. The exact value is 0:
+  - σ_yc is odd under the mirror;
+  - the interface normal at E has n_y = 0, while each cell's plane carries n_y = ±O(κh).
+  The mean of the pair gives 0, so the mean is also the more accurate value there.
+
+**Finding 2 — a tie must be recognised with a tolerance.** Ties that are exact in exact arithmetic arrive
+with round-off spread:
+- measured ≤ 1e-12 at step 0;
+- bounded worst case about 1e-8, from `plicAlpha`'s asin branch near |arg| = 1 (√ε_mach loss at a case
+  boundary);
+- and dα/dC = 1/A_cut ≈ 1e5 in a corner-clipped cell at C ≈ 1e-8, acting on colour asymmetry that
+  round-off grows over a persistently symmetric run.
+
+**Finding 3 — the remaining discontinuity is acceptable once it is moved off zero.**
+- Any rule built on a minimum is discontinuous in the colour. The settled operator already jumps by the
+  candidates' difference wherever the argmin switches; the gates have run with that.
+- The current rule fails because of *where* its jump sits: at gap 0, which is exactly where every
+  symmetric and every grid-aligned configuration lives, so round-off decides.
+- A tolerance band moves the jumps to gap = ±τ, each half the size. Structured inputs do not sit there.
+- Round-off can decide membership only when a generic gap lies within the round-off spread of τ: about
+  1e-15 per edge evaluation, 1e-8 in the asin worst case.
+
+**The rule.** For the edge E_ac(k), take the candidates t = 0…3 in `edgeCells` offset order and let K_E be
+the interfacial ones.
+1. For t ∈ K_E: (m_t, α_t) = `plane(q_t, class)` and d_t = |m_t·ξ_t − α_t|/|m_t|₂. This is today's
+   expression, bit for bit; store the four d_t (pass 1).
+2. d_min = min_{t∈K_E} d_t. The owner set is T_E = {t ∈ K_E : d_t ≤ d_min + τ_own}, with τ_own = 1e-6.
+   Compare exactly this way, using the stored d_t (never recomputed). n_E = |T_E|.
+3. E is a band edge iff n_E ≥ 1, i.e. iff K_E ≠ ∅. This is unchanged, and the non-band paths
+   (`edgePhase`, the four-class fast path in `SvBandOp::beta`) are unchanged.
+4. Pass 2 walks T_E in offset order. It accumulates each output from 0.0 as acc += G_t and divides once
+   at the end, G_E = acc / n_E. With F_row(E; t) and L_ac(E; t) the settled single-owner fractions
+   (`rowFaceFraction`, `linkFraction` with owner q_t) and n_t = `vofPhysNormal(m_t)`:
+   - face fraction (implicit band and explicit transpose): F̄_row(E) = Σ_t F_row(E; t) / n_E, and
+     β = μ(F̄_row). Here row ∈ {a, c}.
+   - fit shear-link rows (§5.3): θ̄_ac(E) = Σ_t L_ac(E; t) / n_E, θ̄_ca likewise. Each link keeps one LS
+     row with its datum.
+   - the T-term (§5.4 a), per member then mean:
+     T_row(E) = Σ_t [ n_a,t τ̂_c (1 − μ(F_row,t) R(L_ac,t)) + n_c,t τ̂_a (1 − μ(F_row,t) R(L_ca,t)) ] / n_E,
+     with τ̂ the interfacial mean (§5.7 Q-A, unchanged).
+5. **Equivalent statement.** μ and R are affine in the fraction. So the edge's sample stress
+   μ(F̄)·Δu/h + T is, in exact arithmetic, the arithmetic mean of the sample stresses that the settled
+   single-owner operator gives with each member of T_E as owner. The fit row is likewise the mean of the
+   members' rows, because `fitCoef` is affine in θ and the datum is member-independent.
+6. **API shape (recommended, not binding).** Replace `edgeOwner` by
+   `template <class F> int forEachOwner(k, a, c, F&& f) const`. It runs pass 1, then calls
+   f(o, m, α) for each member in offset order, and returns n_E (0 = not a band edge). There are three
+   call sites: `SvBandOp::beta`, `edgeTraction`, and the fit's shear-link item. No caller keeps a
+   single owner.
+
+**Why the T-term is averaged per member, not from averaged fractions.**
+- μ(F̄)R(L̄) ≠ mean(μR). Take two members that place E's regions in opposite pure phases: each has
+  μR = 1 and a T-term of 0, while the averaged fractions give μ̄R̄ = (2 + r + 1/r)/4 ≈ r/4. That is a
+  spurious explicit stress of about (r/4)·τ̂.
+- A mean normal can also vanish (antiparallel members across a film).
+- β and θ̄ are affine in the fraction, so for them the mean fraction *is* the per-member mean.
+
+**Properties (what the implementer may rely on, and what the gates check).**
+- *Tie-free edges are unchanged.* For n_E = 1, (0 + G)/1 = G exactly, so the host build is bitwise the
+  f01a251 operator at every tie-free edge. On CUDA the restructured inline code may contract FMAs
+  differently, so tie-free edges agree to round-off there, not bitwise.
+- *Reflection-equivariant.*
+  - Membership depends on distances, which are reflection-invariant in exact arithmetic, through a
+    tolerance ≥ 60× their round-off spread.
+  - The mean is exactly order-free for n_E = 2, and order-dependent only at round-off for n_E = 3, 4.
+  - The rule itself is permutation-equivariant too. End to end it is not: see Q32.
+- *np-bitwise and translation-invariant.* The rule reads the same four cells (inside the depth-3 colour
+  ghosts) and sums in the fixed offset order. It uses a compile-time constant and no reduction. The §7
+  argument stands unchanged, including across a periodic seam.
+- *Accuracy.*
+  - Every member is an interfacial cell whose plane passes within τ_own of the closest, so every
+    single-owner output is a valid sample of the settled operator. The mean of O(h²)-consistent samples
+    is O(h²)-consistent.
+  - On a plane, all members are exact, so the mean is exact.
+- *Stability.* At a tie edge the implicit coefficient is the members' mean and the explicit term the
+  members' mean. By the mediant inequality, the explicit/implicit ratio is at most the worst member's,
+  and the settled rule could already have picked that member. G-SV9's per-edge premise is unchanged.
+- *Films and virtual planes.*
+  - Coincident planes (Q-B: "on the near face, two coincident planes tie at distance 0") give identical
+    member outputs. Since (G + G)/2 = G exactly, the film and ABAB cases are bitwise unchanged at
+    n_E = 2, and within 1 ulp at n_E = 4 (the film layer's a-parallel edges).
+  - Q-B's −a-before-+a choice is output-inert for a film under the mean. The film's own plane is at
+    d = 1 from the far face, and coincident with its neighbour's plane on the near face.
+  - Q-B's axis order (x, y, z) is not permutation-equivariant at a pure cell that qualifies on two
+    axes (a staircase corner). This is out of scope here (Q32).
+- *F5 (a region lying in its owner's plane reads μ_B)* is phase-labelled, not orientation-labelled, so
+  it is reflection-equivariant and is untouched.
+- *Cost.*
+  - Per edge: one 4-entry array of d_t plus a compare. Member planes are re-read in pass 2 (four loads).
+  - Fractions are evaluated n_E times, on tie edges only.
+  - A persistently symmetric run ties on O(N) edges (along the symmetry planes) out of O(N²) band edges.
+- *Host ↔ CUDA.* Owner decisions agree across backends unless a generic gap lies within the backend
+  round-off of τ_own. Field-level host ↔ CUDA agreement remains ordinary round-off (amplified by the
+  dynamics and by the device FP32 V-cycle), and no longer hinges on ties.
+
+**τ_own = 1e-6 (index units, absolute): why this value.**
+- *Lower bound.* τ_own must exceed the round-off spread of exact ties: ≤ 1e-12 measured, about 1e-8
+  bounded worst case (Finding 2). 1e-6 leaves ≥ 60× margin.
+- *Upper bound.* Accuracy sets none, since any member within τ is a valid owner. τ only sets how often
+  generic near-ties are averaged: a fraction of about 2τ per candidate pair, a handful of edges in a
+  long run, harmless.
+- τ must also stay far from structural gaps (0, ½, 1, √2/2, …) where grid-aligned configurations sit.
+  1e-6 does.
+- *Absolute, not relative.* d ∈ [0, √3] and its round-off is absolute. d = 0 at virtual planes, where a
+  relative tolerance degenerates.
+- *Not tied to `interfaceEps`.* That is a volume, user-set, and may be 0.
+- *Not a setter.* A compile-time constant `kSvOwnerTieTol` in `sharp_viscous.hpp`. Nothing physical
+  would tune it, and QUALITY_PLAN D3 forbids result-changing knobs without a reason.
+
+**The census (diagnostic, not on the step path).** `diagnostics.vof_viscous_interface_census()` gains
+three keys. They are computed from the same last-step band state and over the same owned range
+[lo, hi) as the existing keys, over every edge E_ac(k) with k in that range, (a, c) ∈ {(0,1), (0,2),
+(1,2)} and `edgeInDomain`. They are LOCAL to the rank: sum or max/min over ranks yourself.
+- `'tied_edges'`: band edges with n_E ≥ 2.
+- `'max_tie_spread'`: the maximum over tied edges of (max_{t∈T_E} d_t − d_min), in index units; 0.0 if
+  there are none.
+- `'min_untied_gap'`: the minimum, over band edges with |K_E| ≥ 2 and K_E ≠ T_E, of
+  (min_{t∈K_E∖T_E} d_t − d_min); +inf if there are none.
+- These read the void the rule relies on: spread ≪ τ_own ≪ gap. Edges on a non-periodic high domain
+  face (k_a = dhi) are not counted; that is documented, not a defect.
+
+**Rejected (one line each):**
+- *A tie order, fixed or mirrored, for exact ties only.* Measured: it removes mechanism 1 only (cy = 6:
+  3.76e-5 → 1.17e-5). Finding 1 also excludes any order.
+- *A tolerance plus a single-candidate tie-break by an "equivariant" key.* Impossible by Finding 1: the
+  tied candidates are swapped by the symmetry, and no single choice is a fixed point.
+- *A continuous blend w_t = φ((d_t − d_min)/δ).*
+  - It is equivariant and Lipschitz, but it amplifies round-off by about 0.3/δ, so passing at 1e-12
+    needs δ ≳ 1e-2.
+  - At that width it changes the operator at a finite fraction of all band edges (every gate
+    re-validated) and blends planes up to δ cells farther than the closest.
+  - It buys continuity that no invariant asks for. Not now (Q33).
+- *Exactly equivariant arithmetic for d.* Out of reach upstream (MYC sum order, `plicAlpha`), and
+  insufficient by Finding 1.
+- *Mean over all interfacial cells of E, no distance.* It breaks the film's "every face owned at
+  distance 0" exactness (§5.7 Q-B) and moves every edge's constant.
+- *Mean of fractions and normal, evaluated once.* It gives the spurious ≈ (r/4)·τ̂ explicit stress above.
+- *Relative tolerance (the DIAG's 1e-12·max(1, d)).* It degenerates at d = 0. With d ≤ √3 the factor is
+  ≤ 1.73 anyway.
+- *τ = 1e-12 (the DIAG value).* It passed a 3-step test but has no margin against the 1e-8 worst-case
+  spread.
+- *Scoping `mirror_symmetry` to 'averaged'.* Rejected by the coordinator (2026-11-04): asymmetry seeds
+  path instability in symmetric rise.
+
+**Value judgement.** None of this choice needs the user. The coordinator's invariant (mirror-symmetric to
+round-off) forces a symmetric combination (Finding 1). The tolerance is a fact with margin (Q31). The
+gate bands (§11 G-SV12, WO-9.4) are the coordinator's to apply.
 
 ---
 
@@ -1633,6 +1836,60 @@ Escalate to the architect, rather than tune, if any of these happens:
 - G-SV1 fails only near curvature or at virtual planes;
 - G-SV3 orders fall between 1 and 1.5.
 
+**WO-9. Owner set and mean (seventh pass, §5.8).** Requested as "WO-8"; renumbered because WO-8 above is
+Docs. Branch `sharpvisc-land`; host tree first, CUDA under the GPU lock. Commit-sized steps in order:
+- **WO-9.1 Census (inert).** Add the three census keys of §5.8 (`SharpCensus`, the binding, its
+  docstring). Nothing on the step path changes.
+  - *Accept:* `state_hash` = main.
+  - *Accept:* `sharp_viscous`, `sharp_viscous_mpi_np{1,2,4}` and `vof_viscous_interface_auto` pass
+    unchanged.
+  - *Accept:* on the two sharp `mirror_symmetry` rows (run A, read after the first `step()`),
+    `tied_edges` equals MIRROR_DIAG's exact + near count: 80 structured (46 + 34), 94 block A (13 + 81).
+    A difference is acceptable only if it is explained by the two enumerations (e.g. edges on the
+    high domain face). `max_tie_spread` ≤ 1e-12. Record `min_untied_gap`.
+  - A count mismatch means a gap in (1e-12, 1e-6] exists, which is a fact for Q31: report it, do not
+    tune.
+- **WO-9.2 The rule.** Replace `edgeOwner` by the owner-set visitor at its three call sites
+  (`SvBandOp::beta`, `edgeTraction`, the fit's shear-link item), exactly as §5.8 "The rule" items 1–5.
+  Add `kSvOwnerTieTol = 1e-6`. Rewrite the header comment "Fixed offset order (§5.7)" and the
+  `edgeOwner`/`edgeTraction` docstrings to say: owner set, mean, offset order for sums only. Tests in
+  the same commit:
+  - `sharp_viscous`, a **reflection self-symmetry case.** A sphere of radius 5.3 cells centred on a
+    grid vertex of a 24³ periodic box, μ ratio 1e3, σ = 0, velocity the pure strain
+    u = (X, Y, −2Z) about the centre (definite parity under each reflection; its wrap jump lies
+    ≥ 4 cells outside every fit block).
+    - For each axis reflection R, and over all band edges, max |G(E) − s·G(R E)| ≤ 1e-13·max|G| for
+      G ∈ {F̄_row, θ̄_ac, θ̄_ca, T_row}.
+    - s = −1 for T_row iff exactly one of a, c is the reflected axis; else s = +1.
+    - The case must report `tied_edges` > 0, so that it exercises ties.
+  - `sharp_viscous`, a **tie-free identity.** On an existing case whose census reads `tied_edges` = 0,
+    the band-op outputs are bitwise equal to f01a251 (host). Record the values from an f01a251 build
+    once, in the test.
+  - `sharp_viscous_mpi_np{1,2,4}`: add the vertex-centred sphere with a rank boundary on a symmetry
+    plane and a periodic seam through tied edges. F̄, θ̄, T and τ̂ must be bitwise equal at np 1/2/4.
+  - *Accept:* the three ctests above, plus `vof_viscous_interface_auto`, on host.
+- **WO-9.3 The mirror gate.** In `tests/python/test_mirror_symmetry.py`:
+  - tighten the velocity threshold to 1e-12 for every row (pressure stays 1e-8, the PCG tolerance);
+  - after the first `step()` of run A in the two sharp rows, assert `tied_edges` equals the WO-9.1
+    value and `max_tie_spread` ≤ 1e-9.
+  - Re-run the MIRROR_DIAG harness rows on the new build, with the DIAG patch not applied: VoF S = 1,
+    cy ∈ {3.0, 3.3, 6.0, 6.3}; blocks S = 1, cy ∈ {3.0, 6.0}; VoF S = 2, cy ∈ {3.0, 3.3}.
+  - *Accept:* every row ≤ 1e-12, host and CUDA (expected ~1e-15, as the DIAG "both" rows).
+  - If a non-sharp row exceeds 1e-12 on CUDA, it keeps 1e-10 and is reported. That would be a
+    pre-existing condition, not WO-9's.
+- **WO-9.4 Batteries and study gates (no code).** Host battery `-LE bench` (286), the CUDA battery,
+  `state_hash` = main, G-SV6 (np 2/4, host + CUDA), G-SV7, and the study gates by the census rule of
+  G-SV12. Log each as one summary line in the landing log.
+- **WO-9.5 Docs.** One sentence in the flow `CLAUDE.md` sharp paragraph ("owner ties: mean over the
+  owner set within 1e-6 cells; offset order for sums only"); the §13 amendment into
+  `docs/decisions/flow.md` and `docs/DECISIONS.md` (umbrella, coordinator); CHANGELOG.
+
+Escalate WO-9 to the architect, do not tune, if any of these happens:
+- a mirror row stays above 1e-12 after WO-9.3;
+- `max_tie_spread` > 1e-8 anywhere (the margin to τ_own falls below 100);
+- a study-gate verdict flips;
+- a tied row moves outside its G-SV12 band.
+
 ---
 
 ## 11. Verification gates
@@ -1798,6 +2055,34 @@ slope of log e against log h over the stated resolutions.
   run. Virtual-plane cells are reported, and film cells among them.
 - **G-SV11 (single phase stays put).** `variable_mu`, `varmu_mpi`, `full_stress_operator{,_np2,_np4}`,
   `collocated_stability_guard` and `amr_stability_guard` pass bitwise.
+- **G-SV12 (mirror equivariance and owner ties; seventh pass, §5.8, WO-9).**
+  - *Mirror.* `mirror_symmetry`: every row velocity ≤ 1e-12 and pressure ≤ 1e-8, host and CUDA. The
+    `tied_edges` pinned after the first `step()` is equal on both backends, and
+    `max_tie_spread` ≤ 1e-9. The MIRROR_DIAG
+    harness rows (WO-9.3) are ≤ 1e-12. The `sharp_viscous` reflection case is ≤ 1e-13 relative.
+  - *np.* `sharp_viscous_mpi_np{1,2,4}`, with the tie case, is bitwise.
+  - *Host ↔ CUDA.* There is no field-level gate (FMA contraction and the device FP32 V-cycle make it a
+    tolerance question with no owner-specific content). Cross-backend agreement of the owner
+    *decisions* is the pinned census integer, which each backend's own battery asserts.
+  - *Which study gates re-run, and the acceptance band.* All re-run in full (compute is free), each
+    run reading the census after every step:
+    - G-SV1x, G-SV1P, G-SV1dP, G-SV1W, G-SV1cP (still NOT JUDGED; INFO), G-SV2, G-SV3 (P1 ladder,
+      d/h 16–48), G-SV9 (a)–(e), G-SV10;
+    - G-SV4 and G-SV8 if they have recorded numbers to compare against.
+  - Rows whose `tied_edges` is 0 at every step must reproduce the recorded numbers bitwise (host)
+    or to every printed digit. A mismatch is a WO-9.2 bug.
+  - Rows with ties are judged by their own thresholds, and the verdict must not change. They must
+    also stay inside the movement band:
+    - G-SV1-family e(N) within ±10 % of recorded per row; orders ±0.05; G-SV1x exactness unchanged;
+    - G-SV2 gated quantity within ±1e-3 relative; order ±0.05;
+    - P1 Re within ±1e-3 relative per d/h;
+    - G-SV9 ρ ≤ recorded + 1e-3, and ≤ 1 where it was;
+    - G-SV10 fallbacks ≤ 0.1 %.
+  - The bands come from §5.8's argument that a tie's effect on an even quantity is second order in
+    the asymmetry the old rule injected. A band breach with an unchanged verdict is reported to the
+    architect as INFO. A verdict flip is a STOP.
+  - *Cost.* Sharp ms/step on P1 d/h 24, new against f01a251 on the same build type: ≤ 1.02 on host
+    and on the GPU. G-SV7 (≤ 1.2 × 'averaged') still holds.
 
 ---
 
@@ -1835,6 +2120,10 @@ slope of log e against log h over the stated resolutions.
 | Q28 | Uniform-μ controls end with a mean velocity of 1.4–1.7 % of max\|u\| (EXP-B ctrl: err vs err_gauged; `mom` 1.4e-2, 1.7e-2). A momentum-conserving step started from a gauged x0 should not produce that | **fact** (one instrumented ctrl run, `mom` per restart step) | Not blocking: no gate judges a uniform-μ ctrl row, and G-SV2 κ = 1 subtracts ⟨w⟩. Investigate before any uniform-μ control is cited as evidence of momentum conservation. |
 | Q29 | Steady gates on fixed-count momentum for cost (the certifying step runs to the 2e5 cap when its warm start is the answer)? | **fact** (time saved at N64) + **user preference** | No, for the sets in flight (one setting within a gate). Reconsider for the next campaign. |
 | Q30 | GMRES basis scaling: the step turns the Krylov vectors' p part (internal units) into velocity with gain up to 65 (§6.8 C), so restarted GMRES needs 5–8 cycles on (2,1,0), (1,2,1), (2,1,1) | **fact** | No change: it is not needed for a verdict. If WO-C5 leaves NOT CONVERGED rows, scale p by μ_hi,int/h_int in the unknowns for ALL rows of the affected set, as its own instrument change. |
+| Q31 | Placement of τ_own = 1e-6 (§5.8): is the void between tie spread and untied gaps real in production? | **fact** (the census keys on G-SV12's study runs and on the bubble column) | 1e-6. Revisit if `max_tie_spread` > 1e-8 anywhere, or if `tied_edges` exceeds 1e-4 of band edges on a run with no symmetry. |
+| Q32 | Permutation (axis-swap) equivariance end to end | **fact** (scope) | Not gated. The owner rule is permutation-equivariant; upstream it is not: MYC's axis choice, Q-B's x, y, z order at pure cells qualifying on two axes, and the WY split order. Reflections are gated (G-SV12). |
+| Q33 | A continuous owner blend (§5.8 rejected list) | **fact** (is owner switching a measurable source of temporal noise, e.g. parasitic currents at a static drop?) | No. Revisit only on such a measurement. |
+| Q34 | A field-level host ↔ CUDA gate | **fact** (host ↔ CUDA drift on P1 with `'fp64'` V-cycle) | No. Each backend runs the mirror gate; the owner decisions are pinned by the census integer (G-SV12). |
 
 ---
 
@@ -1873,6 +2162,21 @@ stress, explicit conservative transpose on uⁿ, no product form, no Picard plac
 - ρ(G) ≤ 0.99 at every D.
 
 Date 2026-10-31. Evidence: `doc/vof_sharp_viscous_stress.md` §3.4 and §6; `tests/study/sharp_viscous/`.
+
+**Amendment (seventh pass, 2026-11-04): edge-owner ties.**
+- *Decision.* An edge's owner set is every interfacial cell of the edge within τ_own = 1e-6 index
+  cells of the closest plane, |m·ξ_E − α|/|m|₂. Each per-edge output is the arithmetic mean of the
+  single-owner outputs over that set: the face fraction (hence β), the link fractions, and the T-term
+  as a per-member product. The fixed offset order fixes summation order only.
+- *Rejected.*
+  - A single owner with ties to the first cell in offset order, or any other single-candidate
+    tie-break. At a reflection-symmetric colour field the tied candidates are swapped by the symmetry,
+    so no single choice is equivariant, and round-off decided the near ties (`mirror_symmetry`
+    3.1e-5–7.9e-5).
+  - A continuous distance-weighted blend: it needs a width that changes the operator at a finite
+    fraction of all edges.
+  - The T-term from averaged fractions: a spurious ≈ (r/4)·τ̂ explicit stress.
+- *Evidence.* §5.8; `bubble_column_perf/validation/highratio/land/MIRROR_DIAG.md`.
 
 ---
 
