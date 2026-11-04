@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <Kokkos_Core.hpp>
+#include <limits>
 
 #include "face_props.hpp"
 #include "mac_cutcell.hpp"
@@ -55,6 +56,11 @@ constexpr std::uint8_t kSvNone = 0, kSvPlane = 1, kSvVirtual0 = 2;
 /// The fit (§5.3) as items and rows (`SharpGeom::fitItem`): 27 block cells of 3 normal links, then
 /// 144 edges of 2 shear links; 369 rows; 45 + 9 normal-equation entries (upper triangle + rhs).
 constexpr int kSvNormalItems = 27, kSvItems = 27 + 144, kSvRows = 81 + 288, kSvEntries = 45 + 9;
+
+/// The owner-set tolerance τ_own (§5.8), index units, absolute: the candidates of an edge whose
+/// plane distance is within τ_own of the closest form its owner set. Exceeds the round-off spread
+/// of exact ties (≤ 1e-12 measured, ~1e-8 bounded) by ≥ 60×; far from every structural gap.
+constexpr double kSvOwnerTieTol = 1e-6;
 
 /// The compacted interfacial cells of a fit (local linear indices), the device fit's worklist.
 using SvList = Kokkos::View<long*, CCMem>;
@@ -130,6 +136,79 @@ struct SharpGeom {
     }
     da[3] = 0;
     dc[3] = 0;
+  }
+
+  /// Pass 1 of the owner set (§5.8): d_t = |m·ξ_E − α|/|m|₂ for each interfacial cell t of E_ac(k)
+  /// (t in the fixed offset order, ξ_E the edge midpoint in that cell's local coordinates). Returns
+  /// the mask of K_E (bit t set iff cell t is interfacial); `dist[t]` is written for those only.
+  KOKKOS_INLINE_FUNCTION int edgeDistances(const int k[3], int a, int c, double dist[4]) const {
+    int da[4], dc[4];
+    edgeCells(a, c, da, dc);
+    const int b = 3 - a - c;
+    int mask = 0;
+    for (int t = 0; t < 4; ++t) {
+      int q[3] = {k[0], k[1], k[2]};
+      q[a] -= da[t];
+      q[c] -= dc[t];
+      const int kc = cellClass(q);
+      if (kc == kSvNone)
+        continue;
+      double mm[3], aa;
+      plane(q, kc, mm, aa);
+      double xi[3];
+      xi[a] = (double)da[t];
+      xi[c] = (double)dc[t];
+      xi[b] = 0.5;
+      const double nrm = Kokkos::sqrt(mm[0] * mm[0] + mm[1] * mm[1] + mm[2] * mm[2]);
+      dist[t] = Kokkos::fabs(mm[0] * xi[0] + mm[1] * xi[1] + mm[2] * xi[2] - aa) / nrm;
+      mask |= 1 << t;
+    }
+    return mask;
+  }
+
+  /// The owner set of E_ac(k) (§5.8 items 1–2): pass 1 (`edgeDistances`), d_min over K_E, and
+  /// T_E = {t ∈ K_E : d_t ≤ d_min + τ_own}, compared exactly so on the stored d_t. Returns K_E's
+  /// mask in bits 0–3 and T_E's in bits 4–7 (0: E is not a band edge).
+  KOKKOS_INLINE_FUNCTION int edgeOwnerSet(const int k[3], int a, int c, double dist[4],
+                                          double& dmin) const {
+    const int kmask = edgeDistances(k, a, c, dist);
+    dmin = 0.0;
+    bool first = true;
+    for (int t = 0; t < 4; ++t)
+      if ((kmask >> t) & 1) {
+        if (first || dist[t] < dmin)
+          dmin = dist[t];
+        first = false;
+      }
+    int tmask = 0;
+    for (int t = 0; t < 4; ++t)
+      if (((kmask >> t) & 1) && dist[t] <= dmin + kSvOwnerTieTol)
+        tmask |= 1 << t;
+    return kmask | (tmask << 4);
+  }
+
+  /// The census keys of edge E_ac(k), ac = 0, 1, 2 for (a, c) = (0,1), (0,2), (1,2) (§5.8): n_E
+  /// (0 off the domain or off the band); `spread` = max_{T_E} d_t − d_min; `gap` = min_{K_E∖T_E}
+  /// d_t − d_min, left as passed when K_E = T_E.
+  KOKKOS_INLINE_FUNCTION int edgeTieKeys(const int k[3], int ac, double& spread,
+                                         double& gap) const {
+    const int a = (ac == 2) ? 1 : 0, c = (ac == 0) ? 1 : 2;
+    if (!edgeInDomain(k, a, c))
+      return 0;
+    double dist[4], dmin;
+    const int m = edgeOwnerSet(k, a, c, dist, dmin);
+    int nE = 0;
+    for (int t = 0; t < 4; ++t) {
+      if (!((m >> t) & 1))
+        continue;
+      if ((m >> (4 + t)) & 1) {
+        ++nE;
+        spread = Kokkos::fmax(spread, dist[t] - dmin);
+      } else {
+        gap = (gap < 0.0) ? dist[t] - dmin : Kokkos::fmin(gap, dist[t] - dmin);
+      }
+    }
+    return nE;
   }
 
   /// The owner of E_ac(k) (§5.2): among its interfacial cells, the smallest |m·ξ_E − α|/|m|₂, ξ_E
@@ -813,8 +892,16 @@ inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)
 /// The census of the band (§9, G-SV10) over [lo, hi), LOCAL to this block: interfacial cells, the
 /// virtual-plane cells among them, the film cells among those (both a-neighbours pure and of the
 /// other phase), and the fit fallbacks.
+/// The owner-tie keys (§5.8) over every in-domain edge E_ac(k), k in [lo, hi), (a, c) ∈ {(0,1),
+/// (0,2), (1,2)}: the band edges with an owner set of two or more (`tied`), the largest spread
+/// max_{T_E} d_t − d_min over them (`tieSpread`, 0 if none), and the smallest gap
+/// min_{K_E∖T_E} d_t − d_min over the band edges with untied candidates (`untiedGap`, +inf if
+/// none).
 struct SharpCensus {
   long band = 0, virt = 0, film = 0, fallback = 0;
+  long tied = 0;
+  double tieSpread = 0.0;
+  double untiedGap = std::numeric_limits<double>::infinity();
 };
 
 inline SharpCensus sharpCensus(const SharpGeom& gg, SvByteConst fb, C3 lo, C3 hi) {
@@ -862,6 +949,47 @@ inline SharpCensus sharpCensus(const SharpGeom& gg, SvByteConst fb, C3 lo, C3 hi
   out.virt = cnt[1];
   out.film = cnt[2];
   out.fallback = cnt[3];
+  // The owner-tie keys (§5.8): the owner set of every edge, exactly as the rule forms it.
+  const MDRange3<CCExec> rng(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z});
+  long tied = 0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::vof::sharp_census_tied", rng,
+      KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+        const int k[3] = {x, y, z};
+        for (int ac = 0; ac < 3; ++ac) {
+          double sp = 0.0, gp = 0.0;
+          acc += (g.edgeTieKeys(k, ac, sp, gp) >= 2) ? 1 : 0;
+        }
+      },
+      tied);
+  double spread = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::vof::sharp_census_spread", rng,
+      KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+        const int k[3] = {x, y, z};
+        for (int ac = 0; ac < 3; ++ac) {
+          double sp = 0.0, gp = 0.0;
+          if (g.edgeTieKeys(k, ac, sp, gp) >= 2)
+            acc = Kokkos::fmax(acc, sp);
+        }
+      },
+      Kokkos::Max<double>(spread));
+  double gap = 0.0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::vof::sharp_census_gap", rng,
+      KOKKOS_LAMBDA(int x, int y, int z, double& acc) {
+        const int k[3] = {x, y, z};
+        for (int ac = 0; ac < 3; ++ac) {
+          double sp = 0.0, gp = -1.0;
+          if (g.edgeTieKeys(k, ac, sp, gp) >= 1 && gp >= 0.0)
+            acc = Kokkos::fmin(acc, gp);
+        }
+      },
+      Kokkos::Min<double>(gap));
+  out.tied = tied;
+  out.tieSpread = Kokkos::fmax(spread, 0.0);  // 0 when no edge is tied
+  if (gap < std::numeric_limits<double>::max())
+    out.untiedGap = gap;  // else none: +inf
   return out;
 }
 

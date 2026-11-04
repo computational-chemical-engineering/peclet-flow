@@ -2189,6 +2189,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
             d["virtual_cells"] = c.virt;
             d["film_cells"] = c.film;
             d["fit_fallbacks"] = c.fallback;
+            d["tied_edges"] = c.tied;
+            d["max_tie_spread"] = c.tieSpread;
+            d["min_untied_gap"] = c.untiedGap;
             return d;
           },
           "The sharp interface band of the last step, LOCAL to this rank (sum over ranks "
@@ -2196,7 +2199,14 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "'virtual_cells' (pure cells carrying a face plane), 'film_cells' (virtual cells "
           "whose two neighbours along the plane axis are both of the other phase) and "
           "'fit_fallbacks' (cells whose interface fit was singular: tau = D_nn = 0, first order "
-          "locally). All zero while the sharp interface is inactive.")
+          "locally). The edge-owner ties (§5.8; every in-domain edge of the owned cells, an edge "
+          "on a non-periodic high domain face not counted): 'tied_edges' (band edges whose owner "
+          "set, the candidates within 1e-6 cells of the closest plane, has two or more members), "
+          "'max_tie_spread' (the largest distance spread within an owner set, index units; 0.0 "
+          "if none) and 'min_untied_gap' (the smallest distance from the closest plane to a "
+          "candidate outside the owner set; inf if none) -- spread << 1e-6 << gap is the margin "
+          "the rule relies on; take max/min over ranks yourself. All zero (gap inf) while the "
+          "sharp interface is inactive.")
       .def(
           "vof_viscous_interface_fit",
           [](D& diag) {
