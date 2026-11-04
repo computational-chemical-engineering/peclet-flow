@@ -148,7 +148,7 @@ def run_case(key):
             "mom": S.mom, "fsum_rel_abs": fsum_abs, "fsum_rel_max": fsum_max, "cfl": umax * dt / h,
             "inc_default_step": inc_def, "velocity_solver": vsolver, "mom_utol": gsv1.MOM_UTOL,
             "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "secs": round(time.time() - t0, 1),
-            **({"mom_fixed": gsv1.MOM_FIXED} if gsv1.MOM_FIXED else {})}
+            "rescaled": S.rescaled, "max_gain": S.max_gain, **({"mom_fixed": gsv1.MOM_FIXED} if gsv1.MOM_FIXED else {})}
 
 
 def _run(key):

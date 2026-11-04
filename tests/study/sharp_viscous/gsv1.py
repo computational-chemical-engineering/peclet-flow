@@ -600,6 +600,9 @@ class StepMap:
     def __init__(self, s, C0, N, rho=None):
         self.s, self.C0, self.shp, self.n = s, np.asfortranarray(C0), (N, N, N), N**3
         self.steps, self.max_pit, self.max_msw, self.mom, self.max_mres = 0, 0, 0, 0.0, -1.0
+        # WO-C5 (§6.8 C): max over evaluations of CFL_out / CFL_in, the count of rescaled evaluations, and
+        # the refused step's CFL_out (vof_max_courant() read right after the throw)
+        self.max_gain, self.rescaled, self.refused_cfl = 0.0, 0, float("nan")
         self.rf = rho_face(rho) if rho is not None else None
         self.rfs = [float(np.sum(f)) for f in self.rf] if self.rf is not None else None
 
@@ -621,10 +624,20 @@ class StepMap:
             s.set_velocity(c, np.asfortranarray(x[c * n:(c + 1) * n].reshape(self.shp, order="F")))
         p = x[3 * n:]
         s.set_field("p", np.asfortranarray((p - p.mean()).reshape(self.shp, order="F")))
-        s.step()
+        dg = s.diagnostics
+        cin = float(s.vof_max_courant())
+        try:
+            s.step()
+        except RuntimeError:
+            self.refused_cfl = float(s.vof_max_courant())  # the refused step's OUTPUT velocity (§6.8 C)
+            if cin > 0.0:
+                self.max_gain = max(self.max_gain, self.refused_cfl / cin)
+            s.set_vof(self.C0)
+            raise
+        if cin > 0.0:
+            self.max_gain = max(self.max_gain, float(dg.vof_last_courant()) / cin)
         s.set_vof(self.C0)
         self.steps += 1
-        dg = s.diagnostics
         self.max_pit = max(self.max_pit, int(dg.last_pressure_iterations()))
         self.max_msw = max(self.max_msw, int(dg.last_step_timers()["momentum_sweeps"]))
         self.max_mres = max(self.max_mres, float(dg.last_momentum_residual()))
@@ -645,18 +658,32 @@ def gmres_steady(S, x0, nu, umax, m=GM_RESTART, cap=GM_CAP, tol=TOL):
     solver's round-off-level momentum error would put a component there that GMRES amplifies by
     1/lambda; the Krylov vectors are therefore kept in the gauge subspace (rho_F-weighted mean of
     each velocity component removed), as p is kept mean-free. The certificate is the unprojected
-    plain-step increment."""
+    plain-step increment.
+
+    WO-C5 (§6.8 C): an evaluation the colour-CFL guard refuses (the tail advection of the step's
+    OUTPUT) is re-evaluated by affinity at sigma' = sigma * 0.01 / CFL_out (sigma = 1 for a restart step,
+    the Krylov scaling for a matvec): S(sigma x) -> S0 + (S(sigma' x) - S0) sigma / sigma'. Bitwise no-op
+    for every evaluation that did not refuse. The certifying step stays a plain production step: a
+    restart step that refuses can never certify, and if its rescaled increment is within tol the row is
+    NOT CONVERGED ('certify_refused'). S(0) carries no amplitude to rescale: its refusal is not retried."""
     gauge = S.gauge
     S0 = S(np.zeros_like(x0))
     x, cycles = x0.copy(), 0
     while True:
-        Sx = S(x, track=True)
+        refused = False
+        try:
+            Sx = S(x, track=True)
+        except RuntimeError:
+            sg = 0.01 / S.refused_cfl
+            S.rescaled += 1
+            refused = True
+            Sx = S0 + (S(sg * x) - S0) / sg
         r = Sx - x
         inc = float(np.max(np.abs(r[:nu]))) / max(float(np.max(np.abs(x[:nu]))), 1e-300)
         if not math.isfinite(inc):
             return Sx, "blowup", S.steps, inc, cycles
         if inc <= tol:
-            return Sx, "ok", S.steps, inc, cycles
+            return Sx, ("certify_refused" if refused else "ok"), S.steps, inc, cycles
         if S.steps >= cap:
             return Sx, "not_converged", S.steps, inc, cycles
         r = gauge(r)
@@ -672,7 +699,13 @@ def gmres_steady(S, x0, nu, umax, m=GM_RESTART, cap=GM_CAP, tol=TOL):
                 break
             v = V[j]
             sc = umax / max(float(np.max(np.abs(v[:nu]))), float(np.max(np.abs(v))), 1e-300)
-            w = gauge(v - (S(sc * v) - S0) / sc)
+            try:
+                y = S(sc * v)
+            except RuntimeError:  # WO-C5: the refused step's output, rescaled by affinity
+                sc = sc * 0.01 / S.refused_cfl
+                S.rescaled += 1
+                y = S(sc * v)
+            w = gauge(v - (y - S0) / sc)
             for _ in range(2):  # MGS, twice
                 for i in range(j + 1):
                     hij = float(V[i] @ w)
@@ -783,7 +816,7 @@ def run_pcase(key, steady="gmres", want_state=False):
            "at_xi": float(dist), "mom": S.mom, "force_sum_rel": fsum / max(fmax, 1e-300),
            "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "secs": round(time.time() - t0, 1),
            "max_momentum_residual": S.max_mres, "converged_momentum": True, "mom_utol": MOM_UTOL,
-           "velocity_solver": vsolver, "inc_default_step": inc_def}
+           "velocity_solver": vsolver, "inc_default_step": inc_def, "rescaled": S.rescaled, "max_gain": S.max_gain}
     if MOM_FIXED:
         out["mom_fixed"] = MOM_FIXED
     if want_state:
@@ -856,7 +889,7 @@ def run_wcase(key):
             "mode": mode, "status": status, "steps": steps, "cycles": cycles, "inc": inc, "err": float(np.max(e)),
             "err_wall1": float(np.max(e[wd <= 1.0])), "err_interior": float(np.max(e[wd > 1.0])),
             "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "converged_momentum": True,
-            **({"mom_fixed": MOM_FIXED} if MOM_FIXED else {}),
+            "rescaled": S.rescaled, "max_gain": S.max_gain, **({"mom_fixed": MOM_FIXED} if MOM_FIXED else {}),
             "mom_utol": MOM_UTOL, "inc_default_step": inc_def, "secs": round(time.time() - t0, 1)}
 
 
