@@ -763,7 +763,10 @@ class VofCurvature {
   /// The two compaction scans: `listG_` = every interfacial cell of the GROWN region (what
   /// `reconstructPlanes` reconstructs), `listI_` = every interfacial cell of the INNER region
   /// (what the cascade runs on).  Same predicate as the passes, so the compacted and dense paths
-  /// visit exactly the same cells.
+  /// visit exactly the same cells.  A scan into a host scalar blocks on its own instance (Kokkos:
+  /// "fence due to result being a value"), so the counts need no further fence -- never a bare
+  /// `Kokkos::fence()` here: the sharp viscous interface calls this every device step, and the
+  /// step holds no global synchronization (ctest `device_sync_budget`).
   void compact(SField c) {
     const I3 e = e_, n = n_;
     const int g = g_, gr = kPvHalf;
@@ -787,7 +790,6 @@ class VofCurvature {
             }
           },
           cnt);
-      Kokkos::fence();
       nG_ = cnt;
     }
     {
@@ -809,7 +811,6 @@ class VofCurvature {
             }
           },
           cnt);
-      Kokkos::fence();
       nI_ = cnt;
     }
   }
