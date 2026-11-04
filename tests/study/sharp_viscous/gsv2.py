@@ -147,7 +147,8 @@ def run_case(key):
             "inc": inc, "K": K, "Ud": Ud, "U_hr": U_hr, "F": F, "Vh": Vh, "Rh": Rh, "phi_h": phi_h,
             "mom": S.mom, "fsum_rel_abs": fsum_abs, "fsum_rel_max": fsum_max, "cfl": umax * dt / h,
             "inc_default_step": inc_def, "velocity_solver": vsolver, "mom_utol": gsv1.MOM_UTOL,
-            "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "secs": round(time.time() - t0, 1)}
+            "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "secs": round(time.time() - t0, 1),
+            **({"mom_fixed": gsv1.MOM_FIXED} if gsv1.MOM_FIXED else {})}
 
 
 def _run(key):
@@ -196,7 +197,8 @@ def cmd_run(a):
     done = load(a.out)
     todo = [k for k in keys if k not in done]
     print(f"GSV2RUN total={len(keys)} todo={len(todo)} mom_utol={gsv1.MOM_UTOL:g}", flush=True)
-    with Pool(a.procs) as pool, open(a.out, "a") as f:
+    with Pool(a.procs, initializer=gsv1._set_mom_utol, initargs=(gsv1.MOM_UTOL, a.mom_fixed)) as pool, \
+            open(a.out, "a") as f:
         for r in pool.imap_unordered(_run, todo, chunksize=1):
             f.write(json.dumps(r) + "\n")
             f.flush()
@@ -243,6 +245,8 @@ def cmd_table(a):
             ks = " ".join(f"{d}:{r['K']:.6f}" if r and r["status"] == "ok" else f"{d}:{r['status'] if r else '-'}"
                           for d, r in zip(DOH, rows))
             mv = " ".join(f"{r['steps']}" if r else "-" for r in rows)
+            # WO-A5b: rows with a momentum component at the 200000-sweep cap, reported, NOT voiding (§6.8 A)
+            mv += f" | momcap {sum(1 for r in rows if r and r.get('max_momentum_sweeps', 0) >= gsv1.MOM_CAP)}/{len(rows)}"
             kp = k_per(kappa)
             if all(r and r["status"] == "ok" for r in rows):
                 hs = [1.0 / d for d in DOH]
@@ -279,6 +283,7 @@ def main():
     r.add_argument("--modes", default="sharp,averaged")
     r.add_argument("--procs", type=int, default=3)
     r.add_argument("--out", required=True)
+    r.add_argument("--mom-fixed", type=int, default=0)  # WO-A5b: fixed RB-GS sweeps per component (0 = off)
     for nm in ("accept", "table"):
         q = sp.add_parser(nm)
         q.add_argument("--out", required=True)

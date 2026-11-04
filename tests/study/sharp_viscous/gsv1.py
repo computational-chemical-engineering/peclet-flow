@@ -376,18 +376,25 @@ PCAP, PRTOL = 20000, 1e-13  # the production pressure driver's cap (never binds)
 # from the certified state only (its increment, expected <= 1e-11 max|u|, is reported, not judged).
 MOM_CAP, MOM_UTOL = 200000, 1e-15
 DEF_MOM_ITERS, DEF_MOM_RES = 200, -1.0
+# WO-A5b (§6.8 A): `--mom-fixed N` runs a FIXED N RB-GS sweeps per component (update and residual stops
+# off) in place of the update stop; 0 (the default) keeps the §6.6 rule above. Spot check only.
+MOM_FIXED = 0
 
 
-def _set_mom_utol(v):  # Pool initializer: the run's update stop (default the rule's 1e-15)
-    global MOM_UTOL
+def _set_mom_utol(v, fixed=0):  # Pool initializer: the run's update stop (default the rule's 1e-15)
+    global MOM_UTOL, MOM_FIXED
     MOM_UTOL = float(v)
+    MOM_FIXED = int(fixed)
 
 
 def converge_momentum(s):
     # RB-GS by name (§6.6 rule); under VoF with variable mu it is also what 'auto' resolves to
     # (the V-cycle is refused, register 212), so this only pins the uniform-mu controls (G-SV2 kappa = 1).
     s.diagnostics.set_velocity_solver("gauss_seidel")
-    s.diagnostics.set_velocity_solver_params(MOM_CAP, MOM_UTOL, 2)
+    if MOM_FIXED:
+        s.diagnostics.set_velocity_solver_params(MOM_FIXED, 0.0, 2)
+    else:
+        s.diagnostics.set_velocity_solver_params(MOM_CAP, MOM_UTOL, 2)
     s.set_velocity_residual_tolerance(0.0)
 
 
@@ -777,6 +784,8 @@ def run_pcase(key, steady="gmres", want_state=False):
            "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "secs": round(time.time() - t0, 1),
            "max_momentum_residual": S.max_mres, "converged_momentum": True, "mom_utol": MOM_UTOL,
            "velocity_solver": vsolver, "inc_default_step": inc_def}
+    if MOM_FIXED:
+        out["mom_fixed"] = MOM_FIXED
     if want_state:
         return out, uh
     return out
@@ -847,6 +856,7 @@ def run_wcase(key):
             "mode": mode, "status": status, "steps": steps, "cycles": cycles, "inc": inc, "err": float(np.max(e)),
             "err_wall1": float(np.max(e[wd <= 1.0])), "err_interior": float(np.max(e[wd > 1.0])),
             "max_p_it": S.max_pit, "max_momentum_sweeps": S.max_msw, "converged_momentum": True,
+            **({"mom_fixed": MOM_FIXED} if MOM_FIXED else {}),
             "mom_utol": MOM_UTOL, "inc_default_step": inc_def, "secs": round(time.time() - t0, 1)}
 
 
@@ -923,7 +933,7 @@ def cmd_prun(a):
     done = {k: r for k, r in pload(a.out).items() if r.get("mom_utol", 1.0) <= a.mom_utol}  # looser-stop rows redo
     todo = [kk for kk in keys if kk not in done]
     print(f"GSV1RUN set={a.set} N={a.N} total={len(keys)} todo={len(todo)} mom_utol={a.mom_utol:g}", flush=True)
-    with Pool(a.procs, initializer=_set_mom_utol, initargs=(a.mom_utol,)) as pool, open(a.out, "a") as f:
+    with Pool(a.procs, initializer=_set_mom_utol, initargs=(a.mom_utol, a.mom_fixed)) as pool, open(a.out, "a") as f:
         for r in pool.imap_unordered(_run_any, todo, chunksize=1):
             f.write(json.dumps(r) + "\n")
             f.flush()
@@ -952,6 +962,10 @@ def cmd_ptable(a):
         print(f"GSV1-DEFAULT-STEP (reported) max increment/max|u|={float(np.nanmax(idf)):.2e} over 1e-11: {len(big)}")
         for r in big[:20]:
             print(f"  default-step increment {r.get('inc_default_step', float('nan')):.2e}: {pline(r)[9:120]}")
+    # WO-A5b (§6.8 A): rows with a momentum component at the 200000-sweep cap -- reported, NOT voiding
+    capped = lambda rows: sum(1 for r in rows if r.get("max_momentum_sweeps", 0) >= MOM_CAP)
+    print(f"GSV1-MOMCAP rows with a momentum component at the {MOM_CAP}-sweep cap: {capped(res.values())}/{len(res)} "
+          f"(reported, not voiding; §6.8 A)")
     nc = [r for r in res.values() if r["status"] != "ok"]
     for r in nc:  # NOT CONVERGED (cap, step refusal): listed, never judged
         print(f"GSV1-NOTCONV {pline(r)[9:160]}")
@@ -992,7 +1006,9 @@ def cmd_ptable(a):
                         print(f"{name.upper()} {kd} ratio={r:g} m={''.join(map(str, m))} {mode} N={','.join(map(str, Ns))} "
                               f"min_offset_order={min(orders) if orders else float('nan'):.2f} "
                               f"env={','.join(f'{e:.2e}' for e in env)} env_order={envo:.2f} "
-                              f"envN2={','.join(f'{e * n * n:.3g}' for e, n in zip(env, Ns))} {verdict}")
+                              f"envN2={','.join(f'{e * n * n:.3g}' for e, n in zip(env, Ns))} "
+                              f"momcap={capped([rr for v in rows.values() for _, rr in v])}/{sum(len(v) for v in rows.values())} "
+                              f"{verdict}")
     w = {(r["N"], r["mode"]): r for r in res.values() if r["set"] == "gsv1w"}
     if w:
         Ns = sorted({n for n, _ in w})
@@ -1001,6 +1017,7 @@ def cmd_ptable(a):
                  for n in Ns)
         print("GSV1W " + " ".join(f"N={n}: sharp {w[(n, 'sharp')]['err_wall1']:.3e} averaged "
                                    f"{w[(n, 'averaged')]['err_wall1']:.3e}" for n in Ns if (n, 'sharp') in w and (n, 'averaged') in w)
+              + f" momcap={capped(w.values())}/{len(w)}"
               + f" {'PASS' if ok and Ns == [24, 32] else ('MISS' if Ns == [24, 32] else 'NOT_JUDGED(partial)')}")
 
 
@@ -1083,6 +1100,7 @@ def main():
     # every steady set (§6.6 rule, WO-6q; there is no default-solve path any more).
     r.add_argument("--converged-momentum", action="store_true")
     r.add_argument("--mom-utol", type=float, default=MOM_UTOL)  # the converged solve's RB-GS update stop
+    r.add_argument("--mom-fixed", type=int, default=0)  # WO-A5b: fixed RB-GS sweeps per component (0 = off)
     t = sp.add_parser("table")
     t.add_argument("--out", required=True)
     sp.add_parser("check")
