@@ -5,8 +5,8 @@
 /// viscosity of the band edges and the explicit band terms.
 ///
 /// Design: `doc/vof_sharp_viscous_stress.md` (§2, §5, §5.7, §7). Selected by
-/// `diagnostics.set_vof_viscous_interface("sharp")`; the default "averaged" never reaches this
-/// header, so it is bitwise today's operator.
+/// `set_vof_viscous_interface`, whose default "auto" resolves to it in scope (§9); "averaged"
+/// never reaches this header, so it is bitwise the operator before it.
 ///
 /// **Coordinates.** Solver block (ghost `G`), cell index `i = x + y·e.x + z·e.x·e.y`, cell `i`
 /// spanning `[x, x+1] × [y, y+1] × [z, z+1]` in index space; `u_c(i)` sits on the −c face of cell

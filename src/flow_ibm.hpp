@@ -1970,12 +1970,17 @@ class Solver {
   // VoF with mu = LinearMix(C) and the full stress: band edges take the PLIC face-fraction mu of
   // the row's own face in the implicit bands and the explicit transpose, plus the interface-
   // traction (tau) terms and the cell midsection term, all explicit on u^n; tau_hat / D_nn from a
-  // kinked least-squares fit per interfacial cell. `diagnostics.set_vof_viscous_interface(
-  // "sharp" | "averaged")`, default "averaged" (= today's operator, bitwise) until the gates pass.
+  // kinked least-squares fit per interfacial cell. `set_vof_viscous_interface("auto" | "sharp" |
+  // "averaged")`, default "auto" (USER 2026-11-04, note §9): resolved at each step head to sharp
+  // when VoF is on, mu = LinearMix(C) varies, the full stress is active and there are no immersed
+  // solids, porous momentum, moving scene instances or phase change; else to "averaged" (= the
+  // operator before the sharp interface, bitwise) with a one-time stderr notice. SolverColocated
+  // stays "averaged" (§8); an explicit "sharp" raises there and outside the v1 scope.
   void setVofViscousInterface(const std::string& mode);
   std::string vofViscousInterface() const;
-  // Step head, after the viscous-stress resolution: sharpActive_ for this step; an explicit
-  // "sharp" outside the v1 scope (§1, §9) raises here, before the first mutator.
+  // Step head, after the viscous-stress resolution: sharpActive_ for this step. AUTO falls back
+  // with the one-time notice; an explicit "sharp" outside the v1 scope (§1, §9) raises here,
+  // before the first mutator.
   void resolveSharpViscous();
   // After updateProperties()/updateVofCurvature(), before the momentum bands are built: the PLIC
   // planes of the current colour (reconstructed here unless the curvature cascade just did) and
@@ -5463,8 +5468,10 @@ class Solver {
   bool muUniform_ = true;    // this step's exact global test min mu == max mu (full stress skips)
   bool regDirty_ = true;     // the full-stress regular-node masks need a rebuild (geometry built)
   RegMask fsReg_[3];         // full-stress regular-node masks, 1 B/cell each (solids only)
-  bool sharpVisc_ = false;    // diagnostics.set_vof_viscous_interface("sharp") requested
-  bool sharpActive_ = false;  // ... and in force this step (resolveSharpViscous)
+  enum class SharpMode { kAuto, kSharp, kAveraged };
+  SharpMode sharpMode_ = SharpMode::kAuto;  // set_vof_viscous_interface; "auto" the DEFAULT
+  bool sharpActive_ = false;         // the sharp interface is in force this step (resolveSharpViscous)
+  bool sharpAutoNotice_ = false;     // the one-time AUTO-fallback notice was printed
   vof::SharpGeom sharpGeom_;  // this step's band geometry (views into the colour/plane blocks)
   vof::SvByte svCls_, svFb_;  // band class / fit-fallback flag, 1 B/cell each
   CCField svTau_[3], svDnn_;  // tau_hat (3) and D_nn per interfacial cell, dense (§12 Q2)

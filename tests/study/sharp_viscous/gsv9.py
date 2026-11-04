@@ -163,7 +163,7 @@ def run(args):
     s.set_advection(False)
     # Keep the driver the rho model selected (Chebyshev); only its tolerance and cap are set.
     s.set_pressure_chebyshev(True, PCAP, PRTOL)
-    s.diagnostics.set_vof_viscous_interface(mode)
+    s.set_vof_viscous_interface(mode)
     rho = rB + (rA - rB) * C0
     if geom == "pplane":
         u, v, w = solenoidal_periodic(12345)

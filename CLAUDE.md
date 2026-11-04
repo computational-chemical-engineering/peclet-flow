@@ -370,6 +370,7 @@ must agree with the solver in use (unenforced; a mismatch silently made advectio
   harmonic face μ, porous momentum, moving scenes and `SolverColocated`. **Never** use the product form
   (∇μ)·(∇u)ᵀ, and never put the term on the Picard iterate. Design `doc/full_viscous_stress.md`; ctests
   `full_stress_operator{,_np2,_np4}`, `ghost_edges_mpi_np{2,4}`; large dt `tests/study/full_stress_large_dt.py`.
+  At a VoF interface the face μ itself is the sharp operator by default (Geometric VoF, below).
 
 ## Collocated solver (`SolverColocated`)
 
@@ -438,6 +439,21 @@ ablations on `s.diagnostics`. Ref §9; rung record `doc/history/vof_workorders*.
   second order, bounded at any ratio; `'upwind'` is first order. **NEVER a slope of the mixed CV
   velocity without the cap** (`'muscl_mixed'`: wrong limit +3 % at ratio 1e3; why is OPEN, the note's
   emptying-CV diagnosis was refuted by G-D). `doc/vof_momentum_second_order.md` §12.
+- **The VoF interface viscous stress is SHARP by default** (`set_vof_viscous_interface("auto" |
+  "sharp" | "averaged")`, default `"auto"`, USER 2026-11-04; `doc/vof_sharp_viscous_stress.md`):
+  band edges take the row's own PLIC face-fraction μ (implicit band and explicit transpose), plus a
+  per-link interface-traction term from a kinked LS fit (τ̂, D̂_nn per interfacial cell) and the
+  cell-midsection force of the normal-stress jump, explicit on uⁿ: second order where every average
+  (arithmetic, harmonic, 4-cell, sub-cell) is first order on an oblique interface. AUTO = sharp on the
+  staggered `Solver` with VoF, μ = LinearMix(C) varying and the full stress active, and no solid,
+  porous momentum, moving scene or phase change; else `"averaged"` (= the earlier operator, bitwise)
+  with a one-time stderr notice. `SolverColocated` stays averaged (an explicit `"sharp"` raises
+  there, and at `step()` outside the scope or with the harmonic face μ). Read-outs
+  `diagnostics.vof_viscous_interface_census()` / `vof_viscous_interface_fit()`. Host cost
+  1.11–1.15× a step (band worklists). Not proven: the predictor+projection composite (a layered
+  periodic case is unstable at D_hi ≥ 100 sharp, ≥ 1 averaged; note §6.5) and the steady along-mode
+  order (§6.8 D, open). Gates `sharp_viscous`, `sharp_viscous_mpi_np{1,2,4}`,
+  `vof_viscous_interface_auto`; instruments `tests/study/sharp_viscous/`.
 - **Scope — say it to users:** staggered is the reference; collocated is all-fluid, ratio ~10 with
   motion (exact at rest at 1000). Colliding markers are rated since 2026-09-25
   (`doc/vof_overlap_design.md`). **Never assemble the block force from the union colour** (it

@@ -148,8 +148,8 @@ def main():
         s.set_pressure_pcg(True, 800, 1e-10)
         if a.sigma > 0:
             s.set_surface_tension(a.sigma)
-    if a.mode == "sharp":
-        s.diagnostics.set_vof_viscous_interface("sharp")
+    if a.mode == "sharp" or hasattr(s, "set_vof_viscous_interface"):  # absent on a pre-sharp build
+        s.set_vof_viscous_interface(a.mode)  # explicit both ways: the default 'auto' is sharp here
     cen = {"band_cells": 0, "virtual_cells": 0, "film_cells": 0, "fit_fallbacks": 0}
     for _ in range(a.steps):
         if a.case == "p1":

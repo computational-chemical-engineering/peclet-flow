@@ -193,7 +193,7 @@ def cmd_prod(a):
     s.set_property_model("rho", "linear", "C", [1.0, rA - 1.0])
     s.set_advection(False)
     dg = s.diagnostics
-    dg.set_vof_viscous_interface(a.mode)
+    s.set_vof_viscous_interface(a.mode)
     dg.set_incremental_pressure(bool(a.incremental))
     if a.prodsolve:
         s.set_pressure_pcg(True, 800, 1e-12)

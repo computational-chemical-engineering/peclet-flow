@@ -315,6 +315,16 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(vof_momentum_scheme_names PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # set_vof_viscous_interface('auto' | 'sharp' | 'averaged') resolves per
+  # doc/vof_sharp_viscous_stress.md §9: AUTO = sharp on the staggered Solver with VoF, mu =
+  # LinearMix(C) and the full stress; averaged + one notice with the Laplacian stress, a solid, porous
+  # momentum, phase change, the harmonic face mu or SolverColocated; an explicit 'sharp' raises there.
+  add_test(NAME vof_viscous_interface_auto
+           COMMAND ${Python_EXECUTABLE}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_vof_viscous_interface_auto.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(vof_viscous_interface_auto PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The same face plane under MPI: an x-only split at np = 3, so the +x face has one owning rank
   # and the middle rank touches neither open face; distributed == serial to 1e-12 for the outlet
   # scalar, the backflow census and a high-side inflow, both grids (doc/uf_outlet_fix.md).

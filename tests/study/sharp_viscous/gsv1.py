@@ -245,7 +245,7 @@ def run_case(key):
     if kind in ("poiseuille", "general"):
         s.set_body_force(tuple(amp * cs.t))
     s.set_pressure_pcg(True, PCAP, PRTOL)  # uniform rho: the single-rank default driver
-    s.diagnostics.set_vof_viscous_interface("sharp")
+    s.set_vof_viscous_interface("sharp")
     converge_momentum(s)  # §6.6 rule
     for comp in range(3):
         s.set_velocity(comp, np.asfortranarray(ex[comp]))
@@ -786,7 +786,7 @@ def run_pcase(key, steady="gmres", want_state=False):
         s.set_pressure_chebyshev(True, PCAP, PRTOL)
     else:  # uniform rho: the single-rank default driver, MG-PCG
         s.set_pressure_pcg(True, PCAP, PRTOL)
-    s.diagnostics.set_vof_viscous_interface(mode)
+    s.set_vof_viscous_interface(mode)
     converge_momentum(s)  # §6.6 rule: unconditional in every steady set
     s.update_properties()
     fsum = max(abs(float(np.sum(np.asarray(s.get_field("force_" + a))))) for a in "xyz")
@@ -874,7 +874,7 @@ def run_wcase(key):
     s.set_property_model("mu", "linear", "C", [cs.muB, cs.muA - cs.muB])
     s.set_advection(False)
     s.set_pressure_pcg(True, PCAP, PRTOL)  # uniform rho: the single-rank default driver
-    s.diagnostics.set_vof_viscous_interface(mode)
+    s.set_vof_viscous_interface(mode)
     converge_momentum(s)  # §6.6 rule
     S = StepMap(s, C, N)
     nu = 3 * N**3

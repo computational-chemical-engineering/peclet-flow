@@ -261,8 +261,8 @@ void Solver<Grid>::addFullStressRhsComp(int c) {
   const CCConst v[3] = {CCConst(old_[0]), CCConst(old_[1]), CCConst(old_[2])};
   if (sharpActive_) {  // the band transpose with the row's own face mu, then the band terms
     addFullStressRhs<vof::SharpFaceProps, false>(c, C[c].b, CCConst(C[c].rscale), v,
-                                                 makeSharpFaceProps(c, vof::SvRole::kExplicit), e_, G,
-                                                 u_.w[c], skipLo);
+                                                 makeSharpFaceProps(c, vof::SvRole::kExplicit), e_,
+                                                 G, u_.w[c], skipLo);
     const CCConst t[3] = {CCConst(svTau_[0]), CCConst(svTau_[1]), CCConst(svTau_[2])};
     vof::addSharpViscousRhs(c, C[c].b, CCConst(C[c].rscale), v, sharpGeom_, t, CCConst(svDnn_), G,
                             u_.w[c], skipLo, svRhsList_, svRhsN_);
@@ -617,73 +617,107 @@ void Solver<Grid>::addDragDiagonal(int c) {
 
 template <class Grid>
 void Solver<Grid>::setVofViscousInterface(const std::string& mode) {
+  if (mode == "auto") {
+    sharpMode_ = SharpMode::kAuto;
+    return;
+  }
   if (mode == "sharp") {
     if constexpr (Grid::collocated)
       throw std::runtime_error(
-          "SolverColocated.diagnostics.set_vof_viscous_interface('sharp'): the sharp viscous "
-          "interface is staggered-only (doc/vof_sharp_viscous_stress.md §8); use "
-          "peclet.flow.Solver");
-    sharpVisc_ = true;
+          "SolverColocated.set_vof_viscous_interface('sharp'): the sharp viscous interface is "
+          "staggered-only (doc/vof_sharp_viscous_stress.md §8; 'auto' resolves to 'averaged' "
+          "here); use peclet.flow.Solver");
+    sharpMode_ = SharpMode::kSharp;
     return;
   }
   if (mode == "averaged") {
-    sharpVisc_ = false;
+    sharpMode_ = SharpMode::kAveraged;
     sharpActive_ = false;
     return;
   }
   throw std::invalid_argument("set_vof_viscous_interface: unknown mode '" + mode +
-                              "' (expected 'sharp' or 'averaged')");
+                              "' (expected 'auto', 'sharp' or 'averaged')");
 }
 
 template <class Grid>
 std::string Solver<Grid>::vofViscousInterface() const {
-  return sharpVisc_ ? "sharp" : "averaged";
+  switch (sharpMode_) {
+    case SharpMode::kSharp:
+      return "sharp";
+    case SharpMode::kAveraged:
+      return "averaged";
+    default:
+      return "auto";
+  }
 }
 
 template <class Grid>
 void Solver<Grid>::resolveSharpViscous() {
+  // Re-decided every step, like the viscous-stress AUTO: the flags it reads are final at the step
+  // head. An explicit "sharp" raises outside the v1 scope (§1, §9); AUTO (the default, USER
+  // 2026-11-04) falls back to "averaged" there with a one-time stderr notice. Nothing to sharpen
+  // (no VoF, a constant or uniform mu) is silent under AUTO and inert under "sharp".
   sharpActive_ = false;
-  if (!sharpVisc_)
+  if (sharpMode_ == SharpMode::kAveraged)
     return;
-  const auto refuse = [](const char* why) {
-    throw std::runtime_error(std::string("set_vof_viscous_interface('sharp') ") + why +
-                             " (doc/vof_sharp_viscous_stress.md §1, §9); call "
-                             "diagnostics.set_vof_viscous_interface('averaged') for this "
-                             "configuration");
-  };
-  if (!vofEnabled_)
-    refuse("needs the VoF colour field (enable_vof)");
-  if (harmonicMu_)
-    refuse("replaces the harmonic face viscosity; it does not combine with it");
-  if (!varProps_)
-    return;  // a constant mu: nothing to sharpen (inert)
-  if (hasSolid_)
-    refuse("does not support immersed solids (v1)");
-  if (porous_)
-    refuse("does not support porous (eps-weighted) momentum");
-  if (hasMotion_)
-    refuse("does not support moving scene instances");
-  if (pcEnabled_)
-    refuse("does not support phase change ([u] != 0 breaks the kink model)");
-  if (!fullStressActive())
-    refuse("needs the full viscous stress (set_viscous_stress('auto' or 'full'))");
+  const bool expl = sharpMode_ == SharpMode::kSharp;
+  const char* why = nullptr;    // the refusal / fallback reason
   const Closure* cl = nullptr;  // the LAST closure writing mu is the one in force
   for (const auto& c : closures_)
     if (c.outName == "mu")
       cl = &c;
-  if (!cl || cl->kind != ClosureKind::LinearMix || cl->in0Name != "C" || !cl->in1Name.empty())
-    refuse(
+  if (!vofEnabled_) {
+    if (!expl)
+      return;
+    why = "needs the VoF colour field (enable_vof)";
+  } else if (expl && harmonicMu_)
+    why = "replaces the harmonic face viscosity; it does not combine with it";
+  else if (!varProps_)
+    return;  // a constant mu: nothing to sharpen (inert)
+  else if (Grid::collocated)
+    why = "is staggered-only (doc/vof_sharp_viscous_stress.md §8)";
+  else if (harmonicMu_)
+    why = "replaces the harmonic face viscosity; it does not combine with it";
+  else if (hasSolid_)
+    why = "does not support immersed solids (v1)";
+  else if (porous_)
+    why = "does not support porous (eps-weighted) momentum";
+  else if (hasMotion_)
+    why = "does not support moving scene instances";
+  else if (pcEnabled_)
+    why = "does not support phase change ([u] != 0 breaks the kink model)";
+  else if (!fullStressActive())
+    why = "needs the full viscous stress (set_viscous_stress('auto' or 'full'))";
+  else if (!cl || cl->kind != ClosureKind::LinearMix || cl->in0Name != "C" || !cl->in1Name.empty())
+    why =
         "supports mu = LinearMix(C) only, set_property_model('mu', 'linear', 'C', [mu_0, mu_1 - "
-        "mu_0]) (v1, §12 Q7)");
+        "mu_0]) (v1, §12 Q7)";
   vof::SharpGeom& g = sharpGeom_;
-  g.p0 = cl->p[0];
-  g.p1 = cl->p[1];
-  g.muB = g.p0;         // mu(0)
-  g.muA = g.p0 + g.p1;  // mu(1)
-  if (g.muA == g.muB)
-    return;  // uniform mu: inert, the skip rule of the full stress
-  if (!(g.muA > 0.0 && g.muB > 0.0))
-    refuse("needs positive phase viscosities");
+  if (why == nullptr) {
+    g.p0 = cl->p[0];
+    g.p1 = cl->p[1];
+    g.muB = g.p0;         // mu(0)
+    g.muA = g.p0 + g.p1;  // mu(1)
+    if (g.muA == g.muB)
+      return;  // uniform mu: inert, the skip rule of the full stress
+    if (!(g.muA > 0.0 && g.muB > 0.0))
+      why = "needs positive phase viscosities";
+  }
+  if (why != nullptr) {
+    if (expl)
+      throw std::runtime_error(std::string("set_vof_viscous_interface('sharp') ") + why +
+                               " (doc/vof_sharp_viscous_stress.md §1, §9); call "
+                               "set_vof_viscous_interface('averaged') for this configuration");
+    if (!sharpAutoNotice_) {
+      sharpAutoNotice_ = true;
+      fprintf(stderr,
+              "peclet::flow %s: AUTO viscous interface fell back to 'averaged' (the sharp "
+              "interface %s; doc/vof_sharp_viscous_stress.md §9). Select explicitly with "
+              "set_vof_viscous_interface to silence this notice.\n",
+              Grid::collocated ? "SolverColocated" : "Solver", why);
+    }
+    return;
+  }
   g.lowA = g.muA < g.muB;
   g.mulo = g.lowA ? g.muA : g.muB;
   g.r = g.lowA ? g.muA / g.muB : g.muB / g.muA;

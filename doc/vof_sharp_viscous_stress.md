@@ -1379,11 +1379,15 @@ the design. Default until then: collocated stays averaged.
 
 ## 9. API and defaults
 
-- **Setter (tier and name are the user's call, §12 Q3).**
-  - Proposed: `s.diagnostics.set_vof_viscous_interface("sharp" | "averaged")` while it is being built.
-  - On promotion: AUTO resolves to "sharp" when VoF is on, μ = LinearMix(C), full stress is active and
-    neither phase change nor porous momentum is on.
-  - "averaged" reproduces today's numbers bitwise.
+- **Setter (§12 Q3; LANDED 2026-11-04, USER: sharp is the default).**
+  - `s.set_vof_viscous_interface("auto" | "sharp" | "averaged")` on the public tier, default "auto";
+    getter `s.vof_viscous_interface()`. The build-time `s.diagnostics.set_vof_viscous_interface`
+    never shipped and is gone (no alias, QUALITY_PLAN D2).
+  - AUTO resolves at each step head to "sharp" when VoF is on, μ = LinearMix(C) varies, full stress
+    is active and neither phase change, porous momentum, an immersed solid nor moving scene instances
+    are present; else to "averaged" with a one-time stderr notice. `SolverColocated` resolves AUTO to
+    "averaged" (§8).
+  - "averaged" reproduces the pre-sharp numbers bitwise.
 - **Refusals and notices.**
   - harmonic=True with sharp: raises, since sharp replaces it.
   - Non-LinearMix μ, or phase change: AUTO falls back to averaged with a one-time stderr notice; an
@@ -1521,7 +1525,11 @@ T-terms, midsection term, all on `old_`.
   S(0), every matvec and the certificate step, unconditionally in every steady set (remove the option's
   default-off path for gated sets). Add the reported default-step increment. Rerun G-SV1P/1dP/1cP
   (N 24/32 host, 48/64 CUDA) and G-SV1W. Acceptance: the WO-6p invariance Σρ_F u_c ≤ 1e-13·Σρ_F·max|u|
-  on every case; no case judged from a default-solve run.
+  on every case; no case judged from a default-solve run. **Amended 2026-11-02 (USER, post-data):**
+  rows the GMRES driver hands to the march fallback are EXCLUDED from the 1e-13 criterion and listed
+  instead (the march, stop 1e-15 over ~1500 steps, accumulates the translation-mode drift ~(1+6D)×stop
+  per step: an instrument property). The GMRES rows judge the operator: WO-6p PASS 12/12
+  (≤ 3.0e-14); the two march rows read 1.0e-11 and 4.5e-12.
 - **WO-6a′ (periodic energy).** `gsv9.py` on a periodic box judges E′ (§6.5 finding 1) and prints E;
   `gsv9_split.py prod` on a periodic box M-orthogonally projects the three translations out of every
   Arnoldi vector. Acceptance: E8 (`--frac 0.25`) then reports ρ = 0.969 ± 1e-3 instead of 1.0000;
@@ -1779,7 +1787,7 @@ slope of log e against log h over the stated resolutions.
 |---|---|---|---|
 | Q1 | 3-D stability margin (2-D measured; 3-D adds a third shear plane) | **fact** — ANSWERED (third pass, §6.1) | Not a 3-D mode: the cell split. WO-5b; the 3-D margin after it is Q14. |
 | Q2 | Memory for 4 extra fields at d/h ≥ 48 on 16 GB | **fact** (measure free memory at P1 d/h 48) | Dense fields. Switch to worklist storage if they exceed 10 % of free device memory. |
-| Q3 | Name and tier of the setter | **user preference** (docs/NAMING.md) | `diagnostics.set_vof_viscous_interface("sharp"\|"averaged")` until the gates pass. |
+| Q3 | Name and tier of the setter | **user preference** (docs/NAMING.md) | `diagnostics.set_vof_viscous_interface("sharp"\|"averaged")` until the gates pass. DECIDED 2026-11-04 (USER): public `set_vof_viscous_interface("auto"\|"sharp"\|"averaged")`, default "auto" (§9). |
 | Q4 | AUTO = sharp after the gates | **user preference** | Yes: the user named it priority. Make it its own commit and register entry. |
 | Q5 | G-SV2 reference in a periodic box | **fact** | Gate on the self-convergence order. The HR periodic-corrected value is a 3 % sanity check. |
 | Q6 | Interfaces touching walls or contact lines (fit links cut by the wall) | **fact** (census near walls; G-SV1W) | Drop links outside the domain. Fallback to 'facef' if the fit is singular. Report in the census. Third pass: the contact-line error (hat R̄ on a half-link) is out of scope while G-SV1W passes; WO-W parked (§6.3). |

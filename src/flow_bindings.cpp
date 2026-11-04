@@ -2181,25 +2181,6 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
           "vof_momentum_scheme", [](D& diag) { return diag.s->vofMomentumScheme(); },
           "The selected VoF momentum scheme (see set_vof_momentum_scheme).")
       .def(
-          "set_vof_viscous_interface",
-          [](D& diag, const std::string& mode) { diag.s->setVofViscousInterface(mode); },
-          nb::arg("mode"),
-          "The viscous stress at the VoF interface (flow doc/vof_sharp_viscous_stress.md). "
-          "'averaged' (the DEFAULT): today's operator, the cell mu(C) and the 4-cell mean on the "
-          "MAC edges, first order across an oblique interface. 'sharp': on every band edge the "
-          "row's own PLIC face-fraction viscosity (implicit band and explicit transpose), a "
-          "per-link interface-traction correction from a kinked least-squares fit of the "
-          "interface state, and the cell midsection force of the normal-stress jump 2[mu]D_nn "
-          "(explicit on u^n) - second order. 'sharp' needs the staggered Solver, VoF, mu = "
-          "LinearMix(C) (set_property_model('mu', 'linear', 'C', ...)) and the full viscous "
-          "stress; step() raises with the harmonic face viscosity, immersed solids, porous "
-          "momentum, moving scene instances or phase change. Inert for a uniform mu. A cell is "
-          "interfacial iff eps < C < 1 - eps with eps = vof_interface_eps() (the wisp guard, "
-          "default 1e-8), with or without surface tension. Any other mode raises ValueError.")
-      .def(
-          "vof_viscous_interface", [](D& diag) { return diag.s->vofViscousInterface(); },
-          "The selected viscous interface mode (see set_vof_viscous_interface).")
-      .def(
           "vof_viscous_interface_census",
           [](D& diag) {
             const auto c = diag.s->vofViscousInterfaceCensus();
@@ -2547,6 +2528,28 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "instances. With solids it stays allowed, but it drops the transpose flux across the "
            "staircase face: an O(gamma h) near-wall error on oblique walls (gamma the wall shear "
            "rate), present for any non-uniform mu; the repair is open.")
+      .def("set_vof_viscous_interface", &S::setVofViscousInterface, nb::arg("mode"),
+           "The viscous stress at the VoF interface (doc/vof_sharp_viscous_stress.md): 'auto' "
+           "(default), 'sharp' or 'averaged'. 'averaged' = the cell mu(C) and the 4-cell mean on "
+           "the MAC edges, first order across an oblique interface (the operator before the "
+           "sharp interface; it reproduces earlier numbers bitwise). 'sharp' = on every band edge "
+           "the row's own PLIC face-fraction viscosity (implicit band and explicit transpose), a "
+           "per-link interface-traction correction from a kinked least-squares fit of the "
+           "interface state, and the cell midsection force of the normal-stress jump 2[mu]D_nn "
+           "(explicit on u^n): second order. 'auto' resolves at each step to 'sharp' when VoF is "
+           "on, mu = LinearMix(C) (set_property_model('mu', 'linear', 'C', ...)) varies and the "
+           "full viscous stress is active (set_viscous_stress), with no immersed solid, porous "
+           "momentum, moving scene instances or phase change; else to 'averaged' with a one-time "
+           "stderr notice. SolverColocated always resolves 'auto' to 'averaged' and raises on "
+           "'sharp'. An explicit 'sharp' raises at step() outside that scope and with the "
+           "harmonic face viscosity. Inert for a constant mu. A cell is interfacial iff eps < C "
+           "< 1 - eps with eps = diagnostics.vof_interface_eps() (the wisp guard, default 1e-8). "
+           "Read-outs: diagnostics.vof_viscous_interface_census() / vof_viscous_interface_fit(). "
+           "Any other mode raises ValueError.")
+      .def("vof_viscous_interface", &S::vofViscousInterface,
+           "The selected VoF viscous interface mode, 'auto', 'sharp' or 'averaged' (see "
+           "set_vof_viscous_interface; what 'auto' resolved to shows in "
+           "diagnostics.vof_viscous_interface_census()).")
       .def("set_dt", &S::setDt, nb::arg("dt"),
            "Set the time step dt (the caller's time unit); the momentum solve is scaled by 1/dt "
            "(well-conditioned at large dt). Under a physical domain the FIRST call pins the "

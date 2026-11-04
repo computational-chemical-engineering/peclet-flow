@@ -125,7 +125,7 @@ def run_case(key):
         s.set_field("force_" + "xyz"[c], np.asfortranarray(sc * fz if c == 2 else np.zeros((N, N, N))))
     s.set_advection(False)
     s.set_pressure_pcg(True, gsv1.PCAP, gsv1.PRTOL)  # uniform rho: the single-rank default driver
-    s.diagnostics.set_vof_viscous_interface(mode)
+    s.set_vof_viscous_interface(mode)
     gsv1.converge_momentum(s)  # §6.6 rule
     s.update_properties()
     fr = np.asarray(s.get_field("force_z"))
