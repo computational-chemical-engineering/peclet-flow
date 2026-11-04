@@ -9,7 +9,8 @@ cell towards +c -- first-order accurate, and in a walled direction a mirror asym
 src/face_props.hpp). Two checks:
 
   1. mirror pair -- solver A and its y-mirror B (cell fields reflected, v negated onto the mirrored
-     face), same fixed dt, A(y) against mirror(B)(y) after a few steps. Round-off only (~1e-14);
+     face), same fixed dt, A(y) against mirror(B)(y) after a few steps. Round-off only (~1e-14;
+     the velocity gate is 1e-12 in every row);
      the shifted viscosity gave 1e-3..1e-2. Variants: single phase with a transported scalar
      driving rho, the body force and (or not) mu, arithmetic and harmonic viscosity means; the
      structured VoF with CSF; the block container with its per-marker CSF. The blob touches the
@@ -111,19 +112,30 @@ def build(mode, mirror, variable_mu=True, harmonic=False, full=False):
     return s
 
 
+# The sharp viscous interface's edge-owner ties of run A after the first step (flow
+# doc/vof_sharp_viscous_stress.md §5.8, WO-9.1): the blob's y-symmetry plane lies on a grid face,
+# so mirror-image cells tie at its edges. All n_E = 2; the owner-set mean makes the step
+# mirror-equivariant to round-off (single-owner tie-breaks left 3e-5 / 8e-5).
+TIED_EDGES = {"vof": 78, "blocks": 92}
+
+
 def mirror_asymmetry(mode, **kw):
     A, B = build(mode, False, **kw), build(mode, True, **kw)
-    for _ in range(NSTEPS):
+    ties = None
+    for n in range(NSTEPS):
         for s in (A, B):
             s.set_dt(DT)
             s.step()
+        if n == 0 and kw.get("full") and mode in TIED_EDGES:
+            c = A.diagnostics.vof_viscous_interface_census()
+            ties = (c["tied_edges"], c["max_tie_spread"])
 
     def rel(a, b):
         return float(np.abs(a - b).max() / np.abs(a).max())
 
     vel = max(rel(A.get_u(), mir_c(B.get_u())), rel(A.get_v(), mir_v(B.get_v())),
               rel(A.get_w(), mir_c(B.get_w())))
-    return vel, rel(A.get_p(), mir_c(B.get_p()))
+    return vel, rel(A.get_p(), mir_c(B.get_p())), ties
 
 
 def steady_varmu_error(N, A=1e-3, nz=4):
@@ -187,10 +199,14 @@ def main():
              ("structured VoF + CSF, full stress", "vof", {"full": True}),
              ("block VoF + CSF, full stress", "blocks", {"full": True})]
     for name, mode, kw in cases:
-        vel, p = mirror_asymmetry(mode, **kw)
-        good = vel < 1e-10 and p < 1e-8  # p carries the 1e-12 PCG tolerance, not round-off
+        vel, p, ties = mirror_asymmetry(mode, **kw)
+        good = vel <= 1e-12 and p < 1e-8  # p carries the 1e-12 PCG tolerance, not round-off
+        extra = ""
+        if ties is not None:  # the sharp rows: the owner ties are pinned (G-SV12)
+            good &= ties[0] == TIED_EDGES[mode] and ties[1] <= 1e-9
+            extra = f"  tied edges {ties[0]} (want {TIED_EDGES[mode]}), spread {ties[1]:.1e}"
         ok &= good
-        print(f"mirror  {name:28s} velocity {vel:.2e}  pressure {p:.2e}  "
+        print(f"mirror  {name:28s} velocity {vel:.2e}  pressure {p:.2e}{extra}  "
               f"{'ok' if good else 'FAIL'}")
     e16, e32 = steady_varmu_error(16), steady_varmu_error(32)
     order = np.log2(e16 / e32)
