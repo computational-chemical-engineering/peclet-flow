@@ -186,16 +186,18 @@ std::vector<std::array<double, 6>> queryEdges(const Geo& o, const std::vector<Ed
         const int k[3] = {qd(5 * t), qd(5 * t + 1), qd(5 * t + 2)};
         const int a = qd(5 * t + 3), c = qd(5 * t + 4), b = 3 - a - c;
         double dmax = 0.0;
-        const int n = g.forEachOwner(k, a, c, [&](const int ow[3], const double m[3], double al) {
-          double xi[3];
-          xi[a] = k[a] - ow[a];
-          xi[c] = k[c] - ow[c];
-          xi[b] = 0.5;
-          dmax = Kokkos::fmax(dmax, Kokkos::fabs(m[0] * xi[0] + m[1] * xi[1] + m[2] * xi[2] - al) /
-                                        Kokkos::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]));
-        });
+        const double n =
+            g.forEachOwner(k, a, c, [&](const int ow[3], const double m[3], double al, double) {
+              double xi[3];
+              xi[a] = k[a] - ow[a];
+              xi[c] = k[c] - ow[c];
+              xi[b] = 0.5;
+              dmax =
+                  Kokkos::fmax(dmax, Kokkos::fabs(m[0] * xi[0] + m[1] * xi[1] + m[2] * xi[2] - al) /
+                                         Kokkos::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]));
+            });
         out(6 * t) = n;
-        if (n == 0)
+        if (n == 0.0)
           return;
         out(6 * t + 1) = dmax;
         double f = 0.0, tac = 0.0, tca = 0.0;
@@ -1158,10 +1160,13 @@ void testReflection() {
         for (int ac = 0; ac < 3; ++ac) {
           const int a = (ac == 2) ? 1 : 0, c = (ac == 0) ? 1 : 2;
           const long o7 = 21 * i + 7 * ac;
-          const int n = g.forEachOwner(k, a, c, [](const int*, const double*, double) {});
-          out(o7) = n;
-          if (n == 0)
+          const double W =
+              g.forEachOwner(k, a, c, [](const int*, const double*, double, double) {});
+          if (W == 0.0)
             continue;
+          double sp = 0.0, gp = 0.0;
+          bool bl = false;
+          out(o7) = g.edgeTieKeys(k, ac, sp, gp, bl);  // n_E: the plateau members (census)
           double f = 0.0, tac = 0.0, tca = 0.0;
           g.edgeFaceFraction(k, a, c, a, f);
           out(o7 + 1) = f;
@@ -1216,6 +1221,45 @@ void testReflection() {
         census.tied);
   CHECK(badN == 0, "n_E reflection-invariant");
   CHECK(worst <= 1e-13, "reflection self-symmetry %.2e", worst);
+}
+
+// (j) §5.9 item 7: the owner weight -- plateau, C¹ ramp, zero; evaluated in the execution space.
+void testOwnerWeight() {
+  constexpr double t0 = sv::kSvOwnerTieTol, t1 = sv::kSvOwnerRampTol;
+  constexpr int nS = 100000;
+  const double K = 1.5 / (t1 - t0), hh = 1e-9;
+  DV out("ownerWeight", nS + 1 + 7);
+  Kokkos::parallel_for(
+      "test::ownerWeight", Kokkos::RangePolicy<CCExec>(0, nS + 1), KOKKOS_LAMBDA(int i) {
+        out(i) = sv::ownerWeight(2.0 * t1 * (double)i / (double)nS);
+        if (i == 0) {
+          out(nS + 1) = sv::ownerWeight(0.0);
+          out(nS + 2) = sv::ownerWeight(t0);
+          out(nS + 3) = sv::ownerWeight(t1);
+          out(nS + 4) = sv::ownerWeight(2.0 * t1);
+          out(nS + 5) = sv::ownerWeight(Kokkos::Experimental::quiet_NaN<double>::value);
+          out(nS + 6) = sv::ownerWeight(t0 + hh);
+          out(nS + 7) = sv::ownerWeight(t1 - hh);
+        }
+      });
+  const auto h = toHost(out);
+  long nInc = 0;
+  double slope = 0.0;
+  for (int i = 0; i < nS; ++i) {
+    nInc += h[i + 1] > h[i];
+    slope = std::max(slope, std::fabs(h[i + 1] - h[i]) / (2.0 * t1 / nS));
+  }
+  const double e2 = 3.0 * (hh / (t1 - t0)) * (hh / (t1 - t0));
+  std::printf(
+      "(j) owner weight: w(0) %g w(t0) %g w(t1) %g w(2t1) %g w(NaN) %g; %ld increases on %d "
+      "points, max slope %.6e (K %.6e); 1 - w(t0 + h) %.3e, w(t1 - h) %.3e (bound %.3e)\n",
+      h[nS + 1], h[nS + 2], h[nS + 3], h[nS + 4], h[nS + 5], nInc, nS + 1, slope, K,
+      1.0 - h[nS + 6], h[nS + 7], e2);
+  CHECK(h[nS + 1] == 1.0 && h[nS + 2] == 1.0, "w = 1 exactly on the plateau");
+  CHECK(h[nS + 3] == 0.0 && h[nS + 4] == 0.0 && h[nS + 5] == 0.0, "w = 0 from t1 on and at NaN");
+  CHECK(nInc == 0, "w non-increasing (%ld increases)", nInc);
+  CHECK(slope <= K * (1.0 + 1e-9), "|dw/dg| <= K (%.6e)", slope);
+  CHECK(std::fabs(1.0 - h[nS + 6]) <= e2 && std::fabs(h[nS + 7]) <= e2, "C1 at both ends");
 }
 
 // FNV-1a over the bytes of a double array (the tie-free identity's digest).
@@ -1545,6 +1589,7 @@ int main(int argc, char** argv) {
     testPatch();
     testReflection();
     testTieFree();
+    testOwnerWeight();
   }
   Kokkos::finalize();
   if (failures)

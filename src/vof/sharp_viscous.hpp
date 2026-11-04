@@ -19,11 +19,13 @@
 /// b-layer `k_b`: the edge shared by cells `k, k−s_a, k−s_c, k−s_a−s_c`. It is the −a edge of the
 /// u_c control volume of cell `k` and the −c edge of the u_a control volume of cell `k`.
 ///
-/// **Owner set and mean; offset order for sums only (§5.7, §5.8).** An edge has no single owner:
-/// every interfacial cell of the edge whose plane passes within τ_own (`kSvOwnerTieTol`) of the
-/// closest forms its owner set, and each output at the edge (face and link fractions, the
-/// interface-traction term) is the arithmetic mean of the single-owner outputs over that set. The
-/// fixed offset order -- lexicographic in (dz, dy, dx), x fastest; on a block with ghost layers the
+/// **Owner set and weighted mean; plateau τ₀, C¹ ramp to τ₁; offset order for sums only (§5.7,
+/// §5.8, §5.9).** An edge has no single owner: every interfacial cell t of the edge takes the
+/// weight w(d_t − d_min) (`ownerWeight`: 1 on the plateau g ≤ τ₀ = `kSvOwnerTieTol`, a C¹
+/// smoothstep down to 0 at τ₁ = `kSvOwnerRampTol`; the closest cell always 1), its owner set is
+/// {w > 0}, and each output at the edge (face and link fractions, the interface-traction term) is
+/// the weighted mean Σ w G / Σ w of the single-owner outputs over that set. The fixed offset
+/// order -- lexicographic in (dz, dy, dx), x fastest; on a block with ghost layers the
 /// order of the LOCAL linear index, translation-invariant across a periodic seam and a rank
 /// boundary (never the global index) -- orders every sum over the cells of an edge (the owner-set
 /// means, τ̂); it never decides a winner.
@@ -65,6 +67,24 @@ constexpr int kSvNormalItems = 27, kSvItems = 27 + 144, kSvRows = 81 + 288, kSvE
 /// plane distance is within τ_own of the closest form its owner set. Exceeds the round-off spread
 /// of exact ties (≤ 1e-12 measured, ~1e-8 bounded) by ≥ 60×; far from every structural gap.
 constexpr double kSvOwnerTieTol = 1e-6;
+
+/// The end of the owner-weight ramp τ₁ (§5.9), index units, absolute: a candidate whose distance
+/// exceeds the closest by g ∈ (τ₀, τ₁) takes a partial weight, by g ≥ τ₁ none. One decade keeps
+/// the ramp's slope K = 1.5/(τ₁ − τ₀) small enough that round-off in g moves no output visibly.
+constexpr double kSvOwnerRampTol = 1e-5;
+
+/// The owner weight of a candidate whose plane distance exceeds the closest by g (§5.9 a): 1 on
+/// the plateau g ≤ τ₀, s²(3 − 2s) with s = (τ₁ − g)/(τ₁ − τ₀) on the ramp, 0 from τ₁ on and for
+/// NaN. Continuous and C¹; exactly 1.0 or 0.0 off the ramp, so an edge with no candidate on the
+/// ramp is the unweighted owner-set mean bit for bit.
+KOKKOS_INLINE_FUNCTION static double ownerWeight(double g) {
+  if (g <= kSvOwnerTieTol)
+    return 1.0;
+  if (!(g < kSvOwnerRampTol))
+    return 0.0;
+  const double s = (kSvOwnerRampTol - g) / (kSvOwnerRampTol - kSvOwnerTieTol);
+  return s * s * (3.0 - 2.0 * s);
+}
 
 /// The compacted interfacial cells of a fit (local linear indices), the device fit's worklist.
 using SvList = Kokkos::View<long*, CCMem>;
@@ -170,13 +190,15 @@ struct SharpGeom {
     return mask;
   }
 
-  /// The owner set of E_ac(k) (§5.8 items 1–2): pass 1 (`edgeDistances`), d_min over K_E, and
-  /// T_E = {t ∈ K_E : d_t ≤ d_min + τ_own}, compared exactly so on the stored d_t. Returns K_E's
-  /// mask in bits 0–3 and T_E's in bits 4–7 (0: E is not a band edge). The closest candidate
-  /// (first in offset order, the f01a251 owner) is a member by construction: a no-op for finite
-  /// distances, and with a NaN distance it keeps n_E ≥ 1 iff K_E ≠ ∅ (the fit-fallback path).
+  /// The owner set of E_ac(k) (§5.8 items 1–2, §5.9 item 3): pass 1 (`edgeDistances`), d_min
+  /// over K_E, the weights w[t] = w(d_t − d_min) (`ownerWeight`) for t ∈ K_E, 0 otherwise, from
+  /// the stored d_t (never recomputed). Returns K_E's mask in bits 0–3 and the plateau set
+  /// T_E = {t ∈ K_E : d_t − d_min ≤ τ₀} in bits 4–7 (0: E is not a band edge); the owner set is
+  /// {w > 0} ⊇ T_E. The closest candidate (first in offset order, the f01a251 owner) is in T_E
+  /// with w = 1 by construction: a no-op for finite distances, and with a NaN distance it keeps
+  /// Σ w ≥ 1 iff K_E ≠ ∅ (the fit-fallback path).
   KOKKOS_INLINE_FUNCTION int edgeOwnerSet(const int k[3], int a, int c, double dist[4],
-                                          double& dmin) const {
+                                          double& dmin, double w[4]) const {
     const int kmask = edgeDistances(k, a, c, dist);
     dmin = 0.0;
     int best = -1;  // the closest, first in offset order: always a member (item 3, n_E >= 1 iff
@@ -186,90 +208,106 @@ struct SharpGeom {
         dmin = dist[t];
         best = t;
       }
-    int tmask = (best < 0) ? 0 : (1 << best);
-    for (int t = 0; t < 4; ++t)
-      if (((kmask >> t) & 1) && dist[t] <= dmin + kSvOwnerTieTol)
+    int tmask = 0;
+    for (int t = 0; t < 4; ++t) {
+      w[t] = 0.0;
+      if (!((kmask >> t) & 1))
+        continue;
+      const double g = dist[t] - dmin;
+      if (t == best || g <= kSvOwnerTieTol)
         tmask |= 1 << t;
+      w[t] = (t == best) ? 1.0 : ownerWeight(g);
+    }
     return kmask | (tmask << 4);
   }
 
-  /// The census keys of edge E_ac(k), ac = 0, 1, 2 for (a, c) = (0,1), (0,2), (1,2) (§5.8): n_E
-  /// (0 off the domain or off the band); `spread` = max_{T_E} d_t − d_min; `gap` = min_{K_E∖T_E}
-  /// d_t − d_min, left as passed when K_E = T_E.
-  KOKKOS_INLINE_FUNCTION int edgeTieKeys(const int k[3], int ac, double& spread,
-                                         double& gap) const {
+  /// The census keys of edge E_ac(k), ac = 0, 1, 2 for (a, c) = (0,1), (0,2), (1,2) (§5.8; plateau
+  /// semantics, §5.9 item 5): n_E = |T_E|, the plateau members (0 off the domain or off the band);
+  /// `spread` = max_{T_E} d_t − d_min; `gap` = min_{K_E∖T_E} d_t − d_min, left as passed when
+  /// K_E = T_E; `blended` set iff a candidate lies on the ramp, τ₀ < d_t − d_min < τ₁ (left as
+  /// passed otherwise).
+  KOKKOS_INLINE_FUNCTION int edgeTieKeys(const int k[3], int ac, double& spread, double& gap,
+                                         bool& blended) const {
     const int a = (ac == 2) ? 1 : 0, c = (ac == 0) ? 1 : 2;
     if (!edgeInDomain(k, a, c))
       return 0;
-    double dist[4], dmin;
-    const int m = edgeOwnerSet(k, a, c, dist, dmin);
+    double dist[4], dmin, w[4];
+    const int m = edgeOwnerSet(k, a, c, dist, dmin, w);
     int nE = 0;
     for (int t = 0; t < 4; ++t) {
       if (!((m >> t) & 1))
         continue;
+      const double g = dist[t] - dmin;
       if ((m >> (4 + t)) & 1) {
         ++nE;
-        spread = Kokkos::fmax(spread, dist[t] - dmin);
+        spread = Kokkos::fmax(spread, g);
       } else {
-        gap = (gap < 0.0) ? dist[t] - dmin : Kokkos::fmin(gap, dist[t] - dmin);
+        gap = (gap < 0.0) ? g : Kokkos::fmin(gap, g);
+        if (g > kSvOwnerTieTol && g < kSvOwnerRampTol)
+          blended = true;
       }
     }
     return nE;
   }
 
-  /// The owner set of E_ac(k) (§5.2, §5.8): calls `f(o, m, α)` for each member of T_E -- the
-  /// interfacial cells whose plane distance from the edge midpoint is within τ_own of the closest
-  /// -- with its plane, in the fixed offset order, and returns n_E = |T_E| (0: E is not a band
-  /// edge). A caller sums each output from 0.0 over the calls in this order and divides once by
-  /// n_E: at n_E = 1 that is the single closest cell's output, bit for bit.
+  /// The owner set of E_ac(k) (§5.2, §5.8, §5.9 item 4): calls `f(o, m, α, w)` for each member
+  /// -- the interfacial cells of positive weight w = w(d_t − d_min), whose plane distance from the
+  /// edge midpoint is within τ₁ of the closest -- with its plane and weight, in the fixed offset
+  /// order, and returns W = Σ w, summed in that order (0.0: E is not a band edge). A caller sums
+  /// w·G from 0.0 over the calls in this order and divides once by W: with no candidate on the
+  /// ramp every w is 1.0 or 0.0 and W the integer n_E, so at n_E = 1 that is the single closest
+  /// cell's output, bit for bit.
   template <class F>
-  KOKKOS_INLINE_FUNCTION int forEachOwner(const int k[3], int a, int c, F&& f) const {
-    double dist[4], dmin;
-    const int ms = edgeOwnerSet(k, a, c, dist, dmin);
+  KOKKOS_INLINE_FUNCTION double forEachOwner(const int k[3], int a, int c, F&& f) const {
+    double dist[4], dmin, w[4];
+    edgeOwnerSet(k, a, c, dist, dmin, w);
     int da[4], dc[4];
     edgeCells(a, c, da, dc);
-    int n = 0;
+    double W = 0.0;
     for (int t = 0; t < 4; ++t) {
-      if (!((ms >> (4 + t)) & 1))
+      if (!(w[t] > 0.0))
         continue;
       int q[3] = {k[0], k[1], k[2]};
       q[a] -= da[t];
       q[c] -= dc[t];
       double m[3], al;
       plane(q, cellClass(q), m, al);
-      f(q, m, al);
-      ++n;
+      f(q, m, al, w[t]);
+      W += w[t];
     }
-    return n;
+    return W;
   }
 
-  /// F̄_row(E_ac(k)), row ∈ {a, c} (§5.8 item 4): the owner-set mean of the C = 1 fraction of the
-  /// u_row face. False on a non-band edge (`f` untouched).
+  /// F̄_row(E_ac(k)), row ∈ {a, c} (§5.8 item 4, §5.9): the owner-set weighted mean of the C = 1
+  /// fraction of the u_row face. False on a non-band edge (`f` untouched).
   KOKKOS_INLINE_FUNCTION bool edgeFaceFraction(const int k[3], int a, int c, int row,
                                                double& f) const {
     double acc = 0.0;
-    const int n = forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al) {
-      acc += rowFaceFraction(k, a, c, row, o, m, al);
-    });
-    if (n == 0)
+    const double W =
+        forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al, double w) {
+          acc += w * rowFaceFraction(k, a, c, row, o, m, al);
+        });
+    if (W == 0.0)
       return false;
-    f = acc / (double)n;
+    f = acc / W;
     return true;
   }
 
-  /// θ̄_ac and θ̄_ca at E_ac(k) (§5.8 item 4): the owner-set means of the C = 1 fractions of the
-  /// shear links ∂_a u_c and ∂_c u_a. False on a non-band edge (outputs untouched).
+  /// θ̄_ac and θ̄_ca at E_ac(k) (§5.8 item 4, §5.9): the owner-set weighted means of the C = 1
+  /// fractions of the shear links ∂_a u_c and ∂_c u_a. False on a non-band edge (outputs
+  /// untouched).
   KOKKOS_INLINE_FUNCTION bool edgeLinkFractions(const int k[3], int a, int c, double& tac,
                                                 double& tca) const {
     double sac = 0.0, sca = 0.0;
-    const int n = forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al) {
-      sac += linkFraction(k, a, c, o, m, al);
-      sca += linkFraction(k, c, a, o, m, al);
-    });
-    if (n == 0)
+    const double W =
+        forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al, double w) {
+          sac += w * linkFraction(k, a, c, o, m, al);
+          sca += w * linkFraction(k, c, a, o, m, al);
+        });
+    if (W == 0.0)
       return false;
-    tac = sac / (double)n;
-    tca = sca / (double)n;
+    tac = sac / W;
+    tca = sca / W;
     return true;
   }
 
@@ -343,8 +381,8 @@ struct SharpGeom {
     }
   }
 
-  /// The explicit interface-traction part of the u_row stress at E_ac(k) (§5.4 a, §5.8), row ∈
-  /// {a, c}: the owner-set mean of the single-owner term
+  /// The explicit interface-traction part of the u_row stress at E_ac(k) (§5.4 a, §5.8, §5.9),
+  /// row ∈ {a, c}: the owner-set weighted mean of the single-owner term
   ///   n_a τ̂_c (1 − μ̄ R̄_ac) + n_c τ̂_a (1 − μ̄ R̄_ca),  μ̄ = μ(F_row(E)),
   /// (n, F and R from the member's plane, τ̂ the interfacial mean) -- per member, then the mean:
   /// μ(F̄)R(L̄) is not the mean of μR. Zero on a non-band edge.
@@ -352,21 +390,22 @@ struct SharpGeom {
                                              const CCConst (&tau)[3]) const {
     double t[3] = {0.0, 0.0, 0.0}, acc = 0.0;
     bool haveTau = false;
-    const int nE = forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al) {
-      if (!haveTau) {
-        edgeTau(k, a, c, tau, t);
-        haveTau = true;
-      }
-      double n[3] = {0.0, 0.0, 0.0};
-      vofPhysNormal(m, gm, n);
-      const double mub = mu(rowFaceFraction(k, a, c, row, o, m, al));
-      const double rac = res(linkFraction(k, a, c, o, m, al));
-      const double rca = res(linkFraction(k, c, a, o, m, al));
-      acc += n[a] * t[c] * (1.0 - mub * rac) + n[c] * t[a] * (1.0 - mub * rca);
-    });
-    if (nE == 0)
+    const double W =
+        forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al, double w) {
+          if (!haveTau) {
+            edgeTau(k, a, c, tau, t);
+            haveTau = true;
+          }
+          double n[3] = {0.0, 0.0, 0.0};
+          vofPhysNormal(m, gm, n);
+          const double mub = mu(rowFaceFraction(k, a, c, row, o, m, al));
+          const double rac = res(linkFraction(k, a, c, o, m, al));
+          const double rca = res(linkFraction(k, c, a, o, m, al));
+          acc += w * (n[a] * t[c] * (1.0 - mub * rac) + n[c] * t[a] * (1.0 - mub * rca));
+        });
+    if (W == 0.0)
       return 0.0;
-    return acc / (double)nE;
+    return acc / W;
   }
 
   /// The explicit part of the u_c stress at cell q beyond today's 2μ(C)∂_c u_c (§5.4 b):
@@ -570,7 +609,7 @@ struct SharpFaceProps {
     const int a = (ad == 1) ? 0 : ((ad == geo.st[1]) ? 1 : 2);
     const long kk = (dd > 0) ? j : i;
     // Not a band edge (none of its four cells k, k - s_a, k - s_c, k - s_a - s_c interfacial):
-    // forEachOwner's n_E = 0, read without decoding k.
+    // forEachOwner's W = 0, read without decoding k.
     const long sa = geo.st[a], sc = geo.st[c];
     if (geo.cls(kk) == kSvNone && geo.cls(kk - sa) == kSvNone && geo.cls(kk - sc) == kSvNone &&
         geo.cls(kk - sa - sc) == kSvNone)
@@ -919,10 +958,11 @@ inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)
 /// (0,2), (1,2)}: the band edges with an owner set of two or more (`tied`), the largest spread
 /// max_{T_E} d_t − d_min over them (`tieSpread`, 0 if none), and the smallest gap
 /// min_{K_E∖T_E} d_t − d_min over the band edges with untied candidates (`untiedGap`, +inf if
-/// none).
+/// none); T_E is the plateau set (g ≤ τ₀, §5.9 item 5). `blended`: the edges with a candidate on
+/// the owner-weight ramp, τ₀ < d_t − d_min < τ₁ (§5.9).
 struct SharpCensus {
   long band = 0, virt = 0, film = 0, fallback = 0;
-  long tied = 0;
+  long tied = 0, blended = 0;
   double tieSpread = 0.0;
   double untiedGap = std::numeric_limits<double>::infinity();
 };
@@ -981,7 +1021,8 @@ inline SharpCensus sharpCensus(const SharpGeom& gg, SvByteConst fb, C3 lo, C3 hi
         const int k[3] = {x, y, z};
         for (int ac = 0; ac < 3; ++ac) {
           double sp = 0.0, gp = 0.0;
-          acc += (g.edgeTieKeys(k, ac, sp, gp) >= 2) ? 1 : 0;
+          bool bl = false;
+          acc += (g.edgeTieKeys(k, ac, sp, gp, bl) >= 2) ? 1 : 0;
         }
       },
       tied);
@@ -992,7 +1033,8 @@ inline SharpCensus sharpCensus(const SharpGeom& gg, SvByteConst fb, C3 lo, C3 hi
         const int k[3] = {x, y, z};
         for (int ac = 0; ac < 3; ++ac) {
           double sp = 0.0, gp = 0.0;
-          if (g.edgeTieKeys(k, ac, sp, gp) >= 2)
+          bool bl = false;
+          if (g.edgeTieKeys(k, ac, sp, gp, bl) >= 2)
             acc = Kokkos::fmax(acc, sp);
         }
       },
@@ -1004,12 +1046,27 @@ inline SharpCensus sharpCensus(const SharpGeom& gg, SvByteConst fb, C3 lo, C3 hi
         const int k[3] = {x, y, z};
         for (int ac = 0; ac < 3; ++ac) {
           double sp = 0.0, gp = -1.0;
-          if (g.edgeTieKeys(k, ac, sp, gp) >= 1 && gp >= 0.0)
+          bool bl = false;
+          if (g.edgeTieKeys(k, ac, sp, gp, bl) >= 1 && gp >= 0.0)
             acc = Kokkos::fmin(acc, gp);
         }
       },
       Kokkos::Min<double>(gap));
+  long blended = 0;
+  Kokkos::parallel_reduce(
+      "peclet::flow::vof::sharp_census_blended", rng,
+      KOKKOS_LAMBDA(int x, int y, int z, long& acc) {
+        const int k[3] = {x, y, z};
+        for (int ac = 0; ac < 3; ++ac) {
+          double sp = 0.0, gp = 0.0;
+          bool bl = false;
+          g.edgeTieKeys(k, ac, sp, gp, bl);
+          acc += bl ? 1 : 0;
+        }
+      },
+      blended);
   out.tied = tied;
+  out.blended = blended;
   out.tieSpread = Kokkos::fmax(spread, 0.0);  // 0 when no edge is tied
   if (gap < std::numeric_limits<double>::max())
     out.untiedGap = gap;  // else none: +inf
