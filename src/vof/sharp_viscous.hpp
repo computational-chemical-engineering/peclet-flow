@@ -674,7 +674,9 @@ inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCF
       nb);
   if (nb == 0)
     return;
-  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
+  // Keyed on the EXECUTION space (review F9): on a unified-memory device build HostSpace may
+  // reach CCMem, but the one-thread-per-cell host body must still not run on the GPU.
+  if constexpr (!Kokkos::SpaceAccessibility<CCExec, Kokkos::HostSpace>::accessible) {
     using Policy = Kokkos::TeamPolicy<CCExec>;
     Policy pol(space, (int)nb, kVofWarp);
     pol.set_scratch_size(0, Kokkos::PerTeam(SvFitScratch::shmem()));
