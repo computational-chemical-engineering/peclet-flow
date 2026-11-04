@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <fstream>
 #include <Kokkos_Core.hpp>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <string>
@@ -1152,6 +1153,93 @@ void testRhsOracle() {
 
 // (g) WO-4: the full operator on exact face averages of kinked-linear fields (Couette and
 // extension, 9 orientations) -- implicit band + band transpose + tau-terms + midsection - grad p.
+// Review F3: the fit fallback. The normal equations depend on the geometry only (a NaN VELOCITY
+// datum gives a non-finite tau_hat, not a fallback), so a NaN in the PLIC normal of one
+// interfacial cell q* is what makes its fit singular (fitSolve's pivot test is NaN-safe): q* and
+// only interfacial cells within the fit's reach fall back, each with tau_hat = D_nn = 0 exactly,
+// every other fit stays finite, the census counts the fallbacks, and the band terms on the CLEAN
+// geometry with that fit are finite (a fallback's tau_hat = 0 enters the edge mean, §5.2).
+void testFallback() {
+  Blk b(12, 12, 12);
+  const double ell[3] = {1.0, 1.0, 1.0};
+  std::vector<double> col, pm[3], pa, v[3];
+  sphereGeom(b, ell, col, pm, pa);
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> U(-1.0, 1.0);
+  for (int a = 0; a < 3; ++a) {
+    v[a].resize(b.cells);
+    for (long i = 0; i < b.cells; ++i)
+      v[a][i] = U(rng);
+  }
+  const int dlo[3] = {-kBig, -kBig, -kBig}, dhi[3] = {kBig, kBig, kBig};
+  const double muA = 1e-2, muB = 1.0;
+  Geo clean = makeGeo(b, col, pm, pa, v, dlo, dhi, 1e-12, muA, muB, ell);
+  const auto cls = toHost(clean.cls);
+  const auto fb0 = toHost(clean.fb);
+  long qs = -1, nFb0 = 0;
+  for (int z = b.G; z < b.e[2] - b.G; ++z)
+    for (int y = b.G; y < b.e[1] - b.G; ++y)
+      for (int x = b.G; x < b.e[0] - b.G; ++x) {
+        const long i = b.id(x, y, z);
+        nFb0 += fb0[i];
+        if (qs < 0 && cls[i] == sv::kSvPlane && x > 5 && y > 5 && z > 5)
+          qs = i;
+      }
+  CHECK(qs >= 0 && nFb0 == 0, "an interior plane cell (%ld), no fallback on the clean field (%ld)",
+        qs, nFb0);
+  if (qs < 0)
+    return;
+  const int qz = (int)(qs / b.st[2]), qy = (int)((qs - qz * b.st[2]) / b.st[1]),
+            qx = (int)(qs - qz * b.st[2] - qy * b.st[1]);
+  std::vector<double> pmn[3] = {pm[0], pm[1], pm[2]};
+  pmn[0][b.id3(qx, qy, qz)] = std::numeric_limits<double>::quiet_NaN();
+  Geo o = makeGeo(b, col, pmn, pa, v, dlo, dhi, 1e-12, muA, muB, ell);
+  const auto fb = toHost(o.fb);
+  const std::vector<double> tau[3] = {toHost(o.tau[0]), toHost(o.tau[1]), toHost(o.tau[2])};
+  const auto dnn = toHost(o.dnn);
+  long nFb = 0, nFar = 0, nNonZero = 0, nNonFinite = 0, reach = 0;
+  for (int z = b.G; z < b.e[2] - b.G; ++z)
+    for (int y = b.G; y < b.e[1] - b.G; ++y)
+      for (int x = b.G; x < b.e[0] - b.G; ++x) {
+        const long i = b.id(x, y, z);
+        const bool f = fb[i] != 0;
+        nFb += f;
+        const int d = std::max({std::abs(x - qx), std::abs(y - qy), std::abs(z - qz)});
+        if (f) {
+          reach = std::max<long>(reach, d);
+          nFar += (d > 2 || cls[i] == sv::kSvNone);
+          nNonZero += (tau[0][i] != 0.0 || tau[1][i] != 0.0 || tau[2][i] != 0.0 || dnn[i] != 0.0);
+        } else
+          nNonFinite += !(std::isfinite(tau[0][i]) && std::isfinite(tau[1][i]) &&
+                          std::isfinite(tau[2][i]) && std::isfinite(dnn[i]));
+      }
+  const auto cen =
+      sv::sharpCensus(o.g, o.fb, C3{b.G, b.G, b.G}, C3{b.e[0] - b.G, b.e[1] - b.G, b.e[2] - b.G});
+  long nBad = 0;
+  {
+    const CCConst tc[3] = {o.tau[0], o.tau[1], o.tau[2]},
+                  vc[3] = {clean.v[0], clean.v[1], clean.v[2]};
+    DV rs("rs", b.cells);
+    Kokkos::deep_copy(rs, 1.0);
+    for (int c = 0; c < 3; ++c) {
+      DV bb("bb", b.cells);
+      sv::addSharpViscousRhs(c, bb, CCConst(rs), vc, clean.g, tc, CCConst(o.dnn), b.G, 1.0, false);
+      Kokkos::fence();
+      for (double x : toHost(bb))
+        nBad += !std::isfinite(x);
+    }
+  }
+  std::printf(
+      "fallback: NaN normal at (%d,%d,%d): %ld fallbacks (reach %ld), census %ld, tau/D_nn nonzero "
+      "on a fallback %ld, beyond reach 2 or off the band %ld, non-finite fits %ld, non-finite RHS "
+      "%ld\n",
+      qx, qy, qz, nFb, reach, cen.fallback, nNonZero, nFar, nNonFinite, nBad);
+  CHECK(fb[qs] == 1 && nFb >= 1, "q* falls back");
+  CHECK(cen.fallback == nFb, "census %ld vs %ld", cen.fallback, nFb);
+  CHECK(nNonZero == 0 && nFar == 0 && nNonFinite == 0, "fallback state");
+  CHECK(nBad == 0, "finite band terms");
+}
+
 void testPatch() {
   const double angs[3] = {0.0, 22.5, 45.0};
   double worst = 0;
@@ -1243,6 +1331,7 @@ int main(int argc, char** argv) {
     testSeam();
     testBand();
     testRhsOracle();
+    testFallback();
     testPatch();
   }
   Kokkos::finalize();
