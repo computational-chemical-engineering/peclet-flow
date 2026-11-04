@@ -1041,7 +1041,8 @@ void testBand() {
   CHECK(nBand > 500 && wOr <= 1e-14, "band entries vs oracle");
   CHECK(badNon == 0 && badCell == 0, "non-band entries bitwise 'averaged'");
   CHECK(badSym == 0 && badM == 0, "symmetric M-matrix");
-  CHECK(nCellIf > 100 && badSplit == 0, "WO-5b split: 2mu(C) implicit, 0 explicit on interfacial cells");
+  CHECK(nCellIf > 100 && badSplit == 0,
+        "WO-5b split: 2mu(C) implicit, 0 explicit on interfacial cells");
 }
 
 // Host transcription of the explicit band terms of the u_c rows (§5.4): sample arrays, then the

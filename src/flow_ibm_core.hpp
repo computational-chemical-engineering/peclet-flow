@@ -1069,8 +1069,8 @@ void Solver<Grid>::rebuildStencils() {
     Kokkos::deep_copy(CCExec(), C[c].inhom, 0.0);
     if (sharpActive_)  // the band edges' PLIC face-fraction mu (doc/vof_sharp_viscous_stress.md §6)
       ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x,
-                           e_.y, e_.z, G, makeSharpFaceProps(c, vof::SvRole::kImplicit), u_.w[0], u_.w[1],
-                           u_.w[2]);
+                           e_.y, e_.z, G, makeSharpFaceProps(c, vof::SvRole::kImplicit), u_.w[0],
+                           u_.w[1], u_.w[2]);
     else if (varProps_ || effVarRho())
       ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e_.x,
                            e_.y, e_.z, G, makeFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
@@ -1452,7 +1452,7 @@ void Solver<Grid>::buildAdvStencilVar(int c) {
   if (sharpActive_)
     ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y,
                          e.z, G, makeSharpFaceProps(c, vof::SvRole::kImplicit), u_.w[0], u_.w[1],
-                           u_.w[2]);
+                         u_.w[2]);
   else
     ibmBuildDiffusionVar(C[c].AC, C[c].AW, C[c].AE, C[c].AS, C[c].AN, C[c].AB, C[c].AT, e.x, e.y,
                          e.z, G, makeFaceProps(c), u_.w[0], u_.w[1], u_.w[2]);
