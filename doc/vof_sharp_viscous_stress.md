@@ -311,6 +311,10 @@ At cell i, for component c:
   - **τ̂ at an edge sample (§5.7 Q-A).** τ̂_E is the arithmetic mean of τ̂_K over the **interfacial**
     cells K among E's four cells, summed in the fixed offset order. The set is never empty, because E's
     owner is in it.
+    - A fallback cell (§5.3, τ̂_K = 0) stays in the set (as implemented, review F4, 2026-11-04): an
+      edge whose interfacial cells are {fallback, fitted} runs its τ-term at the fitted cell's
+      weight only, between 'sharp' and "facef". Excluding fallbacks would need the fallback flag in
+      the halo; not done while the census reads 0 fallbacks on every gated case (G-SV10).
     - The fit (§5.3) runs on interfacial cells only, with n = n_K.
     - Superseded: the mean over all band cells (interfacial cells plus their 3×3×3 neighbours). It needs
       fits on cells that have no plane and gives the same order.
@@ -328,6 +332,13 @@ At cell i, for component c:
   - Midsection: f = plicVolume(m_a, m_b, 0, α − m_c(ξ_c of the midplane)).
   - These are thin compositions of `core::vof::plicVolume` and are exact for a plane. WO-1 checks them
     against brute-force quadrature.
+  - **A region lying IN its owner's plane** (a face F_c(E) coincident with a virtual plane, α′ = 0
+    exactly) is a tie in `plicVolume` (degenerate normal: `alpha > 0 ? 1 : 0`), so it reads
+    f = 0 and μ̄ = μ_B = μ(C = 0), whichever phase is low (review F5, 2026-11-04). This is the rule,
+    not an accident: σ does not depend on μ̄ for a field the kink model represents exactly (the
+    offset-0 patch test passes both labellings), and with C = 1 the low phase the implicit flux and
+    the explicit T-term on that face, each ~μ_hi/(2μ_lo) times the traction, cancel; G-SV9(d)/(e)
+    run the film at both ratio signs.
 - **Physical normal.** n = `vofPhysNormal(m)` of the owner, used for the kink model and the T-terms.
 
 ### 5.3 Interface state: τ̂ and D̂_nn (one least-squares fit per interfacial cell K)
@@ -344,10 +355,16 @@ At cell i, for component c:
   - Both shear links of every edge of every block cell: 3 orientations × 3·4·4 = 144 edges, 288 links.
     Their θ̄ come from each edge's own owner plane, as in §5.2.
   - Links with a node outside the physical domain are left out; wall and inflow data are used as data.
+    An edge lying ON a wall is kept (`edgeInDomain` is inclusive at k_a = dlo/dhi, review F7,
+    2026-11-04): its link ∂_a u_c then has one node in the ghost beyond the wall (the BC mirror, a
+    half-cell one-sided gradient), which the fit takes as a hat average over [−1, 1] with θ̄ from
+    the owner plane extended past the wall. Exact for a linear field; it matters only at a contact
+    line, which is out of scope (Q3/Q6, G-SV1W passes).
 - **Solve.** Unit weights. Accumulate the 9×9 normal matrix AᵀA and Aᵀm in fixed link order, then
   Cholesky.
-  - If the smallest pivot is below 1e-10·trace/9, the fit falls back: τ̂ = 0 and D̂_nn = 0, which locally
-    reverts to "facef" (first order), and the census counts the cell.
+  - If the smallest pivot is below 1e-10·trace/9, or the system is not finite, the fit falls back:
+    τ̂ = 0 and D̂_nn = 0, which locally moves toward "facef" (first order; τ̂ = 0 still enters the
+    edge mean, §5.2), and the census counts the cell. Pinned by `sharp_viscous` testFallback.
 - **Outputs.** τ̂_K = μ_lo P(S n) (tangential, 3 components) and D̂_nn,K = n·L n (continuous across the
   interface). Stored per interfacial cell; zero elsewhere.
 - **Why the low side.** τ = μ_k P S_k n holds on both sides, but the correction multiplies τ by
