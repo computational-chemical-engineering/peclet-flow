@@ -5468,8 +5468,8 @@ class Solver {
   vof::SharpGeom sharpGeom_;  // this step's band geometry (views into the colour/plane blocks)
   vof::SvByte svCls_, svFb_;  // band class / fit-fallback flag, 1 B/cell each
   CCField svTau_[3], svDnn_;  // tau_hat (3) and D_nn per interfacial cell, dense (§12 Q2)
-  vof::SvList svList_;        // the device fit's worklist of interfacial cells (8 B/cell)
-  vof::SvList svRhsList_;     // the device band-term worklist (sharpRhsCompact), 8 B/cell
+  vof::SvList svList_;        // the fit's worklist of interfacial cells (8 B/cell)
+  vof::SvList svRhsList_;     // the band-term worklist (sharpRhsCompact), 8 B/cell
   long svRhsN_ = 0;           // ... and its length this step
   CCField muField_;          // per-cell dynamic viscosity (when varProps_)
   int varRotMode_ = 0;       // rotational term under varProps: 0 chi*mu_min, 1 chi*mu(i), 2 off

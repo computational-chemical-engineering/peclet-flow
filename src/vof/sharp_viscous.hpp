@@ -637,40 +637,44 @@ KOKKOS_INLINE_FUNCTION void sharpFitTeam(const Member& tm, const SvFitScratch& s
 
 /// The τ̂/D̂_nn fit (§5.3) over the cells [lo, hi) of the solver block: interfacial cells get their
 /// fit (τ̂ = D̂ = 0 and `fb = 1` on a fallback), every other cell τ̂ = D̂ = 0, `fb = 0`. Velocity
-/// ghosts (incl. the (a, c) edges) must be filled to depth 2. On a device one pass zeroes the range
-/// and compacts its interfacial cells into `list` (>= the range's cell count), then one team per
-/// listed cell fits it (`sharpFitTeam`); the host runs one thread per cell over the range.
+/// ghosts (incl. the (a, c) edges) must be filled to depth 2. One pass zeroes the range and
+/// compacts its interfacial cells into `list` (>= the range's cell count); then on a device one
+/// team per listed cell fits it (`sharpFitTeam`), on the host one thread per listed cell
+/// (`SharpGeom::fitCell`) -- a range over the list, not the box, so the band's few cells are spread
+/// over every thread instead of the few whose tiles hold the interface.
 inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCField t1, CCField t2,
                      CCField dnn, SvByte fb, C3 lo, C3 hi, SvList list) {
   const SharpGeom g = gg;
   const CCConst v0 = v[0], v1 = v[1], v2 = v[2];
   CCExec space;
+  const int nx = hi.x - lo.x, ny = hi.y - lo.y, nz = hi.z - lo.z;
+  if (nx <= 0 || ny <= 0 || nz <= 0)
+    return;
+  const long region = (long)nx * ny * nz;
+  long nb = 0;
+  Kokkos::parallel_scan(
+      "peclet::flow::vof::sharp_fit_compact", Kokkos::RangePolicy<CCExec>(space, 0, region),
+      KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+        const int q[3] = {lo.x + (int)(r % nx), lo.y + (int)((r / nx) % ny),
+                          lo.z + (int)(r / ((long)nx * ny))};
+        const long i = g.idx(q);
+        if (final) {
+          t0(i) = 0.0;
+          t1(i) = 0.0;
+          t2(i) = 0.0;
+          dnn(i) = 0.0;
+          fb(i) = 0;
+        }
+        if (g.cellClass(q) != kSvNone) {
+          if (final)
+            list(upd) = i;
+          ++upd;
+        }
+      },
+      nb);
+  if (nb == 0)
+    return;
   if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
-    const int nx = hi.x - lo.x, ny = hi.y - lo.y, nz = hi.z - lo.z;
-    const long region = (long)nx * ny * nz;
-    long nb = 0;
-    Kokkos::parallel_scan(
-        "peclet::flow::vof::sharp_fit_compact", Kokkos::RangePolicy<CCExec>(space, 0, region),
-        KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
-          const int q[3] = {lo.x + (int)(r % nx), lo.y + (int)((r / nx) % ny),
-                            lo.z + (int)(r / ((long)nx * ny))};
-          const long i = g.idx(q);
-          if (final) {
-            t0(i) = 0.0;
-            t1(i) = 0.0;
-            t2(i) = 0.0;
-            dnn(i) = 0.0;
-            fb(i) = 0;
-          }
-          if (g.cellClass(q) != kSvNone) {
-            if (final)
-              list(upd) = i;
-            ++upd;
-          }
-        },
-        nb);
-    if (nb == 0)
-      return;
     using Policy = Kokkos::TeamPolicy<CCExec>;
     Policy pol(space, (int)nb, kVofWarp);
     pol.set_scratch_size(0, Kokkos::PerTeam(SvFitScratch::shmem()));
@@ -685,26 +689,21 @@ inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCF
         });
   } else {
     Kokkos::parallel_for(
-        "peclet::flow::vof::sharp_fit",
-        MDRange3<CCExec>(space, {lo.x, lo.y, lo.z}, {hi.x, hi.y, hi.z}),
-        KOKKOS_LAMBDA(int x, int y, int z) {
-          const int q[3] = {x, y, z};
-          const long i = g.idx(q);
+        "peclet::flow::vof::sharp_fit", Kokkos::RangePolicy<CCExec>(space, 0, nb),
+        KOKKOS_LAMBDA(long r) {
+          const long i = list(r);
+          const long z = i / g.st[2], rr = i - z * g.st[2], y = rr / g.st[1];
+          const int q[3] = {(int)(rr - y * g.st[1]), (int)y, (int)z};
+          const CCConst vv[3] = {v0, v1, v2};
           double t[3] = {0.0, 0.0, 0.0}, dn = 0.0;
-          std::uint8_t f = 0;
-          if (g.cellClass(q) != kSvNone) {
-            const CCConst vv[3] = {v0, v1, v2};
-            if (!g.fitCell(q, vv, t, dn)) {
-              t[0] = t[1] = t[2] = 0.0;
-              dn = 0.0;
-              f = 1;
-            }
+          if (!g.fitCell(q, vv, t, dn)) {
+            fb(i) = 1;  // the scan left tau_hat = D_nn = 0
+            return;
           }
           t0(i) = t[0];
           t1(i) = t[1];
           t2(i) = t[2];
           dnn(i) = dn;
-          fb(i) = f;
         });
   }
 }
@@ -724,8 +723,8 @@ inline void sharpFit(const SharpGeom& gg, const CCConst (&v)[3], CCField t0, CCF
 ///   bb_c(i) += rs(i) · [ w_c (X(i) − X(i−s_c)) + Σ_a (Y(E_ac(i+s_a)) − Y(E_ac(i))) / (ℓ_a ℓ_c) ],
 /// a1 < a2 in that association order. The band transpose itself is `addFullStressRhs` with
 /// `SharpFaceProps`. `tau`/`dnn` ghosts filled to depth 1 incl. edges; `skipLoC` as there.
-/// On a device it runs over `list[0, nl)` (`sharpRhsCompact`: every cell whose terms can be
-/// nonzero), on the host over the box; a cell the list leaves out has every term exactly 0.
+/// It runs over `list[0, nl)` (`sharpRhsCompact`: every cell whose terms can be nonzero); a cell
+/// the list leaves out has every term exactly 0.
 inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)[3],
                                const SharpGeom& gg, const CCConst (&tau)[3], CCConst dnn, int g,
                                double wc, bool skipLoC, SvList list, long nl) {
@@ -750,75 +749,62 @@ inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)
     const long i = geo.idx(q);
     bb(i) += rs(i) * t;
   };
-  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
-    if (nl <= 0)
-      return;
-    const int lc = lo[c];
-    Kokkos::parallel_for(
-        "peclet::flow::vof::sharp_viscous_rhs", Kokkos::RangePolicy<CCExec>(CCExec(), 0, nl),
-        KOKKOS_LAMBDA(long r) {
-          const long i = list(r);
-          const long z = i / geo.st[2], rr = i - z * geo.st[2], y = rr / geo.st[1];
-          const int q[3] = {(int)(rr - y * geo.st[1]), (int)y, (int)z};
-          if (q[c] < lc)
-            return;  // skipLoC: the BC-imposed low-face node
-          body(q[0], q[1], q[2]);
-        });
-  } else {
-    ccForRows3("peclet::flow::vof::sharp_viscous_rhs", C3{lo[0], lo[1], lo[2]},
-               C3{geo.e[0] - g, geo.e[1] - g, geo.e[2] - g}, body);
-  }
+  if (nl <= 0)
+    return;
+  const int lc = lo[c];
+  Kokkos::parallel_for(
+      "peclet::flow::vof::sharp_viscous_rhs", Kokkos::RangePolicy<CCExec>(CCExec(), 0, nl),
+      KOKKOS_LAMBDA(long r) {
+        const long i = list(r);
+        const long z = i / geo.st[2], rr = i - z * geo.st[2], y = rr / geo.st[1];
+        const int q[3] = {(int)(rr - y * geo.st[1]), (int)y, (int)z};
+        if (q[c] < lc)
+          return;  // skipLoC: the BC-imposed low-face node
+        body(q[0], q[1], q[2]);
+      });
 }
 
 /// The cells of the inner box [g, e−g)³ whose band terms (`addSharpViscousRhs`) can be nonzero
 /// for some component: those with an interfacial cell in their 3×3×3 block (the cells i, i − s_c
 /// and the eight further cells of the four edges all lie in it). Compacted into `list` in linear
-/// order; returns their number. Device only (the host runs the box); 0 on the host.
+/// order; returns their number.
 inline long sharpRhsCompact(const SharpGeom& gg, int g, SvList list) {
-  if constexpr (Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
+  const SharpGeom geo = gg;
+  const int nx = geo.e[0] - 2 * g, ny = geo.e[1] - 2 * g, nz = geo.e[2] - 2 * g;
+  if (nx <= 0 || ny <= 0 || nz <= 0)
     return 0;
-  } else {
-    const SharpGeom geo = gg;
-    const int nx = geo.e[0] - 2 * g, ny = geo.e[1] - 2 * g, nz = geo.e[2] - 2 * g;
-    if (nx <= 0 || ny <= 0 || nz <= 0)
-      return 0;
-    long nl = 0;
-    Kokkos::parallel_scan(
-        "peclet::flow::vof::sharp_rhs_compact",
-        Kokkos::RangePolicy<CCExec>(CCExec(), 0, (long)nx * ny * nz),
-        KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
-          const int q[3] = {g + (int)(r % nx), g + (int)((r / nx) % ny),
-                            g + (int)(r / ((long)nx * ny))};
-          bool hit = false;
-          for (int dz = -1; dz <= 1 && !hit; ++dz)
-            for (int dy = -1; dy <= 1 && !hit; ++dy)
-              for (int dx = -1; dx <= 1 && !hit; ++dx) {
-                const int p[3] = {q[0] + dx, q[1] + dy, q[2] + dz};
-                hit = geo.cellClass(p) != kSvNone;
-              }
-          if (hit) {
-            if (final)
-              list(upd) = geo.idx(q);
-            ++upd;
-          }
-        },
-        nl);
-    return nl;
-  }
+  long nl = 0;
+  Kokkos::parallel_scan(
+      "peclet::flow::vof::sharp_rhs_compact",
+      Kokkos::RangePolicy<CCExec>(CCExec(), 0, (long)nx * ny * nz),
+      KOKKOS_LAMBDA(const long r, long& upd, const bool final) {
+        const int q[3] = {g + (int)(r % nx), g + (int)((r / nx) % ny),
+                          g + (int)(r / ((long)nx * ny))};
+        bool hit = false;
+        for (int dz = -1; dz <= 1 && !hit; ++dz)
+          for (int dy = -1; dy <= 1 && !hit; ++dy)
+            for (int dx = -1; dx <= 1 && !hit; ++dx) {
+              const int p[3] = {q[0] + dx, q[1] + dy, q[2] + dz};
+              hit = geo.cellClass(p) != kSvNone;
+            }
+        if (hit) {
+          if (final)
+            list(upd) = geo.idx(q);
+          ++upd;
+        }
+      },
+      nl);
+  return nl;
 }
 
 /// `addSharpViscousRhs` with its own worklist (the unit and MPI tests).
 inline void addSharpViscousRhs(int c, CCField bb, CCConst rs, const CCConst (&v)[3],
                                const SharpGeom& gg, const CCConst (&tau)[3], CCConst dnn, int g,
                                double wc, bool skipLoC) {
-  SvList list;
-  long nl = 0;
-  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible) {
-    list = SvList(Kokkos::view_alloc(CCExec(), "peclet::flow::vof::sharp_rhs_list",
-                                     Kokkos::WithoutInitializing),
-                  (std::size_t)gg.e[0] * gg.e[1] * gg.e[2]);
-    nl = sharpRhsCompact(gg, g, list);
-  }
+  const SvList list(Kokkos::view_alloc(CCExec(), "peclet::flow::vof::sharp_rhs_list",
+                                       Kokkos::WithoutInitializing),
+                    (std::size_t)gg.e[0] * gg.e[1] * gg.e[2]);
+  const long nl = sharpRhsCompact(gg, g, list);
   addSharpViscousRhs(c, bb, rs, v, gg, tau, dnn, g, wc, skipLoC, list, nl);
 }
 
