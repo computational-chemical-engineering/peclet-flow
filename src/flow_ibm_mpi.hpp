@@ -505,6 +505,25 @@ void Solver<Grid>::resizeBlockScratch() {
   resizeIfAllocated(pcGphi_, "pc_gphi", n);
   pcInDomain_ = CCField();  // which ghosts carry a row depends on the decomposition (WO-P3g)
   pcMaskFresh_ = false;
+  // --- sharp viscous interface (doc/vof_sharp_viscous_stress.md) --------------------------
+  // `sharpActive_` and `sharpGeom_` are per-step state of the OLD block: the geometry's views,
+  // extents and strides index the old colour/plane blocks. Left set, `setSolid`'s
+  // `rebuildStencils` (redistribute step 5) assembled the band edges through them on the new
+  // block -- an out-of-bounds read (host SEGFAULT in `vof_redistribute_mpi`). Back to the
+  // initial-setup state instead: `resolveSharpViscous` re-decides at the next step head and
+  // `sharpViscousGeometry` re-allocates the band buffers at the new n (zero-initialised fallback
+  // flags, as at the first step). Inert under 'averaged' (never active, buffers never allocated).
+  sharpActive_ = false;
+  sharpGeom_ = vof::SharpGeom{};
+  svCls_ = vof::SvByte();
+  svFb_ = vof::SvByte();
+  svFit_ = CCField();
+  for (int a = 0; a < 3; ++a)
+    svTau_[a] = CCField();
+  svDnn_ = CCField();
+  svList_ = vof::SvList();
+  svRhsList_ = vof::SvList();
+  svRhsN_ = 0;
   // --- transported scalars (their operator is rebuilt; the solution rides the registry) -----
   for (auto& sc : scalars_) {
     resizeIfAllocated(sc.cOld, "scalar_old", n);
