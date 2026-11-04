@@ -12,8 +12,13 @@
 // fullStressPrelude, sharpViscousFit, the bands of makeSharpFaceProps, addFullStressRhs with the
 // sharp face props + addSharpViscousRhs), and every inner value -- class, fallback flag, tau_hat,
 // D_nn, the 7 band coefficients and the explicit RHS of the 3 components -- is gathered and
-// compared bit for bit with a single-rank solver on the whole box. Two passes: triply periodic,
-// and no-slip walls on both y faces (the domain-face rules). np 4 must cut two axes.
+// compared bit for bit with a single-rank solver on the whole box, together with the owner-set
+// means of every edge of the owned cells (doc §5.8: F_a, F_c, theta_ac, theta_ca, T_a, T_c of the
+// three orientations). Three passes: triply periodic, no-slip walls on both y faces (the
+// domain-face rules), and (WO-9.2) triply periodic with a sphere centred on a grid VERTEX that lies
+// on the decomposition's first cut of every cut axis (a rank boundary on a symmetry plane) and on
+// the periodic z seam, so that tied edge owners straddle both; that pass must tie. np 4 must cut
+// two axes.
 #include <mpi.h>
 
 #include <cmath>
@@ -36,7 +41,8 @@ namespace sv = peclet::flow::vof;
 
 static constexpr int NX = 16, NY = 12, NZ = 10;
 static constexpr int G = IbmSolver::G;
-static constexpr int kVals = 30;  // per inner cell: cls, fb, tau(3), dnn, 3 x 7 bands, 3 rhs
+// per inner cell: cls, fb, tau(3), dnn, 3 x 7 bands, 3 rhs, 3 orientations x 6 edge means
+static constexpr int kVals = 48;
 
 static double urand(int id, int gx, int gy, int gz) {
   gx = ((gx % NX) + NX) % NX;
@@ -50,15 +56,24 @@ static double urand(int id, int gx, int gy, int gz) {
   return (double)(z >> 11) * 0x1.0p-53;
 }
 
-// The colour of global cell (gx, gy, gz): a sphere, 4^3 samples (a plane crossing the walls too).
+// The sphere of the pass: centre (global index coordinates) and radius.
+static double gCen[3] = {7.3, 5.9, 4.6}, gR = 3.7;
+
+// The colour of global cell (gx, gy, gz): a sphere, 4^3 samples (a plane crossing the walls too),
+// periodic images included (the vertex-centred sphere straddles the z seam).
 static double colourValue(int gx, int gy, int gz) {
-  const double c[3] = {7.3, 5.9, 4.6}, r = 3.7;
+  const double* c = gCen;
+  const double r = gR;
+  const double L[3] = {NX, NY, NZ};
   int in = 0;
   for (int k = 0; k < 4; ++k)
     for (int j = 0; j < 4; ++j)
       for (int i = 0; i < 4; ++i) {
-        const double x = gx + (i + 0.5) / 4 - c[0], y = gy + (j + 0.5) / 4 - c[1],
-                     z = gz + (k + 0.5) / 4 - c[2];
+        double p[3] = {gx + (i + 0.5) / 4 - c[0], gy + (j + 0.5) / 4 - c[1],
+                       gz + (k + 0.5) / 4 - c[2]};
+        for (int a = 0; a < 3; ++a)
+          p[a] -= L[a] * std::round(p[a] / L[a]);
+        const double x = p[0], y = p[1], z = p[2];
         in += (x * x + y * y + z * z < r * r) ? 1 : 0;
       }
   return in / 64.0;
@@ -141,6 +156,34 @@ static std::vector<double> evalSharp(IbmSolver& s, const int o[3], const int ln[
     Kokkos::fence();
     pull(bb);
   }
+  {  // the owner-set means of the three edges E_ac(k) of every cell k (§5.8)
+    CCField em("sv_mpi_edges", 18 * n);
+    const sv::SharpGeom g = sv2.geo;
+    Kokkos::parallel_for(
+        "sv_mpi_edges", Kokkos::RangePolicy<peclet::flow::CCExec>(0, n), KOKKOS_LAMBDA(long i) {
+          const int z = (int)(i / g.st[2]), rr = (int)(i - z * g.st[2]), y = rr / (int)g.st[1],
+                    x = rr - y * (int)g.st[1];
+          const bool in =
+              x >= G && y >= G && z >= G && x < g.e[0] - G && y < g.e[1] - G && z < g.e[2] - G;
+          const int k[3] = {x, y, z};
+          for (int ac = 0; ac < 3; ++ac) {
+            const int a = (ac == 2) ? 1 : 0, c = (ac == 0) ? 1 : 2;
+            double r6[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+            if (in && g.edgeFaceFraction(k, a, c, a, r6[0])) {
+              g.edgeFaceFraction(k, a, c, c, r6[1]);
+              g.edgeLinkFractions(k, a, c, r6[2], r6[3]);
+              r6[4] = g.edgeTraction(k, a, c, a, t);
+              r6[5] = g.edgeTraction(k, a, c, c, t);
+            }
+            for (int q = 0; q < 6; ++q)
+              em((long)(6 * ac + q) * n + i) = r6[q];
+          }
+        });
+    Kokkos::fence();
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), em);
+    for (int q = 0; q < 18; ++q)
+      cols.emplace_back(h.data() + (long)q * n, h.data() + (long)(q + 1) * n);
+  }
   std::vector<double> out;
   out.reserve((long)kVals * ln[0] * ln[1] * ln[2]);
   for (const auto& f : cols)
@@ -184,8 +227,28 @@ int main(int argc, char** argv) {
     auto blk = dec.block(rank);
     const int o[3] = {(int)blk.origin[0], (int)blk.origin[1], (int)blk.origin[2]};
     const int ln[3] = {(int)blk.size[0], (int)blk.size[1], (int)blk.size[2]};
-    for (int pass = 0; pass < 2; ++pass) {
+    // The vertex-centred sphere (pass 2): on the first cut of each cut axis, else the box middle;
+    // z = 0 (the periodic seam) unless z is cut.
+    double vcen[3] = {NX / 2, NY / 2, 0};
+    for (int a = 0; a < 3; ++a) {
+      int cut = gn[a];
+      for (int r = 0; r < size; ++r) {
+        const int org = (int)dec.block(r).origin[a];
+        if (org > 0 && org < cut)
+          cut = org;
+      }
+      if (cut < gn[a])
+        vcen[a] = cut;
+    }
+    if (rank == 0)
+      std::printf("  vertex sphere centre (%g, %g, %g), radius 3.4\n", vcen[0], vcen[1], vcen[2]);
+    for (int pass = 0; pass < 3; ++pass) {
       const bool walls = (pass == 1);
+      if (pass == 2) {
+        for (int a = 0; a < 3; ++a)
+          gCen[a] = vcen[a];
+        gR = 3.4;
+      }
       std::vector<double> mine;
       {
         IbmSolver s(ln[0], ln[1], ln[2]);
@@ -209,6 +272,7 @@ int main(int argc, char** argv) {
         IbmSolver ref(NX, NY, NZ);
         configure(ref, walls);
         const std::vector<double> want = evalSharp(ref, zo, gl);
+        const long tied = ref.vofViscousInterfaceCensus().tied;
         long bad = 0, nonfinite = 0, band = 0, fallbacks = 0, rhsNz = 0;
         const long NN = (long)NX * NY * NZ;
         for (int r = 0; r < size; ++r) {
@@ -237,12 +301,13 @@ int main(int argc, char** argv) {
                     ++rhsNz;
                 }
         }
-        const bool ok = bad == 0 && nonfinite == 0 && band > 100 && fallbacks == 0 && rhsNz > 0;
+        const bool ok = bad == 0 && nonfinite == 0 && band > 100 && fallbacks == 0 && rhsNz > 0 &&
+                        (pass != 2 || tied > 0);
         std::printf(
             "  %-9s %ld/%ld bitwise mismatches vs np 1, %ld non-finite, %ld band cells, "
-            "%ld fallbacks, %ld nonzero RHS  %s\n",
-            walls ? "y walls" : "periodic", bad, total, nonfinite, band, fallbacks, rhsNz,
-            ok ? "PASS" : "FAIL");
+            "%ld fallbacks, %ld nonzero RHS, %ld tied edges  %s\n",
+            pass == 2 ? "vertex" : (walls ? "y walls" : "periodic"), bad, total, nonfinite, band,
+            fallbacks, rhsNz, tied, ok ? "PASS" : "FAIL");
         if (!ok)
           fail = 1;
       }

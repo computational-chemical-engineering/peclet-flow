@@ -1,6 +1,6 @@
 /// @file
 /// @brief flow — the sharp conservative viscous stress at a VoF interface on the staggered MAC
-/// grid: band geometry (interfacial cells, virtual planes, edge owners), the per-sample PLIC
+/// grid: band geometry (interfacial cells, virtual planes, edge owner sets), the per-sample PLIC
 /// fractions, the kinked least-squares fit of the interface state (τ̂, D̂_nn), the implicit face
 /// viscosity of the band edges and the explicit band terms.
 ///
@@ -19,14 +19,18 @@
 /// b-layer `k_b`: the edge shared by cells `k, k−s_a, k−s_c, k−s_a−s_c`. It is the −a edge of the
 /// u_c control volume of cell `k` and the −c edge of the u_a control volume of cell `k`.
 ///
-/// **Fixed offset order (§5.7).** Every tie and every sum over the cells of an edge enumerates them
-/// by their offset, lexicographic in (dz, dy, dx), x fastest — on a block with ghost layers that is
-/// the order of the LOCAL linear index, translation-invariant across a periodic seam and a rank
-/// boundary (never the global index).
+/// **Owner set and mean; offset order for sums only (§5.7, §5.8).** An edge has no single owner:
+/// every interfacial cell of the edge whose plane passes within τ_own (`kSvOwnerTieTol`) of the
+/// closest forms its owner set, and each output at the edge (face and link fractions, the
+/// interface-traction term) is the arithmetic mean of the single-owner outputs over that set. The
+/// fixed offset order -- lexicographic in (dz, dy, dx), x fastest; on a block with ghost layers the
+/// order of the LOCAL linear index, translation-invariant across a periodic seam and a rank
+/// boundary (never the global index) -- orders every sum over the cells of an edge (the owner-set
+/// means, τ̂); it never decides a winner.
 ///
 /// **The physical domain.** A cell beyond a non-periodic global face (a domain ghost) is never
 /// interfacial: no rank owns it, so it has no fit (the fit runs on owned interfacial cells, §7) and
-/// can be no edge's owner (§5.2: the owner is always in the τ̂ set). Its neighbour's face is no
+/// is in no edge's owner set (§5.2: the owner set lies in the τ̂ set). Its neighbour's face is no
 /// virtual-plane face (§5.7 Q-B), and a link whose sample lies beyond the face is left out of the
 /// fit (§5.3); a sample ON the face is kept, its ghost velocity is data.
 #ifndef PECLET_FLOW_VOF_SHARP_VISCOUS_HPP
@@ -168,19 +172,21 @@ struct SharpGeom {
 
   /// The owner set of E_ac(k) (§5.8 items 1–2): pass 1 (`edgeDistances`), d_min over K_E, and
   /// T_E = {t ∈ K_E : d_t ≤ d_min + τ_own}, compared exactly so on the stored d_t. Returns K_E's
-  /// mask in bits 0–3 and T_E's in bits 4–7 (0: E is not a band edge).
+  /// mask in bits 0–3 and T_E's in bits 4–7 (0: E is not a band edge). The closest candidate
+  /// (first in offset order, the f01a251 owner) is a member by construction: a no-op for finite
+  /// distances, and with a NaN distance it keeps n_E ≥ 1 iff K_E ≠ ∅ (the fit-fallback path).
   KOKKOS_INLINE_FUNCTION int edgeOwnerSet(const int k[3], int a, int c, double dist[4],
                                           double& dmin) const {
     const int kmask = edgeDistances(k, a, c, dist);
     dmin = 0.0;
-    bool first = true;
+    int best = -1;  // the closest, first in offset order: always a member (item 3, n_E >= 1 iff
+                    // K_E ≠ ∅, also when a distance is NaN -- the fit's NaN-plane fallback)
     for (int t = 0; t < 4; ++t)
-      if ((kmask >> t) & 1) {
-        if (first || dist[t] < dmin)
-          dmin = dist[t];
-        first = false;
+      if (((kmask >> t) & 1) && (best < 0 || dist[t] < dmin)) {
+        dmin = dist[t];
+        best = t;
       }
-    int tmask = 0;
+    int tmask = (best < 0) ? 0 : (1 << best);
     for (int t = 0; t < 4; ++t)
       if (((kmask >> t) & 1) && dist[t] <= dmin + kSvOwnerTieTol)
         tmask |= 1 << t;
@@ -211,49 +217,65 @@ struct SharpGeom {
     return nE;
   }
 
-  /// The owner of E_ac(k) (§5.2): among its interfacial cells, the smallest |m·ξ_E − α|/|m|₂, ξ_E
-  /// the edge midpoint in that cell's local coordinates; ties to the first in offset order.
-  /// False when no cell of E is interfacial (E is not a band edge).
-  KOKKOS_INLINE_FUNCTION bool edgeOwner(const int k[3], int a, int c, int o[3], double m[3],
-                                        double& al) const {
+  /// The owner set of E_ac(k) (§5.2, §5.8): calls `f(o, m, α)` for each member of T_E -- the
+  /// interfacial cells whose plane distance from the edge midpoint is within τ_own of the closest
+  /// -- with its plane, in the fixed offset order, and returns n_E = |T_E| (0: E is not a band
+  /// edge). A caller sums each output from 0.0 over the calls in this order and divides once by
+  /// n_E: at n_E = 1 that is the single closest cell's output, bit for bit.
+  template <class F>
+  KOKKOS_INLINE_FUNCTION int forEachOwner(const int k[3], int a, int c, F&& f) const {
+    double dist[4], dmin;
+    const int ms = edgeOwnerSet(k, a, c, dist, dmin);
     int da[4], dc[4];
     edgeCells(a, c, da, dc);
-    const int b = 3 - a - c;
-    bool found = false;
-    double best = 0.0;
+    int n = 0;
     for (int t = 0; t < 4; ++t) {
+      if (!((ms >> (4 + t)) & 1))
+        continue;
       int q[3] = {k[0], k[1], k[2]};
       q[a] -= da[t];
       q[c] -= dc[t];
-      const int kc = cellClass(q);
-      if (kc == kSvNone)
-        continue;
-      double mm[3], aa;
-      plane(q, kc, mm, aa);
-      double xi[3];
-      xi[a] = (double)da[t];
-      xi[c] = (double)dc[t];
-      xi[b] = 0.5;
-      const double nrm = Kokkos::sqrt(mm[0] * mm[0] + mm[1] * mm[1] + mm[2] * mm[2]);
-      const double dist = Kokkos::fabs(mm[0] * xi[0] + mm[1] * xi[1] + mm[2] * xi[2] - aa) / nrm;
-      if (!found || dist < best) {
-        found = true;
-        best = dist;
-        o[0] = q[0];
-        o[1] = q[1];
-        o[2] = q[2];
-        m[0] = mm[0];
-        m[1] = mm[1];
-        m[2] = mm[2];
-        al = aa;
-      }
+      double m[3], al;
+      plane(q, cellClass(q), m, al);
+      f(q, m, al);
+      ++n;
     }
-    return found;
+    return n;
+  }
+
+  /// F̄_row(E_ac(k)), row ∈ {a, c} (§5.8 item 4): the owner-set mean of the C = 1 fraction of the
+  /// u_row face. False on a non-band edge (`f` untouched).
+  KOKKOS_INLINE_FUNCTION bool edgeFaceFraction(const int k[3], int a, int c, int row,
+                                               double& f) const {
+    double acc = 0.0;
+    const int n = forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al) {
+      acc += rowFaceFraction(k, a, c, row, o, m, al);
+    });
+    if (n == 0)
+      return false;
+    f = acc / (double)n;
+    return true;
+  }
+
+  /// θ̄_ac and θ̄_ca at E_ac(k) (§5.8 item 4): the owner-set means of the C = 1 fractions of the
+  /// shear links ∂_a u_c and ∂_c u_a. False on a non-band edge (outputs untouched).
+  KOKKOS_INLINE_FUNCTION bool edgeLinkFractions(const int k[3], int a, int c, double& tac,
+                                                double& tca) const {
+    double sac = 0.0, sca = 0.0;
+    const int n = forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al) {
+      sac += linkFraction(k, a, c, o, m, al);
+      sca += linkFraction(k, c, a, o, m, al);
+    });
+    if (n == 0)
+      return false;
+    tac = sac / (double)n;
+    tca = sca / (double)n;
+    return true;
   }
 
   /// The C = 1 fraction of the u_row face at E_ac(k), row ∈ {a, c} (§5.1 F_c / F_a): the plane
   /// through E normal to the OTHER edge axis, spanning [k_row − ½, k_row + ½] along row and the
-  /// b-layer box; from the owner o's plane.
+  /// b-layer box; from the plane of owner-set member o.
   KOKKOS_INLINE_FUNCTION double rowFaceFraction(const int k[3], int a, int c, int row,
                                                 const int o[3], const double m[3],
                                                 double al) const {
@@ -321,23 +343,30 @@ struct SharpGeom {
     }
   }
 
-  /// The explicit interface-traction part of the u_row stress at E_ac(k) (§5.4 a), row ∈ {a, c}:
+  /// The explicit interface-traction part of the u_row stress at E_ac(k) (§5.4 a, §5.8), row ∈
+  /// {a, c}: the owner-set mean of the single-owner term
   ///   n_a τ̂_c (1 − μ̄ R̄_ac) + n_c τ̂_a (1 − μ̄ R̄_ca),  μ̄ = μ(F_row(E)),
-  /// (n from the owner, τ̂ the interfacial mean). Zero on a non-band edge.
+  /// (n, F and R from the member's plane, τ̂ the interfacial mean) -- per member, then the mean:
+  /// μ(F̄)R(L̄) is not the mean of μR. Zero on a non-band edge.
   KOKKOS_INLINE_FUNCTION double edgeTraction(const int k[3], int a, int c, int row,
                                              const CCConst (&tau)[3]) const {
-    int o[3];
-    double m[3], al;
-    if (!edgeOwner(k, a, c, o, m, al))
+    double t[3] = {0.0, 0.0, 0.0}, acc = 0.0;
+    bool haveTau = false;
+    const int nE = forEachOwner(k, a, c, [&](const int o[3], const double m[3], double al) {
+      if (!haveTau) {
+        edgeTau(k, a, c, tau, t);
+        haveTau = true;
+      }
+      double n[3] = {0.0, 0.0, 0.0};
+      vofPhysNormal(m, gm, n);
+      const double mub = mu(rowFaceFraction(k, a, c, row, o, m, al));
+      const double rac = res(linkFraction(k, a, c, o, m, al));
+      const double rca = res(linkFraction(k, c, a, o, m, al));
+      acc += n[a] * t[c] * (1.0 - mub * rac) + n[c] * t[a] * (1.0 - mub * rca);
+    });
+    if (nE == 0)
       return 0.0;
-    double n[3] = {0.0, 0.0, 0.0};
-    vofPhysNormal(m, gm, n);
-    const double mub = mu(rowFaceFraction(k, a, c, row, o, m, al));
-    const double rac = res(linkFraction(k, a, c, o, m, al));
-    const double rca = res(linkFraction(k, c, a, o, m, al));
-    double t[3];
-    edgeTau(k, a, c, tau, t);
-    return n[a] * t[c] * (1.0 - mub * rac) + n[c] * t[a] * (1.0 - mub * rca);
+    return acc / (double)nE;
   }
 
   /// The explicit part of the u_c stress at cell q beyond today's 2μ(C)∂_c u_c (§5.4 b):
@@ -388,9 +417,9 @@ struct SharpGeom {
   /// The rows of item `it` of the fit of K (§5.3), in the fit's fixed order: item it < 27 is block
   /// cell it = 9(dz+1) + 3(dy+1) + (dx+1) (offset order) with its normal links ∂_c u_c, c = x, y, z
   /// (θ̄ = C); item 27 + u is edge u = 48 pr + (its offset-order index in orientation pr, (a, c) =
-  /// (0,1), (0,2), (1,2)) of the 3×3×3 block with its shear links ∂_a u_c then ∂_c u_a (θ̄ from the
-  /// edge's own owner). Writes (a, c, θ̄, datum) per row; returns the row count, 3 or 2, and 0 when
-  /// the sample is outside the domain.
+  /// (0,1), (0,2), (1,2)) of the 3×3×3 block with its shear links ∂_a u_c then ∂_c u_a (θ̄ the
+  /// mean over the edge's own owner set, §5.8). Writes (a, c, θ̄, datum) per row; returns the row
+  /// count, 3 or 2, and 0 when the sample is outside the domain.
   KOKKOS_INLINE_FUNCTION int fitItem(const int K[3], int it, const CCConst (&v)[3], int ra[3],
                                      int rc[3], double th[3], double mv[3]) const {
     if (it < kSvNormalItems) {
@@ -412,15 +441,9 @@ struct SharpGeom {
     const int k[3] = {K[0] - 1 + l % ex, K[1] - 1 + (l / ex) % ey, K[2] - 1 + l / (ex * ey)};
     if (!edgeInDomain(k, a, c))
       return 0;
-    int o[3];
-    double mm[3], aa;
-    double tac, tca;
-    if (edgeOwner(k, a, c, o, mm, aa)) {
-      tac = linkFraction(k, a, c, o, mm, aa);
-      tca = linkFraction(k, c, a, o, mm, aa);
-    } else {
+    double tac = 0.0, tca = 0.0;
+    if (!edgeLinkFractions(k, a, c, tac, tca))
       tac = tca = edgePhase(k, a, c);
-    }
     const long j = idx(k);
     ra[0] = a;
     rc[0] = c;
@@ -434,10 +457,10 @@ struct SharpGeom {
   }
 
   /// The fit of interfacial cell (X, Y, Z) (§5.3): L, the low-μ-side gradient, from the 81 normal
-  /// links of the 3×3×3 block and the 288 shear links of its 144 edges (θ̄ from each edge's own
-  /// owner), unit weights, Cholesky. Outputs τ̂ = μ_lo P(S n), D̂_nn = n·L n. False = fallback
-  /// (smallest pivot < 1e-10·trace/9): the caller stores τ̂ = D̂ = 0. One thread; the device runs
-  /// the same rows, sums and solve on a team (`sharpFit`).
+  /// links of the 3×3×3 block and the 288 shear links of its 144 edges (θ̄ the mean over each
+  /// edge's own owner set), unit weights, Cholesky. Outputs τ̂ = μ_lo P(S n), D̂_nn = n·L n. False =
+  /// fallback (smallest pivot < 1e-10·trace/9): the caller stores τ̂ = D̂ = 0. One thread; the device
+  /// runs the same rows, sums and solve on a team (`sharpFit`).
   KOKKOS_INLINE_FUNCTION bool fitCell(const int K[3], const CCConst (&v)[3], double tau[3],
                                       double& dnn) const {
     double n[3] = {0.0, 0.0, 0.0};
@@ -524,11 +547,12 @@ struct SharpGeom {
 enum class SvRole : int { kImplicit = 0, kExplicit = 1 };
 
 /// The face viscosity under the sharp interface (§5.4 a, §6): a band edge across a (a ≠ c) takes
-/// μ̄_c,E = μ(F_c(E)), the u_c row's own PLIC face fraction; the time diagonal is `VarFaceProps`'.
-/// The cell link along c (§6.1, WO-5b): on an interfacial cell q (class ≠ kSvNone, virtual planes
-/// included) the whole normal stress 2μ(C_q) is implicit — the implicit role returns 2μ(C_q), the
-/// explicit role 0; on every other cell both roles return μ(C_q), today's split. A is unchanged.
-/// Symmetric under (i, j) swap: the edge is resolved from max(i, j), the cell from min(i, j).
+/// μ̄_c,E = μ(F̄_c(E)), F̄_c the owner-set mean of the u_c row's own PLIC face fraction (§5.8); the
+/// time diagonal is `VarFaceProps`'. The cell link along c (§6.1, WO-5b): on an interfacial cell q
+/// (class ≠ kSvNone, virtual planes included) the whole normal stress 2μ(C_q) is implicit — the
+/// implicit role returns 2μ(C_q), the explicit role 0; on every other cell both roles return
+/// μ(C_q), today's split. A is unchanged. Symmetric under (i, j) swap: the edge is resolved from
+/// max(i, j), the cell from min(i, j).
 struct SharpFaceProps {
   VarFaceProps base;
   SharpGeom geo;
@@ -546,18 +570,17 @@ struct SharpFaceProps {
     const int a = (ad == 1) ? 0 : ((ad == geo.st[1]) ? 1 : 2);
     const long kk = (dd > 0) ? j : i;
     // Not a band edge (none of its four cells k, k - s_a, k - s_c, k - s_a - s_c interfacial):
-    // edgeOwner's answer, read without decoding k.
+    // forEachOwner's n_E = 0, read without decoding k.
     const long sa = geo.st[a], sc = geo.st[c];
     if (geo.cls(kk) == kSvNone && geo.cls(kk - sa) == kSvNone && geo.cls(kk - sc) == kSvNone &&
         geo.cls(kk - sa - sc) == kSvNone)
       return base.beta(i, j);
     const long z = kk / geo.st[2], rr = kk - z * geo.st[2], y = rr / geo.st[1];
     const int k[3] = {(int)(rr - y * geo.st[1]), (int)y, (int)z};
-    int o[3];
-    double m[3], al;
-    if (!geo.edgeOwner(k, a, c, o, m, al))
+    double f = 0.0;
+    if (!geo.edgeFaceFraction(k, a, c, c, f))
       return base.beta(i, j);
-    return geo.mu(geo.rowFaceFraction(k, a, c, c, o, m, al));
+    return geo.mu(f);
   }
 };
 

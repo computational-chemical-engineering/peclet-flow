@@ -22,11 +22,17 @@
 //   (g) WO-4, the full operator (implicit band + band transpose + tau-terms + midsection - grad p,
 //       p the exact cell-average pressure) on exact face averages of kinked-linear Couette and
 //       extension at the 9 orientations, offsets 0 / 0.3, 4 ratios, both metrics: residual
-//       <= 1e-11 of the stress scale.
+//       <= 1e-11 of the stress scale;
+//   (h) WO-9.2 (§5.8), the owner-set mean: a vertex-centred sphere is reflection self-symmetric
+//       (F, theta, T over every band edge) to 1e-13 of the scale, with ties;
+//   (i) WO-9.2: a tie-free case is bitwise the f01a251 single-owner operator (host digest).
+// The host oracles of (e) and (f) transcribe the owner set and its mean (§5.8) independently.
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <Kokkos_Core.hpp>
 #include <limits>
@@ -157,7 +163,8 @@ Geo makeGeo(const Blk& b, const std::vector<double>& col, const std::vector<doub
   return o;
 }
 
-// Edge queries on the device: owner flag, owner distance, F_row(c), F_row(a), L_ac, L_ca.
+// Edge queries on the device (§5.8): n_E (0 = not a band edge), the largest member distance, and
+// the owner-set means F_row(c), F_row(a), L_ac, L_ca.
 struct EdgeQ {
   int k[3], a, c;
 };
@@ -178,22 +185,27 @@ std::vector<std::array<double, 6>> queryEdges(const Geo& o, const std::vector<Ed
       "test::edges", Kokkos::RangePolicy<CCExec>(0, nq), KOKKOS_LAMBDA(int t) {
         const int k[3] = {qd(5 * t), qd(5 * t + 1), qd(5 * t + 2)};
         const int a = qd(5 * t + 3), c = qd(5 * t + 4), b = 3 - a - c;
-        int ow[3];
-        double m[3], al;
-        const bool has = g.edgeOwner(k, a, c, ow, m, al);
-        out(6 * t) = has ? 1.0 : 0.0;
-        if (!has)
+        double dmax = 0.0;
+        const int n = g.forEachOwner(k, a, c, [&](const int ow[3], const double m[3], double al) {
+          double xi[3];
+          xi[a] = k[a] - ow[a];
+          xi[c] = k[c] - ow[c];
+          xi[b] = 0.5;
+          dmax = Kokkos::fmax(dmax, Kokkos::fabs(m[0] * xi[0] + m[1] * xi[1] + m[2] * xi[2] - al) /
+                                        Kokkos::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]));
+        });
+        out(6 * t) = n;
+        if (n == 0)
           return;
-        double xi[3];
-        xi[a] = k[a] - ow[a];
-        xi[c] = k[c] - ow[c];
-        xi[b] = 0.5;
-        out(6 * t + 1) = Kokkos::fabs(m[0] * xi[0] + m[1] * xi[1] + m[2] * xi[2] - al) /
-                         Kokkos::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
-        out(6 * t + 2) = g.rowFaceFraction(k, a, c, c, ow, m, al);
-        out(6 * t + 3) = g.rowFaceFraction(k, a, c, a, ow, m, al);
-        out(6 * t + 4) = g.linkFraction(k, a, c, ow, m, al);
-        out(6 * t + 5) = g.linkFraction(k, c, a, ow, m, al);
+        out(6 * t + 1) = dmax;
+        double f = 0.0, tac = 0.0, tca = 0.0;
+        g.edgeFaceFraction(k, a, c, c, f);
+        out(6 * t + 2) = f;
+        g.edgeFaceFraction(k, a, c, a, f);
+        out(6 * t + 3) = f;
+        g.edgeLinkFractions(k, a, c, tac, tca);
+        out(6 * t + 4) = tac;
+        out(6 * t + 5) = tca;
       });
   auto oh = toHost(out);
   std::vector<std::array<double, 6>> r(nq);
@@ -349,7 +361,7 @@ void testExtrusion() {
     auto er = queryEdges(o, eq);
     for (std::size_t t = 0; t < nodes.size(); ++t) {
       const auto& d = nodes[t];
-      if (er[t][0] != 1.0) {
+      if (er[t][0] < 1.0) {
         ++nNoOwner;
         continue;
       }
@@ -646,7 +658,7 @@ void testVirtual() {
       auto er = queryEdges(o, eq);
       for (const auto& r : er) {
         ++nEdge;
-        if (r[0] != 1.0)
+        if (r[0] < 1.0)
           ++nBad;
         else
           wDist = std::max(wDist, r[1]);
@@ -803,31 +815,39 @@ struct HostGeo {
       o.push_back(x.second);
     return o;
   }
-  bool owner(const int k[3], int a, int c, int o[3], double m[3], double& al) const {
-    bool f = false;
-    double best = 0;
+  // the owner set of E_ac(k) (§5.8): the interfacial cells whose plane distance from the edge
+  // midpoint is within 1e-6 of the closest, in local-linear-index order (empty: not a band edge)
+  struct Member {
+    int o[3];
+    double m[3], al;
+  };
+  std::vector<Member> owners(const int k[3], int a, int c) const {
+    std::vector<Member> all;
+    std::vector<double> d;
     for (auto& q : cells4(k, a, c)) {
       if (cl(q.data()) == 0)
         continue;
-      double mm[3], aa;
-      plane(q.data(), mm, aa);
+      Member mb;
+      plane(q.data(), mb.m, mb.al);
       double xi[3];
-      for (int s = 0; s < 3; ++s)
+      for (int s = 0; s < 3; ++s) {
+        mb.o[s] = q[s];
         xi[s] = k[s] - q[s];
-      xi[3 - a - c] = 0.5;
-      const double d = std::fabs(mm[0] * xi[0] + mm[1] * xi[1] + mm[2] * xi[2] - aa) /
-                       std::sqrt(mm[0] * mm[0] + mm[1] * mm[1] + mm[2] * mm[2]);
-      if (!f || d < best) {
-        f = true;
-        best = d;
-        for (int s = 0; s < 3; ++s) {
-          o[s] = q[s];
-          m[s] = mm[s];
-        }
-        al = aa;
       }
+      xi[3 - a - c] = 0.5;
+      const double* mm = mb.m;
+      d.push_back(std::fabs(mm[0] * xi[0] + mm[1] * xi[1] + mm[2] * xi[2] - mb.al) /
+                  std::sqrt(mm[0] * mm[0] + mm[1] * mm[1] + mm[2] * mm[2]));
+      all.push_back(mb);
     }
-    return f;
+    std::vector<Member> o;
+    if (all.empty())
+      return o;
+    const double dmin = *std::min_element(d.begin(), d.end());
+    for (std::size_t t = 0; t < all.size(); ++t)
+      if (d[t] <= dmin + 1e-6)
+        o.push_back(all[t]);
+    return o;
   }
   // box x box fraction in the plane x_p = xiP over [lo_s, lo_s + 1] on the two other axes s
   static double boxFrac(const double m[3], double al, int p, double xiP, const double lo[3]) {
@@ -873,9 +893,12 @@ HostGeo hostGeo(const Blk& b, const Geo& o, double eps, double muA, double muB,
 }
 
 // A sphere of tangent planes (one plane per cut cell, so owners choose between planes).
+// Centre `cen` (internal coordinates) and radius R; by default the (e)/(f) sphere.
 void sphereGeom(const Blk& b, const double ell[3], std::vector<double>& col,
-                std::vector<double> (&pm)[3], std::vector<double>& pa) {
-  const double cen[3] = {7.3 * ell[0], 6.7 * ell[1], 7.1 * ell[2]}, R = 3.1;
+                std::vector<double> (&pm)[3], std::vector<double>& pa,
+                const double* centre = nullptr, double R = 3.1) {
+  const double cen[3] = {centre ? centre[0] : 7.3 * ell[0], centre ? centre[1] : 6.7 * ell[1],
+                         centre ? centre[2] : 7.1 * ell[2]};
   col.assign(b.cells3, 0.0);
   pa.assign(b.cells3, 0.0);
   for (int a = 0; a < 3; ++a)
@@ -954,7 +977,7 @@ sv::SharpFaceProps sharpFP(const Geo& o, DV mu, int c, double rhoIdt,
 // 2μ(C) in the implicit role and 0 in the explicit one; implicit + explicit = 2 × 'averaged' there
 // and on every other cell link both roles equal 'averaged'.
 void testBand() {
-  long nBand = 0, nNon = 0, badNon = 0, badSym = 0, badM = 0, badCell = 0, nCellIf = 0,
+  long nBand = 0, nTie = 0, nNon = 0, badNon = 0, badSym = 0, badM = 0, badCell = 0, nCellIf = 0,
        badSplit = 0;
   double wOr = 0;
   for (int an = 0; an < 2; ++an)
@@ -1008,16 +1031,19 @@ void testBand() {
                 int k[3] = {x, y, z};
                 if (sg)
                   k[a] += 1;
-                int ow[3];
-                double m[3], al;
-                if (!hg.owner(k, a, c, ow, m, al)) {
+                const auto ow = hg.owners(k, a, c);
+                if (ow.empty()) {
                   ++nNon;
                   badNon += (sv_ != av);
                   continue;
                 }
                 ++nBand;
+                nTie += ow.size() > 1;
                 rowBand = true;
-                const double ex = -hg.mu(hg.rowFace(k, a, c, c, ow, m, al)) * w[a];
+                double F = 0.0;
+                for (const auto& mb : ow)
+                  F += hg.rowFace(k, a, c, c, mb.o, mb.m, mb.al);
+                const double ex = -hg.mu(F / ow.size()) * w[a];
                 wOr = std::max(wOr, std::fabs(sv_ - ex) / std::fabs(ex));
               }
               if (!rowBand && !rowCell)
@@ -1035,10 +1061,11 @@ void testBand() {
       }
     }
   std::printf(
-      "(e) implicit band: %ld band entries (oracle %.2e), %ld non-band (%ld differ), cells/"
+      "(e) implicit band: %ld band entries (%ld tied; oracle %.2e), %ld non-band (%ld differ), "
+      "cells/"
       "diag %ld differ, symmetry %ld, M-matrix %ld; split: %ld interfacial cell links, %ld "
       "wrong\n",
-      nBand, wOr, nNon, badNon, badCell, badSym, badM, nCellIf, badSplit);
+      nBand, nTie, wOr, nNon, badNon, badCell, badSym, badM, nCellIf, badSplit);
   CHECK(nBand > 500 && wOr <= 1e-14, "band entries vs oracle");
   CHECK(badNon == 0 && badCell == 0, "non-band entries bitwise 'averaged'");
   CHECK(badSym == 0 && badM == 0, "symmetric M-matrix");
@@ -1064,13 +1091,9 @@ double hostCellExtra(const HostGeo& h, const int q[3], int c, const std::vector<
 }
 double hostEdgeY(const HostGeo& h, const int k[3], int a, int c,
                  const std::vector<double> (&tau)[3]) {
-  int o[3];
-  double m[3], al, n[3];
-  if (!h.owner(k, a, c, o, m, al))
+  const auto ow = h.owners(k, a, c);
+  if (ow.empty())
     return 0.0;
-  h.normal(m, n);
-  const double mub = h.mu(h.rowFace(k, a, c, c, o, m, al));
-  const double rac = h.res(h.link(k, a, c, o, m, al)), rca = h.res(h.link(k, c, a, o, m, al));
   double t[3] = {0, 0, 0};
   int nI = 0;
   for (auto& q : h.cells4(k, a, c))
@@ -1079,7 +1102,194 @@ double hostEdgeY(const HostGeo& h, const int k[3], int a, int c,
     if (h.cl(q.data()) != 0)
       for (int s = 0; s < 3; ++s)
         t[s] += tau[s][h.b->id(q[0], q[1], q[2])] / nI;
-  return n[a] * t[c] * (1.0 - mub * rac) + n[c] * t[a] * (1.0 - mub * rca);
+  double y = 0.0;
+  for (const auto& mb : ow) {
+    double n[3];
+    h.normal(mb.m, n);
+    const double mub = h.mu(h.rowFace(k, a, c, c, mb.o, mb.m, mb.al));
+    const double rac = h.res(h.link(k, a, c, mb.o, mb.m, mb.al)),
+                 rca = h.res(h.link(k, c, a, mb.o, mb.m, mb.al));
+    y += n[a] * t[c] * (1.0 - mub * rac) + n[c] * t[a] * (1.0 - mub * rca);
+  }
+  return y / ow.size();
+}
+
+// (h) WO-9.2 (§5.8): reflection self-symmetry of the owner-set mean. A sphere of radius 5.3 cells
+// centred on a grid vertex of a 24^3 periodic box (tangent planes), mu ratio 1e3, u^n the pure
+// strain u = (X, Y, -2Z) about the centre (wrapped at the box faces: its jump lies outside every
+// fit block). For each axis reflection R about the centre and every band edge E,
+// |G(E) - s G(R E)| <= 1e-13 max|G| for G in {F_a, F_c, th_ac, th_ca, T_a, T_c}; s = -1 for T
+// iff R reflects a or c. The case ties (census), and n_E is reflection-invariant.
+void testReflection() {
+  Blk b(24, 24, 24);
+  const double ell[3] = {1.0, 1.0, 1.0};
+  const int X0 = b.G + 12;  // the centre, a grid vertex (solver index coordinates)
+  const double cen[3] = {(double)X0, (double)X0, (double)X0};
+  std::vector<double> col, pm[3], pa, v[3];
+  sphereGeom(b, ell, col, pm, pa, cen, 5.3);
+  for (auto& x : v)
+    x.assign(b.cells, 0.0);
+  for (int z = 0; z < b.e[2]; ++z)
+    for (int y = 0; y < b.e[1]; ++y)
+      for (int x = 0; x < b.e[0]; ++x) {
+        const int q[3] = {x, y, z};
+        for (int a = 0; a < 3; ++a) {
+          const double r = (double)(((q[a] - b.G) % 24 + 24) % 24) - 12.0;  // face a - centre
+          v[a][b.id(x, y, z)] = (a == 2) ? -2.0 * r : r;
+        }
+      }
+  const int dlo[3] = {-kBig, -kBig, -kBig}, dhi[3] = {kBig, kBig, kBig};
+  Geo o = makeGeo(b, col, pm, pa, v, dlo, dhi, 1e-12, 1e3, 1.0, ell);
+  const auto census =
+      sv::sharpCensus(o.g, o.fb, C3{b.G, b.G, b.G}, C3{b.e[0] - b.G, b.e[1] - b.G, b.e[2] - b.G});
+  DV out("refl", 21 * b.cells);
+  const sv::SharpGeom g = o.g;
+  const CCConst tc[3] = {o.tau[0], o.tau[1], o.tau[2]};
+  const int G = b.G;
+  Kokkos::parallel_for(
+      "test::reflection", Kokkos::RangePolicy<CCExec>(0, b.cells), KOKKOS_LAMBDA(long i) {
+        const int z = (int)(i / g.st[2]), rr = (int)(i - z * g.st[2]), y = rr / (int)g.st[1],
+                  x = rr - y * (int)g.st[1];
+        for (int ac = 0; ac < 3; ++ac)
+          out(21 * i + 7 * ac) = 0.0;
+        if (x < G || y < G || z < G || x >= g.e[0] - G || y >= g.e[1] - G || z >= g.e[2] - G)
+          return;
+        const int k[3] = {x, y, z};
+        for (int ac = 0; ac < 3; ++ac) {
+          const int a = (ac == 2) ? 1 : 0, c = (ac == 0) ? 1 : 2;
+          const long o7 = 21 * i + 7 * ac;
+          const int n = g.forEachOwner(k, a, c, [](const int*, const double*, double) {});
+          out(o7) = n;
+          if (n == 0)
+            continue;
+          double f = 0.0, tac = 0.0, tca = 0.0;
+          g.edgeFaceFraction(k, a, c, a, f);
+          out(o7 + 1) = f;
+          g.edgeFaceFraction(k, a, c, c, f);
+          out(o7 + 2) = f;
+          g.edgeLinkFractions(k, a, c, tac, tca);
+          out(o7 + 3) = tac;
+          out(o7 + 4) = tca;
+          out(o7 + 5) = g.edgeTraction(k, a, c, a, tc);
+          out(o7 + 6) = g.edgeTraction(k, a, c, c, tc);
+        }
+      });
+  const auto h = toHost(out);
+  double mx[6] = {0, 0, 0, 0, 0, 0}, wd[6] = {0, 0, 0, 0, 0, 0};
+  long nBand = 0, nTie = 0, badN = 0;
+  for (int r = 0; r < 3; ++r)
+    for (int z = G; z < b.e[2] - G; ++z)
+      for (int y = G; y < b.e[1] - G; ++y)
+        for (int x = G; x < b.e[0] - G; ++x)
+          for (int ac = 0; ac < 3; ++ac) {
+            const int a = (ac == 2) ? 1 : 0, c = (ac == 0) ? 1 : 2, bb = 3 - a - c;
+            const double* e = &h[21 * b.id(x, y, z) + 7 * ac];
+            if (e[0] == 0.0)
+              continue;
+            int kr[3] = {x, y, z};
+            kr[r] = (r == bb) ? 2 * X0 - 1 - kr[r] : 2 * X0 - kr[r];  // the reflected edge
+            const double* f = &h[21 * b.id(kr[0], kr[1], kr[2]) + 7 * ac];
+            if (r == 0) {
+              ++nBand;
+              nTie += e[0] > 1.0;
+            }
+            if (f[0] != e[0]) {
+              ++badN;
+              continue;
+            }
+            for (int q = 0; q < 6; ++q) {
+              const double s = (q >= 4 && r != bb) ? -1.0 : 1.0;
+              mx[q] = std::max(mx[q], std::fabs(e[1 + q]));
+              wd[q] = std::max(wd[q], std::fabs(e[1 + q] - s * f[1 + q]));
+            }
+          }
+  double worst = 0.0;
+  for (int q = 0; q < 6; ++q)
+    worst = std::max(worst, mx[q] > 0.0 ? wd[q] / mx[q] : 0.0);
+  std::printf(
+      "(h) reflection self-symmetry: %ld band edges, %ld tied (census %ld, spread %.2e, gap "
+      "%.2e); worst |G(E) - s G(RE)| / max|G|: F_a %.1e F_c %.1e th_ac %.1e th_ca %.1e T_a %.1e "
+      "T_c %.1e; n_E mismatches %ld; fallbacks %ld\n",
+      nBand, nTie, census.tied, census.tieSpread, census.untiedGap, wd[0] / mx[0], wd[1] / mx[1],
+      wd[2] / mx[2], wd[3] / mx[3], wd[4] / mx[4], wd[5] / mx[5], badN, census.fallback);
+  CHECK(nBand > 1000 && nTie > 0 && census.tied == nTie, "a band with ties (%ld / %ld)", nTie,
+        census.tied);
+  CHECK(badN == 0, "n_E reflection-invariant");
+  CHECK(worst <= 1e-13, "reflection self-symmetry %.2e", worst);
+}
+
+// FNV-1a over the bytes of a double array (the tie-free identity's digest).
+std::uint64_t fnv(std::uint64_t h, const std::vector<double>& x) {
+  for (double d : x) {
+    std::uint64_t u;
+    std::memcpy(&u, &d, sizeof u);
+    for (int s = 0; s < 8; ++s) {
+      h ^= (u >> (8 * s)) & 0xffu;
+      h *= 0x100000001b3ULL;
+    }
+  }
+  return h;
+}
+
+// (i) WO-9.2 (§5.8): a tie-free case is bitwise the single-owner operator of f01a251 (host). The
+// (e)/(f) sphere at mu ratio 1e3 and h ratio 1 : 1.5 : 2, random u^n: its census reads 0 tied
+// edges (the isotropic sphere has 7: not this case), and every band-op output -- the fit (tau_hat,
+// D_nn, fallbacks), the implicit and the explicit bands of the three components, the explicit band
+// RHS -- is hashed (FNV-1a over the bytes). The digests were recorded once from the f01a251
+// operator (the WO-9.1 tree, host OpenMP, 2026-11-04). On a device backend FMA contraction may
+// differ: the digest is printed, not checked.
+void testTieFree() {
+  const std::uint64_t want = 0x453f2865e4cc0381ULL;
+  constexpr bool host = Kokkos::SpaceAccessibility<Kokkos::HostSpace, CCMem>::accessible;
+  {
+    Blk b(12, 12, 12);
+    const double ell[3] = {1.0, 1.5, 2.0};
+    const double w[3] = {1.0 / (ell[0] * ell[0]), 1.0 / (ell[1] * ell[1]), 1.0 / (ell[2] * ell[2])};
+    std::vector<double> col, pm[3], pa, v[3];
+    sphereGeom(b, ell, col, pm, pa);
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<double> U(-1.0, 1.0);
+    for (auto& x : v) {
+      x.resize(b.cells);
+      for (auto& y : x)
+        y = U(rng);
+    }
+    const int dlo[3] = {-kBig, -kBig, -kBig}, dhi[3] = {kBig, kBig, kBig};
+    const double muA = 1e3, muB = 1.0;
+    Geo o = makeGeo(b, col, pm, pa, v, dlo, dhi, 1e-12, muA, muB, ell);
+    const auto cen =
+        sv::sharpCensus(o.g, o.fb, C3{b.G, b.G, b.G}, C3{b.e[0] - b.G, b.e[1] - b.G, b.e[2] - b.G});
+    std::uint64_t h = 0xcbf29ce484222325ULL;
+    for (int a = 0; a < 3; ++a)
+      h = fnv(h, toHost(o.tau[a]));
+    h = fnv(h, toHost(o.dnn));
+    {
+      const auto fb = toHost(o.fb);
+      h = fnv(h, std::vector<double>(fb.begin(), fb.end()));
+    }
+    DV mu = muField(b, col, muA, muB);
+    for (int c = 0; c < 3; ++c) {
+      for (const auto& x : buildBands(b, sharpFP(o, mu, c, 0.7), w))
+        h = fnv(h, x);
+      for (const auto& x : buildBands(b, sharpFP(o, mu, c, 0.7, sv::SvRole::kExplicit), w))
+        h = fnv(h, x);
+    }
+    DV rd("rs", b.cells);
+    Kokkos::deep_copy(rd, 1.0);
+    const CCConst tc[3] = {o.tau[0], o.tau[1], o.tau[2]}, vc[3] = {o.v[0], o.v[1], o.v[2]};
+    for (int c = 0; c < 3; ++c) {
+      DV bb("bb", b.cells);
+      sv::addSharpViscousRhs(c, bb, CCConst(rd), vc, o.g, tc, CCConst(o.dnn), b.G, w[c], false);
+      Kokkos::fence();
+      h = fnv(h, toHost(bb));
+    }
+    std::printf("(i) tie-free identity: %ld band cells, %ld tied edges, digest 0x%016llx%s\n",
+                cen.band, cen.tied, (unsigned long long)h,
+                host ? (h == want ? " (= f01a251)" : " (MISMATCH)") : " (device: not checked)");
+    CHECK(cen.band > 50 && cen.tied == 0, "a tie-free case");
+    if (host)
+      CHECK(h == want, "tie-free band-op outputs bitwise f01a251");
+  }
 }
 
 // (f) WO-4: the explicit kernel against the host transcription.
@@ -1333,6 +1543,8 @@ int main(int argc, char** argv) {
     testRhsOracle();
     testFallback();
     testPatch();
+    testReflection();
+    testTieFree();
   }
   Kokkos::finalize();
   if (failures)
