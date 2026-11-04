@@ -1263,6 +1263,60 @@ change of the force input; default: accept if the N48 pair shows order ≥ 1.8).
 - **C is settled.** The refusal is the tail advection of a non-physical output, and the retry rule
   removes it.
 
+#### D. Sixth pass (architect, 2026-11-04): Q26, the along-mode order — PARTIAL, verdict OPEN
+
+**Instrument (new, cheap, production path).** `arch6/resid.py` (dir `bubble_column_perf/validation/highratio/sv_impl/arch6/`): ONE production step from u^n = ū (exact face
+averages), p^n = 0, the consistent force (L = 4, stiff), at D = 1e-3. Then r = ρ(u^{n+1} − ū)/dt = P_h[(A+T)ū + f̄]
++ O(D). This is exact bookkeeping: the steady velocity error is −L⁻¹r, and −G p̄ drops out (P_h G = 0), so r is the
+unique, gauge-free source of the error. Band faces (|ξ| ≤ 3h) are reduced to Fourier-weighted moments per unit
+interface area: M0 = Σ r w h³/A (net force), M1 = Σ r ξ w h³/A (dipole), w = 2cos(aη) or 2sin(aη), in (n, t).
+Scales: μ_hi U a and μ_hi U. A conservative band flux error δσ gives M0, M1 ∝ δσ h, so O(h²) velocity needs both at
+O(h²). Checks: D-linear to 0.3 % (1e-3 against 1e-4), force residual 2e-16, fit fallbacks 0 at every N.
+
+**Measured, m (1,1,0), k 3, ratio 1e2, N 16/24/32/48/64** (`arch6/resid.jsonl`, `summ_resid.py`):
+
+| quantity | sharp | averaged | uniform μ |
+|---|---|---|---|
+| bulk max r / (μ_hi U a²), N24→64 | 5.1e-2 → 7.3e-3, order 1.96–1.99 | 5.9e-2 → 8.3e-3, 1.98–1.99 | order 1.99 |
+| M0_t (cos), N64; orders | 4.7e-3; 2.2–2.8 | 4.2e-3; 2.2–2.9 | 1.9e-2 (N48); 2.2–2.8 |
+| M1_t (cos), N64; orders | 7.4e-3; 2.1–2.4 | 2.0e-2; 2.0–2.1 | ≤ 5e-4 |
+| M1_n (sin), N64; orders | 5e-6–1.4e-4; ≥ 4.7 | 2.4e-4; 4.8–5.0 | order 4.8 |
+| **M0_n (sin), N24/32/48/64** | **1.0e-2 / 4.7e-3 / 6.3e-3 / 4.6e-3; orders 2.6, −0.7, 1.1** | 3.9e-2 / 3.8e-2 / 2.3e-2 / 1.5e-2; orders 0.1, 1.2, 1.6 | 9.8e-4 / 3.5e-4 / 7.4e-5; 3.6–3.8 |
+| band max r / (μ_hi U a²) | 0.51 flat (O(1); divergence form, expected) | 0.65 flat | 2nd order |
+
+**Reading.**
+- *(i) is excluded* on (1,1,0): force exact, no fallbacks, step linear in D, and the bulk residual is second order.
+- *Shear part sound.* Every tangential moment and the normal dipole converge at order ≥ 2. So the face-fraction
+  shear samples and the τ̂ T-terms behave as §5.5 claims.
+- *One anomaly, and it is the only candidate for (iii).* Sharp's net normal force per interface area, modulated
+  like D_nn (sin aη), stops converging at ≈ 5e-3 μ_hi U a for N 32–64. The uniform-μ control has 7e-5 at order 3.8;
+  'averaged' has 1.5e-2, still falling at order ≈ 1.6. This is a modulated normal force sheet, and a sheet is not
+  a gradient, so it drives velocity at O(h⁰·F/(μa)) asymptotically. It belongs to the normal-stress path: the
+  cell sample's 2μ(C̄)m_cc, the midsection term with D̂_nn, or the normal component of the edge samples at an
+  oblique plane. Its size (5e-3 against err 0.05 at N48) is too small to explain the N24→48 order 1.57 alone, so
+  (ii) and (iii) both survive on (1,1,0).
+- *Not yet in:* the (2,1,1) residual rows (running, `resid.jsonl`) and the steady N16/32/64 sharp rows plus the
+  uniform-μ N32/48 and 'averaged' N24/48 rows (`arch6/steady.jsonl`, via `arch5/exp_b.py`; N64 ≈ 2 h).
+
+**Decision rule for the coordinator, applied to those files (no new runs needed):**
+1. Steady order, sharp N32→64, both normals ≥ 1.8 → **(ii)**. Adopt WO-B5 and judge G-SV1cP on the N32/48/64
+   envelope (N24 is pre-asymptotic at kh 0.37/0.64). Q26 closes.
+2. Steady order N32→64 < 1.5 on either normal AND sharp's M0_n flat (|order| < 0.5 over N32–64) on that normal
+   → **(iii)**, in the normal-stress path. The next instrument is a term split of r: a study-only switch replacing
+   D̂_nn by the exact D_nn(x_i) in the midsection term, and one dropping it. That is a study hook in production
+   code, so it is the coordinator's call. Until then it is NOT a redesign: the shear path is verified, and a defect
+   confined to one cell-centred term is a local fix.
+3. Otherwise (1.5 to 1.8) → NOT JUDGED. Report the four-point orders. The default below stands.
+
+**Default meanwhile (recommendation): ship 'sharp' as the staggered AUTO default now, with this mode's order
+documented as "1.4–1.6 measured at N24→48, under study".** Reasons:
+- On the same instrument sharp beats 'averaged' everywhere: steady err 0.153 against 0.349 at N24; normal sheet
+  5e-3 against 1.5e-2 at N64; dipole M1_t 2.7× smaller.
+- 'averaged' carries a first-order normal sheet of its own.
+- Every other gate is second order.
+
+So there is no measurement on which 'averaged' is the safer default for this mode.
+
 ---
 
 ## 7. MPI, halo, device, cost
@@ -1748,7 +1802,7 @@ slope of log e against log h over the stated resolutions.
 | Q23 | Composite (predictor × M-orthogonal projection) instability at high contrast, layered geometry, D ≥ 1 — in 'averaged' too (§6.5) | **user preference** (priority; separate package) | Logged for the coordinator; own architect pass (periodic layered harness first). This package proceeds; G-SV9(f) reports the onset, and 'sharp' worse than 'averaged' at D_hi ≤ 3 is a STOP. |
 | Q24 | G-SV9(e): fixed-count momentum (N_A = 2000) and the doubling certificate replace "RB-GS to 1e-13/1e-15 … or whose solves cap ⇒ NOT JUDGED" (momentum half; §6.8 A) | **user preference** (a post-data change to a pre-registered instrument) | Accept. It is stricter: the measured map error falls from 4e-12 to ≤ 1e-13, and the solve is certified directly. Judge (e) from the WO-A5 rerun, not from the old pilot. |
 | Q25 | Steady gates: retire the coordinator rule "a sweep-cap hit → NOT CONVERGED" (never implemented by the tables; 71/38/59/4/15 capped rows in G-SV1P/1dP/1cP/1W/G-SV2) | **user preference** (it touches FINAL verdicts), then **fact** (WO-A5b) | Retire it. G-SV1W and G-SV2 stay FINAL unless WO-A5b's spot check differs by more than 1e-8 (then STOP → architect). |
-| Q26 | G-SV1cP after WO-B5: does the operator's remaining along-mode error converge at envelope order ≥ 1.8? | **fact**: the N48 pair running in `arch5/` (consistent force, (1,1,0) and (2,1,1), k 3), then the WO-B5 rerun | If the observed N24→48 order is ≥ 1.8 on both, adopt WO-B5, rerun and judge. If either is ≤ 1.5, STOP → architect (operator per-face residual next). Meanwhile G-SV1cP is NOT JUDGED and N64 HELD. |
+| Q26 | G-SV1cP: is the along-mode order shortfall the operator? (§6.8 D) | **fact**: `arch6/steady.jsonl` (sharp N16/32/64, controls) + `arch6/resid.jsonl` (2,1,1) rows, then §6.8 D's rule | Sixth pass: (i) excluded on (1,1,0); shear path second order; one candidate (iii) term, a non-converging D_nn-modulated normal force sheet (≈5e-3 μ_hi U a). Apply §6.8 D rule 1/2/3 when the rows land. Meanwhile ship sharp as AUTO with this mode documented "1.4–1.6, under study"; G-SV1cP NOT JUDGED. |
 | Q27 | G-SV1cP force input: the face-CV-consistent force (§6.8 B) replaces "the cell field μ(C_i)F(x_i)"; invariance judged on the certifying step | **user preference** (a post-data change to an instrument) | Accept. The old input measures its own forcing: 84 % of the worst row's error goes when the force is made consistent, with the operator unchanged. |
 | Q28 | Uniform-μ controls end with a mean velocity of 1.4–1.7 % of max\|u\| (EXP-B ctrl: err vs err_gauged; `mom` 1.4e-2, 1.7e-2). A momentum-conserving step started from a gauged x0 should not produce that | **fact** (one instrumented ctrl run, `mom` per restart step) | Not blocking: no gate judges a uniform-μ ctrl row, and G-SV2 κ = 1 subtracts ⟨w⟩. Investigate before any uniform-μ control is cited as evidence of momentum conservation. |
 | Q29 | Steady gates on fixed-count momentum for cost (the certifying step runs to the 2e5 cap when its warm start is the answer)? | **fact** (time saved at N64) + **user preference** | No, for the sets in flight (one setting within a gate). Reconsider for the next campaign. |
