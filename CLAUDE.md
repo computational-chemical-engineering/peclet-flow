@@ -60,7 +60,7 @@ OMP_NUM_THREADS=8 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-fai
 ctest --test-dir build_dev -R '_np[0-9]+$' --output-on-failure   # the distributed suite only
 ```
 
-290 registered / **286 with `-LE bench`** (counted 2026-11-04 on `sharpvisc-land`, host): 72 from `tests/kokkos`
+290 registered / **286 with `-LE bench`** (counted 2026-11-05 on `svl-owner` 9a5d2dc, host): 72 from `tests/kokkos`
 (`bench_rbgs`, `vof_timing`, `bench_scalar_cutcell`, `bench_bottom_factor` carry `bench` — instruments,
 not gates), 169 from `tests/kokkos_mpi` (cases at np = 1, 2, 4 — a few at a subset — + three np = 8 rungs), and 49 Python ctests on the
 module of that tree (regression/verify, the guards `no_env_knobs`, `no_float_operator_casts`,
@@ -449,8 +449,14 @@ ablations on `s.diagnostics`. Ref §9; rung record `doc/history/vof_workorders*.
   porous momentum, moving scene or phase change; else `"averaged"` (= the earlier operator, bitwise)
   with a one-time stderr notice. `SolverColocated` stays averaged (an explicit `"sharp"` raises
   there, and at `step()` outside the scope or with the harmonic face μ). Read-outs
-  `diagnostics.vof_viscous_interface_census()` / `vof_viscous_interface_fit()`. Host cost
-  1.11–1.15× a step (band worklists). Not proven: the predictor+projection composite (a layered
+  `diagnostics.vof_viscous_interface_census()` / `vof_viscous_interface_fit()`. **Edge-owner ties
+  are averaged, never broken** (note §5.8–§5.9): each band edge's outputs are the weighted mean over
+  the candidate cells whose plane lies within τ₁ = 1e-5 cells of the closest — weight 1 on the
+  plateau g ≤ τ₀ = 1e-6, a C¹ smoothstep to 0 at τ₁, the closest always 1 (also at a NaN distance).
+  That makes the operator reflection-equivariant (`mirror_symmetry` ≤ 1e-12) and continuous in the
+  distances; a single-owner tie-break or a sharp set edge lets round-off switch the operator. Census
+  keys `tied_edges` / `blended_edges` / `max_tie_spread` / `min_untied_gap` are INFO. Host cost
+  1.11–1.15× a step (band worklists); the owner set adds 6 % GPU kernel time on P1 d/h 24. Not proven: the predictor+projection composite (a layered
   periodic case is unstable at D_hi ≥ 100 sharp, ≥ 1 averaged; note §6.5) and the steady along-mode
   order (§6.8 D, open). Gates `sharp_viscous`, `sharp_viscous_mpi_np{1,2,4}`,
   `vof_viscous_interface_auto`; instruments `tests/study/sharp_viscous/`.

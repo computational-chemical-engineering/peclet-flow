@@ -79,6 +79,9 @@ Builds on `doc/full_viscous_stress.md` (cited as FVS) and `doc/variable_viscosit
   edge at τ_own can itself be switched by round-off. The weights become a plateau (w = 1 for g ≤ 1e-6)
   followed by a C¹ smoothstep ramp to 0 at 1e-5, which makes the operator continuous in the distances.
   G-SV12 study rows are judged on bands only; the census keys are INFO.
+- **Built and gated (WO-9, 9a5d2dc, 2026-11-05).** Every binding G-SV12 gate passes. The finished study
+  rows sit inside their bands with no verdict flip. The ramp costs nothing on device; the owner set costs
+  6 % of GPU kernel time. See §5.9 "As built" and §11 G-SV12 "As run".
 
 ---
 
@@ -924,6 +927,34 @@ raw data `sv_impl/w9/`) refutes it. There is no void:
      at h = 1e-9.
    - The frozen axis and two-axis colours are bitwise equal to 582ac73.
    - The existing WO-9.2/9.3 gates still pass.
+
+**As built (§5.8 WO-9.1–9.3 `829d628`/`33d9eee`/`582ac73`; §5.9 WO-9.2b `9a5d2dc`; gated 2026-11-05).**
+- *Owner rule.* `src/vof/sharp_viscous.hpp`: `kSvOwnerTieTol = 1e-6`, `kSvOwnerRampTol = 1e-5`,
+  `ownerWeight(g)` exactly as item 2. `edgeOwnerSet` reads the stored plane distances (never
+  recomputed) and returns K_E in bits 0–3 and the plateau set T_E in bits 4–7, with `w[4]`.
+  `forEachOwner` visits the members (w > 0) in offset order and returns W = Σ w. Its three callers,
+  `edgeFaceFraction` (F̄, β = μ(F̄)), `edgeLinkFractions` (θ̄) and `edgeTraction` (T_row), sum w·G from
+  0.0 and divide once by W; W = 0.0 marks a non-band edge.
+- *The NaN closest-candidate rule.* The closest candidate (strict <, first in offset order: the
+  f01a251 single owner) is always a member with w = 1, even when its distance is NaN (the fit's
+  NaN-plane fallback). So W ≥ 1 iff K_E ≠ ∅. A NaN g at any other candidate gives w = 0
+  (`!(g < τ₁)`). This keeps the F3 fallback test; (a) endorses it.
+- *Census* (`diagnostics.vof_viscous_interface_census()`, INFO keys, per rank — the caller reduces):
+  `tied_edges` (edges with |T_E| ≥ 2), `max_tie_spread` (max g over T_E), `min_untied_gap` (min g over
+  K_E ∖ T_E; inf when none), `blended_edges` (edges with a candidate in τ₀ < g < τ₁).
+- *Tests.* `sharp_viscous` (j) `ownerWeight`: slope max 1.666667e5 = K, C¹ ends 3.703e-8 ≤ 3.704e-8;
+  (h) reflection; (i) tie-free identity. `mirror_symmetry` sharp rows pin the step-1 ties (78 / 92).
+  The test count is unchanged (286 with `-LE bench`).
+- *Binding gates (§11 G-SV12), all PASS at 9a5d2dc.*
+  - Host 286/286 (`-LE bench`), `state_hash` digest 805e3e99a93333c7; CUDA sharp ctests 6/6, digest
+    e7edbb471ea7a742.
+  - Mirror: host rows 1.70e-15 / 1.84e-15 (tied 78 / 92, equal on CUDA); MIRROR_DIAG harness rows
+    max 5.39e-14 host, 5.45e-14 CUDA. Reflection (h) 7.2e-15 (486 tied on both backends).
+  - `sharp_viscous_mpi_np{1,2,4}` bitwise (17 / 294 tied). Tie-free digest 0x453f2865e4cc0381 = f01a251.
+  - Frozen axis and two-axis colours: 40/40 bitwise to 582ac73, host and CUDA.
+  - Frozen (1,1,1) k5 spread: N96 2.15e-8, N128 1.53e-8 (≤ 5e-8: the (c) falsifier holds; no Q35
+    escalation).
+- *G-SV12 study rows, cost and INFO items:* §11 G-SV12, "As run".
 
 ---
 
@@ -2238,6 +2269,29 @@ slope of log e against log h over the stated resolutions.
   - The census keys `max_tie_spread` and `min_untied_gap` are INFO and never trigger anything.
   - *Cost.* Sharp ms/step on P1 d/h 24, new against f01a251 on the same build type: ≤ 1.02 on host
     and on the GPU. G-SV7 (≤ 1.2 × 'averaged') still holds.
+  - **As run (WO-9.4, 9a5d2dc, 2026-11-05; table `bubble_column_perf/validation/highratio/sv_impl/w9/GSV12_RESULTS.md`).**
+    - *Binding:* all PASS (§5.9, "As built").
+    - *Study rows finished: all in band, no verdict flip.*
+      - G-SV1P and G-SV1dP at N 24/32, 288 rows each, plus N 48/64 so far: |Δe/e| ≤ 1.4e-5.
+      - G-SV1W: err_wall1 identical.
+      - G-SV2: 19 of 25 rows, |ΔK/K| ≤ 1.9e-5; κ = 1 order 1.922 = recorded.
+      - G-SV5: 4/4 bitwise.
+      - G-SV9: (a) and (e) identical; (b) and (d) |Δρ| ≤ 1e-6 with judged verdicts unchanged; (b′),
+        reported only, unchanged.
+    - *Still running when written:* G-SV1 N 48/64 and G-SV1cP (host), and the P1 / G-SV8 / P2 ladders
+      with G-SV10 (GPU). They are judged by the same scripts.
+    - *Cost, device kernel time* (nsys, P1 d/h 24, 600 steps):
+      - 9a5d2dc / 582ac73 = 1.0007: the ramp is free.
+      - 9a5d2dc / f01a251 code = 1.062: the owner set costs +1.18 ms/step in `sharpFit`,
+        `addSharpViscousRhs` and `ibmBuildDiffusionVar<SharpFaceProps>`, since `edgeOwnerSet` runs
+        once per caller per edge.
+      - The wall-clock ratios were not resolvable at 2 % on the loaded host (±20 % spread).
+    - *INFO.*
+      - Trigger 4 fires on P1 d/h 16 at every step: (tied + blended) / band edges is 6.5–11.5 %, mostly
+        plateau ties of the axisymmetric start, with blended ≤ 3.6 % and ≤ 1.4 % from step 5. It also
+        fires on G-SV2 (the centred drop, structural).
+      - The G-SV6 host and CUDA sharp wall rows are 2–4e-12 relative at np 2/4. That is pre-existing:
+        582ac73 and 56d115f give the same, and the binding np ctests stay bitwise.
 
 ---
 
