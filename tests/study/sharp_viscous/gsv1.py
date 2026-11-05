@@ -595,8 +595,11 @@ class PCase:
 # ---------------------------------------------------------------------------------------------
 def tie_init():
     """G-SV12 owner-tie census (WO-9.4, study only): max over steps of 'tied_edges' and 'max_tie_spread', min
-    of 'min_untied_gap'; 'tie_reads' counts the steps read (0 on a build without the owner-set keys)."""
-    return {"tied_max": 0, "spread_max": 0.0, "gap_min": float("inf"), "tie_reads": 0}
+    of 'min_untied_gap'; 'tie_reads' counts the steps read (0 on a build without the owner-set keys). With the
+    eighth-pass ramp (§5.9): max over steps of 'blended_edges' and of (tied + blended) / band_cells -- an upper
+    proxy for the §5.9 (b) trigger 4 fraction of band EDGES (a band cell carries several band edges)."""
+    return {"tied_max": 0, "spread_max": 0.0, "gap_min": float("inf"), "tie_reads": 0, "blended_max": 0,
+            "tb_frac_max": 0.0}
 
 
 def tie_read(s, acc, comm=None):
@@ -608,9 +611,13 @@ def tie_read(s, acc, comm=None):
     if "tied_edges" not in c:
         return
     t, sp, g = int(c["tied_edges"]), float(c["max_tie_spread"]), float(c["min_untied_gap"])
+    bl, nb = int(c.get("blended_edges", 0)), int(c["band_cells"])
     if comm is not None:
         from mpi4py import MPI
         t, sp, g = comm.allreduce(t), comm.allreduce(sp, op=MPI.MAX), comm.allreduce(g, op=MPI.MIN)
+        bl, nb = comm.allreduce(bl), comm.allreduce(nb)
+    acc["blended_max"] = max(acc.get("blended_max", 0), bl)
+    acc["tb_frac_max"] = max(acc.get("tb_frac_max", 0.0), (t + bl) / max(nb, 1))
     acc["tied_max"] = max(acc["tied_max"], t)
     acc["spread_max"] = max(acc["spread_max"], sp)
     acc["gap_min"] = min(acc["gap_min"], g)
@@ -620,7 +627,8 @@ def tie_read(s, acc, comm=None):
 def tie_str(r):
     if "tie_reads" not in r:
         return "tied=n/a"
-    return f"tied={r['tied_max']} spread={r['spread_max']:.1e} gap={r['gap_min']:.1e} reads={r['tie_reads']}"
+    return (f"tied={r['tied_max']} spread={r['spread_max']:.1e} gap={r['gap_min']:.1e} reads={r['tie_reads']}"
+            f" blended={r.get('blended_max', 'n/a')} tb/band={r.get('tb_frac_max', float('nan')):.3f}")
 
 
 class StepMap:
