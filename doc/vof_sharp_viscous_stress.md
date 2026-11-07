@@ -2285,6 +2285,19 @@ slope of log e against log h over the stated resolutions.
       - 9a5d2dc / f01a251 code = 1.062: the owner set costs +1.18 ms/step in `sharpFit`,
         `addSharpViscousRhs` and `ibmBuildDiffusionVar<SharpFaceProps>`, since `edgeOwnerSet` runs
         once per caller per edge.
+      - **WO-9e (2026-11-06): ≤ 1.02 PASS, bitwise.** About 70 % of the cost was warp divergence:
+        `forEachOwner` ran the caller's body inside the loop over the four offsets, so lanes whose
+        edges' members sit at different offsets executed up to four copies in turn. It now gathers
+        the members first and runs the body in one loop over the n_E members; the owner set itself
+        is still evaluated per caller (the remaining +0.39 ms/step). Same
+        calls in the same order: every sharp field, the fit and the velocity are bitwise 9a5d2dc on
+        host and CUDA (P1 d/h 24 60 steps, 40 frozen tied G-SV1 rows, the sharp mirror rows).
+        Kernel-time sums, one lock hold: new / f01a251 code = 1.0136 (1.0171 without the
+        per-step `BottomFactorKernel`, 4.78 s of the 17.4 s); new / 9a5d2dc = 0.964. Per kernel,
+        ms/step f01a251 → 9a5d2dc → new: `sharpFit` 0.962 → 1.479 → 1.108, `addSharpViscousRhs`
+        0.260 → 0.693 → 0.384, `ibmBuildDiffusionVar<SharpFaceProps>` 0.499 → 0.736 → 0.561,
+        `addFullStressRhs<SharpFaceProps>` 0.472 → 0.707 → 0.531. G-SV7 device sharp / averaged
+        = 1.077 (1.110 without the bottom factor). Evidence `sv_impl/w9e/`.
       - The wall-clock ratios were not resolvable at 2 % on the loaded host (±20 % spread).
     - *INFO.*
       - Trigger 4 fires on P1 d/h 16 at every step: (tied + blended) / band edges is 6.5–11.5 %, mostly

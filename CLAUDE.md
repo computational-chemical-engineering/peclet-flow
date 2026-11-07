@@ -456,7 +456,7 @@ ablations on `s.diagnostics`. Ref §9; rung record `doc/history/vof_workorders*.
   That makes the operator reflection-equivariant (`mirror_symmetry` ≤ 1e-12) and continuous in the
   distances; a single-owner tie-break or a sharp set edge lets round-off switch the operator. Census
   keys `tied_edges` / `blended_edges` / `max_tie_spread` / `min_untied_gap` are INFO. Host cost
-  1.11–1.15× a step (band worklists); the owner set adds 6 % GPU kernel time on P1 d/h 24. Not proven: the predictor+projection composite (a layered
+  1.11–1.15× a step (band worklists); the owner set adds 1.4 % GPU kernel time on P1 d/h 24 (WO-9e). Not proven: the predictor+projection composite (a layered
   periodic case is unstable at D_hi ≥ 100 sharp, ≥ 1 averaged; note §6.5) and the steady along-mode
   order (§6.8 D, open). Gates `sharp_viscous`, `sharp_viscous_mpi_np{1,2,4}`,
   `vof_viscous_interface_auto`; instruments `tests/study/sharp_viscous/`.

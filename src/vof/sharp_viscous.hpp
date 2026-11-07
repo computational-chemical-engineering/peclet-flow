@@ -257,25 +257,42 @@ struct SharpGeom {
   /// w·G from 0.0 over the calls in this order and divides once by W: with no candidate on the
   /// ramp every w is 1.0 or 0.0 and W the integer n_E, so at n_E = 1 that is the single closest
   /// cell's output, bit for bit.
+  ///
+  /// The members are gathered first (their offsets packed two bits each, in offset order) and `f`
+  /// runs in one loop over the n_E members, not over the four offsets: the lanes of a device warp
+  /// whose edges' members sit at different offsets then execute one copy of `f` together, as the
+  /// single owner of f01a251 did, instead of one copy per offset in turn. Same calls, same order.
   template <class F>
   KOKKOS_INLINE_FUNCTION double forEachOwner(const int k[3], int a, int c, F&& f) const {
     double dist[4], dmin, w[4];
     edgeOwnerSet(k, a, c, dist, dmin, w);
     int da[4], dc[4];
     edgeCells(a, c, da, dc);
+    int ts = 0, n = 0;
+    for (int t = 0; t < 4; ++t)
+      if (w[t] > 0.0) {
+        ts |= t << (2 * n);
+        ++n;
+      }
     double W = 0.0;
-    for (int t = 0; t < 4; ++t) {
-      if (!(w[t] > 0.0))
-        continue;
+    for (int j = 0; j < n; ++j) {
+      const int t = (ts >> (2 * j)) & 3;
+      const double wt = pick4(w, t);
       int q[3] = {k[0], k[1], k[2]};
-      q[a] -= da[t];
-      q[c] -= dc[t];
+      q[a] -= pick4(da, t);
+      q[c] -= pick4(dc, t);
       double m[3], al;
       plane(q, cellClass(q), m, al);
-      f(q, m, al, w[t]);
-      W += w[t];
+      f(q, m, al, wt);
+      W += wt;
     }
     return W;
+  }
+
+  /// v[t] by selects, so a small array indexed by a runtime offset stays in registers.
+  template <class T>
+  KOKKOS_INLINE_FUNCTION static T pick4(const T v[4], int t) {
+    return (t == 0) ? v[0] : (t == 1) ? v[1] : (t == 2) ? v[2] : v[3];
   }
 
   /// F̄_row(E_ac(k)), row ∈ {a, c} (§5.8 item 4, §5.9): the owner-set weighted mean of the C = 1
