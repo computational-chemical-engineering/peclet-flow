@@ -79,8 +79,8 @@ Builds on `doc/full_viscous_stress.md` (cited as FVS) and `doc/variable_viscosit
   edge at τ_own can itself be switched by round-off. The weights become a plateau (w = 1 for g ≤ 1e-6)
   followed by a C¹ smoothstep ramp to 0 at 1e-5, which makes the operator continuous in the distances.
   G-SV12 study rows are judged on bands only; the census keys are INFO.
-- **Built and gated (WO-9, 9a5d2dc, 2026-11-05).** Every binding G-SV12 gate passes. The finished study
-  rows sit inside their bands with no verdict flip. The ramp costs nothing on device; the owner set costs
+- **Built and gated (WO-9, 9a5d2dc, 2026-11-05).** Every binding G-SV12 gate passes. All study rows
+  (final 2026-11-14) sit inside their bands with no verdict flip. The ramp costs nothing on device; the owner set costs
   6 % of GPU kernel time. See §5.9 "As built" and §11 G-SV12 "As run".
 
 ---
@@ -2278,8 +2278,11 @@ slope of log e against log h over the stated resolutions.
       - G-SV5: 4/4 bitwise.
       - G-SV9: (a) and (e) identical; (b) and (d) |Δρ| ≤ 1e-6 with judged verdicts unchanged; (b′),
         reported only, unchanged.
-    - *Still running when written:* G-SV1 N 48/64 and G-SV1cP (host), and the P1 / G-SV8 / P2 ladders
-      with G-SV10 (GPU). They are judged by the same scripts.
+    - *Final (2026-11-14, every queue finished, same judges):* every row in band, no verdict flip.
+      G-SV1P and G-SV1dP, 576 rows each at N 24–64: |Δe/e| ≤ 2.4e-5 / 3.3e-5, envelope order
+      unchanged. G-SV1cP (INFO): 613 rows, 0 breaches. G-SV2: 25/25 rows, |ΔK/K| ≤ 1.9e-5. P1 d/h
+      16–48 |ΔRe/Re| ≤ 3.2e-5, G-SV8 ≤ 3.0e-6, P2 ≤ 1.3e-5 (bands 1e-3). CUDA battery on `a3d1137`
+      286/286.
     - *Cost, device kernel time* (nsys, P1 d/h 24, 600 steps):
       - 9a5d2dc / 582ac73 = 1.0007: the ramp is free.
       - 9a5d2dc / f01a251 code = 1.062: the owner set costs +1.18 ms/step in `sharpFit`,
