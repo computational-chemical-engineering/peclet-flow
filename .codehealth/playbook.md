@@ -35,6 +35,14 @@ Verbatim from RULES.md:
   head tree and quote them in the step log (they are in `ctest_host` too; naming them makes the evidence visible).
 - Never touch another session's flow worktree or branch (`git worktree list`; vof's are listed above).
 
+## Extra gates per file (owner vof, 11-15)
+
+- **`src/mac_cutcell_mg.hpp` (CutcellMG)**: state_hash covers the HOST path only. The class also carries the device
+  FP32 V-cycle (`'auto'` = FP32 on device only, with an FP64 restart) and the distributed host paths. Every step
+  there also needs: (1) bitwise on CUDA, i.e. state_hash and the sharp-VoF run on the GPU, base == head; (2) the
+  MPI ctests `mg_stencil_halo_np*`, `mg_fp32_vcycle_mpi_np2`, `test_telescope_mpi`, `cg_guard_mpi` and
+  `mg_vcycle_symmetry` passing at np 1/2/4.
+
 ## Rules for new code
 
 1. Pass `Kokkos::View`s by value and capture them by value in `KOKKOS_LAMBDA`; never capture `this` in a device
