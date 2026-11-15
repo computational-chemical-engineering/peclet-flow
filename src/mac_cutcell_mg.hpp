@@ -1276,7 +1276,7 @@ class CutcellMG {
   // ---- the line-relaxation trigger (doc/mg_depth_policy.md Amendment A2.3) --------------------
   // On level L of GLOBAL inner dims g and coarsening factors cf (H_a = hp_a * cf_a): s = the unique
   // axis with H_s < H_b for both b != s (none: no trigger); A' = min_{b != s} H_b / H_s;
-  //   T(L) <=> L >= 1 and !can(g[s]) (globally blocked) and A' > theta and no outflow face on s.
+  //   T(L) <=> L >= 1, !canHalve(g[s]) (globally blocked), A' > theta and no outflow face on s.
   // Returns s when T(L) holds, else -1; *aspect receives A' (0 when there is no unique s). Global
   // quantities only (no collective, np-independent). An s only DEFERRED by mgChooseRatio, or
   // blocked only by evenBlocksOn (§5.4), is not globally blocked. Pure and static: host, once per
@@ -1294,7 +1294,7 @@ class CutcellMG {
       return -1;
     const double A = std::min(H[(s + 1) % 3], H[(s + 2) % 3]) / H[s];
     *aspect = A;
-    const bool blocked = !((gd[s] % 2 == 0) && (gd[s] / 2 >= 2));  // !can(g[s])
+    const bool blocked = !canHalve(gd[s]);
     const bool outflow = bc[2 * s] == 3 || bc[2 * s + 1] == 3;
     return (L >= 1 && blocked && A > theta && !outflow) ? s : -1;
   }
@@ -1426,15 +1426,10 @@ class CutcellMG {
   // that cannot halve is not a constraint. This is the predicate core's stage policy
   // (peclet::core::decomp::chooseStageTarget) is parameterised on, shared by initMpi and predict.
   static bool teleLiftable(const peclet::core::decomp::BlockDecomposer<3>& d, C3 gs) {
-    auto can = [](int e) { return (e % 2 == 0) && (e / 2 >= 2); };
     const int ga[3] = {gs.x, gs.y, gs.z};
-    for (int ax = 0; ax < 3; ++ax) {
-      if (!can(ga[ax]))
-        continue;
-      for (std::size_t b = 0; b < d.sizes().size(); ++b)
-        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
-          return false;
-    }
+    for (int ax = 0; ax < 3; ++ax)
+      if (canHalve(ga[ax]) && !evenBlocksOn(d, ax))
+        return false;
     return true;
   }
   // Per-axis split alignment that makes an ORB safely coarsenable by this MG: align[k] =
@@ -1444,22 +1439,21 @@ class CutcellMG {
   // this MG all compute the SAME value without threading nLevels. The solver builds its shared
   // decomposition with this alignment so initMpi derives nested coarse levels via coarsened().
   static peclet::core::IVec<3> coarsenAlignment(int gnx, int gny, int gnz) {
-    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     C3 gs{gnx, gny, gnz};
     peclet::core::IVec<3> a{1, 1, 1};
     for (bool any = true; any;) {
       any = false;
-      if (can(gs.x)) {
+      if (canHalve(gs.x)) {
         a[0] *= 2;
         gs.x /= 2;
         any = true;
       }
-      if (can(gs.y)) {
+      if (canHalve(gs.y)) {
         a[1] *= 2;
         gs.y /= 2;
         any = true;
       }
-      if (can(gs.z)) {
+      if (canHalve(gs.z)) {
         a[2] *= 2;
         gs.z /= 2;
         any = true;
@@ -1491,19 +1485,18 @@ class CutcellMG {
   // Per-axis coarsening factor a depth-`levels` hierarchy will actually apply: 2^(levels-1),
   // bounded by that axis's factors of two (an odd axis never coarsens, so its factor stays 1).
   static peclet::core::IVec<3> refineFactor(int gnx, int gny, int gnz, int levels) {
-    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     C3 gs{gnx, gny, gnz};
     peclet::core::IVec<3> r{1, 1, 1};
     for (int L = 1; L < levels; ++L) {
-      if (can(gs.x)) {
+      if (canHalve(gs.x)) {
         r[0] *= 2;
         gs.x /= 2;
       }
-      if (can(gs.y)) {
+      if (canHalve(gs.y)) {
         r[1] *= 2;
         gs.y /= 2;
       }
-      if (can(gs.z)) {
+      if (canHalve(gs.z)) {
         r[2] *= 2;
         gs.z /= 2;
       }
@@ -1554,15 +1547,15 @@ class CutcellMG {
   // (teleLiftable) and no block is thinner than 4 cells (the teleMinExtent_ default).
   static int nestDepth(const peclet::core::decomp::BlockDecomposer<3>& d0) {
     namespace cdec = peclet::core::decomp;
-    auto can = [](int e) { return (e % 2 == 0) && (e / 2 >= 2); };
     cdec::BlockDecomposer<3> d = d0;
     C3 gs{(int)d.globalSize()[0], (int)d.globalSize()[1], (int)d.globalSize()[2]};
     int n = 0;
     for (; n < 4; ++n) {
-      if (!(can(gs.x) || can(gs.y) || can(gs.z)) || !teleLiftable(d, gs) ||
+      if (!(canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z)) || !teleLiftable(d, gs) ||
           cdec::minBlockExtent(d) < 4)
         break;
-      const peclet::core::IVec<3> r{can(gs.x) ? 2 : 1, can(gs.y) ? 2 : 1, can(gs.z) ? 2 : 1};
+      const peclet::core::IVec<3> r{canHalve(gs.x) ? 2 : 1, canHalve(gs.y) ? 2 : 1,
+                                    canHalve(gs.z) ? 2 : 1};
       d = d.coarsened(r);
       gs = C3{gs.x / (int)r[0], gs.y / (int)r[1], gs.z / (int)r[2]};
     }
@@ -7830,13 +7823,6 @@ class CutcellMG {
                                       int* align = nullptr) {
     using Dec = peclet::core::decomp::BlockDecomposer<3>;
     std::vector<PlanRow> rows;
-    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
-    auto evenOn = [](const Dec& d, int ax) {
-      for (std::size_t b = 0; b < d.sizes().size(); ++b)
-        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
-          return false;
-      return true;
-    };
     Dec cur;
     peclet::core::Index maxBlockCells = 0;  // 0: sibling merges only (an unweighted dec0)
     if (weights) {
@@ -7871,7 +7857,7 @@ class CutcellMG {
       const bool autoStop =
           autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissible(gs, 4, false, -1, perBc);
       if (L + 1 < nLevelsCap && !autoStop) {
-        const bool canAny = can(gs.x) || can(gs.y) || can(gs.z);
+        const bool canAny = canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z);
         auto liftable = [&](const Dec& d) { return teleLiftable(d, gs); };
         const bool blocked = !liftable(cur);
         const bool tooSmall = minExtent > 0 && peclet::core::decomp::minBlockExtent(cur) <
@@ -7888,15 +7874,15 @@ class CutcellMG {
             r.tele = true;
           }
         }
-        if (can(gs.x) && evenOn(cur, 0)) {
+        if (canHalve(gs.x) && evenBlocksOn(cur, 0)) {
           r.ratio.x = 2;
           next.x = gs.x / 2;
         }
-        if (can(gs.y) && evenOn(cur, 1)) {
+        if (canHalve(gs.y) && evenBlocksOn(cur, 1)) {
           r.ratio.y = 2;
           next.y = gs.y / 2;
         }
-        if (can(gs.z) && evenOn(cur, 2)) {
+        if (canHalve(gs.z) && evenBlocksOn(cur, 2)) {
           r.ratio.z = 2;
           next.z = gs.z / 2;
         }
