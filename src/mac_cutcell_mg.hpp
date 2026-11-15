@@ -3181,6 +3181,50 @@ class CutcellMG {
         std::sqrt(std::max(xA2, 0.0)), xA2 > 0.0 ? std::sqrt(std::max(eA2, 0.0) / xA2) : 0.0,
         rref > 0.0 ? rfin / rref : 0.0, bad);
   }
+  // solvePCGResident's residual of the caller's guess x (no projected guess): r = b - A x, onto
+  // the range; returns r0 = max|r|, the solve's one host read of it.
+  double initialResidual(Level& l0, CCField b, CCField x, CCField r, CCField Ap,
+                         const StarOverlay* star, int nStar, C3 nnStar) {
+    if (zeroGuess_) {
+      // H-2c (§8): the caller guarantees x0 = +0, so A x0 = +0 in every cell and
+      // b + (-1)(+0) = b for every b (+-0 included): r = b with no matvec. The matvec's only
+      // side effect on x, the ghost fill of the non-wrap path, is kept.
+      if (!fusedWrapReads()) {
+        fill(l0, x);
+        applyOutflowGhost(l0, x);
+      }
+      Kokkos::deep_copy(CCExec(), r, b);
+    } else {
+      guessMatvec(l0, Ap, x, star, nStar, nnStar);  // r = b - A x
+      Kokkos::deep_copy(CCExec(), r, b);
+      axpy(r, -1.0, Ap);
+    }
+    removeMean(l0, r);     // compatibility: project rhs/residual onto the range
+    return maxabs(l0, r);  // host read (once per solve)
+  }
+  // solvePCGResident's Ap = A p and p^T Ap into slot kPAp: C1's one fused pass when fuse (and no
+  // "all"-scope mean removal), else the matvec, that mean removal and the dot.
+  void matvecDotPAp(Level& l0, CCField Ap, CCField p, bool fuse, const StarOverlay* star, int nStar,
+                    C3 nnStar) {
+    if (fuse && !meanRemovalAll_) {
+      matvecDotTo(l0, Ap, p, kPAp);  // C1: Ap = A p and p^T Ap in one pass (star == nullptr)
+    } else {
+      guessMatvec(l0, Ap, p, star, nStar, nnStar);
+      if (meanRemovalAll_)
+        removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
+      dotTo(l0, p, Ap, kPAp);
+    }
+  }
+  // solvePCGResident's health instrument at iteration it: |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}|
+  // (rzOld the former, slot kRzNew the latter), logged and, under the trace, printed.
+  void noteHealth(double rzOld, int it, bool trace, bool f32) {
+    const double rzNew = readSlot(kRzNew);
+    const double ratio = rzNew != 0.0 ? std::abs(rzOld / rzNew) : 0.0;
+    healthLog_.push_back(ratio);
+    if (trace)
+      printf("[mg]   it %3d  health |r^T z_k| / |r^T z_{k+1}| = %.3e%s\n", it + 1, ratio,
+             f32 ? " (fp32 V-cycle)" : "");
+  }
   int solvePCGResident(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                        double rtol, int pre, int post, int bottom, const StarOverlay* star,
                        int nStar, C3 nnStar) {
@@ -3192,11 +3236,6 @@ class CutcellMG {
     bottom_ = bottom;
     ensureScalars();
     Level& l0 = lv_[0];  // H-2b: l0.x is not staged (no reader between or inside the solves)
-    auto matvec = [&](CCField y, CCField v) {
-      matvecOverlap(l0, y, v);
-      if (star)
-        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
-    };
     auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
     // E (§5.3): with a projected guess r0 below is rref = max|P b|, the zero-guess residual (the
@@ -3207,22 +3246,7 @@ class CutcellMG {
       r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
                           hostKrylovFusion() && star == nullptr, trace ? &r0w : nullptr);
     } else {
-      if (zeroGuess_) {
-        // H-2c (§8): the caller guarantees x0 = +0, so A x0 = +0 in every cell and
-        // b + (-1)(+0) = b for every b (+-0 included): r = b with no matvec. The matvec's only
-        // side effect on x, the ghost fill of the non-wrap path, is kept.
-        if (!fusedWrapReads()) {
-          fill(l0, x);
-          applyOutflowGhost(l0, x);
-        }
-        Kokkos::deep_copy(CCExec(), r, b);
-      } else {
-        matvec(Ap, x);  // r = b - A x
-        Kokkos::deep_copy(CCExec(), r, b);
-        axpy(r, -1.0, Ap);
-      }
-      removeMean(l0, r);   // compatibility: project rhs/residual onto the range
-      r0 = maxabs(l0, r);  // host read (once per solve)
+      r0 = initialResidual(l0, b, x, r, Ap, star, nStar, nnStar);
       r0w = r0;
     }
     if (trace && guessOn)
@@ -3283,14 +3307,7 @@ class CutcellMG {
       const double brkPAp = kBrkPAp, brkRz = kBrkRz;  // by value into the kernels
       bool exited = false;
       for (; it < maxit; ++it) {
-        if (fuseC && !meanRemovalAll_) {
-          matvecDotTo(l0, Ap, p, kPAp);  // C1: Ap = A p and p^T Ap in one pass (star == nullptr)
-        } else {
-          matvec(Ap, p);
-          if (meanRemovalAll_)
-            removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
-          dotTo(l0, p, Ap, kPAp);
-        }
+        matvecDotPAp(l0, Ap, p, fuseC, star, nStar, nnStar);
         if (dbgBrkWhich_ == 1 && it == dbgBrkIter_)
           setSlot(kPAp, std::numeric_limits<double>::quiet_NaN());
         Kokkos::parallel_for(  // alpha = rz / pAp, or the pAp breakdown flag
@@ -3347,14 +3364,8 @@ class CutcellMG {
         const double rzOld = health ? dot(l0, r, z) : 0.0;  // r_{k+1}^T z_k (the instrument)
         if (!precondDot(kRzNew, CCField()))  // C4: r^T z_new from the V-cycle exit pass
           dotTo(l0, r, z, kRzNew);
-        if (health) {
-          const double rzNew = readSlot(kRzNew);
-          const double ratio = rzNew != 0.0 ? std::abs(rzOld / rzNew) : 0.0;
-          healthLog_.push_back(ratio);
-          if (trace)
-            printf("[mg]   it %3d  health |r^T z_k| / |r^T z_{k+1}| = %.3e%s\n", it + 1, ratio,
-                   f32 ? " (fp32 V-cycle)" : "");
-        }
+        if (health)
+          noteHealth(rzOld, it, trace, f32);
         if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
           setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
         Kokkos::parallel_for(  // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
