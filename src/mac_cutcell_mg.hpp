@@ -1865,86 +1865,11 @@ class CutcellMG {
         const bool doTele = canAny && curDec.numBlocks() > 1 &&
                             ((telescope_ && (blocked || tooSmall)) || teleForce_ == L);
         if (doTele) {
-          // Fewest merges (largest tree depth) at which EVERY still-coarsenable axis has even
-          // blocks — "any axis" would be wrong: it can unblock z and leave x frozen at the extent
-          // that matters. depth 0 (one block: origin 0, size gs, even by can()) always qualifies;
-          // with the economic trigger a merged candidate must also stay fat enough after the
-          // halving that follows. That search is core's `shallowestLiftableMerge`, and behind
-          // flow's trigger it is `chooseStageTarget` with maxBlockCells = 0 (byte-identical to the
-          // search flow carried inline until S4). The test-only forced telescope runs the search
-          // where in-place coarsening is legal, i.e. the search on its own.
-          std::optional<cdec::StageTarget<3>> t;
-          if (teleForce_ == L) {
-            if (auto m = cdec::shallowestLiftableMerge(curDec, liftable, teleMinExtent_)) {
-              t.emplace();
-              t->kind = cdec::StageKind::SiblingMerge;
-              t->dec = std::move(m->dec);
-              t->ownerOf = std::move(m->ownerOf);
-              t->groupOf = std::move(m->groupOf);
-            }
-          } else {
-            t = cdec::chooseStageTarget(curDec, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable,
-                                        teleMinExtent_, maxBlockCells);
-            if (t->kind != cdec::StageKind::SiblingMerge && t->kind != cdec::StageKind::Repartition)
-              throw std::logic_error(
-                  "CutcellMG::initMpi: the telescope search found no merge (depth 0 always lifts "
-                  "under flow's rule)");
-          }
-          if (t) {
-            auto T = std::make_shared<Telescope>();
-            T->comm = cdec::makeStageComm(curComm, *t);
-            T->g = v.g;
-            // The target block this rank's data moves into: its merge group's (SiblingMerge — the
-            // root owns it, the members only feed it), or the one it owns (Repartition; none on a
-            // rank that idles below).
-            const int tb = T->repartition() ? T->comm.myTargetBlock : T->comm.myGroup;
-            if (tb >= 0) {
-              const auto mb = t->dec.block((std::size_t)tb);
-              T->mOg = C3{(int)mb.origin[0], (int)mb.origin[1], (int)mb.origin[2]};
-              T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
-              T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
-            }
-            if (T->repartition()) {
-              T->srcDec = curDec;
-              T->dstDec = t->dec;
-            }
-            // members in group-comm rank order == ascending old block index (makeStageComm)
-            for (const int b : T->comm.members) {
-              const auto fb = curDec.block((std::size_t)b);
-              T->memO.push_back(C3{(int)fb.origin[0], (int)fb.origin[1], (int)fb.origin[2]});
-              T->memS.push_back(C3{(int)fb.size[0], (int)fb.size[1], (int)fb.size[2]});
-            }
-            T->nMembers = (int)T->comm.members.size();
-            // The movement: a global cell of this rank's level-L block lives at its padded slot
-            // (og, g, ext of the level); on the root, a cell of the merged block at the stage
-            // buffer's (mOg, g, mExt). Built once; teleGather / teleScatterAdd run it.
-            {
-              const C3 lo = v.og, le = v.ext, mo = T->mOg, me = T->mExt;
-              const int lg = v.g, mg = T->g;
-              using peclet::core::Index;
-              auto srcIdx = [&](const peclet::core::IVec<3>& c) {
-                return (Index)(c[0] - lo.x + lg) + (Index)(c[1] - lo.y + lg) * le.x +
-                       (Index)(c[2] - lo.z + lg) * (Index)le.x * le.y;
-              };
-              auto dstIdx = [&](const peclet::core::IVec<3>& c) {
-                return (Index)(c[0] - mo.x + mg) + (Index)(c[1] - mo.y + mg) * me.x +
-                       (Index)(c[2] - mo.z + mg) * (Index)me.x * me.y;
-              };
-              T->move.build(curDec, *t, T->comm, srcIdx, dstIdx, /*id=*/L);
-              T->back.assign(v.n, 0.0);
-            }
-            if (T->root()) {
-              const std::size_t mn = (std::size_t)T->mExt.x * T->mExt.y * T->mExt.z;
-              T->res = CCField("tele_res", mn);
-              T->x = CCField("tele_x", mn);
-              T->ox = CCField("tele_ox", mn);
-              T->oy = CCField("tele_oy", mn);
-              T->oz = CCField("tele_oz", mn);
-            }
-            v.tele = T;
-            if (T->root()) {
+          if (auto t = teleTarget(curDec, gs, L, maxBlockCells)) {
+            v.tele = makeTelescope(v, L, curDec, *t, curComm);
+            if (v.tele->root()) {
               curDec = t->dec;
-              curComm = T->comm.sub;
+              curComm = v.tele->comm.sub;
               MPI_Comm_rank(curComm, &curRank);
             } else {
               idleBelow = true;  // this rank holds levels 0..L only
@@ -2028,6 +1953,99 @@ class CutcellMG {
       }
       fflush(stdout);
     }
+  }
+  // initMpi's telescope target at level L (global dims gs). Fewest merges (largest tree depth) at
+  // which EVERY still-coarsenable axis has even blocks — "any axis" would be wrong: it can unblock
+  // z and leave x frozen at the extent that matters. depth 0 (one block: origin 0, size gs, even
+  // by can()) always qualifies; with the economic trigger a merged candidate must also stay fat
+  // enough after the halving that follows. That search is core's `shallowestLiftableMerge`, and
+  // behind flow's trigger it is `chooseStageTarget` with maxBlockCells = 0 (byte-identical to the
+  // search flow carried inline until S4). The test-only forced telescope runs the search where
+  // in-place coarsening is legal, i.e. the search on its own.
+  std::optional<peclet::core::decomp::StageTarget<3>> teleTarget(
+      const peclet::core::decomp::BlockDecomposer<3>& curDec, C3 gs, int L,
+      peclet::core::Index maxBlockCells) const {
+    namespace cdec = peclet::core::decomp;
+    // flow's lift rule, the predicate core's stage policy is parameterised on.
+    auto liftable = [&](const cdec::BlockDecomposer<3>& d) { return teleLiftable(d, gs); };
+    std::optional<cdec::StageTarget<3>> t;
+    if (teleForce_ == L) {
+      if (auto m = cdec::shallowestLiftableMerge(curDec, liftable, teleMinExtent_)) {
+        t.emplace();
+        t->kind = cdec::StageKind::SiblingMerge;
+        t->dec = std::move(m->dec);
+        t->ownerOf = std::move(m->ownerOf);
+        t->groupOf = std::move(m->groupOf);
+      }
+    } else {
+      t = cdec::chooseStageTarget(curDec, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable,
+                                  teleMinExtent_, maxBlockCells);
+      if (t->kind != cdec::StageKind::SiblingMerge && t->kind != cdec::StageKind::Repartition)
+        throw std::logic_error(
+            "CutcellMG::initMpi: the telescope search found no merge (depth 0 always lifts "
+            "under flow's rule)");
+    }
+    return t;
+  }
+  // The telescope stage of level v (level L, decomposition curDec on curComm) onto target t: the
+  // stage communicator, the target block, the members' fine blocks, the field movement and the
+  // root's stage buffers.
+  std::shared_ptr<Telescope> makeTelescope(const Level& v, int L,
+                                           const peclet::core::decomp::BlockDecomposer<3>& curDec,
+                                           const peclet::core::decomp::StageTarget<3>& t,
+                                           MPI_Comm curComm) const {
+    namespace cdec = peclet::core::decomp;
+    auto T = std::make_shared<Telescope>();
+    T->comm = cdec::makeStageComm(curComm, t);
+    T->g = v.g;
+    // The target block this rank's data moves into: its merge group's (SiblingMerge — the
+    // root owns it, the members only feed it), or the one it owns (Repartition; none on a
+    // rank that idles below).
+    const int tb = T->repartition() ? T->comm.myTargetBlock : T->comm.myGroup;
+    if (tb >= 0) {
+      const auto mb = t.dec.block((std::size_t)tb);
+      T->mOg = C3{(int)mb.origin[0], (int)mb.origin[1], (int)mb.origin[2]};
+      T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
+      T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
+    }
+    if (T->repartition()) {
+      T->srcDec = curDec;
+      T->dstDec = t.dec;
+    }
+    // members in group-comm rank order == ascending old block index (makeStageComm)
+    for (const int b : T->comm.members) {
+      const auto fb = curDec.block((std::size_t)b);
+      T->memO.push_back(C3{(int)fb.origin[0], (int)fb.origin[1], (int)fb.origin[2]});
+      T->memS.push_back(C3{(int)fb.size[0], (int)fb.size[1], (int)fb.size[2]});
+    }
+    T->nMembers = (int)T->comm.members.size();
+    // The movement: a global cell of this rank's level-L block lives at its padded slot
+    // (og, g, ext of the level); on the root, a cell of the merged block at the stage
+    // buffer's (mOg, g, mExt). Built once; teleGather / teleScatterAdd run it.
+    {
+      const C3 lo = v.og, le = v.ext, mo = T->mOg, me = T->mExt;
+      const int lg = v.g, mg = T->g;
+      using peclet::core::Index;
+      auto srcIdx = [&](const peclet::core::IVec<3>& c) {
+        return (Index)(c[0] - lo.x + lg) + (Index)(c[1] - lo.y + lg) * le.x +
+               (Index)(c[2] - lo.z + lg) * (Index)le.x * le.y;
+      };
+      auto dstIdx = [&](const peclet::core::IVec<3>& c) {
+        return (Index)(c[0] - mo.x + mg) + (Index)(c[1] - mo.y + mg) * me.x +
+               (Index)(c[2] - mo.z + mg) * (Index)me.x * me.y;
+      };
+      T->move.build(curDec, t, T->comm, srcIdx, dstIdx, /*id=*/L);
+      T->back.assign(v.n, 0.0);
+    }
+    if (T->root()) {
+      const std::size_t mn = (std::size_t)T->mExt.x * T->mExt.y * T->mExt.z;
+      T->res = CCField("tele_res", mn);
+      T->x = CCField("tele_x", mn);
+      T->ox = CCField("tele_ox", mn);
+      T->oy = CCField("tele_oy", mn);
+      T->oz = CCField("tele_oz", mn);
+    }
+    return T;
   }
 #endif
   int nLevels() const { return (int)lv_.size(); }
