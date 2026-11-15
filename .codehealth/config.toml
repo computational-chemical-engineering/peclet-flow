@@ -3,7 +3,8 @@
 # ~45-55 on 48 cores, several tiers concurrently): clang_format 11 s, build_host 534 s, ctest_host 283 tests 6339 s
 # at -j8 (the six scalar_cutcell_g6_* take 4700-5950 s each at one thread, scalar_cutcell_gadv 2457 s,
 # regression_staggered 1239 s; the other 275 sum to 11300 s), state_hash 14 lines ~3 s after the build,
-# sharp_vof ~1 s, build_cuda 3512 s (concurrent with the battery), clang_tidy: see the WO-18 report.
+# sharp_vof ~1 s, build_cuda 3512 s (concurrent with the battery), clang_tidy 9834 s (3 TUs, 152 distinct
+# warnings + 5 clang-diagnostic errors inside GCC's omp.h per TU, identical on both sides).
 #
 # Run with PECLET_SUITE=<suite checkout> set. Every configure pins core's headers with flow's own override
 # -DPECLET_SIBLING_PECLET_CORE (cmake/PecletDeps.cmake), which prints one "[peclet] peclet-core headers from ..."
@@ -84,6 +85,10 @@ cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release 
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
   && cmake --build {repo}/build_health_host -j32'''
 
+# The battery runs at TWO threads per process (flow CLAUDE.md: "on a shared, loaded host run _np* with
+# OMP_NUM_THREADS=2"); state_hash and sharp_vof stay at the [gate.env] one. At one thread four ctests fail at
+# eed2fa4 (deterministic, base and head alike): mg_fp32_vcycle_mpi_np2 (G-DD2 (a) box64 max|x - x1| 1.36e-08 vs
+# its bound) and scalar_cutcell_g6_{1,3,5} (budget identity 1.1-1.4e-13 > 1e-13); all four pass at two threads.
 [[gate.tier]]
 name = "ctest_host"
 kind = "command"
@@ -98,7 +103,7 @@ cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release 
   -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null \
   && cmake --build {repo}/build_health_host -j32 >/dev/null \
-  && PYTHONPATH={repo}/build_health_host \
+  && OMP_NUM_THREADS=2 PYTHONPATH={repo}/build_health_host \
      ctest --test-dir {repo}/build_health_host -LE bench -E '^(device_sync_budget|prefactor_hoist_bitwise|vofmom_sync_budget)$' \
            -j8 --timeout 3600 --output-on-failure'''
 
@@ -159,7 +164,7 @@ kind = "findings"
 cadence = "campaign"
 format = "gcc"
 ignore_exit = true
-timeout = 7200
+timeout = 14400
 cmd = '''cmake -S {repo} -B {repo}/build_health_tidy -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
   -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
