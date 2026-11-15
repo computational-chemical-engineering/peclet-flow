@@ -107,18 +107,21 @@ int main(int argc, char** argv) {
     w.reconstruct();
     mom.buildShiftedColour(w);
     for (int c = 0; c < 3; ++c)
-      writeBin(dir + "/Ce" + std::to_string(c) + "_seed.bin", getInner(mom.shiftedColour(c), e, g, n));
+      writeBin(dir + "/Ce" + std::to_string(c) + "_seed.bin",
+               getInner(mom.shiftedColour(c), e, g, n));
 
     mom.advect(w, dth, step);  // dt in cell units = dt/h, as the solver passes dt_ with h = 1
     for (int c = 0; c < 3; ++c) {
       writeBin(dir + "/Ce" + std::to_string(c) + ".bin", getInner(mom.shiftedColour(c), e, g, n));
-      writeBin(dir + "/ua" + std::to_string(c) + ".bin", getInner(mom.advectedVelocity(c), e, g, n));
+      writeBin(dir + "/ua" + std::to_string(c) + ".bin",
+               getInner(mom.advectedVelocity(c), e, g, n));
     }
     writeBin(dir + "/Cnew.bin", getInner(w.colour(), e, g, n));
     const auto dg = mom.diagnostics();
-    std::printf("VOFMOM_PROBE n=%d step=%ld floored=%ld clamped=%ld minRhoC=%.6e sumM0=%.17g "
-                "sumM=%.17g\n",
-                n, step, dg.floored, mom.clampedFluxes(), dg.minRhoC, dg.sumM0[0], dg.sumM[0]);
+    std::printf(
+        "VOFMOM_PROBE n=%d step=%ld floored=%ld clamped=%ld minRhoC=%.6e sumM0=%.17g "
+        "sumM=%.17g\n",
+        n, step, dg.floored, mom.clampedFluxes(), dg.minRhoC, dg.sumM0[0], dg.sumM[0]);
   }
   Kokkos::finalize();
   return 0;
