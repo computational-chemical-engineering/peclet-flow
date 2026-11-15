@@ -2495,6 +2495,35 @@ class CutcellMG {
                    why, it, it2);
     return it2;
   }
+  // An attempt's V-cycle precision (D, §4.4.5): FP32 on an eligible solve; the R test hook's cap
+  // on an FP32 attempt's maxit; the attempt's budget, which the restart reads.
+  bool beginAttemptPrecision(int& maxit) {
+    const bool f32 = fp32VcycleSolve();
+    lastVcycleFp32_ = f32;
+    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
+    if (f32 && fp32FaultKind_ == 2)
+      maxit = std::min(maxit, fp32FaultAt_);
+    attemptMaxit_ = maxit;
+    return f32;
+  }
+  // ISSUES sweep item 6: a non-finite r^T z after the first preconditioner application is a
+  // FAILED solve, not a converged one. It used to print to stdout, zero the correction and return
+  // 0 iterations, so a caller's rule-3b "no capped pressure solve" check passed while the
+  // projection had been handed nothing. Report the cap (the return value) and raise the flag;
+  // set_pressure_strict(True) turns it into a throw. `who` names the Krylov driver.
+  int failNonFiniteZ(const char* who, Level& l0, CCField x, int maxit) {
+    solveFailed_ = true;
+    printf(
+        "peclet::flow CutcellMG::%s: preconditioner produced non-finite z; "
+        "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
+        who, maxit, maxit);
+    Kokkos::deep_copy(CCExec(), x, 0.0);
+    Kokkos::deep_copy(CCExec(), l0.x, x);
+    if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
+      throw std::runtime_error(std::string("peclet::flow CutcellMG::") + who +
+                               ": preconditioner produced non-finite z (set_pressure_strict)");
+    return maxit;
+  }
   // One MG-PCG attempt (R, §4: solvePCG's body before the restart wrapper).
   int solvePCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                       double rtol, int pre, int post, int bottom, const StarOverlay* star,
@@ -2541,12 +2570,7 @@ class CutcellMG {
     // and forms the local r^T z in its exit pass; the driver allreduces it (the Allreduce dot()
     // spends). z is zeroed once (§5.5: the exit writes inner cells only, so the never-exchanged
     // wall ghosts of z and p stay 0).
-    const bool f32 = fp32VcycleSolve();
-    lastVcycleFp32_ = f32;
-    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
-    if (f32 && fp32FaultKind_ == 2)
-      maxit = std::min(maxit, fp32FaultAt_);
-    attemptMaxit_ = maxit;
+    const bool f32 = beginAttemptPrecision(maxit);
     const bool fuseK4 = distKrylovFusion();  // K4 (§5.4): C2-C4, the same MPI calls
     auto rzFp32 = [&](int k) {  // the exit pass's local r^T z (slot k), summed over the ranks
 #ifdef PECLET_FLOW_MPI
@@ -2594,24 +2618,8 @@ class CutcellMG {
         Kokkos::deep_copy(CCExec(), p, z);
         rz = dot(l0, r, z);
       }
-      if (!std::isfinite(rz)) {
-        // ISSUES sweep item 6: this is a FAILED solve, not a converged one. It used to print to
-        // stdout, zero the correction and return 0 iterations, so a caller's rule-3b "no capped
-        // pressure solve" check passed while the projection had been handed nothing. Report the
-        // cap and raise the flag; set_pressure_strict(True) turns it into a throw.
-        solveFailed_ = true;
-        printf(
-            "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
-            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
-            maxit, maxit);
-        Kokkos::deep_copy(CCExec(), x, 0.0);
-        Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
-          throw std::runtime_error(
-              "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
-              "(set_pressure_strict)");
-        return maxit;
-      }
+      if (!std::isfinite(rz))
+        return failNonFiniteZ("solvePCG", l0, x, maxit);
       for (; it < maxit; ++it) {
         matvec(Ap, p);
         if (meanRemovalAll_)
@@ -3240,12 +3248,7 @@ class CutcellMG {
     // max|P b|, the only value the host holds, not max|r| of the guess residual: inert by the scale
     // covariance B(2^k r) = 2^k B(r) (G-D2 (a)) away from the FP32 range edges. It forms r^T z in
     // its exit.
-    const bool f32 = fp32VcycleSolve();
-    lastVcycleFp32_ = f32;
-    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
-    if (f32 && fp32FaultKind_ == 2)
-      maxit = std::min(maxit, fp32FaultAt_);
-    attemptMaxit_ = maxit;
+    const bool f32 = beginAttemptPrecision(maxit);
     const bool health = trace || healthTrace_;
     healthLog_.clear();
     int eNext = 0;
@@ -3271,20 +3274,8 @@ class CutcellMG {
       else if (!copyFused)
         Kokkos::deep_copy(CCExec(), p, z);
       const double rz0 = readSlot(kRz);  // host read (the initial guard)
-      if (!std::isfinite(rz0)) {
-        solveFailed_ = true;  // see solvePCG
-        printf(
-            "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
-            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
-            maxit, maxit);
-        Kokkos::deep_copy(CCExec(), x, 0.0);
-        Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
-          throw std::runtime_error(
-              "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
-              "(set_pressure_strict)");
-        return maxit;
-      }
+      if (!std::isfinite(rz0))
+        return failNonFiniteZ("solvePCG", l0, x, maxit);
       setSlot(kStop, 0.0);
       auto ks = ks_;
       const std::size_t n = x.extent(0);
@@ -3441,12 +3432,7 @@ class CutcellMG {
     };
     // D (§4.4.5): the FP32 V-cycle on an eligible solve, e = ilogb(max|r|) (on entry ilogb(r0): the
     // stop reference under E, see solvePCGResident); FCG keeps its own dots
-    const bool f32 = fp32VcycleSolve();
-    lastVcycleFp32_ = f32;
-    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
-    if (f32 && fp32FaultKind_ == 2)
-      maxit = std::min(maxit, fp32FaultAt_);
-    attemptMaxit_ = maxit;
+    const bool f32 = beginAttemptPrecision(maxit);
     const bool fuseC23 = distKrylovFusion();  // K4 (§5.4): C2 + C3, the same MPI calls
     const bool fuseC4 = fuseC23 && !f32;      // C4 on the FP64 V-cycle (FP32 keeps FCG's dots)
     healthLog_.clear();
@@ -3505,20 +3491,8 @@ class CutcellMG {
         Kokkos::deep_copy(CCExec(), p, z);
         rz = dot(l0, r, z);
       }
-      if (!std::isfinite(rz)) {
-        solveFailed_ = true;  // ISSUES sweep item 6 -- see solvePCG for the mechanism
-        printf(
-            "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z; "
-            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
-            maxit, maxit);
-        Kokkos::deep_copy(CCExec(), x, 0.0);
-        Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
-          throw std::runtime_error(
-              "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z "
-              "(set_pressure_strict)");
-        return maxit;
-      }
+      if (!std::isfinite(rz))
+        return failNonFiniteZ("solveFCG", l0, x, maxit);
       for (; it < maxit; ++it) {
         matvec(Ap, p);
         if (meanRemovalAll_)
