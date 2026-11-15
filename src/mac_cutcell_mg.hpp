@@ -2538,6 +2538,86 @@ class CutcellMG {
                                ": preconditioner produced non-finite z (set_pressure_strict)");
     return maxit;
   }
+  // This rank's index in the solve's communicator (0 single-rank): the Krylov traces print on
+  // rank 0.
+  int commRank() const {
+    int rank = 0;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      MPI_Comm_rank(comm_, &rank);
+#endif
+    return rank;
+  }
+  // The host-scalar attempts' (solvePCGAttempt, solveFCGAttempt) residual of the caller's guess x:
+  // r = b - A x onto the range; returns r0 = max|r|.
+  double guessResidual(Level& l0, CCField b, CCField x, CCField r, CCField Ap,
+                       const StarOverlay* star, int nStar, C3 nnStar) {
+    guessMatvec(l0, Ap, x, star, nStar, nnStar);  // r = b - A x
+    Kokkos::deep_copy(CCExec(), r, b);
+    axpy(r, -1.0, Ap);
+    removeMean(l0, r);  // compatibility: project rhs/residual onto the range
+    return maxabs(l0, r);
+  }
+  // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
+  // stop reference is set (setStopReference; only the balanced-force projection sets it).
+  // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
+  double armStopTest(double r0, double rtol) {
+    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
+    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
+    cgStopRtol_ = rtol;
+    return rref;
+  }
+  // The host-scalar attempts' Ap = A p (with the "all"-scope mean removal) and p^T Ap.
+  double matvecPAp(Level& l0, CCField Ap, CCField p, const StarOverlay* star, int nStar,
+                   C3 nnStar) {
+    guessMatvec(l0, Ap, p, star, nStar, nnStar);
+    if (meanRemovalAll_)
+      removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
+    return dot(l0, p, Ap);
+  }
+  // The host-scalar attempts' x += alpha p, r -= alpha Ap onto the range; returns max|r|. fuse:
+  // K4 (§5.4) C2 + C3, the same MPI calls.
+  double cgUpdate(Level& l0, CCField x, CCField r, CCField p, CCField Ap, double alpha, bool fuse) {
+    if (fuse)
+      return pcgUpdateMeanMaxDist(l0, x, r, p, Ap, alpha);  // K4 C2 + C3
+    axpy(x, alpha, p);
+    axpy(r, -alpha, Ap);
+    removeMean(l0, r);
+    return maxabs(l0, r);
+  }
+  // x onto the range through level 0's iterate l0.x (the host-scalar drivers' exit).
+  void finalRemoveMean(Level& l0, CCField x) {
+    Kokkos::deep_copy(CCExec(), l0.x, x);
+    removeMean(l0, l0.x);
+    Kokkos::deep_copy(CCExec(), x, l0.x);
+  }
+  // solvePCGAttempt's z = M r and r^T z, summed over the ranks; p = z too when p is given (the
+  // first application). f32 (§5.7): the FP32 V-cycle takes e = ilogb(rn) from the GLOBAL max the
+  // host already holds and forms the local r^T z (slot k) in its exit pass; the Allreduce sums it.
+  // fuse: K4 C4, r^T z from the FP64 V-cycle's level-0 exit pass. Else the V-cycle (A5) and dot().
+  double pcgPrecondRz(Level& l0, bool f32, bool fuse, CCField z, CCField r, double rn, int k,
+                      CCField p) {
+    if (f32) {
+      precondVcycleFp32(z, r, std::ilogb(rn), k, CCField());
+      if (p.extent(0) != 0)
+        Kokkos::deep_copy(CCExec(), p, z);
+#ifdef PECLET_FLOW_MPI
+      return allreduce(readSlot(k), MPI_SUM_, l0.comm);
+#else
+      return allreduce(readSlot(k), MPI_SUM_);
+#endif
+    }
+    if (fuse) {
+      const double rz = precondDotDist(z, r);
+      if (p.extent(0) != 0)
+        Kokkos::deep_copy(CCExec(), p, z);
+      return rz;
+    }
+    precondVcycle(z, r);
+    if (p.extent(0) != 0)
+      Kokkos::deep_copy(CCExec(), p, z);
+    return dot(l0, r, z);
+  }
   // One MG-PCG attempt (R, §4: solvePCG's body before the restart wrapper).
   int solvePCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                       double rtol, int pre, int post, int bottom, const StarOverlay* star,
@@ -2553,12 +2633,6 @@ class CutcellMG {
     bottom_ = bottom;
     Level& l0 = lv_[0];
     Kokkos::deep_copy(CCExec(), l0.x, x);
-    auto matvec = [&](CCField y, CCField v) {
-      matvecOverlap(l0, y, v);
-      if (star)
-        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
-    };
-    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
     // E-dist (doc/vof_projection_distributed_design.md §6 item 3): solvePCGResident's guess branch,
     // unfused (distributed); with a projected guess r0 below is rref = max|P b|, the zero-guess
     // residual. The guess trace is collective (every rank runs it, rank 0 prints).
@@ -2569,45 +2643,23 @@ class CutcellMG {
       r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar, /*fused=*/false,
                           traceGuess ? &r0w : nullptr);
     } else {
-      matvec(Ap, x);  // r = b - A x
-      Kokkos::deep_copy(CCExec(), r, b);
-      axpy(r, -1.0, Ap);
-      removeMean(l0, r);  // compatibility: project rhs/residual onto the range
-      r0 = maxabs(l0, r);
+      r0 = guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
       r0w = r0;
     }
     if (traceGuess)
       guessTraceSave(x);
     // D-dist (doc/vof_projection_distributed_design.md §5.7): the FP32 V-cycle on an eligible
-    // solve (a global decision: fp32VcycleIneligible reads global data only). It takes
-    // e = ilogb(max|r|) from the GLOBAL max the host already holds (r0, then the stop test's rn)
-    // and forms the local r^T z in its exit pass; the driver allreduces it (the Allreduce dot()
-    // spends). z is zeroed once (§5.5: the exit writes inner cells only, so the never-exchanged
-    // wall ghosts of z and p stay 0).
+    // solve (a global decision: fp32VcycleIneligible reads global data only); pcgPrecondRz. The
+    // driver allreduces its r^T z (the Allreduce dot() spends). z is zeroed once (§5.5: the exit
+    // writes inner cells only, so the never-exchanged wall ghosts of z and p stay 0).
     const bool f32 = beginAttemptPrecision(maxit);
     const bool fuseK4 = distKrylovFusion();  // K4 (§5.4): C2-C4, the same MPI calls
-    auto rzFp32 = [&](int k) {  // the exit pass's local r^T z (slot k), summed over the ranks
-#ifdef PECLET_FLOW_MPI
-      return allreduce(readSlot(k), MPI_SUM_, l0.comm);
-#else
-      return allreduce(readSlot(k), MPI_SUM_);
-#endif
-    };
-    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
-    // stop reference is set (setStopReference; only the balanced-force projection sets it).
-    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
-    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
-    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
-    cgStopRtol_ = rtol;
+    const double rref = armStopTest(r0, rtol);
     int it = 0;
     // Env-gated convergence trace (PECLET_FLOW_MG_DEBUG>=2): |b|inf, r0 and the per-iteration
     // residual, so a decomposition-dependent iteration count can be read as a rate (preconditioner
     // quality) or a floor (round-off) instead of guessed at.
-    int dbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      MPI_Comm_rank(comm_, &dbgRank);
-#endif
+    const int dbgRank = commRank();
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && dbgRank == 0;
     if (trace)
       printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
@@ -2618,42 +2670,20 @@ class CutcellMG {
     // produced NaN/Inf (should not happen — the guards fail safe rather than poisoning x with a
     // NaN alpha/beta and letting the projection silently corrupt every field downstream).
     if (r0 > 0.0 && std::isfinite(r0)) {
-      double rz = 0.0;
-      if (f32) {  // §5.7
+      if (f32)  // §5.5
         Kokkos::deep_copy(CCExec(), z, 0.0);
-        precondVcycleFp32(z, r, std::ilogb(r0), kRz, CCField());
-        Kokkos::deep_copy(CCExec(), p, z);
-        rz = rzFp32(kRz);
-      } else if (fuseK4) {  // K4 C4: r^T z from the V-cycle's level-0 exit pass
-        rz = precondDotDist(z, r);
-        Kokkos::deep_copy(CCExec(), p, z);
-      } else {
-        precond(z, r);
-        Kokkos::deep_copy(CCExec(), p, z);
-        rz = dot(l0, r, z);
-      }
+      double rz = pcgPrecondRz(l0, f32, fuseK4, z, r, r0, kRz, p);  // p = z
       if (!std::isfinite(rz))
         return failNonFiniteZ("solvePCG", l0, x, maxit);
       for (; it < maxit; ++it) {
-        matvec(Ap, p);
-        if (meanRemovalAll_)
-          removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
-        const double pAp = dot(l0, p, Ap);
+        const double pAp = matvecPAp(l0, Ap, p, star, nStar, nnStar);
         if (!std::isfinite(pAp) || pAp <= 1e-300) {
           if (!std::isfinite(pAp))
             solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
           break;                  // keep the last finite iterate
         }
         const double alpha = rz / pAp;
-        double rn = 0.0;
-        if (fuseK4) {
-          rn = pcgUpdateMeanMaxDist(l0, x, r, p, Ap, alpha);  // K4 C2 + C3
-        } else {
-          axpy(x, alpha, p);
-          axpy(r, -alpha, Ap);
-          removeMean(l0, r);
-          rn = maxabs(l0, r);
-        }
+        const double rn = cgUpdate(l0, x, r, p, Ap, alpha, fuseK4);
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
@@ -2661,16 +2691,7 @@ class CutcellMG {
           ++it;
           break;
         }
-        double rznew = 0.0;
-        if (f32) {  // §5.7
-          precondVcycleFp32(z, r, std::ilogb(rn), kRzNew, CCField());
-          rznew = rzFp32(kRzNew);
-        } else if (fuseK4) {
-          rznew = precondDotDist(z, r);  // K4 C4
-        } else {
-          precond(z, r);
-          rznew = dot(l0, r, z);
-        }
+        const double rznew = pcgPrecondRz(l0, f32, fuseK4, z, r, rn, kRzNew, CCField());
         const double beta = rznew / rz;
         if (!std::isfinite(rznew)) {
           solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
@@ -2680,9 +2701,7 @@ class CutcellMG {
         rz = rznew;
       }
     }
-    Kokkos::deep_copy(CCExec(), l0.x, x);
-    removeMean(l0, l0.x);
-    Kokkos::deep_copy(CCExec(), x, l0.x);
+    finalRemoveMean(l0, x);
     if (traceGuess)
       guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
     return it;
@@ -3444,6 +3463,24 @@ class CutcellMG {
                              nnStar);
     });
   }
+  // solveFCGAttempt's z = M r and r^T z; p = z too when p is given (the first application). fuse:
+  // K4 C4, r^T z from the FP64 V-cycle's level-0 exit pass. Else the V-cycle -- FP32 with
+  // e = ilogb(rn) (D §4.4.5; FCG keeps its own dots) or FP64 (A5) -- and dot().
+  double fcgPrecondRz(Level& l0, bool f32, bool fuse, CCField z, CCField r, double rn, CCField p) {
+    if (fuse) {
+      const double rz = precondDotDist(z, r);
+      if (p.extent(0) != 0)
+        Kokkos::deep_copy(CCExec(), p, z);
+      return rz;
+    }
+    if (f32)
+      precondVcycleFp32(z, r, std::ilogb(rn), -1, CCField());
+    else
+      precondVcycle(z, r);
+    if (p.extent(0) != 0)
+      Kokkos::deep_copy(CCExec(), p, z);
+    return dot(l0, r, z);
+  }
   // One flexible-CG attempt (R, §4: solveFCG's body before the restart wrapper).
   int solveFCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField zp, CCField Ap,
                       int maxit, double rtol, int pre, int post, int bottom,
@@ -3456,28 +3493,13 @@ class CutcellMG {
     bottom_ = bottom;
     Level& l0 = lv_[0];
     Kokkos::deep_copy(CCExec(), l0.x, x);
-    auto matvec = [&](CCField y, CCField v) {
-      matvecOverlap(l0, y, v);
-      if (star)
-        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
-    };
     // D (§4.4.5): the FP32 V-cycle on an eligible solve, e = ilogb(max|r|) (on entry ilogb(r0): the
     // stop reference under E, see solvePCGResident); FCG keeps its own dots
     const bool f32 = beginAttemptPrecision(maxit);
     const bool fuseC23 = distKrylovFusion();  // K4 (§5.4): C2 + C3, the same MPI calls
     const bool fuseC4 = fuseC23 && !f32;      // C4 on the FP64 V-cycle (FP32 keeps FCG's dots)
     healthLog_.clear();
-    auto precond = [&](CCField zz, CCField rr, double rn) {
-      if (f32)
-        precondVcycleFp32(zz, rr, std::ilogb(rn), -1, CCField());
-      else
-        precondVcycle(zz, rr);  // A5
-    };
-    int dbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      MPI_Comm_rank(comm_, &dbgRank);
-#endif
+    const int dbgRank = commRank();
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && dbgRank == 0;
     // E (§5.3): with a projected guess r0 is rref = max|P b| (see solvePCGResident). The guess
     // trace is collective (E-dist §6 item 2: every rank runs it, rank 0 prints), so it does not
@@ -3489,21 +3511,12 @@ class CutcellMG {
       r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
                           hostKrylovFusion() && star == nullptr, traceGuess ? &r0w : nullptr);
     } else {
-      matvec(Ap, x);  // r = b - A x
-      Kokkos::deep_copy(CCExec(), r, b);
-      axpy(r, -1.0, Ap);
-      removeMean(l0, r);  // compatibility: project rhs/residual onto the range
-      r0 = maxabs(l0, r);
+      r0 = guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
       r0w = r0;
     }
     if (traceGuess)
       guessTraceSave(x);
-    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
-    // stop reference is set (setStopReference; only the balanced-force projection sets it).
-    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
-    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
-    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
-    cgStopRtol_ = rtol;
+    const double rref = armStopTest(r0, rtol);
     int it = 0;
     if (trace)
       printf("[mg] fcg solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0,
@@ -3513,37 +3526,18 @@ class CutcellMG {
     if (r0 > 0.0 && std::isfinite(r0)) {
       if (f32 && distributed_)  // D-dist §5.5: the exit writes inner z only; wall ghosts stay 0
         Kokkos::deep_copy(CCExec(), z, 0.0);
-      double rz = 0.0;
-      if (fuseC4) {  // K4 C4: r^T z from the V-cycle's level-0 exit pass
-        rz = precondDotDist(z, r);
-        Kokkos::deep_copy(CCExec(), p, z);
-      } else {
-        precond(z, r, r0);
-        Kokkos::deep_copy(CCExec(), p, z);
-        rz = dot(l0, r, z);
-      }
+      double rz = fcgPrecondRz(l0, f32, fuseC4, z, r, r0, p);  // p = z
       if (!std::isfinite(rz))
         return failNonFiniteZ("solveFCG", l0, x, maxit);
       for (; it < maxit; ++it) {
-        matvec(Ap, p);
-        if (meanRemovalAll_)
-          removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
-        const double pAp = dot(l0, p, Ap);
+        const double pAp = matvecPAp(l0, Ap, p, star, nStar, nnStar);
         if (!std::isfinite(pAp) || pAp <= 1e-300) {
           if (!std::isfinite(pAp))
             solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
           break;                  // keep the last finite iterate
         }
         const double alpha = rz / pAp;
-        double rn = 0.0;
-        if (fuseC23) {
-          rn = pcgUpdateMeanMaxDist(l0, x, r, p, Ap, alpha);  // K4 C2 + C3
-        } else {
-          axpy(x, alpha, p);
-          axpy(r, -alpha, Ap);
-          removeMean(l0, r);
-          rn = maxabs(l0, r);
-        }
+        const double rn = cgUpdate(l0, x, r, p, Ap, alpha, fuseC23);
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
@@ -3552,13 +3546,7 @@ class CutcellMG {
           break;
         }
         Kokkos::deep_copy(CCExec(), zp, z);  // z_k, before the preconditioner overwrites it
-        double rznew = 0.0;
-        if (fuseC4) {
-          rznew = precondDotDist(z, r);  // K4 C4
-        } else {
-          precond(z, r, rn);
-          rznew = dot(l0, r, z);
-        }
+        const double rznew = fcgPrecondRz(l0, f32, fuseC4, z, r, rn, CCField());
         const double rzcross = dot(l0, r, zp);
         if (!std::isfinite(rznew) || !std::isfinite(rzcross)) {
           solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
@@ -3580,9 +3568,7 @@ class CutcellMG {
         rz = rznew;
       }
     }
-    Kokkos::deep_copy(CCExec(), l0.x, x);
-    removeMean(l0, l0.x);
-    Kokkos::deep_copy(CCExec(), x, l0.x);
+    finalRemoveMean(l0, x);
     if (traceGuess)
       guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
     return it;
