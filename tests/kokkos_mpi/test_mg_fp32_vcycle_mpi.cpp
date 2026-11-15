@@ -19,8 +19,9 @@
 /// (column, cyl, pack, a walled slab at 1e2, box64; rtol 1e-10, cap 200):
 ///   G-DD1 (np 1): one FP32 V-cycle z memcmp-equal on the inner cells; forced 'fp32' (and on a
 ///         device 'auto') PCG and FCG: x memcmp-equal, iterations equal;
-///   G-DD2 (np > 1): (a) max|x_np - x_1| <= 1e-8 and iterations within max(1, 5 %) wherever the
-///         single-rank solve converges (a configuration converging in neither mode is n/a); (b) one
+///   G-DD2 (np > 1): (a) max|x_np - x_1| <= max(1e-8, 1e-12 max|x_1|) and iterations within
+///         max(1, 5 %) wherever the single-rank solve converges (a configuration converging in
+///         neither mode is n/a); (b) one
 ///         V-cycle z within 1e-11 relative (cyl, box64, equal depth); (c) 'fp32' iterations <=
 ///         'fp64' + max(1, 5 %) where 'fp64' converges (every np); (d) np 2, where 'fp64'
 ///         converges: the attainable floor (rtol 1e-14, cap 300), fp32 <= 2 x fp64; (e) CA on == CA
@@ -162,6 +163,12 @@ void problemChecks(const Problem& P) {
 const bool kAutoFp32 = !CutcellMG::kHostMemory;  // WO-A: 'auto' is FP32 on device backends only
 constexpr int kMaxit = 200;
 constexpr double kRtol = 1e-10;
+// G-DD2 (a)'s np-equality bound, scale-aware (Decision Desk vof-gdd2-tolerance, 2026-11-15): the
+// pure absolute 1e-8 failed box64 (max|x| 5.5e4) at OMP_NUM_THREADS=1 by reduction-order round-off
+// (1.36e-8 = 2.5e-13 relative). Never tighter than the old 1e-8.
+inline double gdd2aBound(double refMax) {
+  return std::max(1e-8, 1e-12 * refMax);
+}
 
 // Level 0's inner cell (x, y, z) (local, ghosts included) -> the global (single-rank) index.
 long globalIndex(const Problem& P, const CutcellMG::Level& l0, int x, int y, int z) {
@@ -385,7 +392,7 @@ void d2aChecks(const Problem& P) {
                   " cells differ), iterations " + itStr(got[k]) + " / " + itStr(ref[k]));
       } else if (ref[k].converged()) {  // G-DD2 (a)
         const bool itOk = std::abs(got[k].it - ref[k].it) <= within(ref[k].it);
-        check(d.maxAbs <= 1e-8 && allRanks(itOk),
+        check(d.maxAbs <= gdd2aBound(d.refMax) && allRanks(itOk),
               t + ": G-DD2 (a) max|x - x1| " + num(d.maxAbs) + " (max|x| " + num(d.refMax) +
                   "), iterations " + itStr(got[k]) + " vs " + itStr(ref[k]));
       } else if (rank == 0) {
@@ -568,7 +575,7 @@ void teleChecks(const Problem& P, int teleForce) {
       const Diff d = diffInner(P, probe.level(0), got[k].x, ref[k].x);
       if (ref[k].converged()) {
         const bool itOk = std::abs(got[k].it - ref[k].it) <= within(ref[k].it);
-        check(d.maxAbs <= 1e-8 && allRanks(itOk),
+        check(d.maxAbs <= gdd2aBound(d.refMax) && allRanks(itOk),
               t + ": G-DD2 (f)(a) max|x - x1| " + num(d.maxAbs) + " (max|x| " + num(d.refMax) +
                   "), iterations " + itStr(got[k]) + " vs " + itStr(ref[k]));
       } else if (rank == 0) {
@@ -642,12 +649,12 @@ void teleChecks(const Problem& P, int teleForce) {
 // doc/mg_depth_policy.md A2.4 / A2.5 G-LR (4), at the CutcellMG level: the zebra line smoother
 // (default on) on hierarchies with triggered smoothed levels, distributed against the single-rank
 // reference -- np 1 memcmp-equal x and equal iterations (MG-PCG, rtol 1e-10), np > 1 G-DD2 (a)'s
-// bound (max|dx| <= 1e-8, iterations within max(1, 5 %)), each with LR off as the control. aniso:
-// 64x64x25 periodic, a heavy blob at 1e2, AUTO depth (s = z periodic, Sherman-Morrison); anisoW:
-// the same between z walls (Thomas); thinW: 64x64x4 between z walls at 5 levels, 'fp64' and forced
-// 'fp32' (every FP32 level even: the FP32 line kernel, distributed through the FP32 stencil halo).
-// The LR-off arm is the control (the point smoother's own np 1 / np > 1 classes on the same
-// problems).
+// bound (max|dx| <= max(1e-8, 1e-12 max|x|), iterations within max(1, 5 %)), each with LR off as
+// the control. aniso: 64x64x25 periodic, a heavy blob at 1e2, AUTO depth (s = z periodic,
+// Sherman-Morrison); anisoW: the same between z walls (Thomas); thinW: 64x64x4 between z walls at 5
+// levels, 'fp64' and forced 'fp32' (every FP32 level even: the FP32 line kernel, distributed
+// through the FP32 stencil halo). The LR-off arm is the control (the point smoother's own np 1 / np
+// > 1 classes on the same problems).
 Problem lineProblem(const std::string& name, int nz, int levels, bool walls) {
   int bc[6] = {0, 0, 0, 0, 0, 0};
   if (walls)
@@ -709,9 +716,9 @@ void lineChecks(const Problem& P, std::vector<int> modes) {
               lr ? "n/a (the LR-off control differs too)" : (eq ? "(control) =" : "(control) !="));
       } else {
         const bool itOk = allRanks(std::abs(got.it - ref.it) <= within(ref.it));
-        check(ref.converged() && got.converged() && d.maxAbs <= 1e-8 && itOk,
-              t + ": max|dx| " + num(d.maxAbs) + " <= 1e-8, iterations " + itStr(got) + " vs " +
-                  itStr(ref));
+        check(ref.converged() && got.converged() && d.maxAbs <= gdd2aBound(d.refMax) && itOk,
+              t + ": max|dx| " + num(d.maxAbs) + " <= " + num(gdd2aBound(d.refMax)) +
+                  ", iterations " + itStr(got) + " vs " + itStr(ref));
       }
     }
   gLineRelax = true;

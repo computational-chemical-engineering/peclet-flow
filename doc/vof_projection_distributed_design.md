@@ -470,7 +470,9 @@ memcmp-equal to their single-rank `'fp32'` runs.
 
 **G-DD2** (np 2, 4, 8 vs np 1, host + CUDA, forced `'fp32'` and CUDA `'auto'`):
 - (a) solve: max|x_np − x_np1| ≤ 1e-8 at rtol 1e-10 (the `cutcellmg_mpi` class); iterations per
-  solve within ±max(1, 5 %) of np 1;
+  solve within ±max(1, 5 %) of np 1. *Amended 2026-11-15 (Decision Desk `vof-gdd2-tolerance`, USER):
+  the bound is max(1e-8, 1e-12 · max|x_np1|); the absolute 1e-8 failed box64 (max|x| 5.5e4) at
+  OMP_NUM_THREADS = 1 by reduction-order round-off, 2.5e-13 relative. Never tighter than before.*
 - (b) a 64³ periodic box and the cyl state on a grid whose blocks stay even to the bottom at every np
   (no telescope, equal depth): one V-cycle z, max|Δz|/max|z| ≤ 1e-11 vs np 1;
 - (c) `'fp32'` vs `'fp64'` at the same np, on configurations where `'fp64'` converges every solve:
