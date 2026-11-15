@@ -1589,9 +1589,8 @@ class CutcellMG {
   static peclet::core::decomp::BlockDecomposer<3> decomposition(std::size_t numBlocks, int gnx,
                                                                 int gny, int gnz, int levels = 0,
                                                                 double maxImbalance = 1.05) {
-    namespace cdec = peclet::core::decomp;
-    using Dec = cdec::BlockDecomposer<3>;
-    const peclet::core::IVec<3> G{gnx, gny, gnz}, one{1, 1, 1};
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    const peclet::core::IVec<3> G{gnx, gny, gnz};
     Dec A(numBlocks, G, coarsenAlignment(gnx, gny, gnz));  // legacy: split the longest axis
     if (levels == 1)
       return A;
@@ -1601,66 +1600,87 @@ class CutcellMG {
     // its imbalance.
     if (!(maxImbalance > 1.0))
       maxImbalance = 1.05;
-    auto cellsOf = [](const peclet::core::IVec<3>& s) {
-      return static_cast<std::size_t>(s[0]) * static_cast<std::size_t>(s[1]) *
-             static_cast<std::size_t>(s[2]);
-    };
-    auto maxCells = [&](const Dec& d) {
-      std::size_t hi = 0;
-      for (const auto& s : d.sizes())
-        hi = std::max(hi, cellsOf(s));
-      return hi;
-    };
-    auto minCells = [&](const Dec& d) {
-      std::size_t lo = std::numeric_limits<std::size_t>::max();
-      for (const auto& s : d.sizes())
-        lo = std::min(lo, cellsOf(s));
-      return lo;
-    };
-    auto imbalanceOf = [&](const Dec& d) {
-      const std::size_t lo = minCells(d);
-      return lo ? static_cast<double>(maxCells(d)) / static_cast<double>(lo)
-                : std::numeric_limits<double>::infinity();
-    };
-    // Decompose the COARSE grid of depth L -- telling the ORB each coarse cell's true extent, so it
-    // compares the axes the fine grid would -- then refine the partition upward: blocks are exact
-    // multiples of r, so every level nests for the full depth. `ok` = false when the coarse grid
-    // is thinner than the rank count (someone would get an empty block) or nothing coarsens.
-    auto coarseFirst = [&](int L, bool& ok, cdec::SplitAxis axis) {
-      ok = false;
-      const peclet::core::IVec<3> r = refineFactor(gnx, gny, gnz, L);
-      if (r[0] == 1 && r[1] == 1 && r[2] == 1)
-        return Dec();
-      const peclet::core::IVec<3> Gc{gnx / r[0], gny / r[1], gnz / r[2]};
-      if (cellsOf(Gc) < numBlocks)
-        return Dec();
-      Dec coarse;
-      coarse.init(numBlocks, Gc, one, r, axis);
-      ok = true;
-      return coarse.refined(r);
-    };
-    // levels >= 2: the legacy coarse-first search, longest-axis split (SplitAxis::Longest) --
-    // bit for bit the pre-2026-10 partitions (review 2026-10-20 #1: published benchmarks such as
-    // foxberry's DECOMP_LEVELS=7 and channel_dns's DECOMP >= 2 must keep reproducing).
-    if (levels >= 2) {
-      for (int L = levels; L >= 2; --L) {
-        bool ok = false;
-        Dec fine = coarseFirst(L, ok, cdec::SplitAxis::Longest);
-        if (!ok) {
-          if (refineFactor(gnx, gny, gnz, L) == one)
-            break;  // nothing coarsens on any axis -- the aligned ORB is all there is
-          continue;
-        }
-        if (imbalanceOf(fine) <= maxImbalance) {
-          if (mgDebugLevel())
-            printf("[mg] decomposition: coarse-first depth %d (imbalance %.3f)\n", L,
-                   imbalanceOf(fine));
-          return fine;
-        }
+    if (levels >= 2)
+      return legacyCoarseFirst(std::move(A), numBlocks, gnx, gny, gnz, levels, maxImbalance);
+    return autoDecomposition(std::move(A), numBlocks, gnx, gny, gnz, maxImbalance);
+  }
+  // decomposition()'s cell counts: one block's cells, the largest and the smallest block of d, and
+  // their ratio (infinity when a block is empty).
+  static std::size_t cellsOf(const peclet::core::IVec<3>& s) {
+    return static_cast<std::size_t>(s[0]) * static_cast<std::size_t>(s[1]) *
+           static_cast<std::size_t>(s[2]);
+  }
+  static std::size_t largestBlock(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    std::size_t hi = 0;
+    for (const auto& s : d.sizes())
+      hi = std::max(hi, cellsOf(s));
+    return hi;
+  }
+  static std::size_t smallestBlock(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    std::size_t lo = std::numeric_limits<std::size_t>::max();
+    for (const auto& s : d.sizes())
+      lo = std::min(lo, cellsOf(s));
+    return lo;
+  }
+  static double imbalanceOf(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    const std::size_t lo = smallestBlock(d);
+    return lo ? static_cast<double>(largestBlock(d)) / static_cast<double>(lo)
+              : std::numeric_limits<double>::infinity();
+  }
+  // Decompose the COARSE grid of depth L -- telling the ORB each coarse cell's true extent, so it
+  // compares the axes the fine grid would -- then refine the partition upward: blocks are exact
+  // multiples of r, so every level nests for the full depth. `ok` = false when the coarse grid
+  // is thinner than the rank count (someone would get an empty block) or nothing coarsens.
+  static peclet::core::decomp::BlockDecomposer<3> coarseFirst(
+      std::size_t numBlocks, int gnx, int gny, int gnz, int L, bool& ok,
+      peclet::core::decomp::SplitAxis axis) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    ok = false;
+    const peclet::core::IVec<3> r = refineFactor(gnx, gny, gnz, L);
+    if (r[0] == 1 && r[1] == 1 && r[2] == 1)
+      return Dec();
+    const peclet::core::IVec<3> Gc{gnx / r[0], gny / r[1], gnz / r[2]};
+    if (cellsOf(Gc) < numBlocks)
+      return Dec();
+    Dec coarse;
+    coarse.init(numBlocks, Gc, peclet::core::IVec<3>{1, 1, 1}, r, axis);
+    ok = true;
+    return coarse.refined(r);
+  }
+  // decomposition(levels >= 2): the legacy coarse-first search, longest-axis split
+  // (SplitAxis::Longest) -- bit for bit the pre-2026-10 partitions (review 2026-10-20 #1: published
+  // benchmarks such as foxberry's DECOMP_LEVELS=7 and channel_dns's DECOMP >= 2 must keep
+  // reproducing). A is the legacy aligned ORB, the fallback.
+  static peclet::core::decomp::BlockDecomposer<3> legacyCoarseFirst(
+      peclet::core::decomp::BlockDecomposer<3> A, std::size_t numBlocks, int gnx, int gny, int gnz,
+      int levels, double maxImbalance) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    const peclet::core::IVec<3> one{1, 1, 1};
+    for (int L = levels; L >= 2; --L) {
+      bool ok = false;
+      Dec fine =
+          coarseFirst(numBlocks, gnx, gny, gnz, L, ok, peclet::core::decomp::SplitAxis::Longest);
+      if (!ok) {
+        if (refineFactor(gnx, gny, gnz, L) == one)
+          break;  // nothing coarsens on any axis -- the aligned ORB is all there is
+        continue;
       }
-      return A;
+      if (imbalanceOf(fine) <= maxImbalance) {
+        if (mgDebugLevel())
+          printf("[mg] decomposition: coarse-first depth %d (imbalance %.3f)\n", L,
+                 imbalanceOf(fine));
+        return fine;
+      }
     }
-    // levels == 0: auto
+    return A;
+  }
+  // decomposition(levels == 0), auto: A-exact, C5/C4, A2 or the A fallback (see decomposition()).
+  static peclet::core::decomp::BlockDecomposer<3> autoDecomposition(
+      peclet::core::decomp::BlockDecomposer<3> A, std::size_t numBlocks, int gnx, int gny, int gnz,
+      double maxImbalance) {
+    namespace cdec = peclet::core::decomp;
+    using Dec = cdec::BlockDecomposer<3>;
+    const peclet::core::IVec<3> G{gnx, gny, gnz}, one{1, 1, 1};
     auto report = [&](const char* branch, const Dec& d) {
       if (mgDebugLevel())
         printf("[mg] decomposition: auto %s (max/min %.3f; legacy %.3f)\n", branch, imbalanceOf(d),
@@ -1672,7 +1692,8 @@ class CutcellMG {
     // code paths; the cell count cannot see their cost (+9.4 % at 12x2, legacy max/mean 1.125), so
     // a candidate that changes them must buy a >= 20 % cut in the critical rank's cells.
     const unsigned axesA = splitAxes(A);
-    const bool legacyImbalanced = 4 * maxCells(A) * numBlocks >= 5 * cellsOf(G);  // max/mean >= 5/4
+    const bool legacyImbalanced =
+        4 * largestBlock(A) * numBlocks >= 5 * cellsOf(G);  // max/mean >= 5/4
     auto within = [&](const Dec& d) {
       const unsigned ax = splitAxes(d);
       return (ax & ~axesA) == 0u && (ax == axesA || legacyImbalanced);
@@ -1681,7 +1702,7 @@ class CutcellMG {
     // one the unguarded policy would take, makes the fallback print "A-fallback (guard)".
     bool guardHit = false;
     auto guardOnly = [&](const Dec& d) { return (splitAxes(d) & ~axesA) == 0u && !within(d); };
-    if (maxCells(A) == minCells(A)) {
+    if (largestBlock(A) == smallestBlock(A)) {
       report("A-exact", A);
       return A;
     }
@@ -1690,29 +1711,29 @@ class CutcellMG {
     const int depthA = nestDepth(A);
     for (int L : {5, 4}) {
       bool ok = false;
-      Dec C = coarseFirst(L, ok, cdec::SplitAxis::Balanced);
+      Dec C = coarseFirst(numBlocks, gnx, gny, gnz, L, ok, cdec::SplitAxis::Balanced);
       if (!ok) {
         if (refineFactor(gnx, gny, gnz, L) == one)
           break;
         continue;
       }
-      if (minCells(C) > 0 && imbalanceOf(C) <= maxImbalance && within(C) &&
+      if (smallestBlock(C) > 0 && imbalanceOf(C) <= maxImbalance && within(C) &&
           nestDepth(C) >= depthA) {
         report(L == 5 ? "C5" : "C4", C);
         return C;
       }
-      if (mgDebugLevel() && minCells(C) > 0 && imbalanceOf(C) <= maxImbalance &&
+      if (mgDebugLevel() && smallestBlock(C) > 0 && imbalanceOf(C) <= maxImbalance &&
           nestDepth(C) >= depthA && guardOnly(C))
         guardHit = true;
     }
     Dec A2;
     A2.init(numBlocks, G, coarsenAlignment(gnx, gny, gnz), one, cdec::SplitAxis::Balanced);
-    if (maxCells(A2) < maxCells(A) && nestDepth(A2) >= std::min(depthA, 3) && within(A2)) {
+    if (largestBlock(A2) < largestBlock(A) && nestDepth(A2) >= std::min(depthA, 3) && within(A2)) {
       report("A2", A2);
       return A2;
     }
-    if (mgDebugLevel() && maxCells(A2) < maxCells(A) && nestDepth(A2) >= std::min(depthA, 3) &&
-        guardOnly(A2))
+    if (mgDebugLevel() && largestBlock(A2) < largestBlock(A) &&
+        nestDepth(A2) >= std::min(depthA, 3) && guardOnly(A2))
       guardHit = true;
     report(guardHit ? "A-fallback (guard)" : "A-fallback", A);
     return A;
