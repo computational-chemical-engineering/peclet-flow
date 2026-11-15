@@ -3574,6 +3574,59 @@ class CutcellMG {
     return it;
   }
 
+  // solveBiCGStab's matvec y = A q: the binary-openness 7-point op plus the ghost-projection
+  // overlay delta. Distributed with a g=2 staging field (h2 given): q's inner cells are staged on
+  // the ext2 block, its 2-deep halo exchanged once, and q's g=1 halo read back from the staged
+  // copy, so one exchange serves both the 7-point op and the overlay (applied in ghost mode).
+  void gpMatvec(Level& l0, CCField y, CCField q, const GpOverlayReal<MReal>& ov, int nOv, C3 nn
+#ifdef PECLET_FLOW_MPI
+                ,
+                CCField xg2, GridHalo<double>* h2, C3 ext2
+#endif
+  ) {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && h2) {
+      stageG2(l0, q, xg2, ext2);  // inner cells g=1 block -> g=2 block
+      h2->exchange(xg2);          // 2-deep halo (cross-rank + periodic)
+      unstageG2(l0, q, xg2);      // whole l0 block back (fills q's g=1 halo — no 2nd exchange)
+      applyOutflowGhost(l0, q);
+      applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
+                         G);
+      gpApplyDelta(y, CCConst(xg2), ov, nOv, nn, l0.ext, G, ext2, 2, /*useGhost=*/true);
+      return;
+    }
+#endif
+    fill(l0, q);
+    applyOutflowGhost(l0, q);
+    applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext, G);
+    gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G, l0.ext, G);
+  }
+  // solveBiCGStab's z = M r with M one symmetric V-cycle on level 0's own rhs and x (the copying
+  // form; precondVcycle's A5 runs in place on the caller's vectors).
+  void precondVcycleCopy(CCField zz, CCField rr) {
+    Level& l0 = lv_[0];
+    Kokkos::deep_copy(CCExec(), l0.rhs, rr);
+    Kokkos::deep_copy(CCExec(), l0.x, 0.0);
+    vcycle(0, /*sym=*/true);
+    Kokkos::deep_copy(CCExec(), zz, l0.x);
+  }
+  // solveBiCGStab's exit bookkeeping: running counts of breakdown (exit codes 1-5) and stagnation
+  // (6) exits, and the env-gated exit trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the
+  // first PECLET_FLOW_MG_DEBUG_SOLVES solves, rank 0): the exit reason, r0, the last |r|inf the
+  // stop test saw and those counts. Host integers and values the solve already computed (no extra
+  // reduction), so the solve is unchanged with the trace on or off.
+  void noteBicgExit(int exitCode, int it, int maxit, double r0n, double rnLast, double rtol) {
+    if (exitCode >= 1 && exitCode <= 5)
+      ++dbgBicgBreakdowns_;
+    else if (exitCode == 6)
+      ++dbgBicgStagnations_;
+    if (mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && commRank() == 0)
+      printf(
+          "[mg] bicgstab solve %d: exit=%d it=%d maxit=%d r0=%.6e |r|inf=%.6e rtol=%.1e "
+          "r/r0=%.4e breakdowns=%d stagnations=%d\n",
+          dbgSolve_, exitCode, it, maxit, r0n, rnLast, rtol, r0n > 0.0 ? rnLast / r0n : 0.0,
+          dbgBicgBreakdowns_, dbgBicgStagnations_);
+  }
   // BiCGStab preconditioned by one symmetric V-cycle, for the NONSYMMETRIC ghost-projection
   // operator A = (binary-openness 7-point op) + (per-row overlay delta, gpApplyDelta). The MG
   // hierarchy/preconditioner only ever sees the symmetric binary surrogate its levels were built
@@ -3605,28 +3658,10 @@ class CutcellMG {
     Level& l0 = lv_[0];
     auto matvec = [&](CCField y, CCField q) {
 #ifdef PECLET_FLOW_MPI
-      if (distributed_ && h2) {
-        stageG2(l0, q, xg2, ext2);  // inner cells g=1 block -> g=2 block
-        h2->exchange(xg2);          // 2-deep halo (cross-rank + periodic)
-        unstageG2(l0, q, xg2);      // whole l0 block back (fills q's g=1 halo — no 2nd exchange)
-        applyOutflowGhost(l0, q);
-        applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
-                           G);
-        gpApplyDelta(y, CCConst(xg2), ov, nOv, nn, l0.ext, G, ext2, 2, /*useGhost=*/true);
-        return;
-      }
+      gpMatvec(l0, y, q, ov, nOv, nn, xg2, h2, ext2);
+#else
+      gpMatvec(l0, y, q, ov, nOv, nn);
 #endif
-      fill(l0, q);
-      applyOutflowGhost(l0, q);
-      applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
-                         G);
-      gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G, l0.ext, G);
-    };
-    auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
-      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
-      vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(CCExec(), zz, l0.x);
     };
     matvec(t, x);  // r = b - A x  (t as scratch)
     Kokkos::deep_copy(CCExec(), r, b);
@@ -3656,7 +3691,7 @@ class CutcellMG {
         rho = rhoNew;
         axpy(p, -omega, v);  // p = r + beta (p - omega v)
         aypx(p, beta, r);
-        precond(z, p);
+        precondVcycleCopy(z, p);
         matvec(v, z);
         removeMean(l0, v);
         const double rhv = dot(l0, rh, v);
@@ -3679,7 +3714,7 @@ class CutcellMG {
           exitCode = 0;
           break;
         }
-        precond(z2, r);
+        precondVcycleCopy(z2, r);
         matvec(t, z2);
         removeMean(l0, t);
         const double tt = dot(l0, t, t);
@@ -3719,32 +3754,9 @@ class CutcellMG {
         }
       }
     }
-    // Env-gated exit trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the first
-    // PECLET_FLOW_MG_DEBUG_SOLVES solves, rank 0): the exit reason, r0, the last |r|inf the stop
-    // test saw, and running counts of breakdown (1-5) and stagnation (6) exits. Host integers and
-    // values the solve already computed (no extra reduction), so the solve is unchanged with it on
-    // or off.
-    if (exitCode >= 1 && exitCode <= 5)
-      ++dbgBicgBreakdowns_;
-    else if (exitCode == 6)
-      ++dbgBicgStagnations_;
-    if (mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves()) {
-      int dbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-      if (distributed_)
-        MPI_Comm_rank(comm_, &dbgRank);
-#endif
-      if (dbgRank == 0)
-        printf(
-            "[mg] bicgstab solve %d: exit=%d it=%d maxit=%d r0=%.6e |r|inf=%.6e rtol=%.1e "
-            "r/r0=%.4e breakdowns=%d stagnations=%d\n",
-            dbgSolve_, exitCode, it, maxit, r0n, rnLast, rtol, r0n > 0.0 ? rnLast / r0n : 0.0,
-            dbgBicgBreakdowns_, dbgBicgStagnations_);
-    }
+    noteBicgExit(exitCode, it, maxit, r0n, rnLast, rtol);
     ++dbgSolve_;
-    Kokkos::deep_copy(CCExec(), l0.x, x);
-    removeMean(l0, l0.x);
-    Kokkos::deep_copy(CCExec(), x, l0.x);
+    finalRemoveMean(l0, x);
     return it;
   }
 
