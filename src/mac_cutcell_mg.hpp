@@ -3225,6 +3225,31 @@ class CutcellMG {
       printf("[mg]   it %3d  health |r^T z_k| / |r^T z_{k+1}| = %.3e%s\n", it + 1, ratio,
              f32 ? " (fp32 V-cycle)" : "");
   }
+  // solvePCGResident's z = M r with r^T z into slot k: the FP32 V-cycle (scale exponent e) forms it
+  // in its exit; the FP64 one (A5) under C4 (fuse) from its level-0 exit pass, p = z there when pz
+  // is given (copyDotTo's fusion condition). false: no exit pass formed it (a one-level V-cycle)
+  // -> the caller's own kernels.
+  bool precondDotTo(bool f32, bool fuse, int e, int k, CCField z, CCField r, CCField pz) {
+    if (f32) {
+      precondVcycleFp32(z, r, e, k, pz);
+      return true;
+    }
+    exitDot_ = ExitDot{fuse ? k : -1, pz, false};
+    precondVcycle(z, r);
+    const bool done = exitDot_.done;
+    exitDot_ = ExitDot{};
+    return done;
+  }
+  // solvePCGResident's first preconditioner application: z = M r, p = z and r^T z into kRz (fused
+  // into the V-cycle's exit where it can be); returns r^T z (one host read).
+  double firstPrecondRz(Level& l0, bool f32, bool fuse, int e, CCField z, CCField r, CCField p) {
+    const bool copyFused = kHostMemory && fusedWrapSmooth(l0) && lv_.size() > 1;
+    if (!precondDotTo(f32, fuse, e, kRz, z, r, copyFused ? p : CCField()))
+      copyDotTo(l0, p, r, z, kRz);  // p = z; r^T z into kRz
+    else if (!copyFused)
+      Kokkos::deep_copy(CCExec(), p, z);
+    return readSlot(kRz);  // host read (the initial guard)
+  }
   int solvePCGResident(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                        double rtol, int pre, int post, int bottom, const StarOverlay* star,
                        int nStar, C3 nnStar) {
@@ -3236,7 +3261,6 @@ class CutcellMG {
     bottom_ = bottom;
     ensureScalars();
     Level& l0 = lv_[0];  // H-2b: l0.x is not staged (no reader between or inside the solves)
-    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
     // E (§5.3): with a projected guess r0 below is rref = max|P b|, the zero-guess residual (the
     // guard, the stop and the FP32 V-cycle's scale exponent read it; the host holds no other)
@@ -3276,28 +3300,10 @@ class CutcellMG {
     const bool health = trace || healthTrace_;
     healthLog_.clear();
     int eNext = 0;
-    // C4: r^T z from the V-cycle's level-0 exit pass (and p = z there under copyDotTo's fusion
-    // condition); a V-cycle without that exit (one level) leaves `done` false -> the old kernels
-    auto precondDot = [&](int k, CCField pz) {
-      if (f32) {
-        precondVcycleFp32(z, r, eNext, k, pz);
-        return true;
-      }
-      exitDot_ = ExitDot{fuseC ? k : -1, pz, false};
-      precond(z, r);
-      const bool done = exitDot_.done;
-      exitDot_ = ExitDot{};
-      return done;
-    };
     lastSolveConverged_ = r0 == 0.0;  // R (§4): the loop is skipped on a zero residual
     if (r0 > 0.0 && std::isfinite(r0)) {
-      const bool copyFused = kHostMemory && fusedWrapSmooth(l0) && lv_.size() > 1;
       eNext = std::ilogb(r0);
-      if (!precondDot(kRz, copyFused ? p : CCField()))
-        copyDotTo(l0, p, r, z, kRz);  // p = z; r^T z into kRz
-      else if (!copyFused)
-        Kokkos::deep_copy(CCExec(), p, z);
-      const double rz0 = readSlot(kRz);  // host read (the initial guard)
+      const double rz0 = firstPrecondRz(l0, f32, fuseC, eNext, z, r, p);  // the initial guard
       if (!std::isfinite(rz0))
         return failNonFiniteZ("solvePCG", l0, x, maxit);
       setSlot(kStop, 0.0);
@@ -3362,7 +3368,7 @@ class CutcellMG {
         }
         eNext = std::ilogb(rn);
         const double rzOld = health ? dot(l0, r, z) : 0.0;  // r_{k+1}^T z_k (the instrument)
-        if (!precondDot(kRzNew, CCField()))  // C4: r^T z_new from the V-cycle exit pass
+        if (!precondDotTo(f32, fuseC, eNext, kRzNew, z, r, CCField()))  // C4: from the exit pass
           dotTo(l0, r, z, kRzNew);
         if (health)
           noteHealth(rzOld, it, trace, f32);
