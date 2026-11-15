@@ -5693,14 +5693,47 @@ class CutcellMG {
   // a mesh-agnostic smoothed-aggregation AMG on it. Decomposition-agnostic: the CSR is keyed by
   // GLOBAL cell id (periodic-wrapped neighbours), so any (weighted) ORB gives the SAME operator.
   void buildAmg(Level& lv) {
-    int gbx = gnxF_, gby = gnyF_,
-        gbz = gnzF_;  // bottom global dims (coarsen by the ratios above it)
+    const C3 gb = amgBottomDims();
+    amgGlobalN_ = gb.x * gb.y * gb.z;
+    const AmgRows local = amgLocalRows(lv, gb);
+    amgGlobalOfLocal_ = local.gid;
+    // all-gather every rank's rows (no-op / identity single-rank): EVERY rank assembles the same
+    // global CSR and builds the same AMG (redundant coarse solve).
+    AmgRows rows = local;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      gatherAmgRows(local, rows, lv.comm);
+#endif
+    amgLabelComponents(rows);
+    if (agmgDebug())
+      printAmgBuildCensus(rows);
+    peclet::core::solver::HostCsrOp A = amgAssembleCsr(rows);
+    amgA_ = A;
+    amg_ = std::make_shared<peclet::core::solver::GraphAMG>();
+    amg_->build(A);
+  }
+  // buildAmg's operator as rows before the CSR assembly: per cell its global id, diagonal and
+  // solid (identity-row) marker; per off-diagonal coupling its row gid, column gid and value.
+  // One rank's rows (amgLocalRows), or every rank's after gatherAmgRows.
+  struct AmgRows {
+    std::vector<int> gid, row, col;
+    std::vector<double> diag, val;
+    std::vector<std::uint8_t> solid;  // AGMG_DEBUG: identity-row marker, per row
+  };
+  // The bottom level's GLOBAL dims: the fine dims coarsened by every ratio above it.
+  C3 amgBottomDims() const {
+    int gbx = gnxF_, gby = gnyF_, gbz = gnzF_;
     for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
       gbx /= lv_[L].ratio.x;
       gby /= lv_[L].ratio.y;
       gbz /= lv_[L].ratio.z;
     }
-    amgGlobalN_ = gbx * gby * gbz;
+    return C3{gbx, gby, gbz};
+  }
+  // This rank's rows of the bottom operator (inner cells in x-fastest order), periodic-wrapped by
+  // GLOBAL id on the bottom grid gb.
+  AmgRows amgLocalRows(const Level& lv, C3 gb) const {
+    const int gbx = gb.x, gby = gb.y;
     const int nx = lv.inner.x, ny = lv.inner.y, nz = lv.inner.z, ex = lv.ext.x, ey = lv.ext.y;
     auto host = [](FPV v) {
       auto h = Kokkos::create_mirror_view(v);
@@ -5708,185 +5741,185 @@ class CutcellMG {
       return h;
     };
     auto hC = host(lv.AC), hAFX = host(lv.AFX), hAFY = host(lv.AFY), hAFZ = host(lv.AFZ);
-    // this rank's rows: (gid, diag) and off-diagonals (gid -> ngid, coef), periodic-wrapped.
-    std::vector<int> lgid, lrow, lcol;
-    std::vector<double> ldiag, lval;
-    std::vector<std::uint8_t> lsolid;  // AGMG_DEBUG: identity-row marker, per local row
-    amgGlobalOfLocal_.clear();
-    const int band[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+    AmgRows o;
     const int g = lv.g;
     for (int k = 0; k < nz; ++k)
       for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i) {
           const long p = (long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey;
-          const int gx = lv.og.x + i, gy = lv.og.y + j, gz = lv.og.z + k;
-          const int gid = gx + gy * gbx + gz * gbx * gby;
-          amgGlobalOfLocal_.push_back(gid);
-          lgid.push_back(gid);
+          const C3 gc{lv.og.x + i, lv.og.y + j, lv.og.z + k};
+          const int gid = gc.x + gc.y * gbx + gc.z * gbx * gby;
+          o.gid.push_back(gid);
           // solid cells (all faces closed => diag 0, no coupling) get an identity row so D^-1 is
           // finite; their rhs is 0, so x stays 0 (correct — no flow inside the solid).
           const double dc = (double)hC(p);
-          ldiag.push_back(dc != 0.0 ? dc : 1.0);
-          lsolid.push_back(dc == 0.0 ? 1 : 0);
+          o.diag.push_back(dc != 0.0 ? dc : 1.0);
+          o.solid.push_back(dc == 0.0 ? 1 : 0);
           // A2 face form: AW = AFX(p), AE = AFX(p+1), ... (the band values themselves).
           const double bc[6] = {(double)hAFX(p), (double)hAFX(p + 1),
                                 (double)hAFY(p), (double)hAFY(p + ex),
                                 (double)hAFZ(p), (double)hAFZ(p + (long)ex * ey)};
-          for (int d = 0; d < 6; ++d) {
-            if (bc[d] == 0.0)
-              continue;  // closed face (wall) -> no coupling
-            // A face crossing the domain boundary couples to the wrapped cell ONLY on a periodic
-            // axis (bc_ type 0). On a non-periodic axis an OPEN boundary face is the Dirichlet
-            // outflow anchor: its coefficient lives in the diagonal (already in AC) with NO
-            // off-diagonal partner — wrapping it would add a spurious top<->bottom coupling and
-            // (with the mean projection skipped) a wrong, possibly indefinite bottom matrix.
-            const int rx = gx + band[d][0], ry = gy + band[d][1], rz = gz + band[d][2];
-            const int axis = d / 2;
-            const bool crosses = (axis == 0 && (rx < 0 || rx >= gbx)) ||
-                                 (axis == 1 && (ry < 0 || ry >= gby)) ||
-                                 (axis == 2 && (rz < 0 || rz >= gbz));
-            if (crosses && bc_[d] != 0)
-              continue;  // non-periodic boundary face: Dirichlet anchor stays diagonal-only
-            const int ngx = (rx % gbx + gbx) % gbx;
-            const int ngy = (ry % gby + gby) % gby;
-            const int ngz = (rz % gbz + gbz) % gbz;
-            lrow.push_back(gid);
-            lcol.push_back(ngx + ngy * gbx + ngz * gbx * gby);
-            lval.push_back(bc[d]);
-          }
+          amgCellCouplings(gc, gb, gid, bc, o);
         }
-    // all-gather every rank's rows (no-op / identity single-rank): EVERY rank assembles the same
-    // global CSR and builds the same AMG (redundant coarse solve).
-    std::vector<int> ggid = lgid, grow = lrow, gcol = lcol;
-    std::vector<double> gdiag = ldiag, gval = lval;
-    std::vector<std::uint8_t> gsolid = lsolid;
+    return o;
+  }
+  // The off-diagonal couplings of the cell at GLOBAL index gc (row gid, face coefficients bc in
+  // the order -x, +x, -y, +y, -z, +z), appended to o.
+  void amgCellCouplings(C3 gc, C3 gb, int gid, const double (&bc)[6], AmgRows& o) const {
+    const int band[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+    const int gbx = gb.x, gby = gb.y, gbz = gb.z;
+    for (int d = 0; d < 6; ++d) {
+      if (bc[d] == 0.0)
+        continue;  // closed face (wall) -> no coupling
+      // A face crossing the domain boundary couples to the wrapped cell ONLY on a periodic
+      // axis (bc_ type 0). On a non-periodic axis an OPEN boundary face is the Dirichlet
+      // outflow anchor: its coefficient lives in the diagonal (already in AC) with NO
+      // off-diagonal partner — wrapping it would add a spurious top<->bottom coupling and
+      // (with the mean projection skipped) a wrong, possibly indefinite bottom matrix.
+      const int rx = gc.x + band[d][0], ry = gc.y + band[d][1], rz = gc.z + band[d][2];
+      const int axis = d / 2;
+      const bool crosses = (axis == 0 && (rx < 0 || rx >= gbx)) ||
+                           (axis == 1 && (ry < 0 || ry >= gby)) ||
+                           (axis == 2 && (rz < 0 || rz >= gbz));
+      if (crosses && bc_[d] != 0)
+        continue;  // non-periodic boundary face: Dirichlet anchor stays diagonal-only
+      const int ngx = (rx % gbx + gbx) % gbx;
+      const int ngy = (ry % gby + gby) % gby;
+      const int ngz = (rz % gbz + gbz) % gbz;
+      o.row.push_back(gid);
+      o.col.push_back(ngx + ngy * gbx + ngz * gbx * gby);
+      o.val.push_back(bc[d]);
+    }
+  }
 #ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      gatherv(lgid, ggid, lv.comm);
-      gatherv(ldiag, gdiag, lv.comm);
-      gatherv(lrow, grow, lv.comm);
-      gatherv(lcol, gcol, lv.comm);
-      gatherv(lval, gval, lv.comm);
-      gatherv(lsolid, gsolid, lv.comm);
-    }
+  // Every rank's rows, all-gathered in rank order (field by field: gid, diag, row, col, val,
+  // solid).
+  void gatherAmgRows(const AmgRows& local, AmgRows& all, MPI_Comm c) {
+    gatherv(local.gid, all.gid, c);
+    gatherv(local.diag, all.diag, c);
+    gatherv(local.row, all.row, c);
+    gatherv(local.col, all.col, c);
+    gatherv(local.val, all.val, c);
+    gatherv(local.solid, all.solid, c);
+  }
 #endif
+  // amgSolid_ per gid, and the connected components of the operator graph (union-find over the
+  // off-diagonal edges): each FLUID component carries its own constant null vector, so the
+  // null-space projection must be per-component. Solid identity rows are singletons and take no
+  // projection.
+  void amgLabelComponents(const AmgRows& rows) {
     amgSolid_.assign((std::size_t)amgGlobalN_, 0);
-    for (std::size_t r = 0; r < ggid.size(); ++r)
-      amgSolid_[(std::size_t)ggid[r]] = gsolid[r];
-    {  // connected components of the operator graph (union-find over the off-diagonal edges):
-      // each FLUID component carries its own constant null vector, so the null-space projection
-      // must be per-component. Solid identity rows are singletons and take no projection.
-      std::vector<int> parent((std::size_t)amgGlobalN_);
-      for (int i = 0; i < amgGlobalN_; ++i)
-        parent[(std::size_t)i] = i;
-      auto find = [&](int a) {
-        while (parent[(std::size_t)a] != a)
-          a = parent[(std::size_t)a] = parent[(std::size_t)parent[(std::size_t)a]];
-        return a;
-      };
-      for (std::size_t e = 0; e < grow.size(); ++e) {
-        const int ra = find(grow[e]), rb = find(gcol[e]);
-        if (ra != rb)
-          parent[(std::size_t)ra] = rb;
-      }
-      amgComp_.assign((std::size_t)amgGlobalN_, -1);
-      std::vector<int> remap((std::size_t)amgGlobalN_, -1);
-      amgNComp_ = 0;
-      for (int i = 0; i < amgGlobalN_; ++i) {
-        if (amgSolid_[(std::size_t)i])
-          continue;  // identity row: no null space, excluded from projection
-        const int r = find(i);
-        if (remap[(std::size_t)r] < 0)
-          remap[(std::size_t)r] = amgNComp_++;
-        amgComp_[(std::size_t)i] = remap[(std::size_t)r];
-      }
+    for (std::size_t r = 0; r < rows.gid.size(); ++r)
+      amgSolid_[(std::size_t)rows.gid[r]] = rows.solid[r];
+    std::vector<int> parent((std::size_t)amgGlobalN_);
+    for (int i = 0; i < amgGlobalN_; ++i)
+      parent[(std::size_t)i] = i;
+    auto find = [&](int a) {
+      while (parent[(std::size_t)a] != a)
+        a = parent[(std::size_t)a] = parent[(std::size_t)parent[(std::size_t)a]];
+      return a;
+    };
+    for (std::size_t e = 0; e < rows.row.size(); ++e) {
+      const int ra = find(rows.row[e]), rb = find(rows.col[e]);
+      if (ra != rb)
+        parent[(std::size_t)ra] = rb;
     }
-    if (agmgDebug()) {
-      std::vector<long> csize((std::size_t)amgNComp_, 0);
-      for (int i = 0; i < amgGlobalN_; ++i)
-        if (amgComp_[(std::size_t)i] >= 0)
-          ++csize[(std::size_t)amgComp_[(std::size_t)i]];
-      printf("[agmg-build] fluid components=%d  sizes:", amgNComp_);
-      for (int c = 0; c < std::min(amgNComp_, 12); ++c)
-        printf(" %ld", csize[(std::size_t)c]);
-      printf(amgNComp_ > 12 ? " ...\n" : "\n");
+    amgComp_.assign((std::size_t)amgGlobalN_, -1);
+    std::vector<int> remap((std::size_t)amgGlobalN_, -1);
+    amgNComp_ = 0;
+    for (int i = 0; i < amgGlobalN_; ++i) {
+      if (amgSolid_[(std::size_t)i])
+        continue;  // identity row: no null space, excluded from projection
+      const int r = find(i);
+      if (remap[(std::size_t)r] < 0)
+        remap[(std::size_t)r] = amgNComp_++;
+      amgComp_[(std::size_t)i] = remap[(std::size_t)r];
     }
-    if (agmgDebug()) {
-      long nSolid = 0, nTiny30 = 0, nTiny12 = 0;
-      double minFluidDiag = 1e300, maxFluidDiag = 0;
-      for (std::size_t r = 0; r < ggid.size(); ++r) {
-        if (gsolid[r]) {
-          ++nSolid;
-          continue;
-        }
-        const double ad = std::fabs(gdiag[r]);
-        minFluidDiag = std::min(minFluidDiag, ad);
-        maxFluidDiag = std::max(maxFluidDiag, ad);
-        nTiny30 += ad < 1e-30;
-        nTiny12 += ad < 1e-12;
+  }
+  // PECLET_FLOW_AGMG_DEBUG census of the gathered bottom operator: component sizes, the fluid
+  // diagonal range and the row-sum defect.
+  void printAmgBuildCensus(const AmgRows& rows) const {
+    std::vector<long> csize((std::size_t)amgNComp_, 0);
+    for (int i = 0; i < amgGlobalN_; ++i)
+      if (amgComp_[(std::size_t)i] >= 0)
+        ++csize[(std::size_t)amgComp_[(std::size_t)i]];
+    printf("[agmg-build] fluid components=%d  sizes:", amgNComp_);
+    for (int c = 0; c < std::min(amgNComp_, 12); ++c)
+      printf(" %ld", csize[(std::size_t)c]);
+    printf(amgNComp_ > 12 ? " ...\n" : "\n");
+    long nSolid = 0, nTiny30 = 0, nTiny12 = 0;
+    double minFluidDiag = 1e300, maxFluidDiag = 0;
+    for (std::size_t r = 0; r < rows.gid.size(); ++r) {
+      if (rows.solid[r]) {
+        ++nSolid;
+        continue;
       }
-      printf(
-          "[agmg-build] n=%d solid=%ld fluid=%ld  fluid|diag| min=%.3e max=%.3e  "
-          "tiny<1e-30=%ld <1e-12=%ld\n",
-          amgGlobalN_, nSolid, (long)ggid.size() - nSolid, minFluidDiag, maxFluidDiag, nTiny30,
-          nTiny12);
-      // Row-sum defect: the operator's null vector is the constant ONLY if every fluid row sums
-      // to zero. The level coefficients are stored in float (MReal), so the diagonal is a
-      // float-rounded sum of the face coefficients — a nonzero defect here bounds how far a
-      // singular-consistent solve can converge.
-      std::vector<double> rowsum((std::size_t)amgGlobalN_, 0.0);
-      for (std::size_t r = 0; r < ggid.size(); ++r)
-        rowsum[(std::size_t)ggid[r]] = gsolid[r] ? 0.0 : gdiag[r];
-      for (std::size_t e = 0; e < grow.size(); ++e)
-        if (!amgSolid_[(std::size_t)grow[e]])
-          rowsum[(std::size_t)grow[e]] += gval[e];
-      double defMax = 0, defRelMax = 0;
-      for (std::size_t r = 0; r < ggid.size(); ++r)
-        if (!gsolid[r]) {
-          const double d = std::fabs(rowsum[(std::size_t)ggid[r]]);
-          defMax = std::max(defMax, d);
-          defRelMax = std::max(defRelMax, d / std::fabs(gdiag[r]));
-        }
-      printf("[agmg-build] fluid row-sum defect max=%.3e rel=%.3e\n", defMax, defRelMax);
-      fflush(stdout);
+      const double ad = std::fabs(rows.diag[r]);
+      minFluidDiag = std::min(minFluidDiag, ad);
+      maxFluidDiag = std::max(maxFluidDiag, ad);
+      nTiny30 += ad < 1e-30;
+      nTiny12 += ad < 1e-12;
     }
-    {  // assemble the global CSR keyed by gid
-      peclet::core::solver::HostCsrOp A;
-      A.n = amgGlobalN_;
-      A.diag.assign((std::size_t)amgGlobalN_, 0.0);
-      for (std::size_t r = 0; r < ggid.size(); ++r)
-        A.diag[(std::size_t)ggid[r]] = gdiag[r];
-      std::vector<std::vector<std::pair<int, double>>> rows((std::size_t)amgGlobalN_);
-      for (std::size_t e = 0; e < grow.size(); ++e)
-        rows[(std::size_t)grow[e]].push_back({gcol[e], gval[e]});
-      A.start.assign((std::size_t)amgGlobalN_ + 1, 0);
+    printf(
+        "[agmg-build] n=%d solid=%ld fluid=%ld  fluid|diag| min=%.3e max=%.3e  "
+        "tiny<1e-30=%ld <1e-12=%ld\n",
+        amgGlobalN_, nSolid, (long)rows.gid.size() - nSolid, minFluidDiag, maxFluidDiag, nTiny30,
+        nTiny12);
+    // Row-sum defect: the operator's null vector is the constant ONLY if every fluid row sums
+    // to zero. The level coefficients are stored in float (MReal), so the diagonal is a
+    // float-rounded sum of the face coefficients — a nonzero defect here bounds how far a
+    // singular-consistent solve can converge.
+    std::vector<double> rowsum((std::size_t)amgGlobalN_, 0.0);
+    for (std::size_t r = 0; r < rows.gid.size(); ++r)
+      rowsum[(std::size_t)rows.gid[r]] = rows.solid[r] ? 0.0 : rows.diag[r];
+    for (std::size_t e = 0; e < rows.row.size(); ++e)
+      if (!amgSolid_[(std::size_t)rows.row[e]])
+        rowsum[(std::size_t)rows.row[e]] += rows.val[e];
+    double defMax = 0, defRelMax = 0;
+    for (std::size_t r = 0; r < rows.gid.size(); ++r)
+      if (!rows.solid[r]) {
+        const double d = std::fabs(rowsum[(std::size_t)rows.gid[r]]);
+        defMax = std::max(defMax, d);
+        defRelMax = std::max(defRelMax, d / std::fabs(rows.diag[r]));
+      }
+    printf("[agmg-build] fluid row-sum defect max=%.3e rel=%.3e\n", defMax, defRelMax);
+    fflush(stdout);
+  }
+  // The global CSR keyed by gid, from the gathered rows.
+  peclet::core::solver::HostCsrOp amgAssembleCsr(const AmgRows& rows) const {
+    peclet::core::solver::HostCsrOp A;
+    A.n = amgGlobalN_;
+    A.diag.assign((std::size_t)amgGlobalN_, 0.0);
+    for (std::size_t r = 0; r < rows.gid.size(); ++r)
+      A.diag[(std::size_t)rows.gid[r]] = rows.diag[r];
+    std::vector<std::vector<std::pair<int, double>>> crow((std::size_t)amgGlobalN_);
+    for (std::size_t e = 0; e < rows.row.size(); ++e)
+      crow[(std::size_t)rows.row[e]].push_back({rows.col[e], rows.val[e]});
+    A.start.assign((std::size_t)amgGlobalN_ + 1, 0);
+    for (int r = 0; r < amgGlobalN_; ++r)
+      A.start[(std::size_t)r + 1] = A.start[(std::size_t)r] + (long)crow[(std::size_t)r].size();
+    A.nbr.reserve(rows.row.size());
+    A.coef.reserve(rows.row.size());
+    for (int r = 0; r < amgGlobalN_; ++r)
+      for (auto& [c, v] : crow[(std::size_t)r]) {
+        A.nbr.push_back(c);
+        A.coef.push_back(v);
+      }
+    // Singular (periodic / all-Neumann) path: every fluid diagonal is BY CONSTRUCTION the
+    // negative sum of its off-diagonals (walls/solids contribute zero, and no Dirichlet anchor
+    // exists when removeMean_). The float (MReal) level storage breaks that identity at ~5e-8
+    // relative, which shifts the operator's near-null vector off the constant the null-space
+    // projection assumes — measured as the inner CG flooring at ~1e-5 and burning its full
+    // iteration cap every call. Resum the diagonal in double so A·1 = 0 EXACTLY per fluid row.
+    if (removeMean_)
       for (int r = 0; r < amgGlobalN_; ++r)
-        A.start[(std::size_t)r + 1] = A.start[(std::size_t)r] + (long)rows[(std::size_t)r].size();
-      A.nbr.reserve(grow.size());
-      A.coef.reserve(grow.size());
-      for (int r = 0; r < amgGlobalN_; ++r)
-        for (auto& [c, v] : rows[(std::size_t)r]) {
-          A.nbr.push_back(c);
-          A.coef.push_back(v);
+        if (!amgSolid_[(std::size_t)r] && !crow[(std::size_t)r].empty()) {
+          double s = 0;
+          for (auto& [c, v] : crow[(std::size_t)r])
+            s += v;
+          A.diag[(std::size_t)r] = -s;
         }
-      // Singular (periodic / all-Neumann) path: every fluid diagonal is BY CONSTRUCTION the
-      // negative sum of its off-diagonals (walls/solids contribute zero, and no Dirichlet anchor
-      // exists when removeMean_). The float (MReal) level storage breaks that identity at ~5e-8
-      // relative, which shifts the operator's near-null vector off the constant the null-space
-      // projection assumes — measured as the inner CG flooring at ~1e-5 and burning its full
-      // iteration cap every call. Resum the diagonal in double so A·1 = 0 EXACTLY per fluid row.
-      if (removeMean_)
-        for (int r = 0; r < amgGlobalN_; ++r)
-          if (!amgSolid_[(std::size_t)r] && !rows[(std::size_t)r].empty()) {
-            double s = 0;
-            for (auto& [c, v] : rows[(std::size_t)r])
-              s += v;
-            A.diag[(std::size_t)r] = -s;
-          }
-      amgA_ = A;
-      amg_ = std::make_shared<peclet::core::solver::GraphAMG>();
-      amg_->build(A);
-    }
+    return A;
   }
   // Solve the coarsest level with the agglomerated AMG, REDUNDANTLY: all-gather the coarse rhs,
   // every rank runs the identical GraphAMG-preconditioned CG on the identical global operator
