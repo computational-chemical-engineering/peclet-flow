@@ -1228,7 +1228,8 @@ class CutcellMG {
   // ---- the aspect-ratio coarsening rule (doc/anisotropic_metric.md §5) -------------------------
   // Shared by BOTH geometric hierarchies (VelocityMG calls it too): given this level's spacings
   // H[a] = hp[a] * cfac[a] and the per-axis coarsenability canA[a] that today's tests produce
-  // (can(dim) single-rank, plus evenOn(dec, a) under MPI), return the per-axis coarsening ratio.
+  // (canHalve(dim) single-rank, plus evenBlocksOn(dec, a) under MPI), return the per-axis
+  // coarsening ratio.
   //
   //   aniso == false : ratio_a = 2 iff canA[a]                     -- TODAY'S DECISION, VERBATIM
   //   aniso == true  : ratio_a = 2 iff canA[a] and H[a] < theta * min_{b : canA[b]} H[b]
@@ -1278,8 +1279,8 @@ class CutcellMG {
   //   T(L) <=> L >= 1 and !can(g[s]) (globally blocked) and A' > theta and no outflow face on s.
   // Returns s when T(L) holds, else -1; *aspect receives A' (0 when there is no unique s). Global
   // quantities only (no collective, np-independent). An s only DEFERRED by mgChooseRatio, or
-  // blocked only by evenOn (§5.4), is not globally blocked. Pure and static: host, once per level
-  // per build.
+  // blocked only by evenBlocksOn (§5.4), is not globally blocked. Pure and static: host, once per
+  // level per build.
   static int lineAxisTrigger(int L, C3 g, C3 cf, const double hp[3], double theta, const int bc[6],
                              double* aspect) {
     const double H[3] = {hp[0] * (double)cf.x, hp[1] * (double)cf.y, hp[2] * (double)cf.z};
@@ -1348,22 +1349,15 @@ class CutcellMG {
       v.ext = C3{inner.x + 2 * G, inner.y + 2 * G, inner.z + 2 * G};
       v.cfac = cf;
       v.n = (std::size_t)v.ext.x * v.ext.y * v.ext.z;
-      auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
       C3 next = inner;
       C3 ratio{1, 1, 1};
       const bool autoStop = autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissibleHere(inner);
       if (L + 1 < nLevelsCap && !autoStop) {
-        // §5.1: the candidate set is today's `can()` per axis; the aspect rule then defers an axis
-        // that is already >= theta times coarser than the finest candidate.  Inert when !aniso_.
-        const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
-        const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-        ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
-        if (ratio.x == 2)
-          next.x = inner.x / 2;
-        if (ratio.y == 2)
-          next.y = inner.y / 2;
-        if (ratio.z == 2)
-          next.z = inner.z / 2;
+        // §5.1: the candidate set is today's `canHalve()` per axis; the aspect rule then defers an
+        // axis that is already >= theta times coarser than the finest candidate.  Inert when
+        // !aniso_.
+        const bool canA[3] = {canHalve(inner.x), canHalve(inner.y), canHalve(inner.z)};
+        ratio = levelRatio(inner, cf, canA, next);
       }
       v.ratio = ratio;
       // D5 (doc/vof_projection_cost_design.md §4.4.7): here only what every precision reads --
@@ -1428,8 +1422,8 @@ class CutcellMG {
   // maxBlockCells > 0, amr/docs/amr_mg_core_boundary.md §11.1-§11.3).
 
   // flow's LIFT rule — "every block can coarsen in place one more time": every block is even in
-  // origin and size on every axis whose GLOBAL extent `gs` can still halve (can()). An axis that
-  // cannot halve is not a constraint. This is the predicate core's stage policy
+  // origin and size on every axis whose GLOBAL extent `gs` can still halve (canHalve()). An axis
+  // that cannot halve is not a constraint. This is the predicate core's stage policy
   // (peclet::core::decomp::chooseStageTarget) is parameterised on, shared by initMpi and predict.
   static bool teleLiftable(const peclet::core::decomp::BlockDecomposer<3>& d, C3 gs) {
     auto can = [](int e) { return (e % 2 == 0) && (e / 2 >= 2); };
@@ -1724,6 +1718,164 @@ class CutcellMG {
     return A;
   }
 
+#endif
+  // An axis of GLOBAL extent d can halve once more (even, and the half at least 2).
+  static bool canHalve(int d) { return (d % 2 == 0) && (d / 2 >= 2); }
+  // §5.1 on one level (dims gs, coarsening factor cf so far, candidate axes canA): the ratio the
+  // aspect rule picks; next = the coarse level's dims. Inert when !aniso_.
+  C3 levelRatio(C3 gs, C3 cf, const bool canA[3], C3& next) const {
+    const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
+    const C3 ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
+    if (ratio.x == 2)
+      next.x = gs.x / 2;
+    if (ratio.y == 2)
+      next.y = gs.y / 2;
+    if (ratio.z == 2)
+      next.z = gs.z / 2;
+    return ratio;
+  }
+#ifdef PECLET_FLOW_MPI
+  // Every block of d is even in origin and size on axis ax.
+  static bool evenBlocksOn(const peclet::core::decomp::BlockDecomposer<3>& d, int ax) {
+    for (std::size_t b = 0; b < d.sizes().size(); ++b)
+      if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
+        return false;
+    return true;
+  }
+  // Smallest block extent (any rank, any axis) — the same on every rank (the decomposition is
+  // replicated), so initLevelLayout's ghost-width decision is rank-uniform by construction.
+  static long minBlockExtentOf(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    long m = std::numeric_limits<long>::max();
+    for (const auto& s : d.sizes())
+      for (int k = 0; k < 3; ++k)
+        m = std::min(m, (long)s[k]);
+    return m;
+  }
+  // initMpi, level L on decomposition dec (rank curRank of curComm; GLOBAL dims gs, coarsening
+  // factor cf so far): the ghost width, the halo and faces-only stencil topologies, the wrap
+  // axes and the block geometry.
+  void initLevelLayout(Level& v, int L, const peclet::core::decomp::BlockDecomposer<3>& dec,
+                       int curRank, MPI_Comm curComm, C3 gs, C3 cf) const {
+    std::array<bool, 3> per{true, true, true};
+    v.halo = std::make_shared<GridHaloTopology<3>>();
+    // Communication-avoiding smoothing needs a 2-deep ghost layer; give it to the COARSE levels
+    // (where every halo message is pure latency) whose blocks can carry it (extent >= 4 on every
+    // rank; below that fall back to the per-colour exchange). Level 0 keeps g=1: its exchanges
+    // are already overlapped with the interior sweep and the solver's g=1 bridge (openness/rhs/
+    // phi staging, ghost-projection g=2 staging) assumes it. Only for the periodic/IBM operator
+    // — with domain BCs (setBoundaryConditions BEFORE initMpi) every level keeps the g=1 layout,
+    // so that path is byte-identical to the pre-CA code.
+    // Also off on an ODD periodic global extent: the wrap ring slot then has the opposite
+    // parity of its image, so the colour-0 ring sweep would update it in the wrong colour.
+    bool oddPeriodic = false;
+    for (int a = 0; a < 3; ++a)
+      oddPeriodic = oddPeriodic || (per[a] && dec.globalSize()[a] % 2 != 0);
+    const bool ca =
+        L > 0 && !hasBC_ && (caMode_ & kCaMg) && minBlockExtentOf(dec) >= 4 && !oddPeriodic;
+    v.g = ca ? 2 : 1;
+    v.caOk = (v.g == 2);
+    v.halo->buildTopology(dec, curRank, v.g, per, curComm);
+    v.comm = curComm;
+    v.dev = std::make_shared<GridHalo<double>>();
+    v.dev->init(*v.halo);
+    v.dev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " ranks" +
+                    std::to_string(dec.numBlocks()));
+    // K3 (§5.2): the wrap axes M_L, from the replicated decomposition (every rank agrees), and
+    // the faces-only stencil topology with `per` cleared on them.
+    {
+      std::array<bool, 3> sper = per;
+      v.wrapAxes = 0;
+      v.wholeAxes = 0;
+      for (int a = 0; a < 3; ++a) {
+        bool oneBlock = true;
+        for (std::size_t b = 0; b < dec.sizes().size(); ++b)
+          oneBlock =
+              oneBlock && dec.origins()[b][a] == 0 && dec.sizes()[b][a] == dec.globalSize()[a];
+        if (oneBlock)
+          v.wholeAxes |= 1 << a;  // A2.4
+        const bool outflow = bc_[2 * a] == 3 || bc_[2 * a + 1] == 3;
+        if (oneBlock && !outflow && dec.globalSize()[a] % 2 == 0) {
+          v.wrapAxes |= 1 << a;
+          sper[a] = false;
+        }
+      }
+      v.shalo = std::make_shared<GridHaloTopology<3>>();
+      v.shalo->buildTopology(dec, curRank, v.g, sper, curComm,
+                             peclet::core::halo::Neighborhood::Faces);
+      v.sdev = std::make_shared<GridHalo<double>>();
+      v.sdev->init(*v.shalo);
+      v.sdev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " stencil w" +
+                       std::to_string(v.wrapAxes));
+    }
+    const auto& idx = v.halo->indexer();
+    const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
+    v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]};
+    v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
+    v.og = {(int)oig[0] + v.g, (int)oig[1] + v.g,
+            (int)oig[2] + v.g};  // inner origin == single-rank og=0 at origin 0
+    v.gdim = gs;                 // this level's GLOBAL dims (og + inner == gdim -> owns +face)
+    v.cfac = cf;
+    v.n = idx.numCellsInclGhost();
+  }
+  // Does initMpi's level L (GLOBAL dims gs, decomposition curDec) telescope: telescoping on and
+  // the in-place coarsening blocked (or the blocks below teleMinExtent_), or the test-only force.
+  bool teleHere(const peclet::core::decomp::BlockDecomposer<3>& curDec, C3 gs, int L) const {
+    namespace cdec = peclet::core::decomp;
+    const bool canAny = canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z);
+    // flow's lift rule, the predicate core's stage policy is parameterised on.
+    auto liftable = [&](const cdec::BlockDecomposer<3>& d) { return teleLiftable(d, gs); };
+    const bool blocked = !liftable(curDec);
+    const bool tooSmall =
+        teleMinExtent_ > 0 && cdec::minBlockExtent(curDec) < (peclet::core::Index)teleMinExtent_;
+    return canAny && curDec.numBlocks() > 1 &&
+           ((telescope_ && (blocked || tooSmall)) || teleForce_ == L);
+  }
+  // initMpi: a level's fields at its full extent (this path allocates every level's FP64 data).
+  static void allocLevelFields(Level& v) {
+    v.x = CCField("mg_x", v.n);
+    v.rhs = CCField("mg_rhs", v.n);
+    v.res = CCField("mg_res", v.n);
+    v.nFluidDev = Kokkos::View<long, CCMem>("mg_nfluid");
+    v.ox = CCField("mg_ox", v.n);
+    v.oy = CCField("mg_oy", v.n);
+    v.oz = CCField("mg_oz", v.n);
+    for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
+      *p = FPV("mg_A", v.n);
+  }
+  // PECLET_FLOW_MG_DEBUG (rank 0): initMpi's hierarchy over `size` ranks, depth census and
+  // per-level table; gs and curDec are the last level's.
+  void printMpiHierarchy(int size, int nLevels, C3 gs,
+                         const peclet::core::decomp::BlockDecomposer<3>& curDec) const {
+    const int gnx = gnxF_, gny = gnyF_, gnz = gnzF_;
+    printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %s)%s\n", gnx, gny, gnz, size,
+           (int)lv_.size(), depthRequestLabel(nLevels).c_str(),
+           telescope_ ? "  [telescope ON]" : "");
+    {  // rank 0 roots every stage: gs / curDec are the last level's
+      bool more = false;
+      for (int a = 0; a < 3; ++a) {
+        const int d = a == 0 ? gs.x : (a == 1 ? gs.y : gs.z);
+        more = more || (canHalve(d) && (telescope_ || evenBlocksOn(curDec, a)));
+      }
+      printDepthCensus(nLevels, more);
+    }
+    C3 g{gnx, gny, gnz};
+    int ranks = size;
+    for (int L = 0; L < (int)lv_.size(); ++L) {
+      printf(
+          "[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  "
+          "ratio(%d,%d,%d)%s%s\n",
+          L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
+          lv_[L].ratio.y, lv_[L].ratio.z, lineAxisLabel(L).c_str(),
+          lv_[L].tele ? (lv_[L].tele->repartition() ? "  -> REPARTITION" : "  -> TELESCOPE") : "");
+      if (lv_[L].tele) {
+        int sub = 1;
+        MPI_Comm_size(lv_[L].tele->comm.sub, &sub);
+        ranks = sub;
+      }
+      g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
+    }
+    fflush(stdout);
+  }
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     joinPrefactor();  // X: as init(): join the side factor before the levels it reads are freed
@@ -1740,9 +1892,7 @@ class CutcellMG {
     int rank = 0, size = 1;
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &size);
-    std::array<bool, 3> per{true, true, true};
     C3 gs{gnx, gny, gnz}, cf{1, 1, 1};
-    auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     // Coarse levels are NESTED: level 0 is the shared solver decomposition (dec0), and each coarse
     // level is the previous level's decomposition coarsened IN PLACE (same tree/leaf order, split
     // positions halved). This keeps restrict/prolong's coarse-local i <-> fine-local ratio*i
@@ -1764,21 +1914,6 @@ class CutcellMG {
     // (design §11.1 — the finest level's largest block, replicated); 0 = sibling merges only.
     const peclet::core::Index maxBlockCells =
         repartition_ ? peclet::core::decomp::largestBlockCells(curDec) : 0;
-    auto evenOn = [](const peclet::core::decomp::BlockDecomposer<3>& d, int ax) {
-      for (std::size_t b = 0; b < d.sizes().size(); ++b)
-        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
-          return false;
-      return true;
-    };
-    // Smallest block extent (any rank, any axis) — the same on every rank (the decomposition is
-    // replicated), so the per-level ghost-width decision below is rank-uniform by construction.
-    auto minBlockExtent = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
-      long m = std::numeric_limits<long>::max();
-      for (const auto& s : d.sizes())
-        for (int k = 0; k < 3; ++k)
-          m = std::min(m, (long)s[k]);
-      return m;
-    };
     // doc/mg_depth_policy.md §4.2: as init() -- nLevels == 0 = AUTO on the GLOBAL dims gs, which
     // are replicated with the bc, the mode and the extent, so every rank resolves the same depth
     // without a collective; the bottom level is the last, so no telescope is evaluated there.
@@ -1786,84 +1921,17 @@ class CutcellMG {
     const int nLevelsCap = autoDepth ? kAutoMaxLevels : nLevels;
     for (int L = 0; L < nLevelsCap; ++L) {
       Level v;
-      v.halo = std::make_shared<GridHaloTopology<3>>();
-      const peclet::core::decomp::BlockDecomposer<3>& dec = curDec;
-      // Communication-avoiding smoothing needs a 2-deep ghost layer; give it to the COARSE levels
-      // (where every halo message is pure latency) whose blocks can carry it (extent >= 4 on every
-      // rank; below that fall back to the per-colour exchange). Level 0 keeps g=1: its exchanges
-      // are already overlapped with the interior sweep and the solver's g=1 bridge (openness/rhs/
-      // phi staging, ghost-projection g=2 staging) assumes it. Only for the periodic/IBM operator
-      // — with domain BCs (setBoundaryConditions BEFORE initMpi) every level keeps the g=1 layout,
-      // so that path is byte-identical to the pre-CA code.
-      // Also off on an ODD periodic global extent: the wrap ring slot then has the opposite
-      // parity of its image, so the colour-0 ring sweep would update it in the wrong colour.
-      bool oddPeriodic = false;
-      for (int a = 0; a < 3; ++a)
-        oddPeriodic = oddPeriodic || (per[a] && dec.globalSize()[a] % 2 != 0);
-      const bool ca =
-          L > 0 && !hasBC_ && (caMode_ & kCaMg) && minBlockExtent(dec) >= 4 && !oddPeriodic;
-      v.g = ca ? 2 : 1;
-      v.caOk = (v.g == 2);
-      v.halo->buildTopology(dec, curRank, v.g, per, curComm);
-      v.comm = curComm;
-      v.dev = std::make_shared<GridHalo<double>>();
-      v.dev->init(*v.halo);
-      v.dev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " ranks" +
-                      std::to_string(curDec.numBlocks()));
-      // K3 (§5.2): the wrap axes M_L, from the replicated decomposition (every rank agrees), and
-      // the faces-only stencil topology with `per` cleared on them.
-      {
-        std::array<bool, 3> sper = per;
-        v.wrapAxes = 0;
-        v.wholeAxes = 0;
-        for (int a = 0; a < 3; ++a) {
-          bool oneBlock = true;
-          for (std::size_t b = 0; b < dec.sizes().size(); ++b)
-            oneBlock =
-                oneBlock && dec.origins()[b][a] == 0 && dec.sizes()[b][a] == dec.globalSize()[a];
-          if (oneBlock)
-            v.wholeAxes |= 1 << a;  // A2.4
-          const bool outflow = bc_[2 * a] == 3 || bc_[2 * a + 1] == 3;
-          if (oneBlock && !outflow && dec.globalSize()[a] % 2 == 0) {
-            v.wrapAxes |= 1 << a;
-            sper[a] = false;
-          }
-        }
-        v.shalo = std::make_shared<GridHaloTopology<3>>();
-        v.shalo->buildTopology(dec, curRank, v.g, sper, curComm,
-                               peclet::core::halo::Neighborhood::Faces);
-        v.sdev = std::make_shared<GridHalo<double>>();
-        v.sdev->init(*v.shalo);
-        v.sdev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " stencil w" +
-                         std::to_string(v.wrapAxes));
-      }
-      const auto& idx = v.halo->indexer();
-      const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
-      v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]};
-      v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
-      v.og = {(int)oig[0] + v.g, (int)oig[1] + v.g,
-              (int)oig[2] + v.g};  // inner origin == single-rank og=0 at origin 0
-      v.gdim = gs;                 // this level's GLOBAL dims (og + inner == gdim -> owns +face)
-      v.cfac = cf;
-      v.n = idx.numCellsInclGhost();
+      initLevelLayout(v, L, curDec, curRank, curComm, gs, cf);
       C3 next = gs, ratio{1, 1, 1};
       bool idleBelow = false;
       const bool autoStop = autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissibleHere(gs);
       if (L + 1 < nLevelsCap && !autoStop) {
-        // Coarsen an axis only if the GLOBAL dim can (can()) AND every rank's block is even on that
-        // axis, so coarsened() nests exactly. Alignment (coarsenAlignment) makes this hold for the
-        // full natural depth; on an unaligned/awkward decomposition it used to simply stop
+        // Coarsen an axis only if the GLOBAL dim can (canHalve()) AND every rank's block is even on
+        // that axis, so coarsened() nests exactly. Alignment (coarsenAlignment) makes this hold for
+        // the full natural depth; on an unaligned/awkward decomposition it used to simply stop
         // coarsening that axis (fewer geometric levels) — with telescoping ON, a blocked axis
         // instead merges ORB siblings onto fewer ranks and carries on (see Telescope).
-        namespace cdec = peclet::core::decomp;
-        const bool canAny = can(gs.x) || can(gs.y) || can(gs.z);
-        // flow's lift rule, the predicate core's stage policy is parameterised on.
-        auto liftable = [&](const cdec::BlockDecomposer<3>& d) { return teleLiftable(d, gs); };
-        const bool blocked = !liftable(curDec);
-        const bool tooSmall = teleMinExtent_ > 0 &&
-                              cdec::minBlockExtent(curDec) < (peclet::core::Index)teleMinExtent_;
-        const bool doTele = canAny && curDec.numBlocks() > 1 &&
-                            ((telescope_ && (blocked || tooSmall)) || teleForce_ == L);
+        const bool doTele = teleHere(curDec, gs, L);
         if (doTele) {
           if (auto t = teleTarget(curDec, gs, L, maxBlockCells)) {
             v.tele = makeTelescope(v, L, curDec, *t, curComm);
@@ -1876,34 +1944,19 @@ class CutcellMG {
             }
           }
         }
-        auto evenBlocks = [&](int ax) { return evenOn(curDec, ax); };
+        auto evenBlocks = [&](int ax) { return evenBlocksOn(curDec, ax); };
         // §5.1 again, with the MPI candidate set: an axis can coarsen when the GLOBAL dim can and
         // every rank's (possibly just-merged) block is even on it.  The aspect rule then defers
-        // one that is already >= theta times coarser.  Note `blocked` above is computed from
-        // `can()` and `evenOn()` ALONE (trap 6): an axis deferred here is not blocked and must not
-        // trigger a telescope merge.  Every rank has the same doubles and the same decomposition,
-        // so this is a pure function -- no communication.
-        const bool canA[3] = {can(gs.x) && evenBlocks(0), can(gs.y) && evenBlocks(1),
-                              can(gs.z) && evenBlocks(2)};
-        const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-        ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
-        if (ratio.x == 2)
-          next.x = gs.x / 2;
-        if (ratio.y == 2)
-          next.y = gs.y / 2;
-        if (ratio.z == 2)
-          next.z = gs.z / 2;
+        // one that is already >= theta times coarser.  Note `blocked` (teleHere) is computed from
+        // `canHalve()` and `evenBlocksOn()` ALONE (trap 6): an axis deferred here is not blocked
+        // and must not trigger a telescope merge.  Every rank has the same doubles and the same
+        // decomposition, so this is a pure function -- no communication.
+        const bool canA[3] = {canHalve(gs.x) && evenBlocks(0), canHalve(gs.y) && evenBlocks(1),
+                              canHalve(gs.z) && evenBlocks(2)};
+        ratio = levelRatio(gs, cf, canA, next);
       }
       v.ratio = ratio;
-      v.x = CCField("mg_x", v.n);
-      v.rhs = CCField("mg_rhs", v.n);
-      v.res = CCField("mg_res", v.n);
-      v.nFluidDev = Kokkos::View<long, CCMem>("mg_nfluid");
-      v.ox = CCField("mg_ox", v.n);
-      v.oy = CCField("mg_oy", v.n);
-      v.oz = CCField("mg_oz", v.n);
-      for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
-        *p = FPV("mg_A", v.n);
+      allocLevelFields(v);
       lv_.push_back(v);
       if (idleBelow) {
         teleActive_ = false;
@@ -1922,43 +1975,14 @@ class CutcellMG {
       allocLine(v);      // A2.4: this path allocates every level's FP64 data in the loop above
     computeFp32Last();   // D-dist (§5.2): after the hierarchy, before any operator build
     buildBottomStore();  // §14 H-6: the host global bottom gb_ (none on a device backend)
-    if (mgDebugLevel() && rank == 0) {
-      printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %s)%s\n", gnx, gny, gnz, size,
-             (int)lv_.size(), depthRequestLabel(nLevels).c_str(),
-             telescope_ ? "  [telescope ON]" : "");
-      {  // rank 0 roots every stage: gs / curDec are the last level's
-        bool more = false;
-        for (int a = 0; a < 3; ++a) {
-          const int d = a == 0 ? gs.x : (a == 1 ? gs.y : gs.z);
-          more = more || (can(d) && (telescope_ || evenOn(curDec, a)));
-        }
-        printDepthCensus(nLevels, more);
-      }
-      C3 g{gnx, gny, gnz};
-      int ranks = size;
-      for (int L = 0; L < (int)lv_.size(); ++L) {
-        printf(
-            "[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  "
-            "ratio(%d,%d,%d)%s%s\n",
-            L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
-            lv_[L].ratio.y, lv_[L].ratio.z, lineAxisLabel(L).c_str(),
-            lv_[L].tele ? (lv_[L].tele->repartition() ? "  -> REPARTITION" : "  -> TELESCOPE")
-                        : "");
-        if (lv_[L].tele) {
-          int sub = 1;
-          MPI_Comm_size(lv_[L].tele->comm.sub, &sub);
-          ranks = sub;
-        }
-        g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
-      }
-      fflush(stdout);
-    }
+    if (mgDebugLevel() && rank == 0)
+      printMpiHierarchy(size, nLevels, gs, curDec);
   }
   // initMpi's telescope target at level L (global dims gs). Fewest merges (largest tree depth) at
   // which EVERY still-coarsenable axis has even blocks — "any axis" would be wrong: it can unblock
   // z and leave x frozen at the extent that matters. depth 0 (one block: origin 0, size gs, even
-  // by can()) always qualifies; with the economic trigger a merged candidate must also stay fat
-  // enough after the halving that follows. That search is core's `shallowestLiftableMerge`, and
+  // by canHalve()) always qualifies; with the economic trigger a merged candidate must also stay
+  // fat enough after the halving that follows. That search is core's `shallowestLiftableMerge`, and
   // behind flow's trigger it is `chooseStageTarget` with maxBlockCells = 0 (byte-identical to the
   // search flow carried inline until S4). The test-only forced telescope runs the search where
   // in-place coarsening is legal, i.e. the search on its own.
