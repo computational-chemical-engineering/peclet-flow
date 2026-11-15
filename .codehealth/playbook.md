@@ -93,6 +93,15 @@ Evidence carried over from dem (`codehealth stats`, dem-s1..s8, 38 records): ext
 SASS reject), split-flag-argument 1/1, restructure-split-file 0/2 (dedupe first; split only if the size smell survives).
 No flow records yet.
 
+Evidence, flow F1 (WO-20, 2026-11-15, `src/mac_cutcell_mg.hpp`): extract-kernel-phase 6/6 accepted, all host
+orchestration, no device lambda moved. buildAmg 59.1 -> 0.0 (five phase helpers), initMpi 92.0 -> 19.6 (telescope
+stage, level layout, field allocation, debug table; `levelRatio` shared with init()), solvePCGResident 74.5 -> 48.1
+(shared FP32-attempt prologue/failure path with solvePCGAttempt/solveFCGAttempt, residual/matvec/precond-dot members).
+Device code untouched: SASS 836 kernels S0; GPU state_hash bitwise; MPI MG 15/15 at np 1/2/4. A branch probe outside the
+gate (GraphAMG bottom at np 1/2/4 and with walls, telescoped hierarchies at np 3/4/6) was bitwise after every step:
+reuse it (`branch_probe.py` pattern) for any MG step, since state_hash does not reach those paths. Gate `--base` must
+be a commit with the same `.codehealth/` as the head's parent (a playbook commit after the CB fails forbid/scope).
+
 ## Anti-patterns (review rejects)
 
 - **Settled-decision drift** (flow `CLAUDE.md`, `../docs/decisions/flow.md`): the collocated coupling is the
