@@ -1,0 +1,193 @@
+# cce-code-health gate for peclet.flow (https://github.com/computational-chemical-engineering/cce-code-health).
+# Adapted from dem's (dem-health) and pnm's (pnm-health b65b4a2). Measured cold on SMM-TRS2 2026-11-15 (WO-18, load
+# ~45-55 on 48 cores, several tiers concurrently): clang_format 11 s, build_host 534 s, ctest_host 283 tests 6339 s
+# at -j8 (the six scalar_cutcell_g6_* take 4700-5950 s each at one thread, scalar_cutcell_gadv 2457 s,
+# regression_staggered 1239 s; the other 275 sum to 11300 s), state_hash 14 lines ~3 s after the build,
+# sharp_vof ~1 s, build_cuda 3512 s (concurrent with the battery), clang_tidy 9834 s (3 TUs, 152 distinct
+# warnings + 5 clang-diagnostic errors inside GCC's omp.h per TU, identical on both sides).
+#
+# Run with PECLET_SUITE=<suite checkout> set. Every configure pins core's headers with flow's own override
+# -DPECLET_SIBLING_PECLET_CORE (cmake/PecletDeps.cmake), which prints one "[peclet] peclet-core headers from ..."
+# line on every configure, base and head alike; without it the base side (built under <git-common-dir>/codehealth/
+# base-<sha>, no sibling ../core) would silently FETCH core at PECLET_CORE_TAG -- a different program.
+# The pin is the detached worktree $PECLET_SUITE/core-health-flowpin at the umbrella's core commit 7cec32a (core
+# 1.8.1): flow main eed2fa4 needs core's vof/plic_regions.hpp, which the shared ../core checkout (8bfd73c, 1.7.0)
+# lacks. Never move that worktree during a campaign: base and head both build against it, and moving it moves the
+# reference. To change it, re-run the reference tiers at the campaign base.
+#
+# Traps encoded below:
+#  - OMP_NUM_THREADS=1: the battery and the hashes are bitwise only at one thread; an unbounded pool per MPI rank
+#    turns seconds into hours.
+#  - MPIEXEC_PREFLAGS takes flow's LIST form "--bind-to;none" (tests/kokkos_mpi expands ${MPIEXEC_PREFLAGS} as a list;
+#    dem/pnm take a space). MPIEXEC_EXECUTABLE is forced to /usr/bin/mpirun (ParaView's mpiexec on PATH runs
+#    singletons; flow CLAUDE.md).
+#  - ctest exits 0 when a test is skipped -> fail_regex. The three device-only ctests (device_sync_budget,
+#    prefactor_hoist_bitwise, vofmom_sync_budget) exit 77 on a host backend BY DESIGN; they are excluded by name.
+#  - state_hash.py runs the np = 2 case only when asked ("mpi" under mpirun); the tier runs both and requires the
+#    mpi_np2 line (a singleton launch would print mpi_np1).
+#  - No state_hash case reaches the sharp VoF viscous interface (its VoF cases have a constant mu): the sharp_vof
+#    tier (.codehealth/sharp_vof_hash.py) is the "sharp VoF run" RULES.md requires next to the vof keep-out.
+#  - nvcc from /usr/local/cuda (13.5).
+#  - clang-tidy (clang 19) cannot find GCC's omp.h; it is added with -isystem.
+schema = 1
+
+[profiles]
+python = "python@0"
+cpp = "cpp@0"
+
+[scope]
+include = ["src/*"]
+
+[gate]
+frozen = ["cmake/*", "CMakeLists.txt", "tests/regression/*", "CLAUDE.md", "AGENTS.md"]
+# tests/packaging/pyproject as in dem/pnm, then EVERY flow keep-out path of the vof session (RULES.md, 11-15).
+# The sharp-viscous block of src/flow_bindings.cpp is not a path: it is in the playbook's keep-out.
+forbid = ["tests/*", "packaging/*", "pyproject.toml",
+          "src/vof/sharp_viscous.hpp", "src/vof/curvature_field.hpp", "src/flow_ibm*.hpp",
+          "doc/vof_sharp_viscous_stress.md", "doc/full_viscous_stress.md"]
+literals = false
+public_api = false
+flags = true
+keep_going = false
+# The suite venv supplies nanobind (found through the active interpreter), python, numpy, mpi4py and clang-format.
+prefix = ': "${PECLET_SUITE:?set PECLET_SUITE to the suite checkout}" && export VIRTUAL_ENV="$PECLET_SUITE/.venv" PATH="$PECLET_SUITE/.venv/bin:$PATH" FLOW_CORE="$PECLET_SUITE/core-health-flowpin" && test -f "$FLOW_CORE/include/peclet/core/vof/plic_regions.hpp" &&'
+
+[gate.env]
+OMP_NUM_THREADS = "1"
+OMP_PROC_BIND = "false"
+OPENBLAS_NUM_THREADS = "1"
+MKL_NUM_THREADS = "1"
+PYTHONHASHSEED = "0"
+
+# flow's CI format job is BLOCKING (quality.yml, clang-format 18.1.8 = the suite venv's). The tier checks src/ only,
+# with quality.yml's four src/ vof-w4 exclusions: a step may not touch tests/ (forbid), and at eed2fa4 CI's own file
+# set already fails on tests/study/case_a/vofmom_probe/vofmom_probe.cpp (unformatted on main), which would make the
+# tier fail at every base.
+[[gate.tier]]
+name = "clang_format"
+kind = "command"
+behaviour = false
+cadence = "step"
+timeout = 120
+cmd = '''cd {repo} && $PECLET_SUITE/.venv/bin/clang-format --dry-run --Werror $(git ls-files 'src/*.hpp' 'src/*.cpp' \
+  | grep -vx -e src/flow_bindings.cpp -e src/flow_ibm.hpp -e src/vof/block_container.hpp -e src/vof/block_exchange.hpp)'''
+
+[[gate.tier]]
+name = "build_host"
+kind = "command"
+behaviour = false
+cadence = "step"
+timeout = 2400
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  && cmake --build {repo}/build_health_host -j32'''
+
+# The battery runs at TWO threads per process (flow CLAUDE.md: "on a shared, loaded host run _np* with
+# OMP_NUM_THREADS=2"); state_hash and sharp_vof stay at the [gate.env] one. At one thread four ctests fail at
+# eed2fa4 (deterministic, base and head alike): mg_fp32_vcycle_mpi_np2 (G-DD2 (a) box64 max|x - x1| 1.36e-08 vs
+# its bound) and scalar_cutcell_g6_{1,3,5} (budget identity 1.1-1.4e-13 > 1e-13); all four pass at two threads.
+[[gate.tier]]
+name = "ctest_host"
+# The eight longest tests (~1 h wall) run in ctest_long at campaign cadence (DECISIONS_LOG 2026-11-15).
+kind = "command"
+cadence = "step"
+timeout = 14400
+skip_exit = 77
+fail_regex = '\*\*\*Skipped|Not Run|No tests were found'
+detect_exit = [8]
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null \
+  && cmake --build {repo}/build_health_host -j32 >/dev/null \
+  && OMP_NUM_THREADS=2 PYTHONPATH={repo}/build_health_host \
+     ctest --test-dir {repo}/build_health_host -LE bench -E '^(device_sync_budget|prefactor_hoist_bitwise|vofmom_sync_budget|scalar_cutcell_g6_[1-6]|scalar_cutcell_gadv|regression_staggered)$' \
+           -j8 --timeout 3600 --output-on-failure'''
+
+[[gate.tier]]
+name = "ctest_long"
+kind = "command"
+cadence = "campaign"
+timeout = 14400
+skip_exit = 77
+fail_regex = '\*\*\*Skipped|Not Run|No tests were found'
+detect_exit = [8]
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null \
+  && cmake --build {repo}/build_health_host -j32 >/dev/null \
+  && OMP_NUM_THREADS=2 PYTHONPATH={repo}/build_health_host \
+     ctest --test-dir {repo}/build_health_host -LE bench -R '^(scalar_cutcell_g6_[1-6]|scalar_cutcell_gadv|regression_staggered)$' \
+           -j8 --timeout 3600 --output-on-failure'''
+
+[[gate.tier]]
+name = "state_hash"
+kind = "reference"
+cadence = "step"
+timeout = 1800
+fail_regex = 'mpi_np1 '
+# Alarm for a dependency resolved differently at base and head: the '[peclet] ...' configure lines (printed on
+# EVERY configure) must match. The configure is not silenced here.
+same_lines = '^-- \[peclet\] '
+outputs = ["hashes.txt"]
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+  && cmake --build {repo}/build_health_host -j32 >/dev/null \
+  && PYTHONPATH={repo}/build_health_host python {repo}/tests/regression/state_hash.py > {out}/hashes.txt \
+  && PYTHONPATH={repo}/build_health_host /usr/bin/mpirun -np 2 --bind-to none \
+     python {repo}/tests/regression/state_hash.py mpi >> {out}/hashes.txt \
+  && grep -q '^mpi_np2 ' {out}/hashes.txt && test "$(wc -l < {out}/hashes.txt)" -eq 14 \
+  && cat {out}/hashes.txt'''
+
+[[gate.tier]]
+name = "sharp_vof"
+kind = "reference"
+cadence = "step"
+timeout = 900
+fail_regex = 'SHARP INACTIVE'
+outputs = ["sharp.txt"]
+# The script lives in .codehealth/, which the gate forbids a step to edit, so base and head run the same file.
+cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null \
+  && cmake --build {repo}/build_health_host -j32 >/dev/null \
+  && PYTHONPATH={repo}/build_health_host python {repo}/.codehealth/sharp_vof_hash.py > {out}/sharp.txt \
+  && test "$(grep -c band_cells= {out}/sharp.txt)" -eq 2 && cat {out}/sharp.txt'''
+
+[[gate.tier]]
+name = "build_cuda"
+kind = "command"
+behaviour = false
+cadence = "campaign"  # 3512 s cold; built at every round close (DECISIONS_LOG 2026-11-15)
+timeout = 7200
+cmd = '''PATH=/usr/local/cuda/bin:$PATH cmake -S {repo} -B {repo}/build_health_cuda -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/nvidia-cuda \
+  -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
+  && PATH=/usr/local/cuda/bin:$PATH cmake --build {repo}/build_health_cuda -j32'''
+
+[[gate.tier]]
+name = "clang_tidy"
+kind = "findings"
+cadence = "campaign"
+format = "gcc"
+ignore_exit = true
+timeout = 14400
+cmd = '''cmake -S {repo} -B {repo}/build_health_tidy -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/host-openmp \
+  -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
+  -DPECLET_FLOW_MPI=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null \
+  && ${CLANG_TIDY:-/usr/bin/clang-tidy} -p {repo}/build_health_tidy --quiet \
+     "--extra-arg=-isystem$(dirname "$(gcc -print-file-name=include/omp.h)")" \
+     {repo}/src/flow_bindings.cpp {repo}/src/flow_solver_staggered.cpp {repo}/src/flow_solver_colocated.cpp'''

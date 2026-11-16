@@ -1228,7 +1228,8 @@ class CutcellMG {
   // ---- the aspect-ratio coarsening rule (doc/anisotropic_metric.md §5) -------------------------
   // Shared by BOTH geometric hierarchies (VelocityMG calls it too): given this level's spacings
   // H[a] = hp[a] * cfac[a] and the per-axis coarsenability canA[a] that today's tests produce
-  // (can(dim) single-rank, plus evenOn(dec, a) under MPI), return the per-axis coarsening ratio.
+  // (canHalve(dim) single-rank, plus evenBlocksOn(dec, a) under MPI), return the per-axis
+  // coarsening ratio.
   //
   //   aniso == false : ratio_a = 2 iff canA[a]                     -- TODAY'S DECISION, VERBATIM
   //   aniso == true  : ratio_a = 2 iff canA[a] and H[a] < theta * min_{b : canA[b]} H[b]
@@ -1278,8 +1279,8 @@ class CutcellMG {
   //   T(L) <=> L >= 1 and !can(g[s]) (globally blocked) and A' > theta and no outflow face on s.
   // Returns s when T(L) holds, else -1; *aspect receives A' (0 when there is no unique s). Global
   // quantities only (no collective, np-independent). An s only DEFERRED by mgChooseRatio, or
-  // blocked only by evenOn (§5.4), is not globally blocked. Pure and static: host, once per level
-  // per build.
+  // blocked only by evenBlocksOn (§5.4), is not globally blocked. Pure and static: host, once per
+  // level per build.
   static int lineAxisTrigger(int L, C3 g, C3 cf, const double hp[3], double theta, const int bc[6],
                              double* aspect) {
     const double H[3] = {hp[0] * (double)cf.x, hp[1] * (double)cf.y, hp[2] * (double)cf.z};
@@ -1348,22 +1349,15 @@ class CutcellMG {
       v.ext = C3{inner.x + 2 * G, inner.y + 2 * G, inner.z + 2 * G};
       v.cfac = cf;
       v.n = (std::size_t)v.ext.x * v.ext.y * v.ext.z;
-      auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
       C3 next = inner;
       C3 ratio{1, 1, 1};
       const bool autoStop = autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissibleHere(inner);
       if (L + 1 < nLevelsCap && !autoStop) {
-        // §5.1: the candidate set is today's `can()` per axis; the aspect rule then defers an axis
-        // that is already >= theta times coarser than the finest candidate.  Inert when !aniso_.
-        const bool canA[3] = {can(inner.x), can(inner.y), can(inner.z)};
-        const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-        ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
-        if (ratio.x == 2)
-          next.x = inner.x / 2;
-        if (ratio.y == 2)
-          next.y = inner.y / 2;
-        if (ratio.z == 2)
-          next.z = inner.z / 2;
+        // §5.1: the candidate set is today's `canHalve()` per axis; the aspect rule then defers an
+        // axis that is already >= theta times coarser than the finest candidate.  Inert when
+        // !aniso_.
+        const bool canA[3] = {canHalve(inner.x), canHalve(inner.y), canHalve(inner.z)};
+        ratio = levelRatio(inner, cf, canA, next);
       }
       v.ratio = ratio;
       // D5 (doc/vof_projection_cost_design.md §4.4.7): here only what every precision reads --
@@ -1428,8 +1422,8 @@ class CutcellMG {
   // maxBlockCells > 0, amr/docs/amr_mg_core_boundary.md §11.1-§11.3).
 
   // flow's LIFT rule — "every block can coarsen in place one more time": every block is even in
-  // origin and size on every axis whose GLOBAL extent `gs` can still halve (can()). An axis that
-  // cannot halve is not a constraint. This is the predicate core's stage policy
+  // origin and size on every axis whose GLOBAL extent `gs` can still halve (canHalve()). An axis
+  // that cannot halve is not a constraint. This is the predicate core's stage policy
   // (peclet::core::decomp::chooseStageTarget) is parameterised on, shared by initMpi and predict.
   static bool teleLiftable(const peclet::core::decomp::BlockDecomposer<3>& d, C3 gs) {
     auto can = [](int e) { return (e % 2 == 0) && (e / 2 >= 2); };
@@ -1724,6 +1718,164 @@ class CutcellMG {
     return A;
   }
 
+#endif
+  // An axis of GLOBAL extent d can halve once more (even, and the half at least 2).
+  static bool canHalve(int d) { return (d % 2 == 0) && (d / 2 >= 2); }
+  // §5.1 on one level (dims gs, coarsening factor cf so far, candidate axes canA): the ratio the
+  // aspect rule picks; next = the coarse level's dims. Inert when !aniso_.
+  C3 levelRatio(C3 gs, C3 cf, const bool canA[3], C3& next) const {
+    const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
+    const C3 ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
+    if (ratio.x == 2)
+      next.x = gs.x / 2;
+    if (ratio.y == 2)
+      next.y = gs.y / 2;
+    if (ratio.z == 2)
+      next.z = gs.z / 2;
+    return ratio;
+  }
+#ifdef PECLET_FLOW_MPI
+  // Every block of d is even in origin and size on axis ax.
+  static bool evenBlocksOn(const peclet::core::decomp::BlockDecomposer<3>& d, int ax) {
+    for (std::size_t b = 0; b < d.sizes().size(); ++b)
+      if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
+        return false;
+    return true;
+  }
+  // Smallest block extent (any rank, any axis) — the same on every rank (the decomposition is
+  // replicated), so initLevelLayout's ghost-width decision is rank-uniform by construction.
+  static long minBlockExtentOf(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    long m = std::numeric_limits<long>::max();
+    for (const auto& s : d.sizes())
+      for (int k = 0; k < 3; ++k)
+        m = std::min(m, (long)s[k]);
+    return m;
+  }
+  // initMpi, level L on decomposition dec (rank curRank of curComm; GLOBAL dims gs, coarsening
+  // factor cf so far): the ghost width, the halo and faces-only stencil topologies, the wrap
+  // axes and the block geometry.
+  void initLevelLayout(Level& v, int L, const peclet::core::decomp::BlockDecomposer<3>& dec,
+                       int curRank, MPI_Comm curComm, C3 gs, C3 cf) const {
+    std::array<bool, 3> per{true, true, true};
+    v.halo = std::make_shared<GridHaloTopology<3>>();
+    // Communication-avoiding smoothing needs a 2-deep ghost layer; give it to the COARSE levels
+    // (where every halo message is pure latency) whose blocks can carry it (extent >= 4 on every
+    // rank; below that fall back to the per-colour exchange). Level 0 keeps g=1: its exchanges
+    // are already overlapped with the interior sweep and the solver's g=1 bridge (openness/rhs/
+    // phi staging, ghost-projection g=2 staging) assumes it. Only for the periodic/IBM operator
+    // — with domain BCs (setBoundaryConditions BEFORE initMpi) every level keeps the g=1 layout,
+    // so that path is byte-identical to the pre-CA code.
+    // Also off on an ODD periodic global extent: the wrap ring slot then has the opposite
+    // parity of its image, so the colour-0 ring sweep would update it in the wrong colour.
+    bool oddPeriodic = false;
+    for (int a = 0; a < 3; ++a)
+      oddPeriodic = oddPeriodic || (per[a] && dec.globalSize()[a] % 2 != 0);
+    const bool ca =
+        L > 0 && !hasBC_ && (caMode_ & kCaMg) && minBlockExtentOf(dec) >= 4 && !oddPeriodic;
+    v.g = ca ? 2 : 1;
+    v.caOk = (v.g == 2);
+    v.halo->buildTopology(dec, curRank, v.g, per, curComm);
+    v.comm = curComm;
+    v.dev = std::make_shared<GridHalo<double>>();
+    v.dev->init(*v.halo);
+    v.dev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " ranks" +
+                    std::to_string(dec.numBlocks()));
+    // K3 (§5.2): the wrap axes M_L, from the replicated decomposition (every rank agrees), and
+    // the faces-only stencil topology with `per` cleared on them.
+    {
+      std::array<bool, 3> sper = per;
+      v.wrapAxes = 0;
+      v.wholeAxes = 0;
+      for (int a = 0; a < 3; ++a) {
+        bool oneBlock = true;
+        for (std::size_t b = 0; b < dec.sizes().size(); ++b)
+          oneBlock =
+              oneBlock && dec.origins()[b][a] == 0 && dec.sizes()[b][a] == dec.globalSize()[a];
+        if (oneBlock)
+          v.wholeAxes |= 1 << a;  // A2.4
+        const bool outflow = bc_[2 * a] == 3 || bc_[2 * a + 1] == 3;
+        if (oneBlock && !outflow && dec.globalSize()[a] % 2 == 0) {
+          v.wrapAxes |= 1 << a;
+          sper[a] = false;
+        }
+      }
+      v.shalo = std::make_shared<GridHaloTopology<3>>();
+      v.shalo->buildTopology(dec, curRank, v.g, sper, curComm,
+                             peclet::core::halo::Neighborhood::Faces);
+      v.sdev = std::make_shared<GridHalo<double>>();
+      v.sdev->init(*v.shalo);
+      v.sdev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " stencil w" +
+                       std::to_string(v.wrapAxes));
+    }
+    const auto& idx = v.halo->indexer();
+    const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
+    v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]};
+    v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
+    v.og = {(int)oig[0] + v.g, (int)oig[1] + v.g,
+            (int)oig[2] + v.g};  // inner origin == single-rank og=0 at origin 0
+    v.gdim = gs;                 // this level's GLOBAL dims (og + inner == gdim -> owns +face)
+    v.cfac = cf;
+    v.n = idx.numCellsInclGhost();
+  }
+  // Does initMpi's level L (GLOBAL dims gs, decomposition curDec) telescope: telescoping on and
+  // the in-place coarsening blocked (or the blocks below teleMinExtent_), or the test-only force.
+  bool teleHere(const peclet::core::decomp::BlockDecomposer<3>& curDec, C3 gs, int L) const {
+    namespace cdec = peclet::core::decomp;
+    const bool canAny = canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z);
+    // flow's lift rule, the predicate core's stage policy is parameterised on.
+    auto liftable = [&](const cdec::BlockDecomposer<3>& d) { return teleLiftable(d, gs); };
+    const bool blocked = !liftable(curDec);
+    const bool tooSmall =
+        teleMinExtent_ > 0 && cdec::minBlockExtent(curDec) < (peclet::core::Index)teleMinExtent_;
+    return canAny && curDec.numBlocks() > 1 &&
+           ((telescope_ && (blocked || tooSmall)) || teleForce_ == L);
+  }
+  // initMpi: a level's fields at its full extent (this path allocates every level's FP64 data).
+  static void allocLevelFields(Level& v) {
+    v.x = CCField("mg_x", v.n);
+    v.rhs = CCField("mg_rhs", v.n);
+    v.res = CCField("mg_res", v.n);
+    v.nFluidDev = Kokkos::View<long, CCMem>("mg_nfluid");
+    v.ox = CCField("mg_ox", v.n);
+    v.oy = CCField("mg_oy", v.n);
+    v.oz = CCField("mg_oz", v.n);
+    for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
+      *p = FPV("mg_A", v.n);
+  }
+  // PECLET_FLOW_MG_DEBUG (rank 0): initMpi's hierarchy over `size` ranks, depth census and
+  // per-level table; gs and curDec are the last level's.
+  void printMpiHierarchy(int size, int nLevels, C3 gs,
+                         const peclet::core::decomp::BlockDecomposer<3>& curDec) const {
+    const int gnx = gnxF_, gny = gnyF_, gnz = gnzF_;
+    printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %s)%s\n", gnx, gny, gnz, size,
+           (int)lv_.size(), depthRequestLabel(nLevels).c_str(),
+           telescope_ ? "  [telescope ON]" : "");
+    {  // rank 0 roots every stage: gs / curDec are the last level's
+      bool more = false;
+      for (int a = 0; a < 3; ++a) {
+        const int d = a == 0 ? gs.x : (a == 1 ? gs.y : gs.z);
+        more = more || (canHalve(d) && (telescope_ || evenBlocksOn(curDec, a)));
+      }
+      printDepthCensus(nLevels, more);
+    }
+    C3 g{gnx, gny, gnz};
+    int ranks = size;
+    for (int L = 0; L < (int)lv_.size(); ++L) {
+      printf(
+          "[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  "
+          "ratio(%d,%d,%d)%s%s\n",
+          L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
+          lv_[L].ratio.y, lv_[L].ratio.z, lineAxisLabel(L).c_str(),
+          lv_[L].tele ? (lv_[L].tele->repartition() ? "  -> REPARTITION" : "  -> TELESCOPE") : "");
+      if (lv_[L].tele) {
+        int sub = 1;
+        MPI_Comm_size(lv_[L].tele->comm.sub, &sub);
+        ranks = sub;
+      }
+      g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
+    }
+    fflush(stdout);
+  }
   void initMpi(int gnx, int gny, int gnz, int nLevels, MPI_Comm comm,
                const peclet::core::decomp::BlockDecomposer<3>* dec0 = nullptr) {
     joinPrefactor();  // X: as init(): join the side factor before the levels it reads are freed
@@ -1740,9 +1892,7 @@ class CutcellMG {
     int rank = 0, size = 1;
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &size);
-    std::array<bool, 3> per{true, true, true};
     C3 gs{gnx, gny, gnz}, cf{1, 1, 1};
-    auto can = [&](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     // Coarse levels are NESTED: level 0 is the shared solver decomposition (dec0), and each coarse
     // level is the previous level's decomposition coarsened IN PLACE (same tree/leaf order, split
     // positions halved). This keeps restrict/prolong's coarse-local i <-> fine-local ratio*i
@@ -1764,21 +1914,6 @@ class CutcellMG {
     // (design §11.1 — the finest level's largest block, replicated); 0 = sibling merges only.
     const peclet::core::Index maxBlockCells =
         repartition_ ? peclet::core::decomp::largestBlockCells(curDec) : 0;
-    auto evenOn = [](const peclet::core::decomp::BlockDecomposer<3>& d, int ax) {
-      for (std::size_t b = 0; b < d.sizes().size(); ++b)
-        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
-          return false;
-      return true;
-    };
-    // Smallest block extent (any rank, any axis) — the same on every rank (the decomposition is
-    // replicated), so the per-level ghost-width decision below is rank-uniform by construction.
-    auto minBlockExtent = [](const peclet::core::decomp::BlockDecomposer<3>& d) {
-      long m = std::numeric_limits<long>::max();
-      for (const auto& s : d.sizes())
-        for (int k = 0; k < 3; ++k)
-          m = std::min(m, (long)s[k]);
-      return m;
-    };
     // doc/mg_depth_policy.md §4.2: as init() -- nLevels == 0 = AUTO on the GLOBAL dims gs, which
     // are replicated with the bc, the mode and the extent, so every rank resolves the same depth
     // without a collective; the bottom level is the last, so no telescope is evaluated there.
@@ -1786,199 +1921,42 @@ class CutcellMG {
     const int nLevelsCap = autoDepth ? kAutoMaxLevels : nLevels;
     for (int L = 0; L < nLevelsCap; ++L) {
       Level v;
-      v.halo = std::make_shared<GridHaloTopology<3>>();
-      const peclet::core::decomp::BlockDecomposer<3>& dec = curDec;
-      // Communication-avoiding smoothing needs a 2-deep ghost layer; give it to the COARSE levels
-      // (where every halo message is pure latency) whose blocks can carry it (extent >= 4 on every
-      // rank; below that fall back to the per-colour exchange). Level 0 keeps g=1: its exchanges
-      // are already overlapped with the interior sweep and the solver's g=1 bridge (openness/rhs/
-      // phi staging, ghost-projection g=2 staging) assumes it. Only for the periodic/IBM operator
-      // — with domain BCs (setBoundaryConditions BEFORE initMpi) every level keeps the g=1 layout,
-      // so that path is byte-identical to the pre-CA code.
-      // Also off on an ODD periodic global extent: the wrap ring slot then has the opposite
-      // parity of its image, so the colour-0 ring sweep would update it in the wrong colour.
-      bool oddPeriodic = false;
-      for (int a = 0; a < 3; ++a)
-        oddPeriodic = oddPeriodic || (per[a] && dec.globalSize()[a] % 2 != 0);
-      const bool ca =
-          L > 0 && !hasBC_ && (caMode_ & kCaMg) && minBlockExtent(dec) >= 4 && !oddPeriodic;
-      v.g = ca ? 2 : 1;
-      v.caOk = (v.g == 2);
-      v.halo->buildTopology(dec, curRank, v.g, per, curComm);
-      v.comm = curComm;
-      v.dev = std::make_shared<GridHalo<double>>();
-      v.dev->init(*v.halo);
-      v.dev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " ranks" +
-                      std::to_string(curDec.numBlocks()));
-      // K3 (§5.2): the wrap axes M_L, from the replicated decomposition (every rank agrees), and
-      // the faces-only stencil topology with `per` cleared on them.
-      {
-        std::array<bool, 3> sper = per;
-        v.wrapAxes = 0;
-        v.wholeAxes = 0;
-        for (int a = 0; a < 3; ++a) {
-          bool oneBlock = true;
-          for (std::size_t b = 0; b < dec.sizes().size(); ++b)
-            oneBlock =
-                oneBlock && dec.origins()[b][a] == 0 && dec.sizes()[b][a] == dec.globalSize()[a];
-          if (oneBlock)
-            v.wholeAxes |= 1 << a;  // A2.4
-          const bool outflow = bc_[2 * a] == 3 || bc_[2 * a + 1] == 3;
-          if (oneBlock && !outflow && dec.globalSize()[a] % 2 == 0) {
-            v.wrapAxes |= 1 << a;
-            sper[a] = false;
-          }
-        }
-        v.shalo = std::make_shared<GridHaloTopology<3>>();
-        v.shalo->buildTopology(dec, curRank, v.g, sper, curComm,
-                               peclet::core::halo::Neighborhood::Faces);
-        v.sdev = std::make_shared<GridHalo<double>>();
-        v.sdev->init(*v.shalo);
-        v.sdev->setLabel("mg L" + std::to_string(L) + " g" + std::to_string(v.g) + " stencil w" +
-                         std::to_string(v.wrapAxes));
-      }
-      const auto& idx = v.halo->indexer();
-      const auto eg = idx.sizeInclGhost(), ino = idx.sizeInner(), oig = idx.originInclGhost();
-      v.ext = {(int)eg[0], (int)eg[1], (int)eg[2]};
-      v.inner = {(int)ino[0], (int)ino[1], (int)ino[2]};
-      v.og = {(int)oig[0] + v.g, (int)oig[1] + v.g,
-              (int)oig[2] + v.g};  // inner origin == single-rank og=0 at origin 0
-      v.gdim = gs;                 // this level's GLOBAL dims (og + inner == gdim -> owns +face)
-      v.cfac = cf;
-      v.n = idx.numCellsInclGhost();
+      initLevelLayout(v, L, curDec, curRank, curComm, gs, cf);
       C3 next = gs, ratio{1, 1, 1};
       bool idleBelow = false;
       const bool autoStop = autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissibleHere(gs);
       if (L + 1 < nLevelsCap && !autoStop) {
-        // Coarsen an axis only if the GLOBAL dim can (can()) AND every rank's block is even on that
-        // axis, so coarsened() nests exactly. Alignment (coarsenAlignment) makes this hold for the
-        // full natural depth; on an unaligned/awkward decomposition it used to simply stop
+        // Coarsen an axis only if the GLOBAL dim can (canHalve()) AND every rank's block is even on
+        // that axis, so coarsened() nests exactly. Alignment (coarsenAlignment) makes this hold for
+        // the full natural depth; on an unaligned/awkward decomposition it used to simply stop
         // coarsening that axis (fewer geometric levels) — with telescoping ON, a blocked axis
         // instead merges ORB siblings onto fewer ranks and carries on (see Telescope).
-        namespace cdec = peclet::core::decomp;
-        const bool canAny = can(gs.x) || can(gs.y) || can(gs.z);
-        // flow's lift rule, the predicate core's stage policy is parameterised on.
-        auto liftable = [&](const cdec::BlockDecomposer<3>& d) { return teleLiftable(d, gs); };
-        const bool blocked = !liftable(curDec);
-        const bool tooSmall = teleMinExtent_ > 0 &&
-                              cdec::minBlockExtent(curDec) < (peclet::core::Index)teleMinExtent_;
-        const bool doTele = canAny && curDec.numBlocks() > 1 &&
-                            ((telescope_ && (blocked || tooSmall)) || teleForce_ == L);
+        const bool doTele = teleHere(curDec, gs, L);
         if (doTele) {
-          // Fewest merges (largest tree depth) at which EVERY still-coarsenable axis has even
-          // blocks — "any axis" would be wrong: it can unblock z and leave x frozen at the extent
-          // that matters. depth 0 (one block: origin 0, size gs, even by can()) always qualifies;
-          // with the economic trigger a merged candidate must also stay fat enough after the
-          // halving that follows. That search is core's `shallowestLiftableMerge`, and behind
-          // flow's trigger it is `chooseStageTarget` with maxBlockCells = 0 (byte-identical to the
-          // search flow carried inline until S4). The test-only forced telescope runs the search
-          // where in-place coarsening is legal, i.e. the search on its own.
-          std::optional<cdec::StageTarget<3>> t;
-          if (teleForce_ == L) {
-            if (auto m = cdec::shallowestLiftableMerge(curDec, liftable, teleMinExtent_)) {
-              t.emplace();
-              t->kind = cdec::StageKind::SiblingMerge;
-              t->dec = std::move(m->dec);
-              t->ownerOf = std::move(m->ownerOf);
-              t->groupOf = std::move(m->groupOf);
-            }
-          } else {
-            t = cdec::chooseStageTarget(curDec, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable,
-                                        teleMinExtent_, maxBlockCells);
-            if (t->kind != cdec::StageKind::SiblingMerge && t->kind != cdec::StageKind::Repartition)
-              throw std::logic_error(
-                  "CutcellMG::initMpi: the telescope search found no merge (depth 0 always lifts "
-                  "under flow's rule)");
-          }
-          if (t) {
-            auto T = std::make_shared<Telescope>();
-            T->comm = cdec::makeStageComm(curComm, *t);
-            T->g = v.g;
-            // The target block this rank's data moves into: its merge group's (SiblingMerge — the
-            // root owns it, the members only feed it), or the one it owns (Repartition; none on a
-            // rank that idles below).
-            const int tb = T->repartition() ? T->comm.myTargetBlock : T->comm.myGroup;
-            if (tb >= 0) {
-              const auto mb = t->dec.block((std::size_t)tb);
-              T->mOg = C3{(int)mb.origin[0], (int)mb.origin[1], (int)mb.origin[2]};
-              T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
-              T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
-            }
-            if (T->repartition()) {
-              T->srcDec = curDec;
-              T->dstDec = t->dec;
-            }
-            // members in group-comm rank order == ascending old block index (makeStageComm)
-            for (const int b : T->comm.members) {
-              const auto fb = curDec.block((std::size_t)b);
-              T->memO.push_back(C3{(int)fb.origin[0], (int)fb.origin[1], (int)fb.origin[2]});
-              T->memS.push_back(C3{(int)fb.size[0], (int)fb.size[1], (int)fb.size[2]});
-            }
-            T->nMembers = (int)T->comm.members.size();
-            // The movement: a global cell of this rank's level-L block lives at its padded slot
-            // (og, g, ext of the level); on the root, a cell of the merged block at the stage
-            // buffer's (mOg, g, mExt). Built once; teleGather / teleScatterAdd run it.
-            {
-              const C3 lo = v.og, le = v.ext, mo = T->mOg, me = T->mExt;
-              const int lg = v.g, mg = T->g;
-              using peclet::core::Index;
-              auto srcIdx = [&](const peclet::core::IVec<3>& c) {
-                return (Index)(c[0] - lo.x + lg) + (Index)(c[1] - lo.y + lg) * le.x +
-                       (Index)(c[2] - lo.z + lg) * (Index)le.x * le.y;
-              };
-              auto dstIdx = [&](const peclet::core::IVec<3>& c) {
-                return (Index)(c[0] - mo.x + mg) + (Index)(c[1] - mo.y + mg) * me.x +
-                       (Index)(c[2] - mo.z + mg) * (Index)me.x * me.y;
-              };
-              T->move.build(curDec, *t, T->comm, srcIdx, dstIdx, /*id=*/L);
-              T->back.assign(v.n, 0.0);
-            }
-            if (T->root()) {
-              const std::size_t mn = (std::size_t)T->mExt.x * T->mExt.y * T->mExt.z;
-              T->res = CCField("tele_res", mn);
-              T->x = CCField("tele_x", mn);
-              T->ox = CCField("tele_ox", mn);
-              T->oy = CCField("tele_oy", mn);
-              T->oz = CCField("tele_oz", mn);
-            }
-            v.tele = T;
-            if (T->root()) {
+          if (auto t = teleTarget(curDec, gs, L, maxBlockCells)) {
+            v.tele = makeTelescope(v, L, curDec, *t, curComm);
+            if (v.tele->root()) {
               curDec = t->dec;
-              curComm = T->comm.sub;
+              curComm = v.tele->comm.sub;
               MPI_Comm_rank(curComm, &curRank);
             } else {
               idleBelow = true;  // this rank holds levels 0..L only
             }
           }
         }
-        auto evenBlocks = [&](int ax) { return evenOn(curDec, ax); };
+        auto evenBlocks = [&](int ax) { return evenBlocksOn(curDec, ax); };
         // §5.1 again, with the MPI candidate set: an axis can coarsen when the GLOBAL dim can and
         // every rank's (possibly just-merged) block is even on it.  The aspect rule then defers
-        // one that is already >= theta times coarser.  Note `blocked` above is computed from
-        // `can()` and `evenOn()` ALONE (trap 6): an axis deferred here is not blocked and must not
-        // trigger a telescope merge.  Every rank has the same doubles and the same decomposition,
-        // so this is a pure function -- no communication.
-        const bool canA[3] = {can(gs.x) && evenBlocks(0), can(gs.y) && evenBlocks(1),
-                              can(gs.z) && evenBlocks(2)};
-        const double H[3] = {hp_[0] * (double)cf.x, hp_[1] * (double)cf.y, hp_[2] * (double)cf.z};
-        ratio = mgChooseRatio(H, canA, aniso_, aspectTheta_);
-        if (ratio.x == 2)
-          next.x = gs.x / 2;
-        if (ratio.y == 2)
-          next.y = gs.y / 2;
-        if (ratio.z == 2)
-          next.z = gs.z / 2;
+        // one that is already >= theta times coarser.  Note `blocked` (teleHere) is computed from
+        // `canHalve()` and `evenBlocksOn()` ALONE (trap 6): an axis deferred here is not blocked
+        // and must not trigger a telescope merge.  Every rank has the same doubles and the same
+        // decomposition, so this is a pure function -- no communication.
+        const bool canA[3] = {canHalve(gs.x) && evenBlocks(0), canHalve(gs.y) && evenBlocks(1),
+                              canHalve(gs.z) && evenBlocks(2)};
+        ratio = levelRatio(gs, cf, canA, next);
       }
       v.ratio = ratio;
-      v.x = CCField("mg_x", v.n);
-      v.rhs = CCField("mg_rhs", v.n);
-      v.res = CCField("mg_res", v.n);
-      v.nFluidDev = Kokkos::View<long, CCMem>("mg_nfluid");
-      v.ox = CCField("mg_ox", v.n);
-      v.oy = CCField("mg_oy", v.n);
-      v.oz = CCField("mg_oz", v.n);
-      for (FPV* p : {&v.AC, &v.AFX, &v.AFY, &v.AFZ})
-        *p = FPV("mg_A", v.n);
+      allocLevelFields(v);
       lv_.push_back(v);
       if (idleBelow) {
         teleActive_ = false;
@@ -1997,37 +1975,101 @@ class CutcellMG {
       allocLine(v);      // A2.4: this path allocates every level's FP64 data in the loop above
     computeFp32Last();   // D-dist (§5.2): after the hierarchy, before any operator build
     buildBottomStore();  // §14 H-6: the host global bottom gb_ (none on a device backend)
-    if (mgDebugLevel() && rank == 0) {
-      printf("[mg] initMpi %dx%dx%d np=%d -> %d levels (requested %s)%s\n", gnx, gny, gnz, size,
-             (int)lv_.size(), depthRequestLabel(nLevels).c_str(),
-             telescope_ ? "  [telescope ON]" : "");
-      {  // rank 0 roots every stage: gs / curDec are the last level's
-        bool more = false;
-        for (int a = 0; a < 3; ++a) {
-          const int d = a == 0 ? gs.x : (a == 1 ? gs.y : gs.z);
-          more = more || (can(d) && (telescope_ || evenOn(curDec, a)));
-        }
-        printDepthCensus(nLevels, more);
+    if (mgDebugLevel() && rank == 0)
+      printMpiHierarchy(size, nLevels, gs, curDec);
+  }
+  // initMpi's telescope target at level L (global dims gs). Fewest merges (largest tree depth) at
+  // which EVERY still-coarsenable axis has even blocks — "any axis" would be wrong: it can unblock
+  // z and leave x frozen at the extent that matters. depth 0 (one block: origin 0, size gs, even
+  // by canHalve()) always qualifies; with the economic trigger a merged candidate must also stay
+  // fat enough after the halving that follows. That search is core's `shallowestLiftableMerge`, and
+  // behind flow's trigger it is `chooseStageTarget` with maxBlockCells = 0 (byte-identical to the
+  // search flow carried inline until S4). The test-only forced telescope runs the search where
+  // in-place coarsening is legal, i.e. the search on its own.
+  std::optional<peclet::core::decomp::StageTarget<3>> teleTarget(
+      const peclet::core::decomp::BlockDecomposer<3>& curDec, C3 gs, int L,
+      peclet::core::Index maxBlockCells) const {
+    namespace cdec = peclet::core::decomp;
+    // flow's lift rule, the predicate core's stage policy is parameterised on.
+    auto liftable = [&](const cdec::BlockDecomposer<3>& d) { return teleLiftable(d, gs); };
+    std::optional<cdec::StageTarget<3>> t;
+    if (teleForce_ == L) {
+      if (auto m = cdec::shallowestLiftableMerge(curDec, liftable, teleMinExtent_)) {
+        t.emplace();
+        t->kind = cdec::StageKind::SiblingMerge;
+        t->dec = std::move(m->dec);
+        t->ownerOf = std::move(m->ownerOf);
+        t->groupOf = std::move(m->groupOf);
       }
-      C3 g{gnx, gny, gnz};
-      int ranks = size;
-      for (int L = 0; L < (int)lv_.size(); ++L) {
-        printf(
-            "[mg]  L%d global %4dx%4dx%4d  ranks %5d  rank0 block %4dx%4dx%4d  "
-            "ratio(%d,%d,%d)%s%s\n",
-            L, g.x, g.y, g.z, ranks, lv_[L].inner.x, lv_[L].inner.y, lv_[L].inner.z, lv_[L].ratio.x,
-            lv_[L].ratio.y, lv_[L].ratio.z, lineAxisLabel(L).c_str(),
-            lv_[L].tele ? (lv_[L].tele->repartition() ? "  -> REPARTITION" : "  -> TELESCOPE")
-                        : "");
-        if (lv_[L].tele) {
-          int sub = 1;
-          MPI_Comm_size(lv_[L].tele->comm.sub, &sub);
-          ranks = sub;
-        }
-        g = C3{g.x / lv_[L].ratio.x, g.y / lv_[L].ratio.y, g.z / lv_[L].ratio.z};
-      }
-      fflush(stdout);
+    } else {
+      t = cdec::chooseStageTarget(curDec, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable,
+                                  teleMinExtent_, maxBlockCells);
+      if (t->kind != cdec::StageKind::SiblingMerge && t->kind != cdec::StageKind::Repartition)
+        throw std::logic_error(
+            "CutcellMG::initMpi: the telescope search found no merge (depth 0 always lifts "
+            "under flow's rule)");
     }
+    return t;
+  }
+  // The telescope stage of level v (level L, decomposition curDec on curComm) onto target t: the
+  // stage communicator, the target block, the members' fine blocks, the field movement and the
+  // root's stage buffers.
+  std::shared_ptr<Telescope> makeTelescope(const Level& v, int L,
+                                           const peclet::core::decomp::BlockDecomposer<3>& curDec,
+                                           const peclet::core::decomp::StageTarget<3>& t,
+                                           MPI_Comm curComm) const {
+    namespace cdec = peclet::core::decomp;
+    auto T = std::make_shared<Telescope>();
+    T->comm = cdec::makeStageComm(curComm, t);
+    T->g = v.g;
+    // The target block this rank's data moves into: its merge group's (SiblingMerge — the
+    // root owns it, the members only feed it), or the one it owns (Repartition; none on a
+    // rank that idles below).
+    const int tb = T->repartition() ? T->comm.myTargetBlock : T->comm.myGroup;
+    if (tb >= 0) {
+      const auto mb = t.dec.block((std::size_t)tb);
+      T->mOg = C3{(int)mb.origin[0], (int)mb.origin[1], (int)mb.origin[2]};
+      T->mInner = C3{(int)mb.size[0], (int)mb.size[1], (int)mb.size[2]};
+      T->mExt = C3{T->mInner.x + 2 * T->g, T->mInner.y + 2 * T->g, T->mInner.z + 2 * T->g};
+    }
+    if (T->repartition()) {
+      T->srcDec = curDec;
+      T->dstDec = t.dec;
+    }
+    // members in group-comm rank order == ascending old block index (makeStageComm)
+    for (const int b : T->comm.members) {
+      const auto fb = curDec.block((std::size_t)b);
+      T->memO.push_back(C3{(int)fb.origin[0], (int)fb.origin[1], (int)fb.origin[2]});
+      T->memS.push_back(C3{(int)fb.size[0], (int)fb.size[1], (int)fb.size[2]});
+    }
+    T->nMembers = (int)T->comm.members.size();
+    // The movement: a global cell of this rank's level-L block lives at its padded slot
+    // (og, g, ext of the level); on the root, a cell of the merged block at the stage
+    // buffer's (mOg, g, mExt). Built once; teleGather / teleScatterAdd run it.
+    {
+      const C3 lo = v.og, le = v.ext, mo = T->mOg, me = T->mExt;
+      const int lg = v.g, mg = T->g;
+      using peclet::core::Index;
+      auto srcIdx = [&](const peclet::core::IVec<3>& c) {
+        return (Index)(c[0] - lo.x + lg) + (Index)(c[1] - lo.y + lg) * le.x +
+               (Index)(c[2] - lo.z + lg) * (Index)le.x * le.y;
+      };
+      auto dstIdx = [&](const peclet::core::IVec<3>& c) {
+        return (Index)(c[0] - mo.x + mg) + (Index)(c[1] - mo.y + mg) * me.x +
+               (Index)(c[2] - mo.z + mg) * (Index)me.x * me.y;
+      };
+      T->move.build(curDec, t, T->comm, srcIdx, dstIdx, /*id=*/L);
+      T->back.assign(v.n, 0.0);
+    }
+    if (T->root()) {
+      const std::size_t mn = (std::size_t)T->mExt.x * T->mExt.y * T->mExt.z;
+      T->res = CCField("tele_res", mn);
+      T->x = CCField("tele_x", mn);
+      T->ox = CCField("tele_ox", mn);
+      T->oy = CCField("tele_oy", mn);
+      T->oz = CCField("tele_oz", mn);
+    }
+    return T;
   }
 #endif
   int nLevels() const { return (int)lv_.size(); }
@@ -2453,6 +2495,35 @@ class CutcellMG {
                    why, it, it2);
     return it2;
   }
+  // An attempt's V-cycle precision (D, §4.4.5): FP32 on an eligible solve; the R test hook's cap
+  // on an FP32 attempt's maxit; the attempt's budget, which the restart reads.
+  bool beginAttemptPrecision(int& maxit) {
+    const bool f32 = fp32VcycleSolve();
+    lastVcycleFp32_ = f32;
+    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
+    if (f32 && fp32FaultKind_ == 2)
+      maxit = std::min(maxit, fp32FaultAt_);
+    attemptMaxit_ = maxit;
+    return f32;
+  }
+  // ISSUES sweep item 6: a non-finite r^T z after the first preconditioner application is a
+  // FAILED solve, not a converged one. It used to print to stdout, zero the correction and return
+  // 0 iterations, so a caller's rule-3b "no capped pressure solve" check passed while the
+  // projection had been handed nothing. Report the cap (the return value) and raise the flag;
+  // set_pressure_strict(True) turns it into a throw. `who` names the Krylov driver.
+  int failNonFiniteZ(const char* who, Level& l0, CCField x, int maxit) {
+    solveFailed_ = true;
+    printf(
+        "peclet::flow CutcellMG::%s: preconditioner produced non-finite z; "
+        "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
+        who, maxit, maxit);
+    Kokkos::deep_copy(CCExec(), x, 0.0);
+    Kokkos::deep_copy(CCExec(), l0.x, x);
+    if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
+      throw std::runtime_error(std::string("peclet::flow CutcellMG::") + who +
+                               ": preconditioner produced non-finite z (set_pressure_strict)");
+    return maxit;
+  }
   // One MG-PCG attempt (R, §4: solvePCG's body before the restart wrapper).
   int solvePCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                       double rtol, int pre, int post, int bottom, const StarOverlay* star,
@@ -2499,12 +2570,7 @@ class CutcellMG {
     // and forms the local r^T z in its exit pass; the driver allreduces it (the Allreduce dot()
     // spends). z is zeroed once (§5.5: the exit writes inner cells only, so the never-exchanged
     // wall ghosts of z and p stay 0).
-    const bool f32 = fp32VcycleSolve();
-    lastVcycleFp32_ = f32;
-    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
-    if (f32 && fp32FaultKind_ == 2)
-      maxit = std::min(maxit, fp32FaultAt_);
-    attemptMaxit_ = maxit;
+    const bool f32 = beginAttemptPrecision(maxit);
     const bool fuseK4 = distKrylovFusion();  // K4 (§5.4): C2-C4, the same MPI calls
     auto rzFp32 = [&](int k) {  // the exit pass's local r^T z (slot k), summed over the ranks
 #ifdef PECLET_FLOW_MPI
@@ -2552,24 +2618,8 @@ class CutcellMG {
         Kokkos::deep_copy(CCExec(), p, z);
         rz = dot(l0, r, z);
       }
-      if (!std::isfinite(rz)) {
-        // ISSUES sweep item 6: this is a FAILED solve, not a converged one. It used to print to
-        // stdout, zero the correction and return 0 iterations, so a caller's rule-3b "no capped
-        // pressure solve" check passed while the projection had been handed nothing. Report the
-        // cap and raise the flag; set_pressure_strict(True) turns it into a throw.
-        solveFailed_ = true;
-        printf(
-            "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
-            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
-            maxit, maxit);
-        Kokkos::deep_copy(CCExec(), x, 0.0);
-        Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
-          throw std::runtime_error(
-              "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
-              "(set_pressure_strict)");
-        return maxit;
-      }
+      if (!std::isfinite(rz))
+        return failNonFiniteZ("solvePCG", l0, x, maxit);
       for (; it < maxit; ++it) {
         matvec(Ap, p);
         if (meanRemovalAll_)
@@ -3131,6 +3181,75 @@ class CutcellMG {
         std::sqrt(std::max(xA2, 0.0)), xA2 > 0.0 ? std::sqrt(std::max(eA2, 0.0) / xA2) : 0.0,
         rref > 0.0 ? rfin / rref : 0.0, bad);
   }
+  // solvePCGResident's residual of the caller's guess x (no projected guess): r = b - A x, onto
+  // the range; returns r0 = max|r|, the solve's one host read of it.
+  double initialResidual(Level& l0, CCField b, CCField x, CCField r, CCField Ap,
+                         const StarOverlay* star, int nStar, C3 nnStar) {
+    if (zeroGuess_) {
+      // H-2c (§8): the caller guarantees x0 = +0, so A x0 = +0 in every cell and
+      // b + (-1)(+0) = b for every b (+-0 included): r = b with no matvec. The matvec's only
+      // side effect on x, the ghost fill of the non-wrap path, is kept.
+      if (!fusedWrapReads()) {
+        fill(l0, x);
+        applyOutflowGhost(l0, x);
+      }
+      Kokkos::deep_copy(CCExec(), r, b);
+    } else {
+      guessMatvec(l0, Ap, x, star, nStar, nnStar);  // r = b - A x
+      Kokkos::deep_copy(CCExec(), r, b);
+      axpy(r, -1.0, Ap);
+    }
+    removeMean(l0, r);     // compatibility: project rhs/residual onto the range
+    return maxabs(l0, r);  // host read (once per solve)
+  }
+  // solvePCGResident's Ap = A p and p^T Ap into slot kPAp: C1's one fused pass when fuse (and no
+  // "all"-scope mean removal), else the matvec, that mean removal and the dot.
+  void matvecDotPAp(Level& l0, CCField Ap, CCField p, bool fuse, const StarOverlay* star, int nStar,
+                    C3 nnStar) {
+    if (fuse && !meanRemovalAll_) {
+      matvecDotTo(l0, Ap, p, kPAp);  // C1: Ap = A p and p^T Ap in one pass (star == nullptr)
+    } else {
+      guessMatvec(l0, Ap, p, star, nStar, nnStar);
+      if (meanRemovalAll_)
+        removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
+      dotTo(l0, p, Ap, kPAp);
+    }
+  }
+  // solvePCGResident's health instrument at iteration it: |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}|
+  // (rzOld the former, slot kRzNew the latter), logged and, under the trace, printed.
+  void noteHealth(double rzOld, int it, bool trace, bool f32) {
+    const double rzNew = readSlot(kRzNew);
+    const double ratio = rzNew != 0.0 ? std::abs(rzOld / rzNew) : 0.0;
+    healthLog_.push_back(ratio);
+    if (trace)
+      printf("[mg]   it %3d  health |r^T z_k| / |r^T z_{k+1}| = %.3e%s\n", it + 1, ratio,
+             f32 ? " (fp32 V-cycle)" : "");
+  }
+  // solvePCGResident's z = M r with r^T z into slot k: the FP32 V-cycle (scale exponent e) forms it
+  // in its exit; the FP64 one (A5) under C4 (fuse) from its level-0 exit pass, p = z there when pz
+  // is given (copyDotTo's fusion condition). false: no exit pass formed it (a one-level V-cycle)
+  // -> the caller's own kernels.
+  bool precondDotTo(bool f32, bool fuse, int e, int k, CCField z, CCField r, CCField pz) {
+    if (f32) {
+      precondVcycleFp32(z, r, e, k, pz);
+      return true;
+    }
+    exitDot_ = ExitDot{fuse ? k : -1, pz, false};
+    precondVcycle(z, r);
+    const bool done = exitDot_.done;
+    exitDot_ = ExitDot{};
+    return done;
+  }
+  // solvePCGResident's first preconditioner application: z = M r, p = z and r^T z into kRz (fused
+  // into the V-cycle's exit where it can be); returns r^T z (one host read).
+  double firstPrecondRz(Level& l0, bool f32, bool fuse, int e, CCField z, CCField r, CCField p) {
+    const bool copyFused = kHostMemory && fusedWrapSmooth(l0) && lv_.size() > 1;
+    if (!precondDotTo(f32, fuse, e, kRz, z, r, copyFused ? p : CCField()))
+      copyDotTo(l0, p, r, z, kRz);  // p = z; r^T z into kRz
+    else if (!copyFused)
+      Kokkos::deep_copy(CCExec(), p, z);
+    return readSlot(kRz);  // host read (the initial guard)
+  }
   int solvePCGResident(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                        double rtol, int pre, int post, int bottom, const StarOverlay* star,
                        int nStar, C3 nnStar) {
@@ -3142,12 +3261,6 @@ class CutcellMG {
     bottom_ = bottom;
     ensureScalars();
     Level& l0 = lv_[0];  // H-2b: l0.x is not staged (no reader between or inside the solves)
-    auto matvec = [&](CCField y, CCField v) {
-      matvecOverlap(l0, y, v);
-      if (star)
-        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
-    };
-    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
     // E (§5.3): with a projected guess r0 below is rref = max|P b|, the zero-guess residual (the
     // guard, the stop and the FP32 V-cycle's scale exponent read it; the host holds no other)
@@ -3157,22 +3270,7 @@ class CutcellMG {
       r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
                           hostKrylovFusion() && star == nullptr, trace ? &r0w : nullptr);
     } else {
-      if (zeroGuess_) {
-        // H-2c (§8): the caller guarantees x0 = +0, so A x0 = +0 in every cell and
-        // b + (-1)(+0) = b for every b (+-0 included): r = b with no matvec. The matvec's only
-        // side effect on x, the ghost fill of the non-wrap path, is kept.
-        if (!fusedWrapReads()) {
-          fill(l0, x);
-          applyOutflowGhost(l0, x);
-        }
-        Kokkos::deep_copy(CCExec(), r, b);
-      } else {
-        matvec(Ap, x);  // r = b - A x
-        Kokkos::deep_copy(CCExec(), r, b);
-        axpy(r, -1.0, Ap);
-      }
-      removeMean(l0, r);   // compatibility: project rhs/residual onto the range
-      r0 = maxabs(l0, r);  // host read (once per solve)
+      r0 = initialResidual(l0, b, x, r, Ap, star, nStar, nnStar);
       r0w = r0;
     }
     if (trace && guessOn)
@@ -3198,51 +3296,16 @@ class CutcellMG {
     // max|P b|, the only value the host holds, not max|r| of the guess residual: inert by the scale
     // covariance B(2^k r) = 2^k B(r) (G-D2 (a)) away from the FP32 range edges. It forms r^T z in
     // its exit.
-    const bool f32 = fp32VcycleSolve();
-    lastVcycleFp32_ = f32;
-    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
-    if (f32 && fp32FaultKind_ == 2)
-      maxit = std::min(maxit, fp32FaultAt_);
-    attemptMaxit_ = maxit;
+    const bool f32 = beginAttemptPrecision(maxit);
     const bool health = trace || healthTrace_;
     healthLog_.clear();
     int eNext = 0;
-    // C4: r^T z from the V-cycle's level-0 exit pass (and p = z there under copyDotTo's fusion
-    // condition); a V-cycle without that exit (one level) leaves `done` false -> the old kernels
-    auto precondDot = [&](int k, CCField pz) {
-      if (f32) {
-        precondVcycleFp32(z, r, eNext, k, pz);
-        return true;
-      }
-      exitDot_ = ExitDot{fuseC ? k : -1, pz, false};
-      precond(z, r);
-      const bool done = exitDot_.done;
-      exitDot_ = ExitDot{};
-      return done;
-    };
     lastSolveConverged_ = r0 == 0.0;  // R (§4): the loop is skipped on a zero residual
     if (r0 > 0.0 && std::isfinite(r0)) {
-      const bool copyFused = kHostMemory && fusedWrapSmooth(l0) && lv_.size() > 1;
       eNext = std::ilogb(r0);
-      if (!precondDot(kRz, copyFused ? p : CCField()))
-        copyDotTo(l0, p, r, z, kRz);  // p = z; r^T z into kRz
-      else if (!copyFused)
-        Kokkos::deep_copy(CCExec(), p, z);
-      const double rz0 = readSlot(kRz);  // host read (the initial guard)
-      if (!std::isfinite(rz0)) {
-        solveFailed_ = true;  // see solvePCG
-        printf(
-            "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z; "
-            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
-            maxit, maxit);
-        Kokkos::deep_copy(CCExec(), x, 0.0);
-        Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
-          throw std::runtime_error(
-              "peclet::flow CutcellMG::solvePCG: preconditioner produced non-finite z "
-              "(set_pressure_strict)");
-        return maxit;
-      }
+      const double rz0 = firstPrecondRz(l0, f32, fuseC, eNext, z, r, p);  // the initial guard
+      if (!std::isfinite(rz0))
+        return failNonFiniteZ("solvePCG", l0, x, maxit);
       setSlot(kStop, 0.0);
       auto ks = ks_;
       const std::size_t n = x.extent(0);
@@ -3250,14 +3313,7 @@ class CutcellMG {
       const double brkPAp = kBrkPAp, brkRz = kBrkRz;  // by value into the kernels
       bool exited = false;
       for (; it < maxit; ++it) {
-        if (fuseC && !meanRemovalAll_) {
-          matvecDotTo(l0, Ap, p, kPAp);  // C1: Ap = A p and p^T Ap in one pass (star == nullptr)
-        } else {
-          matvec(Ap, p);
-          if (meanRemovalAll_)
-            removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
-          dotTo(l0, p, Ap, kPAp);
-        }
+        matvecDotPAp(l0, Ap, p, fuseC, star, nStar, nnStar);
         if (dbgBrkWhich_ == 1 && it == dbgBrkIter_)
           setSlot(kPAp, std::numeric_limits<double>::quiet_NaN());
         Kokkos::parallel_for(  // alpha = rz / pAp, or the pAp breakdown flag
@@ -3312,16 +3368,10 @@ class CutcellMG {
         }
         eNext = std::ilogb(rn);
         const double rzOld = health ? dot(l0, r, z) : 0.0;  // r_{k+1}^T z_k (the instrument)
-        if (!precondDot(kRzNew, CCField()))  // C4: r^T z_new from the V-cycle exit pass
+        if (!precondDotTo(f32, fuseC, eNext, kRzNew, z, r, CCField()))  // C4: from the exit pass
           dotTo(l0, r, z, kRzNew);
-        if (health) {
-          const double rzNew = readSlot(kRzNew);
-          const double ratio = rzNew != 0.0 ? std::abs(rzOld / rzNew) : 0.0;
-          healthLog_.push_back(ratio);
-          if (trace)
-            printf("[mg]   it %3d  health |r^T z_k| / |r^T z_{k+1}| = %.3e%s\n", it + 1, ratio,
-                   f32 ? " (fp32 V-cycle)" : "");
-        }
+        if (health)
+          noteHealth(rzOld, it, trace, f32);
         if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
           setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
         Kokkos::parallel_for(  // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
@@ -3399,12 +3449,7 @@ class CutcellMG {
     };
     // D (§4.4.5): the FP32 V-cycle on an eligible solve, e = ilogb(max|r|) (on entry ilogb(r0): the
     // stop reference under E, see solvePCGResident); FCG keeps its own dots
-    const bool f32 = fp32VcycleSolve();
-    lastVcycleFp32_ = f32;
-    fp32FaultCount_ = 0;  // R test hook (debugSetFp32Fault): kind 2 caps an FP32 attempt
-    if (f32 && fp32FaultKind_ == 2)
-      maxit = std::min(maxit, fp32FaultAt_);
-    attemptMaxit_ = maxit;
+    const bool f32 = beginAttemptPrecision(maxit);
     const bool fuseC23 = distKrylovFusion();  // K4 (§5.4): C2 + C3, the same MPI calls
     const bool fuseC4 = fuseC23 && !f32;      // C4 on the FP64 V-cycle (FP32 keeps FCG's dots)
     healthLog_.clear();
@@ -3463,20 +3508,8 @@ class CutcellMG {
         Kokkos::deep_copy(CCExec(), p, z);
         rz = dot(l0, r, z);
       }
-      if (!std::isfinite(rz)) {
-        solveFailed_ = true;  // ISSUES sweep item 6 -- see solvePCG for the mechanism
-        printf(
-            "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z; "
-            "returning zero correction (reported as %d/%d iterations, i.e. a CAPPED solve)\n",
-            maxit, maxit);
-        Kokkos::deep_copy(CCExec(), x, 0.0);
-        Kokkos::deep_copy(CCExec(), l0.x, x);
-        if (strictPressure_ && !restartArmed())  // R (§4): the restart handles it
-          throw std::runtime_error(
-              "peclet::flow CutcellMG::solveFCG: preconditioner produced non-finite z "
-              "(set_pressure_strict)");
-        return maxit;
-      }
+      if (!std::isfinite(rz))
+        return failNonFiniteZ("solveFCG", l0, x, maxit);
       for (; it < maxit; ++it) {
         matvec(Ap, p);
         if (meanRemovalAll_)
@@ -5693,14 +5726,47 @@ class CutcellMG {
   // a mesh-agnostic smoothed-aggregation AMG on it. Decomposition-agnostic: the CSR is keyed by
   // GLOBAL cell id (periodic-wrapped neighbours), so any (weighted) ORB gives the SAME operator.
   void buildAmg(Level& lv) {
-    int gbx = gnxF_, gby = gnyF_,
-        gbz = gnzF_;  // bottom global dims (coarsen by the ratios above it)
+    const C3 gb = amgBottomDims();
+    amgGlobalN_ = gb.x * gb.y * gb.z;
+    const AmgRows local = amgLocalRows(lv, gb);
+    amgGlobalOfLocal_ = local.gid;
+    // all-gather every rank's rows (no-op / identity single-rank): EVERY rank assembles the same
+    // global CSR and builds the same AMG (redundant coarse solve).
+    AmgRows rows = local;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      gatherAmgRows(local, rows, lv.comm);
+#endif
+    amgLabelComponents(rows);
+    if (agmgDebug())
+      printAmgBuildCensus(rows);
+    peclet::core::solver::HostCsrOp A = amgAssembleCsr(rows);
+    amgA_ = A;
+    amg_ = std::make_shared<peclet::core::solver::GraphAMG>();
+    amg_->build(A);
+  }
+  // buildAmg's operator as rows before the CSR assembly: per cell its global id, diagonal and
+  // solid (identity-row) marker; per off-diagonal coupling its row gid, column gid and value.
+  // One rank's rows (amgLocalRows), or every rank's after gatherAmgRows.
+  struct AmgRows {
+    std::vector<int> gid, row, col;
+    std::vector<double> diag, val;
+    std::vector<std::uint8_t> solid;  // AGMG_DEBUG: identity-row marker, per row
+  };
+  // The bottom level's GLOBAL dims: the fine dims coarsened by every ratio above it.
+  C3 amgBottomDims() const {
+    int gbx = gnxF_, gby = gnyF_, gbz = gnzF_;
     for (int L = 0; L + 1 < (int)lv_.size(); ++L) {
       gbx /= lv_[L].ratio.x;
       gby /= lv_[L].ratio.y;
       gbz /= lv_[L].ratio.z;
     }
-    amgGlobalN_ = gbx * gby * gbz;
+    return C3{gbx, gby, gbz};
+  }
+  // This rank's rows of the bottom operator (inner cells in x-fastest order), periodic-wrapped by
+  // GLOBAL id on the bottom grid gb.
+  AmgRows amgLocalRows(const Level& lv, C3 gb) const {
+    const int gbx = gb.x, gby = gb.y;
     const int nx = lv.inner.x, ny = lv.inner.y, nz = lv.inner.z, ex = lv.ext.x, ey = lv.ext.y;
     auto host = [](FPV v) {
       auto h = Kokkos::create_mirror_view(v);
@@ -5708,185 +5774,185 @@ class CutcellMG {
       return h;
     };
     auto hC = host(lv.AC), hAFX = host(lv.AFX), hAFY = host(lv.AFY), hAFZ = host(lv.AFZ);
-    // this rank's rows: (gid, diag) and off-diagonals (gid -> ngid, coef), periodic-wrapped.
-    std::vector<int> lgid, lrow, lcol;
-    std::vector<double> ldiag, lval;
-    std::vector<std::uint8_t> lsolid;  // AGMG_DEBUG: identity-row marker, per local row
-    amgGlobalOfLocal_.clear();
-    const int band[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+    AmgRows o;
     const int g = lv.g;
     for (int k = 0; k < nz; ++k)
       for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i) {
           const long p = (long)(i + g) + (long)(j + g) * ex + (long)(k + g) * ex * ey;
-          const int gx = lv.og.x + i, gy = lv.og.y + j, gz = lv.og.z + k;
-          const int gid = gx + gy * gbx + gz * gbx * gby;
-          amgGlobalOfLocal_.push_back(gid);
-          lgid.push_back(gid);
+          const C3 gc{lv.og.x + i, lv.og.y + j, lv.og.z + k};
+          const int gid = gc.x + gc.y * gbx + gc.z * gbx * gby;
+          o.gid.push_back(gid);
           // solid cells (all faces closed => diag 0, no coupling) get an identity row so D^-1 is
           // finite; their rhs is 0, so x stays 0 (correct — no flow inside the solid).
           const double dc = (double)hC(p);
-          ldiag.push_back(dc != 0.0 ? dc : 1.0);
-          lsolid.push_back(dc == 0.0 ? 1 : 0);
+          o.diag.push_back(dc != 0.0 ? dc : 1.0);
+          o.solid.push_back(dc == 0.0 ? 1 : 0);
           // A2 face form: AW = AFX(p), AE = AFX(p+1), ... (the band values themselves).
           const double bc[6] = {(double)hAFX(p), (double)hAFX(p + 1),
                                 (double)hAFY(p), (double)hAFY(p + ex),
                                 (double)hAFZ(p), (double)hAFZ(p + (long)ex * ey)};
-          for (int d = 0; d < 6; ++d) {
-            if (bc[d] == 0.0)
-              continue;  // closed face (wall) -> no coupling
-            // A face crossing the domain boundary couples to the wrapped cell ONLY on a periodic
-            // axis (bc_ type 0). On a non-periodic axis an OPEN boundary face is the Dirichlet
-            // outflow anchor: its coefficient lives in the diagonal (already in AC) with NO
-            // off-diagonal partner — wrapping it would add a spurious top<->bottom coupling and
-            // (with the mean projection skipped) a wrong, possibly indefinite bottom matrix.
-            const int rx = gx + band[d][0], ry = gy + band[d][1], rz = gz + band[d][2];
-            const int axis = d / 2;
-            const bool crosses = (axis == 0 && (rx < 0 || rx >= gbx)) ||
-                                 (axis == 1 && (ry < 0 || ry >= gby)) ||
-                                 (axis == 2 && (rz < 0 || rz >= gbz));
-            if (crosses && bc_[d] != 0)
-              continue;  // non-periodic boundary face: Dirichlet anchor stays diagonal-only
-            const int ngx = (rx % gbx + gbx) % gbx;
-            const int ngy = (ry % gby + gby) % gby;
-            const int ngz = (rz % gbz + gbz) % gbz;
-            lrow.push_back(gid);
-            lcol.push_back(ngx + ngy * gbx + ngz * gbx * gby);
-            lval.push_back(bc[d]);
-          }
+          amgCellCouplings(gc, gb, gid, bc, o);
         }
-    // all-gather every rank's rows (no-op / identity single-rank): EVERY rank assembles the same
-    // global CSR and builds the same AMG (redundant coarse solve).
-    std::vector<int> ggid = lgid, grow = lrow, gcol = lcol;
-    std::vector<double> gdiag = ldiag, gval = lval;
-    std::vector<std::uint8_t> gsolid = lsolid;
+    return o;
+  }
+  // The off-diagonal couplings of the cell at GLOBAL index gc (row gid, face coefficients bc in
+  // the order -x, +x, -y, +y, -z, +z), appended to o.
+  void amgCellCouplings(C3 gc, C3 gb, int gid, const double (&bc)[6], AmgRows& o) const {
+    const int band[6][3] = {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}};
+    const int gbx = gb.x, gby = gb.y, gbz = gb.z;
+    for (int d = 0; d < 6; ++d) {
+      if (bc[d] == 0.0)
+        continue;  // closed face (wall) -> no coupling
+      // A face crossing the domain boundary couples to the wrapped cell ONLY on a periodic
+      // axis (bc_ type 0). On a non-periodic axis an OPEN boundary face is the Dirichlet
+      // outflow anchor: its coefficient lives in the diagonal (already in AC) with NO
+      // off-diagonal partner — wrapping it would add a spurious top<->bottom coupling and
+      // (with the mean projection skipped) a wrong, possibly indefinite bottom matrix.
+      const int rx = gc.x + band[d][0], ry = gc.y + band[d][1], rz = gc.z + band[d][2];
+      const int axis = d / 2;
+      const bool crosses = (axis == 0 && (rx < 0 || rx >= gbx)) ||
+                           (axis == 1 && (ry < 0 || ry >= gby)) ||
+                           (axis == 2 && (rz < 0 || rz >= gbz));
+      if (crosses && bc_[d] != 0)
+        continue;  // non-periodic boundary face: Dirichlet anchor stays diagonal-only
+      const int ngx = (rx % gbx + gbx) % gbx;
+      const int ngy = (ry % gby + gby) % gby;
+      const int ngz = (rz % gbz + gbz) % gbz;
+      o.row.push_back(gid);
+      o.col.push_back(ngx + ngy * gbx + ngz * gbx * gby);
+      o.val.push_back(bc[d]);
+    }
+  }
 #ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      gatherv(lgid, ggid, lv.comm);
-      gatherv(ldiag, gdiag, lv.comm);
-      gatherv(lrow, grow, lv.comm);
-      gatherv(lcol, gcol, lv.comm);
-      gatherv(lval, gval, lv.comm);
-      gatherv(lsolid, gsolid, lv.comm);
-    }
+  // Every rank's rows, all-gathered in rank order (field by field: gid, diag, row, col, val,
+  // solid).
+  void gatherAmgRows(const AmgRows& local, AmgRows& all, MPI_Comm c) {
+    gatherv(local.gid, all.gid, c);
+    gatherv(local.diag, all.diag, c);
+    gatherv(local.row, all.row, c);
+    gatherv(local.col, all.col, c);
+    gatherv(local.val, all.val, c);
+    gatherv(local.solid, all.solid, c);
+  }
 #endif
+  // amgSolid_ per gid, and the connected components of the operator graph (union-find over the
+  // off-diagonal edges): each FLUID component carries its own constant null vector, so the
+  // null-space projection must be per-component. Solid identity rows are singletons and take no
+  // projection.
+  void amgLabelComponents(const AmgRows& rows) {
     amgSolid_.assign((std::size_t)amgGlobalN_, 0);
-    for (std::size_t r = 0; r < ggid.size(); ++r)
-      amgSolid_[(std::size_t)ggid[r]] = gsolid[r];
-    {  // connected components of the operator graph (union-find over the off-diagonal edges):
-      // each FLUID component carries its own constant null vector, so the null-space projection
-      // must be per-component. Solid identity rows are singletons and take no projection.
-      std::vector<int> parent((std::size_t)amgGlobalN_);
-      for (int i = 0; i < amgGlobalN_; ++i)
-        parent[(std::size_t)i] = i;
-      auto find = [&](int a) {
-        while (parent[(std::size_t)a] != a)
-          a = parent[(std::size_t)a] = parent[(std::size_t)parent[(std::size_t)a]];
-        return a;
-      };
-      for (std::size_t e = 0; e < grow.size(); ++e) {
-        const int ra = find(grow[e]), rb = find(gcol[e]);
-        if (ra != rb)
-          parent[(std::size_t)ra] = rb;
-      }
-      amgComp_.assign((std::size_t)amgGlobalN_, -1);
-      std::vector<int> remap((std::size_t)amgGlobalN_, -1);
-      amgNComp_ = 0;
-      for (int i = 0; i < amgGlobalN_; ++i) {
-        if (amgSolid_[(std::size_t)i])
-          continue;  // identity row: no null space, excluded from projection
-        const int r = find(i);
-        if (remap[(std::size_t)r] < 0)
-          remap[(std::size_t)r] = amgNComp_++;
-        amgComp_[(std::size_t)i] = remap[(std::size_t)r];
-      }
+    for (std::size_t r = 0; r < rows.gid.size(); ++r)
+      amgSolid_[(std::size_t)rows.gid[r]] = rows.solid[r];
+    std::vector<int> parent((std::size_t)amgGlobalN_);
+    for (int i = 0; i < amgGlobalN_; ++i)
+      parent[(std::size_t)i] = i;
+    auto find = [&](int a) {
+      while (parent[(std::size_t)a] != a)
+        a = parent[(std::size_t)a] = parent[(std::size_t)parent[(std::size_t)a]];
+      return a;
+    };
+    for (std::size_t e = 0; e < rows.row.size(); ++e) {
+      const int ra = find(rows.row[e]), rb = find(rows.col[e]);
+      if (ra != rb)
+        parent[(std::size_t)ra] = rb;
     }
-    if (agmgDebug()) {
-      std::vector<long> csize((std::size_t)amgNComp_, 0);
-      for (int i = 0; i < amgGlobalN_; ++i)
-        if (amgComp_[(std::size_t)i] >= 0)
-          ++csize[(std::size_t)amgComp_[(std::size_t)i]];
-      printf("[agmg-build] fluid components=%d  sizes:", amgNComp_);
-      for (int c = 0; c < std::min(amgNComp_, 12); ++c)
-        printf(" %ld", csize[(std::size_t)c]);
-      printf(amgNComp_ > 12 ? " ...\n" : "\n");
+    amgComp_.assign((std::size_t)amgGlobalN_, -1);
+    std::vector<int> remap((std::size_t)amgGlobalN_, -1);
+    amgNComp_ = 0;
+    for (int i = 0; i < amgGlobalN_; ++i) {
+      if (amgSolid_[(std::size_t)i])
+        continue;  // identity row: no null space, excluded from projection
+      const int r = find(i);
+      if (remap[(std::size_t)r] < 0)
+        remap[(std::size_t)r] = amgNComp_++;
+      amgComp_[(std::size_t)i] = remap[(std::size_t)r];
     }
-    if (agmgDebug()) {
-      long nSolid = 0, nTiny30 = 0, nTiny12 = 0;
-      double minFluidDiag = 1e300, maxFluidDiag = 0;
-      for (std::size_t r = 0; r < ggid.size(); ++r) {
-        if (gsolid[r]) {
-          ++nSolid;
-          continue;
-        }
-        const double ad = std::fabs(gdiag[r]);
-        minFluidDiag = std::min(minFluidDiag, ad);
-        maxFluidDiag = std::max(maxFluidDiag, ad);
-        nTiny30 += ad < 1e-30;
-        nTiny12 += ad < 1e-12;
+  }
+  // PECLET_FLOW_AGMG_DEBUG census of the gathered bottom operator: component sizes, the fluid
+  // diagonal range and the row-sum defect.
+  void printAmgBuildCensus(const AmgRows& rows) const {
+    std::vector<long> csize((std::size_t)amgNComp_, 0);
+    for (int i = 0; i < amgGlobalN_; ++i)
+      if (amgComp_[(std::size_t)i] >= 0)
+        ++csize[(std::size_t)amgComp_[(std::size_t)i]];
+    printf("[agmg-build] fluid components=%d  sizes:", amgNComp_);
+    for (int c = 0; c < std::min(amgNComp_, 12); ++c)
+      printf(" %ld", csize[(std::size_t)c]);
+    printf(amgNComp_ > 12 ? " ...\n" : "\n");
+    long nSolid = 0, nTiny30 = 0, nTiny12 = 0;
+    double minFluidDiag = 1e300, maxFluidDiag = 0;
+    for (std::size_t r = 0; r < rows.gid.size(); ++r) {
+      if (rows.solid[r]) {
+        ++nSolid;
+        continue;
       }
-      printf(
-          "[agmg-build] n=%d solid=%ld fluid=%ld  fluid|diag| min=%.3e max=%.3e  "
-          "tiny<1e-30=%ld <1e-12=%ld\n",
-          amgGlobalN_, nSolid, (long)ggid.size() - nSolid, minFluidDiag, maxFluidDiag, nTiny30,
-          nTiny12);
-      // Row-sum defect: the operator's null vector is the constant ONLY if every fluid row sums
-      // to zero. The level coefficients are stored in float (MReal), so the diagonal is a
-      // float-rounded sum of the face coefficients — a nonzero defect here bounds how far a
-      // singular-consistent solve can converge.
-      std::vector<double> rowsum((std::size_t)amgGlobalN_, 0.0);
-      for (std::size_t r = 0; r < ggid.size(); ++r)
-        rowsum[(std::size_t)ggid[r]] = gsolid[r] ? 0.0 : gdiag[r];
-      for (std::size_t e = 0; e < grow.size(); ++e)
-        if (!amgSolid_[(std::size_t)grow[e]])
-          rowsum[(std::size_t)grow[e]] += gval[e];
-      double defMax = 0, defRelMax = 0;
-      for (std::size_t r = 0; r < ggid.size(); ++r)
-        if (!gsolid[r]) {
-          const double d = std::fabs(rowsum[(std::size_t)ggid[r]]);
-          defMax = std::max(defMax, d);
-          defRelMax = std::max(defRelMax, d / std::fabs(gdiag[r]));
-        }
-      printf("[agmg-build] fluid row-sum defect max=%.3e rel=%.3e\n", defMax, defRelMax);
-      fflush(stdout);
+      const double ad = std::fabs(rows.diag[r]);
+      minFluidDiag = std::min(minFluidDiag, ad);
+      maxFluidDiag = std::max(maxFluidDiag, ad);
+      nTiny30 += ad < 1e-30;
+      nTiny12 += ad < 1e-12;
     }
-    {  // assemble the global CSR keyed by gid
-      peclet::core::solver::HostCsrOp A;
-      A.n = amgGlobalN_;
-      A.diag.assign((std::size_t)amgGlobalN_, 0.0);
-      for (std::size_t r = 0; r < ggid.size(); ++r)
-        A.diag[(std::size_t)ggid[r]] = gdiag[r];
-      std::vector<std::vector<std::pair<int, double>>> rows((std::size_t)amgGlobalN_);
-      for (std::size_t e = 0; e < grow.size(); ++e)
-        rows[(std::size_t)grow[e]].push_back({gcol[e], gval[e]});
-      A.start.assign((std::size_t)amgGlobalN_ + 1, 0);
+    printf(
+        "[agmg-build] n=%d solid=%ld fluid=%ld  fluid|diag| min=%.3e max=%.3e  "
+        "tiny<1e-30=%ld <1e-12=%ld\n",
+        amgGlobalN_, nSolid, (long)rows.gid.size() - nSolid, minFluidDiag, maxFluidDiag, nTiny30,
+        nTiny12);
+    // Row-sum defect: the operator's null vector is the constant ONLY if every fluid row sums
+    // to zero. The level coefficients are stored in float (MReal), so the diagonal is a
+    // float-rounded sum of the face coefficients — a nonzero defect here bounds how far a
+    // singular-consistent solve can converge.
+    std::vector<double> rowsum((std::size_t)amgGlobalN_, 0.0);
+    for (std::size_t r = 0; r < rows.gid.size(); ++r)
+      rowsum[(std::size_t)rows.gid[r]] = rows.solid[r] ? 0.0 : rows.diag[r];
+    for (std::size_t e = 0; e < rows.row.size(); ++e)
+      if (!amgSolid_[(std::size_t)rows.row[e]])
+        rowsum[(std::size_t)rows.row[e]] += rows.val[e];
+    double defMax = 0, defRelMax = 0;
+    for (std::size_t r = 0; r < rows.gid.size(); ++r)
+      if (!rows.solid[r]) {
+        const double d = std::fabs(rowsum[(std::size_t)rows.gid[r]]);
+        defMax = std::max(defMax, d);
+        defRelMax = std::max(defRelMax, d / std::fabs(rows.diag[r]));
+      }
+    printf("[agmg-build] fluid row-sum defect max=%.3e rel=%.3e\n", defMax, defRelMax);
+    fflush(stdout);
+  }
+  // The global CSR keyed by gid, from the gathered rows.
+  peclet::core::solver::HostCsrOp amgAssembleCsr(const AmgRows& rows) const {
+    peclet::core::solver::HostCsrOp A;
+    A.n = amgGlobalN_;
+    A.diag.assign((std::size_t)amgGlobalN_, 0.0);
+    for (std::size_t r = 0; r < rows.gid.size(); ++r)
+      A.diag[(std::size_t)rows.gid[r]] = rows.diag[r];
+    std::vector<std::vector<std::pair<int, double>>> crow((std::size_t)amgGlobalN_);
+    for (std::size_t e = 0; e < rows.row.size(); ++e)
+      crow[(std::size_t)rows.row[e]].push_back({rows.col[e], rows.val[e]});
+    A.start.assign((std::size_t)amgGlobalN_ + 1, 0);
+    for (int r = 0; r < amgGlobalN_; ++r)
+      A.start[(std::size_t)r + 1] = A.start[(std::size_t)r] + (long)crow[(std::size_t)r].size();
+    A.nbr.reserve(rows.row.size());
+    A.coef.reserve(rows.row.size());
+    for (int r = 0; r < amgGlobalN_; ++r)
+      for (auto& [c, v] : crow[(std::size_t)r]) {
+        A.nbr.push_back(c);
+        A.coef.push_back(v);
+      }
+    // Singular (periodic / all-Neumann) path: every fluid diagonal is BY CONSTRUCTION the
+    // negative sum of its off-diagonals (walls/solids contribute zero, and no Dirichlet anchor
+    // exists when removeMean_). The float (MReal) level storage breaks that identity at ~5e-8
+    // relative, which shifts the operator's near-null vector off the constant the null-space
+    // projection assumes — measured as the inner CG flooring at ~1e-5 and burning its full
+    // iteration cap every call. Resum the diagonal in double so A·1 = 0 EXACTLY per fluid row.
+    if (removeMean_)
       for (int r = 0; r < amgGlobalN_; ++r)
-        A.start[(std::size_t)r + 1] = A.start[(std::size_t)r] + (long)rows[(std::size_t)r].size();
-      A.nbr.reserve(grow.size());
-      A.coef.reserve(grow.size());
-      for (int r = 0; r < amgGlobalN_; ++r)
-        for (auto& [c, v] : rows[(std::size_t)r]) {
-          A.nbr.push_back(c);
-          A.coef.push_back(v);
+        if (!amgSolid_[(std::size_t)r] && !crow[(std::size_t)r].empty()) {
+          double s = 0;
+          for (auto& [c, v] : crow[(std::size_t)r])
+            s += v;
+          A.diag[(std::size_t)r] = -s;
         }
-      // Singular (periodic / all-Neumann) path: every fluid diagonal is BY CONSTRUCTION the
-      // negative sum of its off-diagonals (walls/solids contribute zero, and no Dirichlet anchor
-      // exists when removeMean_). The float (MReal) level storage breaks that identity at ~5e-8
-      // relative, which shifts the operator's near-null vector off the constant the null-space
-      // projection assumes — measured as the inner CG flooring at ~1e-5 and burning its full
-      // iteration cap every call. Resum the diagonal in double so A·1 = 0 EXACTLY per fluid row.
-      if (removeMean_)
-        for (int r = 0; r < amgGlobalN_; ++r)
-          if (!amgSolid_[(std::size_t)r] && !rows[(std::size_t)r].empty()) {
-            double s = 0;
-            for (auto& [c, v] : rows[(std::size_t)r])
-              s += v;
-            A.diag[(std::size_t)r] = -s;
-          }
-      amgA_ = A;
-      amg_ = std::make_shared<peclet::core::solver::GraphAMG>();
-      amg_->build(A);
-    }
+    return A;
   }
   // Solve the coarsest level with the agglomerated AMG, REDUNDANTLY: all-gather the coarse rhs,
   // every rank runs the identical GraphAMG-preconditioned CG on the identical global operator
