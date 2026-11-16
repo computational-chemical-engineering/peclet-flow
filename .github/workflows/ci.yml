@@ -98,8 +98,11 @@ jobs:
     env:
       OMP_NUM_THREADS: "1"
       OMP_PROC_BIND: "false"
-      # OpenMPI 4.x: allow more ranks than cores (the np=4 / np=8 rungs on the 4-core runner).
+      # Allow more ranks than slots (the np=4 / np=8 rungs). OpenMPI 4.x reads the OMPI_ variable;
+      # OpenMPI 5 (PRRTE, ubuntu-26.04 since 2026-10-29) ignores it and refuses with
+      # prte-rmaps-base:alloc-error -- it reads the PRTE_ mapping policy instead.
       OMPI_MCA_rmaps_base_oversubscribe: "1"
+      PRTE_MCA_rmaps_default_mapping_policy: ":oversubscribe"
     steps:
       - uses: actions/checkout@v7
 
