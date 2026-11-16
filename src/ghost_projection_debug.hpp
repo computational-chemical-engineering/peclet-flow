@@ -53,37 +53,39 @@ inline int gpDebugLevel() {
   return s ? std::atoi(s) : 0;
 }
 
-/// Census + optional per-row dump of the built overlay. `nn` is the inner grid, `nRows` the row
-/// count returned by buildGpOverlay, `idMap` the inner-cell -> row map (-1 = no row). `rank` only
-/// labels the output. Host-side; copies the overlay out of device memory once.
+/// Face-state names, indexed by `GpOverlayT::state` (GP_COUPLED .. GP_EXPLICIT).
+inline constexpr const char* gpStateName[5] = {"COUPLED", "QUAD", "LIN", "BC_ONLY", "EXPLICIT"};
+
+/// The report's host view of an overlay: the first `nRows` rows of every array it reads (`w_bc`
+/// is not read and stays empty). One copy out of device memory per array.
 template <class Real>
-inline void gpDebugReport(const GpOverlayReal<Real>& ov, int nRows, C3 nn,
-                          Kokkos::View<int*, CCMem> idMap, int rank = 0) {
-  const int level = gpDebugLevel();
-  if (level <= 0 || nRows <= 0)
-    return;
-  const auto h_cell = Kokkos::create_mirror_view_and_copy(
+using GpOverlayHost = GpOverlayT<Kokkos::HostSpace, Real>;
+
+template <class Real>
+inline GpOverlayHost<Real> gpOverlayRowsToHost(const GpOverlayReal<Real>& ov, int nRows) {
+  GpOverlayHost<Real> h;
+  h.cell = Kokkos::create_mirror_view_and_copy(
       Kokkos::HostSpace(), Kokkos::subview(ov.cell, Kokkos::make_pair(0, nRows)));
-  const auto h_rho = Kokkos::create_mirror_view_and_copy(
+  h.rescale = Kokkos::create_mirror_view_and_copy(
       Kokkos::HostSpace(), Kokkos::subview(ov.rescale, Kokkos::make_pair(0, nRows)));
-  const auto h_cpl = Kokkos::create_mirror_view_and_copy(
+  h.coupled = Kokkos::create_mirror_view_and_copy(
       Kokkos::HostSpace(), Kokkos::subview(ov.coupled, Kokkos::make_pair(0, nRows)));
   const auto sub6 = Kokkos::make_pair(0, 6 * nRows);
-  const auto h_st =
+  h.state =
       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.state, sub6));
-  const auto h_th =
-      Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.th, sub6));
-  const auto h_wm1 =
+  h.th = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.th, sub6));
+  h.wm_n1 =
       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.wm_n1, sub6));
-  const auto h_wm2 =
+  h.wm_n2 =
       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.wm_n2, sub6));
-  const auto h_w1 =
-      Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.w_n1, sub6));
-  const auto h_w2 =
-      Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.w_n2, sub6));
-  const auto h_id = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), idMap);
+  h.w_n1 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.w_n1, sub6));
+  h.w_n2 = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), Kokkos::subview(ov.w_n2, sub6));
+  return h;
+}
 
-  const char* stName[5] = {"COUPLED", "QUAD", "LIN", "BC_ONLY", "EXPLICIT"};
+/// Row/face census of the overlay: face-state counts, the theta and rho histograms and the
+/// max |closure weight| per row (QUAD/LIN faces only, both weight sets).
+struct GpRowCensus {
   long stCount[5] = {0, 0, 0, 0, 0};
   long extendedTh = 0, clampedThLo = 0, clampedThHi = 0;
   // rho decades: [1e-5,1e-4) ... [1e-1,1) and == 1
@@ -91,116 +93,149 @@ inline void gpDebugReport(const GpOverlayReal<Real>& ov, int nRows, C3 nn,
   long wDec[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // max |w| decades 1e0..1e7
   long decoupled = 0;
   double rhoMin = 1.0, wMax = 0.0;
+  std::vector<float> rowMaxW;
+};
 
-  std::vector<float> rowMaxW((std::size_t)nRows, 0.0f);
-  for (int s = 0; s < nRows; ++s) {
-    if (!h_cpl(s))
-      ++decoupled;
-    const float rho = h_rho(s);
-    rhoMin = rho < rhoMin ? rho : rhoMin;
-    int d = rho >= 1.0f ? 6 : (int)std::floor(std::log10((double)rho)) + 6;
-    rhoDec[d < 0 ? 0 : (d > 6 ? 6 : d)]++;
-    float mw = 0.0f;
-    for (int k = 0; k < 6; ++k) {
-      const int8_t st = h_st(s * 6 + k);
-      stCount[st < 0 || st > 4 ? 0 : st]++;
-      const float th = h_th(s * 6 + k);
-      if (st == GP_QUAD || st == GP_LIN) {
-        if (th > 1.0f)
-          ++extendedTh;
-        if (th <= (float)(1e-4 * 1.0000001))
-          ++clampedThLo;
-        if (th >= 2.0f)
-          ++clampedThHi;
-        const float a1 = std::fabs(h_wm1(s * 6 + k)), a2 = std::fabs(h_wm2(s * 6 + k));
-        mw = mw > a1 ? mw : a1;
-        mw = mw > a2 ? mw : a2;
-        const float b1 = std::fabs(h_w1(s * 6 + k)), b2 = std::fabs(h_w2(s * 6 + k));
-        mw = mw > b1 ? mw : b1;
-        mw = mw > b2 ? mw : b2;
-      }
-    }
-    rowMaxW[(std::size_t)s] = mw;
-    wMax = mw > wMax ? mw : wMax;
-    int wd = mw <= 1.0f ? 0 : (int)std::floor(std::log10((double)mw));
-    wDec[wd < 0 ? 0 : (wd > 7 ? 7 : wd)]++;
+/// Face census of row `s` into `c`; returns the row's max |closure weight|.
+template <class Real>
+inline float gpRowFaceCensus(const GpOverlayHost<Real>& h, int s, GpRowCensus& c) {
+  float mw = 0.0f;
+  for (int k = 0; k < 6; ++k) {
+    const int8_t st = h.state(s * 6 + k);
+    c.stCount[st < 0 || st > 4 ? 0 : st]++;
+    if (st != GP_QUAD && st != GP_LIN)
+      continue;
+    const float th = h.th(s * 6 + k);
+    if (th > 1.0f)
+      ++c.extendedTh;
+    if (th <= (float)(1e-4 * 1.0000001))
+      ++c.clampedThLo;
+    if (th >= 2.0f)
+      ++c.clampedThHi;
+    const float a1 = std::fabs(h.wm_n1(s * 6 + k)), a2 = std::fabs(h.wm_n2(s * 6 + k));
+    mw = mw > a1 ? mw : a1;
+    mw = mw > a2 ? mw : a2;
+    const float b1 = std::fabs(h.w_n1(s * 6 + k)), b2 = std::fabs(h.w_n2(s * 6 + k));
+    mw = mw > b1 ? mw : b1;
+    mw = mw > b2 ? mw : b2;
   }
+  return mw;
+}
 
-  // Neighbour rho mismatch: the row scaling is a LEFT diagonal scaling of a nonsymmetric operator,
-  // so a row whose rho differs sharply from its neighbours' has coefficients a_ij / a_ji differing
-  // by that ratio. Cells with no overlay row scale by 1.
-  const long nInner = (long)nn.x * nn.y * nn.z;
+template <class Real>
+inline GpRowCensus gpRowCensus(const GpOverlayHost<Real>& h, int nRows) {
+  GpRowCensus c;
+  c.rowMaxW.assign((std::size_t)nRows, 0.0f);
+  for (int s = 0; s < nRows; ++s) {
+    if (!h.coupled(s))
+      ++c.decoupled;
+    const float rho = h.rescale(s);
+    c.rhoMin = rho < c.rhoMin ? rho : c.rhoMin;
+    int d = rho >= 1.0f ? 6 : (int)std::floor(std::log10((double)rho)) + 6;
+    c.rhoDec[d < 0 ? 0 : (d > 6 ? 6 : d)]++;
+    const float mw = gpRowFaceCensus(h, s, c);
+    c.rowMaxW[(std::size_t)s] = mw;
+    c.wMax = mw > c.wMax ? mw : c.wMax;
+    int wd = mw <= 1.0f ? 0 : (int)std::floor(std::log10((double)mw));
+    c.wDec[wd < 0 ? 0 : (wd > 7 ? 7 : wd)]++;
+  }
+  return c;
+}
+
+/// Neighbour rho mismatch: the row scaling is a LEFT diagonal scaling of a nonsymmetric operator,
+/// so a row whose rho differs sharply from its neighbours' has coefficients a_ij / a_ji differing
+/// by that ratio. Cells with no overlay row scale by 1.
+struct GpRhoMismatch {
   long mmDec[6] = {0, 0, 0, 0, 0, 0};  // |log10 ratio| in [0,1),[1,2),...,[5,inf)
   double mmMax = 0.0;
+  std::vector<float> rowMismatch;
+};
+
+template <class Real>
+inline GpRhoMismatch gpRhoMismatch(const GpOverlayHost<Real>& h, int nRows, C3 nn,
+                                   Kokkos::View<int*, Kokkos::HostSpace> hId) {
+  const long nInner = (long)nn.x * nn.y * nn.z;
   auto rhoAt = [&](int x, int y, int z) -> float {
     const int ix = ((x % nn.x) + nn.x) % nn.x, iy = ((y % nn.y) + nn.y) % nn.y,
               iz = ((z % nn.z) + nn.z) % nn.z;
     const long c = (long)ix + (long)iy * nn.x + (long)iz * (long)nn.x * nn.y;
     if (c < 0 || c >= nInner)
       return 1.0f;
-    const int s = h_id(c);
-    return s >= 0 ? h_rho(s) : 1.0f;
+    const int s = hId(c);
+    return s >= 0 ? h.rescale(s) : 1.0f;
   };
-  std::vector<float> rowMismatch((std::size_t)nRows, 0.0f);
+  GpRhoMismatch m;
+  m.rowMismatch.assign((std::size_t)nRows, 0.0f);
   for (int s = 0; s < nRows; ++s) {
-    const int c = h_cell(s);
+    const int c = h.cell(s);
     const int x = c % nn.x, y = (c / nn.x) % nn.y, z = c / (nn.x * nn.y);
-    const double lr = std::log10((double)h_rho(s));
+    const double lr = std::log10((double)h.rescale(s));
     double worst = 0.0;
     const int off[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
     for (auto& o : off) {
       const double d = std::fabs(lr - std::log10((double)rhoAt(x + o[0], y + o[1], z + o[2])));
       worst = d > worst ? d : worst;
     }
-    rowMismatch[(std::size_t)s] = (float)worst;
-    mmMax = worst > mmMax ? worst : mmMax;
+    m.rowMismatch[(std::size_t)s] = (float)worst;
+    m.mmMax = worst > m.mmMax ? worst : m.mmMax;
     int b = (int)worst;
-    mmDec[b < 0 ? 0 : (b > 5 ? 5 : b)]++;
+    m.mmDec[b < 0 ? 0 : (b > 5 ? 5 : b)]++;
   }
+  return m;
+}
 
+inline void gpPrintCensus(int rank, int nRows, long nInner, const GpRowCensus& c,
+                          const GpRhoMismatch& m) {
   std::printf("[gp] rank %d overlay census: %d rows of %ld inner cells (%.2f %%), %ld decoupled\n",
-              rank, nRows, nInner, 100.0 * nRows / (double)nInner, decoupled);
+              rank, nRows, nInner, 100.0 * nRows / (double)nInner, c.decoupled);
   std::printf("[gp]   face states:");
   for (int i = 0; i < 5; ++i)
-    std::printf("  %s=%ld", stName[i], stCount[i]);
+    std::printf("  %s=%ld", gpStateName[i], c.stCount[i]);
   std::printf("\n[gp]   theta: EXTENDED(1,2)=%ld  clamped-low(1e-4)=%ld  clamped-high(2)=%ld\n",
-              extendedTh, clampedThLo, clampedThHi);
+              c.extendedTh, c.clampedThLo, c.clampedThHi);
   std::printf(
       "[gp]   rho decades  [1e-5,1e-4)=%ld [1e-4,1e-3)=%ld [1e-3,1e-2)=%ld "
       "[1e-2,1e-1)=%ld [1e-1,1)=%ld ==1:%ld   min=%.3e\n",
-      rhoDec[0] + rhoDec[1], rhoDec[2], rhoDec[3], rhoDec[4], rhoDec[5], rhoDec[6], rhoMin);
+      c.rhoDec[0] + c.rhoDec[1], c.rhoDec[2], c.rhoDec[3], c.rhoDec[4], c.rhoDec[5], c.rhoDec[6],
+      c.rhoMin);
   std::printf("[gp]   max|w| decades");
   for (int i = 0; i < 8; ++i)
-    std::printf(" 1e%d:%ld", i, wDec[i]);
-  std::printf("   max=%.3e\n", wMax);
+    std::printf(" 1e%d:%ld", i, c.wDec[i]);
+  std::printf("   max=%.3e\n", c.wMax);
   std::printf("[gp]   neighbour rho mismatch |log10| bins");
   for (int i = 0; i < 6; ++i)
-    std::printf(" %d:%ld", i, mmDec[i]);
-  std::printf("   max=%.2f decades\n", mmMax);
+    std::printf(" %d:%ld", i, m.mmDec[i]);
+  std::printf("   max=%.2f decades\n", m.mmMax);
+}
 
-  // the 20 worst rows by rho, with their full face anatomy
+/// The 20 worst rows by rho, with their full face anatomy.
+template <class Real>
+inline void gpPrintWorstRows(const GpOverlayHost<Real>& h, int nRows, C3 nn, const GpRowCensus& c,
+                             const GpRhoMismatch& m) {
   std::vector<int> ord((std::size_t)nRows);
   for (int i = 0; i < nRows; ++i)
     ord[(std::size_t)i] = i;
   const int show = nRows < 20 ? nRows : 20;
   std::partial_sort(ord.begin(), ord.begin() + show, ord.end(),
-                    [&](int a, int b) { return h_rho(a) < h_rho(b); });
+                    [&](int a, int b) { return h.rescale(a) < h.rescale(b); });
   std::printf("[gp]   worst %d rows by rho:\n", show);
   for (int i = 0; i < show; ++i) {
     const int s = ord[(std::size_t)i];
-    const int c = h_cell(s);
-    std::printf("[gp]     (%4d,%4d,%4d) rho=%.4e maxw=%.3e mism=%.2f |", c % nn.x,
-                (c / nn.x) % nn.y, c / (nn.x * nn.y), h_rho(s), rowMaxW[(std::size_t)s],
-                rowMismatch[(std::size_t)s]);
+    const int cl = h.cell(s);
+    std::printf("[gp]     (%4d,%4d,%4d) rho=%.4e maxw=%.3e mism=%.2f |", cl % nn.x,
+                (cl / nn.x) % nn.y, cl / (nn.x * nn.y), h.rescale(s), c.rowMaxW[(std::size_t)s],
+                m.rowMismatch[(std::size_t)s]);
     for (int k = 0; k < 6; ++k)
-      std::printf(" %s(th=%.3e,wm=%.3e/%.3e)", stName[h_st(s * 6 + k)], h_th(s * 6 + k),
-                  h_wm1(s * 6 + k), h_wm2(s * 6 + k));
+      std::printf(" %s(th=%.3e,wm=%.3e/%.3e)", gpStateName[h.state(s * 6 + k)], h.th(s * 6 + k),
+                  h.wm_n1(s * 6 + k), h.wm_n2(s * 6 + k));
     std::printf("\n");
   }
-  std::fflush(stdout);
+}
 
-  if (level < 2)
-    return;
+/// PECLET_FLOW_GP_DEBUG=2: every overlay row to `<PECLET_FLOW_GP_DEBUG_FILE>_rank<r>.bin`
+/// (record layout in the file header).
+template <class Real>
+inline void gpDumpRows(const GpOverlayHost<Real>& h, int nRows, C3 nn, int rank) {
   const char* fenv = std::getenv("PECLET_FLOW_GP_DEBUG_FILE");
   std::string path = fenv ? std::string(fenv) : std::string("gp_rows");
   path += "_rank" + std::to_string(rank) + ".bin";
@@ -210,19 +245,19 @@ inline void gpDebugReport(const GpOverlayReal<Real>& ov, int nRows, C3 nn,
     return;
   }
   for (int s = 0; s < nRows; ++s) {
-    const int c = h_cell(s);
+    const int c = h.cell(s);
     const int32_t xyz[3] = {c % nn.x, (c / nn.x) % nn.y, c / (nn.x * nn.y)};
-    const float rho = h_rho(s);
-    const int8_t cpl = h_cpl(s);
+    const float rho = h.rescale(s);
+    const int8_t cpl = h.coupled(s);
     int8_t st[6];
     float th[6], wm1[6], wm2[6], w1[6], w2[6];
     for (int k = 0; k < 6; ++k) {
-      st[k] = h_st(s * 6 + k);
-      th[k] = h_th(s * 6 + k);
-      wm1[k] = h_wm1(s * 6 + k);
-      wm2[k] = h_wm2(s * 6 + k);
-      w1[k] = h_w1(s * 6 + k);
-      w2[k] = h_w2(s * 6 + k);
+      st[k] = h.state(s * 6 + k);
+      th[k] = h.th(s * 6 + k);
+      wm1[k] = h.wm_n1(s * 6 + k);
+      wm2[k] = h.wm_n2(s * 6 + k);
+      w1[k] = h.w_n1(s * 6 + k);
+      w2[k] = h.w_n2(s * 6 + k);
     }
     std::fwrite(xyz, sizeof(int32_t), 3, f);
     std::fwrite(&rho, sizeof(float), 1, f);
@@ -237,6 +272,27 @@ inline void gpDebugReport(const GpOverlayReal<Real>& ov, int nRows, C3 nn,
   std::fclose(f);
   std::printf("[gp]   per-row dump -> %s (%d records)\n", path.c_str(), nRows);
   std::fflush(stdout);
+}
+
+/// Census + optional per-row dump of the built overlay. `nn` is the inner grid, `nRows` the row
+/// count returned by buildGpOverlay, `idMap` the inner-cell -> row map (-1 = no row). `rank` only
+/// labels the output. Host-side; copies the overlay out of device memory once.
+template <class Real>
+inline void gpDebugReport(const GpOverlayReal<Real>& ov, int nRows, C3 nn,
+                          Kokkos::View<int*, CCMem> idMap, int rank = 0) {
+  const int level = gpDebugLevel();
+  if (level <= 0 || nRows <= 0)
+    return;
+  const GpOverlayHost<Real> h = gpOverlayRowsToHost(ov, nRows);
+  const Kokkos::View<int*, Kokkos::HostSpace> hId =
+      Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), idMap);
+  const GpRowCensus census = gpRowCensus(h, nRows);
+  const GpRhoMismatch mismatch = gpRhoMismatch(h, nRows, nn, hId);
+  gpPrintCensus(rank, nRows, (long)nn.x * nn.y * nn.z, census, mismatch);
+  gpPrintWorstRows(h, nRows, nn, census, mismatch);
+  std::fflush(stdout);
+  if (level >= 2)
+    gpDumpRows(h, nRows, nn, rank);
 }
 
 }  // namespace peclet::flow
