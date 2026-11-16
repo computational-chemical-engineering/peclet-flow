@@ -2496,12 +2496,7 @@ class CutcellMG {
     guessHist_ = 0;
     zeroGuess_ = true;
     const int it2 = attempt(maxit);
-    int rank = 0;
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      MPI_Comm_rank(comm_, &rank);
-#endif
-    if (rank == 0)
+    if (commRank() == 0)
       std::fprintf(stderr,
                    "peclet::flow CutcellMG: the FP32 V-cycle did not converge this solve (%s %d); "
                    "re-solved with the FP64 V-cycle in %d iterations; 'auto' stays FP64 for the "
@@ -3198,14 +3193,12 @@ class CutcellMG {
           },
           bad);
     }
-    int rank = 0;  // E-dist (§6 item 2): collective (dot, maxabs, the matvec, this count); rank 0
+    // E-dist (§6 item 2): collective (dot, maxabs, the matvec, this count); rank 0 prints.
 #ifdef PECLET_FLOW_MPI
-    if (distributed_) {
+    if (distributed_)
       bad = (long)allreduce((double)bad, MPI_SUM_, l0.comm);
-      MPI_Comm_rank(comm_, &rank);
-    }
 #endif
-    if (rank != 0)
+    if (commRank() != 0)
       return;
     printf(
         "[mg] guess solve %d: hist %d c1 %.17g c2 %.17g rref %.6e r0w %.6e iters %d "
@@ -6909,12 +6902,7 @@ class CutcellMG {
     // values the solve already computed (no extra reduction), so the solve is unchanged with it on
     // or off.
     if (mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves()) {
-      int dbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-      if (distributed_)
-        MPI_Comm_rank(comm_, &dbgRank);
-#endif
-      if (dbgRank == 0)
+      if (commRank() == 0)
         printf(
             "[mg] cheb solve %d: r0=%.6e rref=%.6e rtol=%.1e |r|inf=%.6e r/rref=%.4e vcycles=%d "
             "maxit=%d guard=%d\n",
