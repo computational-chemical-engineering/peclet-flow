@@ -1276,7 +1276,7 @@ class CutcellMG {
   // ---- the line-relaxation trigger (doc/mg_depth_policy.md Amendment A2.3) --------------------
   // On level L of GLOBAL inner dims g and coarsening factors cf (H_a = hp_a * cf_a): s = the unique
   // axis with H_s < H_b for both b != s (none: no trigger); A' = min_{b != s} H_b / H_s;
-  //   T(L) <=> L >= 1 and !can(g[s]) (globally blocked) and A' > theta and no outflow face on s.
+  //   T(L) <=> L >= 1, !canHalve(g[s]) (globally blocked), A' > theta and no outflow face on s.
   // Returns s when T(L) holds, else -1; *aspect receives A' (0 when there is no unique s). Global
   // quantities only (no collective, np-independent). An s only DEFERRED by mgChooseRatio, or
   // blocked only by evenBlocksOn (§5.4), is not globally blocked. Pure and static: host, once per
@@ -1294,7 +1294,7 @@ class CutcellMG {
       return -1;
     const double A = std::min(H[(s + 1) % 3], H[(s + 2) % 3]) / H[s];
     *aspect = A;
-    const bool blocked = !((gd[s] % 2 == 0) && (gd[s] / 2 >= 2));  // !can(g[s])
+    const bool blocked = !canHalve(gd[s]);
     const bool outflow = bc[2 * s] == 3 || bc[2 * s + 1] == 3;
     return (L >= 1 && blocked && A > theta && !outflow) ? s : -1;
   }
@@ -1426,15 +1426,10 @@ class CutcellMG {
   // that cannot halve is not a constraint. This is the predicate core's stage policy
   // (peclet::core::decomp::chooseStageTarget) is parameterised on, shared by initMpi and predict.
   static bool teleLiftable(const peclet::core::decomp::BlockDecomposer<3>& d, C3 gs) {
-    auto can = [](int e) { return (e % 2 == 0) && (e / 2 >= 2); };
     const int ga[3] = {gs.x, gs.y, gs.z};
-    for (int ax = 0; ax < 3; ++ax) {
-      if (!can(ga[ax]))
-        continue;
-      for (std::size_t b = 0; b < d.sizes().size(); ++b)
-        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
-          return false;
-    }
+    for (int ax = 0; ax < 3; ++ax)
+      if (canHalve(ga[ax]) && !evenBlocksOn(d, ax))
+        return false;
     return true;
   }
   // Per-axis split alignment that makes an ORB safely coarsenable by this MG: align[k] =
@@ -1444,22 +1439,21 @@ class CutcellMG {
   // this MG all compute the SAME value without threading nLevels. The solver builds its shared
   // decomposition with this alignment so initMpi derives nested coarse levels via coarsened().
   static peclet::core::IVec<3> coarsenAlignment(int gnx, int gny, int gnz) {
-    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     C3 gs{gnx, gny, gnz};
     peclet::core::IVec<3> a{1, 1, 1};
     for (bool any = true; any;) {
       any = false;
-      if (can(gs.x)) {
+      if (canHalve(gs.x)) {
         a[0] *= 2;
         gs.x /= 2;
         any = true;
       }
-      if (can(gs.y)) {
+      if (canHalve(gs.y)) {
         a[1] *= 2;
         gs.y /= 2;
         any = true;
       }
-      if (can(gs.z)) {
+      if (canHalve(gs.z)) {
         a[2] *= 2;
         gs.z /= 2;
         any = true;
@@ -1491,19 +1485,18 @@ class CutcellMG {
   // Per-axis coarsening factor a depth-`levels` hierarchy will actually apply: 2^(levels-1),
   // bounded by that axis's factors of two (an odd axis never coarsens, so its factor stays 1).
   static peclet::core::IVec<3> refineFactor(int gnx, int gny, int gnz, int levels) {
-    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
     C3 gs{gnx, gny, gnz};
     peclet::core::IVec<3> r{1, 1, 1};
     for (int L = 1; L < levels; ++L) {
-      if (can(gs.x)) {
+      if (canHalve(gs.x)) {
         r[0] *= 2;
         gs.x /= 2;
       }
-      if (can(gs.y)) {
+      if (canHalve(gs.y)) {
         r[1] *= 2;
         gs.y /= 2;
       }
-      if (can(gs.z)) {
+      if (canHalve(gs.z)) {
         r[2] *= 2;
         gs.z /= 2;
       }
@@ -1554,15 +1547,15 @@ class CutcellMG {
   // (teleLiftable) and no block is thinner than 4 cells (the teleMinExtent_ default).
   static int nestDepth(const peclet::core::decomp::BlockDecomposer<3>& d0) {
     namespace cdec = peclet::core::decomp;
-    auto can = [](int e) { return (e % 2 == 0) && (e / 2 >= 2); };
     cdec::BlockDecomposer<3> d = d0;
     C3 gs{(int)d.globalSize()[0], (int)d.globalSize()[1], (int)d.globalSize()[2]};
     int n = 0;
     for (; n < 4; ++n) {
-      if (!(can(gs.x) || can(gs.y) || can(gs.z)) || !teleLiftable(d, gs) ||
+      if (!(canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z)) || !teleLiftable(d, gs) ||
           cdec::minBlockExtent(d) < 4)
         break;
-      const peclet::core::IVec<3> r{can(gs.x) ? 2 : 1, can(gs.y) ? 2 : 1, can(gs.z) ? 2 : 1};
+      const peclet::core::IVec<3> r{canHalve(gs.x) ? 2 : 1, canHalve(gs.y) ? 2 : 1,
+                                    canHalve(gs.z) ? 2 : 1};
       d = d.coarsened(r);
       gs = C3{gs.x / (int)r[0], gs.y / (int)r[1], gs.z / (int)r[2]};
     }
@@ -1589,9 +1582,8 @@ class CutcellMG {
   static peclet::core::decomp::BlockDecomposer<3> decomposition(std::size_t numBlocks, int gnx,
                                                                 int gny, int gnz, int levels = 0,
                                                                 double maxImbalance = 1.05) {
-    namespace cdec = peclet::core::decomp;
-    using Dec = cdec::BlockDecomposer<3>;
-    const peclet::core::IVec<3> G{gnx, gny, gnz}, one{1, 1, 1};
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    const peclet::core::IVec<3> G{gnx, gny, gnz};
     Dec A(numBlocks, G, coarsenAlignment(gnx, gny, gnz));  // legacy: split the longest axis
     if (levels == 1)
       return A;
@@ -1601,66 +1593,87 @@ class CutcellMG {
     // its imbalance.
     if (!(maxImbalance > 1.0))
       maxImbalance = 1.05;
-    auto cellsOf = [](const peclet::core::IVec<3>& s) {
-      return static_cast<std::size_t>(s[0]) * static_cast<std::size_t>(s[1]) *
-             static_cast<std::size_t>(s[2]);
-    };
-    auto maxCells = [&](const Dec& d) {
-      std::size_t hi = 0;
-      for (const auto& s : d.sizes())
-        hi = std::max(hi, cellsOf(s));
-      return hi;
-    };
-    auto minCells = [&](const Dec& d) {
-      std::size_t lo = std::numeric_limits<std::size_t>::max();
-      for (const auto& s : d.sizes())
-        lo = std::min(lo, cellsOf(s));
-      return lo;
-    };
-    auto imbalanceOf = [&](const Dec& d) {
-      const std::size_t lo = minCells(d);
-      return lo ? static_cast<double>(maxCells(d)) / static_cast<double>(lo)
-                : std::numeric_limits<double>::infinity();
-    };
-    // Decompose the COARSE grid of depth L -- telling the ORB each coarse cell's true extent, so it
-    // compares the axes the fine grid would -- then refine the partition upward: blocks are exact
-    // multiples of r, so every level nests for the full depth. `ok` = false when the coarse grid
-    // is thinner than the rank count (someone would get an empty block) or nothing coarsens.
-    auto coarseFirst = [&](int L, bool& ok, cdec::SplitAxis axis) {
-      ok = false;
-      const peclet::core::IVec<3> r = refineFactor(gnx, gny, gnz, L);
-      if (r[0] == 1 && r[1] == 1 && r[2] == 1)
-        return Dec();
-      const peclet::core::IVec<3> Gc{gnx / r[0], gny / r[1], gnz / r[2]};
-      if (cellsOf(Gc) < numBlocks)
-        return Dec();
-      Dec coarse;
-      coarse.init(numBlocks, Gc, one, r, axis);
-      ok = true;
-      return coarse.refined(r);
-    };
-    // levels >= 2: the legacy coarse-first search, longest-axis split (SplitAxis::Longest) --
-    // bit for bit the pre-2026-10 partitions (review 2026-10-20 #1: published benchmarks such as
-    // foxberry's DECOMP_LEVELS=7 and channel_dns's DECOMP >= 2 must keep reproducing).
-    if (levels >= 2) {
-      for (int L = levels; L >= 2; --L) {
-        bool ok = false;
-        Dec fine = coarseFirst(L, ok, cdec::SplitAxis::Longest);
-        if (!ok) {
-          if (refineFactor(gnx, gny, gnz, L) == one)
-            break;  // nothing coarsens on any axis -- the aligned ORB is all there is
-          continue;
-        }
-        if (imbalanceOf(fine) <= maxImbalance) {
-          if (mgDebugLevel())
-            printf("[mg] decomposition: coarse-first depth %d (imbalance %.3f)\n", L,
-                   imbalanceOf(fine));
-          return fine;
-        }
+    if (levels >= 2)
+      return legacyCoarseFirst(std::move(A), numBlocks, gnx, gny, gnz, levels, maxImbalance);
+    return autoDecomposition(std::move(A), numBlocks, gnx, gny, gnz, maxImbalance);
+  }
+  // decomposition()'s cell counts: one block's cells, the largest and the smallest block of d, and
+  // their ratio (infinity when a block is empty).
+  static std::size_t cellsOf(const peclet::core::IVec<3>& s) {
+    return static_cast<std::size_t>(s[0]) * static_cast<std::size_t>(s[1]) *
+           static_cast<std::size_t>(s[2]);
+  }
+  static std::size_t largestBlock(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    std::size_t hi = 0;
+    for (const auto& s : d.sizes())
+      hi = std::max(hi, cellsOf(s));
+    return hi;
+  }
+  static std::size_t smallestBlock(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    std::size_t lo = std::numeric_limits<std::size_t>::max();
+    for (const auto& s : d.sizes())
+      lo = std::min(lo, cellsOf(s));
+    return lo;
+  }
+  static double imbalanceOf(const peclet::core::decomp::BlockDecomposer<3>& d) {
+    const std::size_t lo = smallestBlock(d);
+    return lo ? static_cast<double>(largestBlock(d)) / static_cast<double>(lo)
+              : std::numeric_limits<double>::infinity();
+  }
+  // Decompose the COARSE grid of depth L -- telling the ORB each coarse cell's true extent, so it
+  // compares the axes the fine grid would -- then refine the partition upward: blocks are exact
+  // multiples of r, so every level nests for the full depth. `ok` = false when the coarse grid
+  // is thinner than the rank count (someone would get an empty block) or nothing coarsens.
+  static peclet::core::decomp::BlockDecomposer<3> coarseFirst(
+      std::size_t numBlocks, int gnx, int gny, int gnz, int L, bool& ok,
+      peclet::core::decomp::SplitAxis axis) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    ok = false;
+    const peclet::core::IVec<3> r = refineFactor(gnx, gny, gnz, L);
+    if (r[0] == 1 && r[1] == 1 && r[2] == 1)
+      return Dec();
+    const peclet::core::IVec<3> Gc{gnx / r[0], gny / r[1], gnz / r[2]};
+    if (cellsOf(Gc) < numBlocks)
+      return Dec();
+    Dec coarse;
+    coarse.init(numBlocks, Gc, peclet::core::IVec<3>{1, 1, 1}, r, axis);
+    ok = true;
+    return coarse.refined(r);
+  }
+  // decomposition(levels >= 2): the legacy coarse-first search, longest-axis split
+  // (SplitAxis::Longest) -- bit for bit the pre-2026-10 partitions (review 2026-10-20 #1: published
+  // benchmarks such as foxberry's DECOMP_LEVELS=7 and channel_dns's DECOMP >= 2 must keep
+  // reproducing). A is the legacy aligned ORB, the fallback.
+  static peclet::core::decomp::BlockDecomposer<3> legacyCoarseFirst(
+      peclet::core::decomp::BlockDecomposer<3> A, std::size_t numBlocks, int gnx, int gny, int gnz,
+      int levels, double maxImbalance) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    const peclet::core::IVec<3> one{1, 1, 1};
+    for (int L = levels; L >= 2; --L) {
+      bool ok = false;
+      Dec fine =
+          coarseFirst(numBlocks, gnx, gny, gnz, L, ok, peclet::core::decomp::SplitAxis::Longest);
+      if (!ok) {
+        if (refineFactor(gnx, gny, gnz, L) == one)
+          break;  // nothing coarsens on any axis -- the aligned ORB is all there is
+        continue;
       }
-      return A;
+      if (imbalanceOf(fine) <= maxImbalance) {
+        if (mgDebugLevel())
+          printf("[mg] decomposition: coarse-first depth %d (imbalance %.3f)\n", L,
+                 imbalanceOf(fine));
+        return fine;
+      }
     }
-    // levels == 0: auto
+    return A;
+  }
+  // decomposition(levels == 0), auto: A-exact, C5/C4, A2 or the A fallback (see decomposition()).
+  static peclet::core::decomp::BlockDecomposer<3> autoDecomposition(
+      peclet::core::decomp::BlockDecomposer<3> A, std::size_t numBlocks, int gnx, int gny, int gnz,
+      double maxImbalance) {
+    namespace cdec = peclet::core::decomp;
+    using Dec = cdec::BlockDecomposer<3>;
+    const peclet::core::IVec<3> G{gnx, gny, gnz}, one{1, 1, 1};
     auto report = [&](const char* branch, const Dec& d) {
       if (mgDebugLevel())
         printf("[mg] decomposition: auto %s (max/min %.3f; legacy %.3f)\n", branch, imbalanceOf(d),
@@ -1672,7 +1685,8 @@ class CutcellMG {
     // code paths; the cell count cannot see their cost (+9.4 % at 12x2, legacy max/mean 1.125), so
     // a candidate that changes them must buy a >= 20 % cut in the critical rank's cells.
     const unsigned axesA = splitAxes(A);
-    const bool legacyImbalanced = 4 * maxCells(A) * numBlocks >= 5 * cellsOf(G);  // max/mean >= 5/4
+    const bool legacyImbalanced =
+        4 * largestBlock(A) * numBlocks >= 5 * cellsOf(G);  // max/mean >= 5/4
     auto within = [&](const Dec& d) {
       const unsigned ax = splitAxes(d);
       return (ax & ~axesA) == 0u && (ax == axesA || legacyImbalanced);
@@ -1681,7 +1695,7 @@ class CutcellMG {
     // one the unguarded policy would take, makes the fallback print "A-fallback (guard)".
     bool guardHit = false;
     auto guardOnly = [&](const Dec& d) { return (splitAxes(d) & ~axesA) == 0u && !within(d); };
-    if (maxCells(A) == minCells(A)) {
+    if (largestBlock(A) == smallestBlock(A)) {
       report("A-exact", A);
       return A;
     }
@@ -1690,29 +1704,29 @@ class CutcellMG {
     const int depthA = nestDepth(A);
     for (int L : {5, 4}) {
       bool ok = false;
-      Dec C = coarseFirst(L, ok, cdec::SplitAxis::Balanced);
+      Dec C = coarseFirst(numBlocks, gnx, gny, gnz, L, ok, cdec::SplitAxis::Balanced);
       if (!ok) {
         if (refineFactor(gnx, gny, gnz, L) == one)
           break;
         continue;
       }
-      if (minCells(C) > 0 && imbalanceOf(C) <= maxImbalance && within(C) &&
+      if (smallestBlock(C) > 0 && imbalanceOf(C) <= maxImbalance && within(C) &&
           nestDepth(C) >= depthA) {
         report(L == 5 ? "C5" : "C4", C);
         return C;
       }
-      if (mgDebugLevel() && minCells(C) > 0 && imbalanceOf(C) <= maxImbalance &&
+      if (mgDebugLevel() && smallestBlock(C) > 0 && imbalanceOf(C) <= maxImbalance &&
           nestDepth(C) >= depthA && guardOnly(C))
         guardHit = true;
     }
     Dec A2;
     A2.init(numBlocks, G, coarsenAlignment(gnx, gny, gnz), one, cdec::SplitAxis::Balanced);
-    if (maxCells(A2) < maxCells(A) && nestDepth(A2) >= std::min(depthA, 3) && within(A2)) {
+    if (largestBlock(A2) < largestBlock(A) && nestDepth(A2) >= std::min(depthA, 3) && within(A2)) {
       report("A2", A2);
       return A2;
     }
-    if (mgDebugLevel() && maxCells(A2) < maxCells(A) && nestDepth(A2) >= std::min(depthA, 3) &&
-        guardOnly(A2))
+    if (mgDebugLevel() && largestBlock(A2) < largestBlock(A) &&
+        nestDepth(A2) >= std::min(depthA, 3) && guardOnly(A2))
       guardHit = true;
     report(guardHit ? "A-fallback (guard)" : "A-fallback", A);
     return A;
@@ -2524,6 +2538,86 @@ class CutcellMG {
                                ": preconditioner produced non-finite z (set_pressure_strict)");
     return maxit;
   }
+  // This rank's index in the solve's communicator (0 single-rank): the Krylov traces print on
+  // rank 0.
+  int commRank() const {
+    int rank = 0;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      MPI_Comm_rank(comm_, &rank);
+#endif
+    return rank;
+  }
+  // The host-scalar attempts' (solvePCGAttempt, solveFCGAttempt) residual of the caller's guess x:
+  // r = b - A x onto the range; returns r0 = max|r|.
+  double guessResidual(Level& l0, CCField b, CCField x, CCField r, CCField Ap,
+                       const StarOverlay* star, int nStar, C3 nnStar) {
+    guessMatvec(l0, Ap, x, star, nStar, nnStar);  // r = b - A x
+    Kokkos::deep_copy(CCExec(), r, b);
+    axpy(r, -1.0, Ap);
+    removeMean(l0, r);  // compatibility: project rhs/residual onto the range
+    return maxabs(l0, r);
+  }
+  // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
+  // stop reference is set (setStopReference; only the balanced-force projection sets it).
+  // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
+  double armStopTest(double r0, double rtol) {
+    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
+    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
+    cgStopRtol_ = rtol;
+    return rref;
+  }
+  // The host-scalar attempts' Ap = A p (with the "all"-scope mean removal) and p^T Ap.
+  double matvecPAp(Level& l0, CCField Ap, CCField p, const StarOverlay* star, int nStar,
+                   C3 nnStar) {
+    guessMatvec(l0, Ap, p, star, nStar, nnStar);
+    if (meanRemovalAll_)
+      removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
+    return dot(l0, p, Ap);
+  }
+  // The host-scalar attempts' x += alpha p, r -= alpha Ap onto the range; returns max|r|. fuse:
+  // K4 (§5.4) C2 + C3, the same MPI calls.
+  double cgUpdate(Level& l0, CCField x, CCField r, CCField p, CCField Ap, double alpha, bool fuse) {
+    if (fuse)
+      return pcgUpdateMeanMaxDist(l0, x, r, p, Ap, alpha);  // K4 C2 + C3
+    axpy(x, alpha, p);
+    axpy(r, -alpha, Ap);
+    removeMean(l0, r);
+    return maxabs(l0, r);
+  }
+  // x onto the range through level 0's iterate l0.x (the host-scalar drivers' exit).
+  void finalRemoveMean(Level& l0, CCField x) {
+    Kokkos::deep_copy(CCExec(), l0.x, x);
+    removeMean(l0, l0.x);
+    Kokkos::deep_copy(CCExec(), x, l0.x);
+  }
+  // solvePCGAttempt's z = M r and r^T z, summed over the ranks; p = z too when p is given (the
+  // first application). f32 (§5.7): the FP32 V-cycle takes e = ilogb(rn) from the GLOBAL max the
+  // host already holds and forms the local r^T z (slot k) in its exit pass; the Allreduce sums it.
+  // fuse: K4 C4, r^T z from the FP64 V-cycle's level-0 exit pass. Else the V-cycle (A5) and dot().
+  double pcgPrecondRz(Level& l0, bool f32, bool fuse, CCField z, CCField r, double rn, int k,
+                      CCField p) {
+    if (f32) {
+      precondVcycleFp32(z, r, std::ilogb(rn), k, CCField());
+      if (p.extent(0) != 0)
+        Kokkos::deep_copy(CCExec(), p, z);
+#ifdef PECLET_FLOW_MPI
+      return allreduce(readSlot(k), MPI_SUM_, l0.comm);
+#else
+      return allreduce(readSlot(k), MPI_SUM_);
+#endif
+    }
+    if (fuse) {
+      const double rz = precondDotDist(z, r);
+      if (p.extent(0) != 0)
+        Kokkos::deep_copy(CCExec(), p, z);
+      return rz;
+    }
+    precondVcycle(z, r);
+    if (p.extent(0) != 0)
+      Kokkos::deep_copy(CCExec(), p, z);
+    return dot(l0, r, z);
+  }
   // One MG-PCG attempt (R, §4: solvePCG's body before the restart wrapper).
   int solvePCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                       double rtol, int pre, int post, int bottom, const StarOverlay* star,
@@ -2539,12 +2633,6 @@ class CutcellMG {
     bottom_ = bottom;
     Level& l0 = lv_[0];
     Kokkos::deep_copy(CCExec(), l0.x, x);
-    auto matvec = [&](CCField y, CCField v) {
-      matvecOverlap(l0, y, v);
-      if (star)
-        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
-    };
-    auto precond = [&](CCField zz, CCField rr) { precondVcycle(zz, rr); };  // A5
     // E-dist (doc/vof_projection_distributed_design.md §6 item 3): solvePCGResident's guess branch,
     // unfused (distributed); with a projected guess r0 below is rref = max|P b|, the zero-guess
     // residual. The guess trace is collective (every rank runs it, rank 0 prints).
@@ -2555,45 +2643,23 @@ class CutcellMG {
       r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar, /*fused=*/false,
                           traceGuess ? &r0w : nullptr);
     } else {
-      matvec(Ap, x);  // r = b - A x
-      Kokkos::deep_copy(CCExec(), r, b);
-      axpy(r, -1.0, Ap);
-      removeMean(l0, r);  // compatibility: project rhs/residual onto the range
-      r0 = maxabs(l0, r);
+      r0 = guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
       r0w = r0;
     }
     if (traceGuess)
       guessTraceSave(x);
     // D-dist (doc/vof_projection_distributed_design.md §5.7): the FP32 V-cycle on an eligible
-    // solve (a global decision: fp32VcycleIneligible reads global data only). It takes
-    // e = ilogb(max|r|) from the GLOBAL max the host already holds (r0, then the stop test's rn)
-    // and forms the local r^T z in its exit pass; the driver allreduces it (the Allreduce dot()
-    // spends). z is zeroed once (§5.5: the exit writes inner cells only, so the never-exchanged
-    // wall ghosts of z and p stay 0).
+    // solve (a global decision: fp32VcycleIneligible reads global data only); pcgPrecondRz. The
+    // driver allreduces its r^T z (the Allreduce dot() spends). z is zeroed once (§5.5: the exit
+    // writes inner cells only, so the never-exchanged wall ghosts of z and p stay 0).
     const bool f32 = beginAttemptPrecision(maxit);
     const bool fuseK4 = distKrylovFusion();  // K4 (§5.4): C2-C4, the same MPI calls
-    auto rzFp32 = [&](int k) {  // the exit pass's local r^T z (slot k), summed over the ranks
-#ifdef PECLET_FLOW_MPI
-      return allreduce(readSlot(k), MPI_SUM_, l0.comm);
-#else
-      return allreduce(readSlot(k), MPI_SUM_);
-#endif
-    };
-    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
-    // stop reference is set (setStopReference; only the balanced-force projection sets it).
-    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
-    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
-    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
-    cgStopRtol_ = rtol;
+    const double rref = armStopTest(r0, rtol);
     int it = 0;
     // Env-gated convergence trace (PECLET_FLOW_MG_DEBUG>=2): |b|inf, r0 and the per-iteration
     // residual, so a decomposition-dependent iteration count can be read as a rate (preconditioner
     // quality) or a floor (round-off) instead of guessed at.
-    int dbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      MPI_Comm_rank(comm_, &dbgRank);
-#endif
+    const int dbgRank = commRank();
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && dbgRank == 0;
     if (trace)
       printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
@@ -2604,42 +2670,20 @@ class CutcellMG {
     // produced NaN/Inf (should not happen — the guards fail safe rather than poisoning x with a
     // NaN alpha/beta and letting the projection silently corrupt every field downstream).
     if (r0 > 0.0 && std::isfinite(r0)) {
-      double rz = 0.0;
-      if (f32) {  // §5.7
+      if (f32)  // §5.5
         Kokkos::deep_copy(CCExec(), z, 0.0);
-        precondVcycleFp32(z, r, std::ilogb(r0), kRz, CCField());
-        Kokkos::deep_copy(CCExec(), p, z);
-        rz = rzFp32(kRz);
-      } else if (fuseK4) {  // K4 C4: r^T z from the V-cycle's level-0 exit pass
-        rz = precondDotDist(z, r);
-        Kokkos::deep_copy(CCExec(), p, z);
-      } else {
-        precond(z, r);
-        Kokkos::deep_copy(CCExec(), p, z);
-        rz = dot(l0, r, z);
-      }
+      double rz = pcgPrecondRz(l0, f32, fuseK4, z, r, r0, kRz, p);  // p = z
       if (!std::isfinite(rz))
         return failNonFiniteZ("solvePCG", l0, x, maxit);
       for (; it < maxit; ++it) {
-        matvec(Ap, p);
-        if (meanRemovalAll_)
-          removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
-        const double pAp = dot(l0, p, Ap);
+        const double pAp = matvecPAp(l0, Ap, p, star, nStar, nnStar);
         if (!std::isfinite(pAp) || pAp <= 1e-300) {
           if (!std::isfinite(pAp))
             solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
           break;                  // keep the last finite iterate
         }
         const double alpha = rz / pAp;
-        double rn = 0.0;
-        if (fuseK4) {
-          rn = pcgUpdateMeanMaxDist(l0, x, r, p, Ap, alpha);  // K4 C2 + C3
-        } else {
-          axpy(x, alpha, p);
-          axpy(r, -alpha, Ap);
-          removeMean(l0, r);
-          rn = maxabs(l0, r);
-        }
+        const double rn = cgUpdate(l0, x, r, p, Ap, alpha, fuseK4);
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
@@ -2647,16 +2691,7 @@ class CutcellMG {
           ++it;
           break;
         }
-        double rznew = 0.0;
-        if (f32) {  // §5.7
-          precondVcycleFp32(z, r, std::ilogb(rn), kRzNew, CCField());
-          rznew = rzFp32(kRzNew);
-        } else if (fuseK4) {
-          rznew = precondDotDist(z, r);  // K4 C4
-        } else {
-          precond(z, r);
-          rznew = dot(l0, r, z);
-        }
+        const double rznew = pcgPrecondRz(l0, f32, fuseK4, z, r, rn, kRzNew, CCField());
         const double beta = rznew / rz;
         if (!std::isfinite(rznew)) {
           solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
@@ -2666,9 +2701,7 @@ class CutcellMG {
         rz = rznew;
       }
     }
-    Kokkos::deep_copy(CCExec(), l0.x, x);
-    removeMean(l0, l0.x);
-    Kokkos::deep_copy(CCExec(), x, l0.x);
+    finalRemoveMean(l0, x);
     if (traceGuess)
       guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
     return it;
@@ -3430,6 +3463,24 @@ class CutcellMG {
                              nnStar);
     });
   }
+  // solveFCGAttempt's z = M r and r^T z; p = z too when p is given (the first application). fuse:
+  // K4 C4, r^T z from the FP64 V-cycle's level-0 exit pass. Else the V-cycle -- FP32 with
+  // e = ilogb(rn) (D §4.4.5; FCG keeps its own dots) or FP64 (A5) -- and dot().
+  double fcgPrecondRz(Level& l0, bool f32, bool fuse, CCField z, CCField r, double rn, CCField p) {
+    if (fuse) {
+      const double rz = precondDotDist(z, r);
+      if (p.extent(0) != 0)
+        Kokkos::deep_copy(CCExec(), p, z);
+      return rz;
+    }
+    if (f32)
+      precondVcycleFp32(z, r, std::ilogb(rn), -1, CCField());
+    else
+      precondVcycle(z, r);
+    if (p.extent(0) != 0)
+      Kokkos::deep_copy(CCExec(), p, z);
+    return dot(l0, r, z);
+  }
   // One flexible-CG attempt (R, §4: solveFCG's body before the restart wrapper).
   int solveFCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField zp, CCField Ap,
                       int maxit, double rtol, int pre, int post, int bottom,
@@ -3442,28 +3493,13 @@ class CutcellMG {
     bottom_ = bottom;
     Level& l0 = lv_[0];
     Kokkos::deep_copy(CCExec(), l0.x, x);
-    auto matvec = [&](CCField y, CCField v) {
-      matvecOverlap(l0, y, v);
-      if (star)
-        starApplyDelta(y, CCConst(v), *star, nStar, nnStar, l0.ext, G, l0.ext, G, exactResidual_);
-    };
     // D (§4.4.5): the FP32 V-cycle on an eligible solve, e = ilogb(max|r|) (on entry ilogb(r0): the
     // stop reference under E, see solvePCGResident); FCG keeps its own dots
     const bool f32 = beginAttemptPrecision(maxit);
     const bool fuseC23 = distKrylovFusion();  // K4 (§5.4): C2 + C3, the same MPI calls
     const bool fuseC4 = fuseC23 && !f32;      // C4 on the FP64 V-cycle (FP32 keeps FCG's dots)
     healthLog_.clear();
-    auto precond = [&](CCField zz, CCField rr, double rn) {
-      if (f32)
-        precondVcycleFp32(zz, rr, std::ilogb(rn), -1, CCField());
-      else
-        precondVcycle(zz, rr);  // A5
-    };
-    int dbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-    if (distributed_)
-      MPI_Comm_rank(comm_, &dbgRank);
-#endif
+    const int dbgRank = commRank();
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && dbgRank == 0;
     // E (§5.3): with a projected guess r0 is rref = max|P b| (see solvePCGResident). The guess
     // trace is collective (E-dist §6 item 2: every rank runs it, rank 0 prints), so it does not
@@ -3475,21 +3511,12 @@ class CutcellMG {
       r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
                           hostKrylovFusion() && star == nullptr, traceGuess ? &r0w : nullptr);
     } else {
-      matvec(Ap, x);  // r = b - A x
-      Kokkos::deep_copy(CCExec(), r, b);
-      axpy(r, -1.0, Ap);
-      removeMean(l0, r);  // compatibility: project rhs/residual onto the range
-      r0 = maxabs(l0, r);
+      r0 = guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
       r0w = r0;
     }
     if (traceGuess)
       guessTraceSave(x);
-    // The stop reference: r0 (the default), or the caller's FULL right-hand-side norm when a
-    // stop reference is set (setStopReference; only the balanced-force projection sets it).
-    // With it unset rref IS r0, so `rtol * rref` is bit-for-bit the old test.
-    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
-    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
-    cgStopRtol_ = rtol;
+    const double rref = armStopTest(r0, rtol);
     int it = 0;
     if (trace)
       printf("[mg] fcg solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0,
@@ -3499,37 +3526,18 @@ class CutcellMG {
     if (r0 > 0.0 && std::isfinite(r0)) {
       if (f32 && distributed_)  // D-dist §5.5: the exit writes inner z only; wall ghosts stay 0
         Kokkos::deep_copy(CCExec(), z, 0.0);
-      double rz = 0.0;
-      if (fuseC4) {  // K4 C4: r^T z from the V-cycle's level-0 exit pass
-        rz = precondDotDist(z, r);
-        Kokkos::deep_copy(CCExec(), p, z);
-      } else {
-        precond(z, r, r0);
-        Kokkos::deep_copy(CCExec(), p, z);
-        rz = dot(l0, r, z);
-      }
+      double rz = fcgPrecondRz(l0, f32, fuseC4, z, r, r0, p);  // p = z
       if (!std::isfinite(rz))
         return failNonFiniteZ("solveFCG", l0, x, maxit);
       for (; it < maxit; ++it) {
-        matvec(Ap, p);
-        if (meanRemovalAll_)
-          removeMean(l0, Ap);  // A preserves mean-freeness; "fine" scope trusts that
-        const double pAp = dot(l0, p, Ap);
+        const double pAp = matvecPAp(l0, Ap, p, star, nStar, nnStar);
         if (!std::isfinite(pAp) || pAp <= 1e-300) {
           if (!std::isfinite(pAp))
             solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
           break;                  // keep the last finite iterate
         }
         const double alpha = rz / pAp;
-        double rn = 0.0;
-        if (fuseC23) {
-          rn = pcgUpdateMeanMaxDist(l0, x, r, p, Ap, alpha);  // K4 C2 + C3
-        } else {
-          axpy(x, alpha, p);
-          axpy(r, -alpha, Ap);
-          removeMean(l0, r);
-          rn = maxabs(l0, r);
-        }
+        const double rn = cgUpdate(l0, x, r, p, Ap, alpha, fuseC23);
         if (trace)
           printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
         if (rn < rtol * rref) {
@@ -3538,13 +3546,7 @@ class CutcellMG {
           break;
         }
         Kokkos::deep_copy(CCExec(), zp, z);  // z_k, before the preconditioner overwrites it
-        double rznew = 0.0;
-        if (fuseC4) {
-          rznew = precondDotDist(z, r);  // K4 C4
-        } else {
-          precond(z, r, rn);
-          rznew = dot(l0, r, z);
-        }
+        const double rznew = fcgPrecondRz(l0, f32, fuseC4, z, r, rn, CCField());
         const double rzcross = dot(l0, r, zp);
         if (!std::isfinite(rznew) || !std::isfinite(rzcross)) {
           solveFailed_ = true;  // ISSUES sweep item 6: a breakdown, not a convergence
@@ -3566,14 +3568,65 @@ class CutcellMG {
         rz = rznew;
       }
     }
-    Kokkos::deep_copy(CCExec(), l0.x, x);
-    removeMean(l0, l0.x);
-    Kokkos::deep_copy(CCExec(), x, l0.x);
+    finalRemoveMean(l0, x);
     if (traceGuess)
       guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
+  // solveBiCGStab's matvec y = A q: the binary-openness 7-point op plus the ghost-projection
+  // overlay delta. Distributed with a g=2 staging field (h2 given): q's inner cells are staged on
+  // the ext2 block, its 2-deep halo exchanged once, and q's g=1 halo read back from the staged
+  // copy, so one exchange serves both the 7-point op and the overlay (applied in ghost mode).
+  void gpMatvec(Level& l0, CCField y, CCField q, const GpOverlayReal<MReal>& ov, int nOv, C3 nn
+#ifdef PECLET_FLOW_MPI
+                ,
+                CCField xg2, GridHalo<double>* h2, C3 ext2
+#endif
+  ) {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && h2) {
+      stageG2(l0, q, xg2, ext2);  // inner cells g=1 block -> g=2 block
+      h2->exchange(xg2);          // 2-deep halo (cross-rank + periodic)
+      unstageG2(l0, q, xg2);      // whole l0 block back (fills q's g=1 halo — no 2nd exchange)
+      applyOutflowGhost(l0, q);
+      applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
+                         G);
+      gpApplyDelta(y, CCConst(xg2), ov, nOv, nn, l0.ext, G, ext2, 2, /*useGhost=*/true);
+      return;
+    }
+#endif
+    fill(l0, q);
+    applyOutflowGhost(l0, q);
+    applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext, G);
+    gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G, l0.ext, G);
+  }
+  // solveBiCGStab's z = M r with M one symmetric V-cycle on level 0's own rhs and x (the copying
+  // form; precondVcycle's A5 runs in place on the caller's vectors).
+  void precondVcycleCopy(CCField zz, CCField rr) {
+    Level& l0 = lv_[0];
+    Kokkos::deep_copy(CCExec(), l0.rhs, rr);
+    Kokkos::deep_copy(CCExec(), l0.x, 0.0);
+    vcycle(0, /*sym=*/true);
+    Kokkos::deep_copy(CCExec(), zz, l0.x);
+  }
+  // solveBiCGStab's exit bookkeeping: running counts of breakdown (exit codes 1-5) and stagnation
+  // (6) exits, and the env-gated exit trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the
+  // first PECLET_FLOW_MG_DEBUG_SOLVES solves, rank 0): the exit reason, r0, the last |r|inf the
+  // stop test saw and those counts. Host integers and values the solve already computed (no extra
+  // reduction), so the solve is unchanged with the trace on or off.
+  void noteBicgExit(int exitCode, int it, int maxit, double r0n, double rnLast, double rtol) {
+    if (exitCode >= 1 && exitCode <= 5)
+      ++dbgBicgBreakdowns_;
+    else if (exitCode == 6)
+      ++dbgBicgStagnations_;
+    if (mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves() && commRank() == 0)
+      printf(
+          "[mg] bicgstab solve %d: exit=%d it=%d maxit=%d r0=%.6e |r|inf=%.6e rtol=%.1e "
+          "r/r0=%.4e breakdowns=%d stagnations=%d\n",
+          dbgSolve_, exitCode, it, maxit, r0n, rnLast, rtol, r0n > 0.0 ? rnLast / r0n : 0.0,
+          dbgBicgBreakdowns_, dbgBicgStagnations_);
+  }
   // BiCGStab preconditioned by one symmetric V-cycle, for the NONSYMMETRIC ghost-projection
   // operator A = (binary-openness 7-point op) + (per-row overlay delta, gpApplyDelta). The MG
   // hierarchy/preconditioner only ever sees the symmetric binary surrogate its levels were built
@@ -3605,28 +3658,10 @@ class CutcellMG {
     Level& l0 = lv_[0];
     auto matvec = [&](CCField y, CCField q) {
 #ifdef PECLET_FLOW_MPI
-      if (distributed_ && h2) {
-        stageG2(l0, q, xg2, ext2);  // inner cells g=1 block -> g=2 block
-        h2->exchange(xg2);          // 2-deep halo (cross-rank + periodic)
-        unstageG2(l0, q, xg2);      // whole l0 block back (fills q's g=1 halo — no 2nd exchange)
-        applyOutflowGhost(l0, q);
-        applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
-                           G);
-        gpApplyDelta(y, CCConst(xg2), ov, nOv, nn, l0.ext, G, ext2, 2, /*useGhost=*/true);
-        return;
-      }
+      gpMatvec(l0, y, q, ov, nOv, nn, xg2, h2, ext2);
+#else
+      gpMatvec(l0, y, q, ov, nOv, nn);
 #endif
-      fill(l0, q);
-      applyOutflowGhost(l0, q);
-      applyCutcellOpFace(y, CCConst(q), FPC(l0.AC), FPC(l0.AFX), FPC(l0.AFY), FPC(l0.AFZ), l0.ext,
-                         G);
-      gpApplyDelta(y, CCConst(q), ov, nOv, nn, l0.ext, G, l0.ext, G);
-    };
-    auto precond = [&](CCField zz, CCField rr) {
-      Kokkos::deep_copy(CCExec(), l0.rhs, rr);
-      Kokkos::deep_copy(CCExec(), l0.x, 0.0);
-      vcycle(0, /*sym=*/true);
-      Kokkos::deep_copy(CCExec(), zz, l0.x);
     };
     matvec(t, x);  // r = b - A x  (t as scratch)
     Kokkos::deep_copy(CCExec(), r, b);
@@ -3656,7 +3691,7 @@ class CutcellMG {
         rho = rhoNew;
         axpy(p, -omega, v);  // p = r + beta (p - omega v)
         aypx(p, beta, r);
-        precond(z, p);
+        precondVcycleCopy(z, p);
         matvec(v, z);
         removeMean(l0, v);
         const double rhv = dot(l0, rh, v);
@@ -3679,7 +3714,7 @@ class CutcellMG {
           exitCode = 0;
           break;
         }
-        precond(z2, r);
+        precondVcycleCopy(z2, r);
         matvec(t, z2);
         removeMean(l0, t);
         const double tt = dot(l0, t, t);
@@ -3719,32 +3754,9 @@ class CutcellMG {
         }
       }
     }
-    // Env-gated exit trace (debug output only: PECLET_FLOW_MG_DEBUG >= 2, the first
-    // PECLET_FLOW_MG_DEBUG_SOLVES solves, rank 0): the exit reason, r0, the last |r|inf the stop
-    // test saw, and running counts of breakdown (1-5) and stagnation (6) exits. Host integers and
-    // values the solve already computed (no extra reduction), so the solve is unchanged with it on
-    // or off.
-    if (exitCode >= 1 && exitCode <= 5)
-      ++dbgBicgBreakdowns_;
-    else if (exitCode == 6)
-      ++dbgBicgStagnations_;
-    if (mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves()) {
-      int dbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-      if (distributed_)
-        MPI_Comm_rank(comm_, &dbgRank);
-#endif
-      if (dbgRank == 0)
-        printf(
-            "[mg] bicgstab solve %d: exit=%d it=%d maxit=%d r0=%.6e |r|inf=%.6e rtol=%.1e "
-            "r/r0=%.4e breakdowns=%d stagnations=%d\n",
-            dbgSolve_, exitCode, it, maxit, r0n, rnLast, rtol, r0n > 0.0 ? rnLast / r0n : 0.0,
-            dbgBicgBreakdowns_, dbgBicgStagnations_);
-    }
+    noteBicgExit(exitCode, it, maxit, r0n, rnLast, rtol);
     ++dbgSolve_;
-    Kokkos::deep_copy(CCExec(), l0.x, x);
-    removeMean(l0, l0.x);
-    Kokkos::deep_copy(CCExec(), x, l0.x);
+    finalRemoveMean(l0, x);
     return it;
   }
 
@@ -7809,13 +7821,6 @@ class CutcellMG {
                                       int* align = nullptr) {
     using Dec = peclet::core::decomp::BlockDecomposer<3>;
     std::vector<PlanRow> rows;
-    auto can = [](int d) { return (d % 2 == 0) && (d / 2 >= 2); };
-    auto evenOn = [](const Dec& d, int ax) {
-      for (std::size_t b = 0; b < d.sizes().size(); ++b)
-        if ((d.origins()[b][ax] % 2) || (d.sizes()[b][ax] % 2))
-          return false;
-      return true;
-    };
     Dec cur;
     peclet::core::Index maxBlockCells = 0;  // 0: sibling merges only (an unweighted dec0)
     if (weights) {
@@ -7850,7 +7855,7 @@ class CutcellMG {
       const bool autoStop =
           autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissible(gs, 4, false, -1, perBc);
       if (L + 1 < nLevelsCap && !autoStop) {
-        const bool canAny = can(gs.x) || can(gs.y) || can(gs.z);
+        const bool canAny = canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z);
         auto liftable = [&](const Dec& d) { return teleLiftable(d, gs); };
         const bool blocked = !liftable(cur);
         const bool tooSmall = minExtent > 0 && peclet::core::decomp::minBlockExtent(cur) <
@@ -7867,15 +7872,15 @@ class CutcellMG {
             r.tele = true;
           }
         }
-        if (can(gs.x) && evenOn(cur, 0)) {
+        if (canHalve(gs.x) && evenBlocksOn(cur, 0)) {
           r.ratio.x = 2;
           next.x = gs.x / 2;
         }
-        if (can(gs.y) && evenOn(cur, 1)) {
+        if (canHalve(gs.y) && evenBlocksOn(cur, 1)) {
           r.ratio.y = 2;
           next.y = gs.y / 2;
         }
-        if (can(gs.z) && evenOn(cur, 2)) {
+        if (canHalve(gs.z) && evenBlocksOn(cur, 2)) {
           r.ratio.z = 2;
           next.z = gs.z / 2;
         }
