@@ -111,6 +111,15 @@ driver; first application passes p, so every branch keeps its copy/dot/Allreduce
 (predict_hierarchy over 720 configurations with the decomposition debug lines; FCG single rank; distributed FCG,
 ghost BiCGStab and outflow PCG/FCG at np 2/4; the same Krylov cases on the GPU) bitwise after every step. SASS 836 S0.
 
+Evidence, flow F3 (WO-22, 2026-11-16): replace-temp-with-query 1/1 (CutcellMG solveWithRestart/guessTraceExit/
+solveChebyshev rank-0 guards -> commRank(); guessTraceExit keeps its Allreduce first; solveChebyshev 22.9 -> 20.6) and
+extract-kernel-phase 1/1 on host debug code (`src/ghost_projection_debug.hpp` gpDebugReport 49.0 -> 0.0, file 49.0 -> 4.0:
+host copy into a `GpOverlayT<HostSpace, Real>`, row census, rho mismatch, two printers, row dump). Extra gate: the
+PECLET_FLOW_GP_DEBUG=2 report (text + per-rank .bin dumps) on the state_hash collocated 'ghost' bed, np 1/2/4,
+byte-identical base vs head on the host build. On the GPU the overlay's row slots come from an atomic counter, so the
+report's row order varies run to run (base vs base too): compare it there as multisets (census lines, worst-row rho,
+sorted .bin records). SASS 836 S0; GPU state_hash + sharp VoF bitwise.
+
 ## Anti-patterns (review rejects)
 
 - **Settled-decision drift** (flow `CLAUDE.md`, `../docs/decisions/flow.md`): the collocated coupling is the
