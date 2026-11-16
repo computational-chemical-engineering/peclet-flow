@@ -102,6 +102,15 @@ gate (GraphAMG bottom at np 1/2/4 and with walls, telescoped hierarchies at np 3
 reuse it (`branch_probe.py` pattern) for any MG step, since state_hash does not reach those paths. Gate `--base` must
 be a commit with the same `.codehealth/` as the head's parent (a playbook commit after the CB fails forbid/scope).
 
+Evidence, flow F2 (WO-21, 2026-11-16, same file): extract-kernel-phase 3/3 + dedup (host predicates) 1/1 accepted, host
+orchestration only. decomposition 40.0 -> 1.0 (legacy search / auto policy / cell counts as static members), six
+`can`/`evenOn` copies -> canHalve/evenBlocksOn (predict 34.2 -> 29.5), solvePCGAttempt 40.5 -> 25.4 and solveFCGAttempt
+47.6 -> 34.0 (shared guessResidual/armStopTest/matvecPAp/cgUpdate/finalRemoveMean/commRank + one z = M r helper per
+driver; first application passes p, so every branch keeps its copy/dot/Allreduce order), solveBiCGStab 45.5 -> 31.0
+(gpMatvec, precondVcycleCopy, noteBicgExit). solvePCGResident untouched. Coverage outside the gate: `krylov_probe.py`
+(predict_hierarchy over 720 configurations with the decomposition debug lines; FCG single rank; distributed FCG,
+ghost BiCGStab and outflow PCG/FCG at np 2/4; the same Krylov cases on the GPU) bitwise after every step. SASS 836 S0.
+
 ## Anti-patterns (review rejects)
 
 - **Settled-decision drift** (flow `CLAUDE.md`, `../docs/decisions/flow.md`): the collocated coupling is the
