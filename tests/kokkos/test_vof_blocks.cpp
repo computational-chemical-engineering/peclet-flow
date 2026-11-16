@@ -439,7 +439,12 @@ void gateOneBubble() {
   CHECK(nRecentre > 0);
   CHECK(nRecentreP > 0);
   CHECK(unionOther == 0);
-  CHECK(prodWorst < 1e-15);
+  // Round-off bound, not structural (Decision Desk vof-blocks-prodworst, 2026-11-16): the eps =
+  // 1e-12 drift depends on which glibc libm variant (FMA or not) evaluates acos/cos/cbrt in the
+  // PLIC inversion, picked by CPU: 4.3e-19 with FMA, 7.4e-15 under
+  // GLIBC_TUNABLES=glibc.cpu.hwcaps=-FMA, 7.9e-15 on the ubuntu-26.04 CI runner. A real container
+  // defect shows at the eps scale (1e-12) or above.
+  CHECK(prodWorst < 1e-13);
   CHECK(std::fabs(sp.discarded) < 1e-15);
   CHECK(std::fabs(v1 - v0) / v0 < 1e-13);
   CHECK(std::fabs(v2 - v0) / v0 < 1e-13);
