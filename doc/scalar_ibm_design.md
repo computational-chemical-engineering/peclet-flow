@@ -1373,7 +1373,7 @@ The temperature becomes a two-field (liquid/vapour) problem with K = 1.
 
 ## 8. Python API (D15, D16)
 
-Both `Solver` and `SolverColocated`. Names were checked against `../docs/NAMING.md`:
+Both `Solver` and `SolverColocated`. Names were checked against `../../docs/NAMING.md`:
 - strings for enumerations;
 - `set_` setters;
 - computed reductions as bare-name methods;
@@ -1457,7 +1457,7 @@ General rules for every WO:
 - Where: core worktree `suite/core-scalar-ibm`, branch `scalar-ibm`. Build flow against it with
   `-DPECLET_SIBLING_PECLET_CORE=/home/frankp/Codes/suite/core-scalar-ibm`.
 - Files: new `include/peclet/core/scheme/cut_cell_geometry.hpp`, `.../probe_flux.hpp`,
-  `tests/test_cut_cell_geometry.cpp`, `tests/test_probe_flux.cpp`; CMake registration.
+  `../../core/tests/test_cut_cell_geometry.cpp`, `../../core/tests/test_probe_flux.cpp`; CMake registration.
 - Functions: §7.1, except the plane source.
 - Gate: G-geom (a)–(d) of §11, plus the probe unit cases.
 - Must not touch: any existing core header.
@@ -1608,7 +1608,7 @@ General rules for every WO:
 
 **WO-10 — documentation.**
 - `CLAUDE.md` (a scalar section: the opt-in, refusals, traps), the register entries of §12,
-  `../docs/NAMING.md` rows for the new names (including A2's diagnostics key `max_cell_peclet`),
+  `../../docs/NAMING.md` rows for the new names (including A2's diagnostics key `max_cell_peclet`),
   the flow `doc/README.md` index.
 - Gate: review only.
 
@@ -1960,7 +1960,7 @@ Rules:
 | Q3 | Depth at scale without telescoping | **fact** | in-place depth only | if steady singular at np ≥ 8 needs > 1.5× the np = 1 iterations, add core stage telescoping (`chooseStageTarget`/`RedistributeTopology`, as CutcellMG) |
 | Q4 | Contact-region accuracy for packed-bed Nu | **fact** — **TRIGGERED by WO-8 (D-WO8-2); OPEN → Frank** | ladder of §3.3, one solid DOF per cell | G13 self-convergence < 1 or R2 > 1 % → design a contact model (Claassen 2024 line). *Status (WO-10):* G13's conjugate contact row (Λ_s/Λ_f = 100) self-converges at order −2.84 while the Dirichlet rows reach 1.91–1.92 and Λ_s = Λ_f is exact to 1e-6, so the probes are exonerated. Cause: the point-sampled SDF closes every fluid wedge thinner than ~h, so the neck comes out √(a² + Rh) instead of a, and conducting sub-cell gaps fuse. The row is INFO, marked OPEN. Options for Frank: an architect-designed contact model (body-aware record, per-body SDF at the face samples, plus a lubrication-type contact conductance; Claassen 2024 / Peters' very-close faces), a pre-asymptotic restatement, or a resolution requirement only. |
 | Q5 | API spelling of the opt-in | **user preference** — **DECIDED by Frank 2026-10-22: keep `cutcell=`** | `add_scalar(..., cutcell=True)`, the spelling of `set_solid(..., cutcell_pressure=)` | — (ships in flow 1.4.0; a rename after that needs an alias, NAMING §0). With it Frank decided the three PENDING NAMING rows: `set_scalar_residual_tolerance`, `max_iter`, `num_mg_levels` (flow 7ade940, 6f29ad7, aed416c). |
-| Q6 | The legacy `add_scalar` diffusivity is in internal units under an armed extent | **user preference** (scope) — **DECIDED by Frank 2026-10-02: fix it; done on `scalar-units`, merged 184ae9f (§1.2 amendment)** | leave legacy untouched; document — **DEFAULT-PENDING-USER** | fix at the next breaking release, or make cutcell the default (Q7). *Status:* decided and done (§1.2 amendment); the register entry is in `../docs/decisions/flow.md` (umbrella 4661441). |
+| Q6 | The legacy `add_scalar` diffusivity is in internal units under an armed extent | **user preference** (scope) — **DECIDED by Frank 2026-10-02: fix it; done on `scalar-units`, merged 184ae9f (§1.2 amendment)** | leave legacy untouched; document — **DEFAULT-PENDING-USER** | fix at the next breaking release, or make cutcell the default (Q7). *Status:* decided and done (§1.2 amendment); the register entry is in `../../docs/decisions/flow.md` (umbrella 4661441). |
 | Q7 | Should cut-cell become the default scalar discretization? | **user preference** — **DECIDED by Frank 2026-10-22: opt-in this release** | opt-in (`cutcell=False` the default) in flow 1.4.0 | a new recorded decision after 1.4.0 has shipped (G13's conjugate contact row, Q4, is still OPEN) |
 | Q8 | First-order FOU at small-cell faces on slip walls / interfaces | **fact** — **not triggered (WO-5)** | the dynamic split (§6.3) | if the G9 L1 error at the finest grid is dominated by the cut band (> 50 % of the total), or at VoF species time: implement WSRD with a G = 3 scalar block. *Status:* the cut band carries 1.4 % (cut cells) / 4.5 % (± one cell) of FOU's L1 error at R_o/h 64, and 0.0 % / 0.3 % of Koren's: far from 50 %. WSRD stays the recorded alternative for VoF species and slip walls. |
 | Q9 | Memory and time per scalar | **fact** — **triggered by WO-9a, addressed by WO-9b + D-WO9-3** | separate level-0 surrogate storage, host Krylov scalars | G-perf red flag → derive the level-0 surrogate from the bands on the fly; device-resident Krylov scalars; fused two-field exchange. *Status:* the CUDA path was synchronization-bound (advance ÷ projection 33.7; 40 769 stream syncs in 3 steps); WO-9b's bitwise changes (one-launch coarse fills, device-resident Krylov scalars, reused coarse wall gather) cut the syncs to 922 and the GPU ratio to 0.96–0.98 under contention. Memory 237 B/cell (≤ 300). Host ratio 1.39–1.58 with the level-rule switch at κ_A 13; D-WO9-3 moved it to 25, giving 1.05 (OMP 4, load 37–45; A3). Not done: a fused two-colour sweep, a vectorized trilinear prolongation (flow-wide), surrogate-only float storage. |

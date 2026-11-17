@@ -474,7 +474,7 @@ reported, not blocking).
 
 **WO-1: core additions (core repo; then tag, then flow pin bump in WO-2a's commit).**
 - Add §5.1 (a)–(d) to `curvature.hpp`, with doc comments that carry the equivalence arguments above.
-- Tests in `core/tests/test_vof_pvfit.cpp`, or a new `test_vof_pvcache.cpp` registered the same
+- Tests in `core/tests/test_vof_pvfit.cpp`, or a new `../../core/tests/test_vof_pvcache.cpp` registered the same
   way. Use the existing random-case generator (planted rejections, random metrics) and run on the
   default execution space and on the host space:
   - **T1.** The refactored `pvFitTerm` equals a frozen verbatim copy of today's `pvFitTerm`,
@@ -502,7 +502,7 @@ reported, not blocking).
       1e-15.
     - A tilted plane against a fine triangulated quadrature of the polygon to 1e-12.
 - **Accept:** the T1–T5 core ctests pass on host-openmp and CUDA; core CI is green; a tag is cut
-  per `docs/RELEASE.md` (additive, so a minor version).
+  per `../../docs/RELEASE.md` (additive, so a minor version).
 
 **WO-2a: flow polygon cache, support prefilter, lower-triangle accumulation (bitwise). Pin bump.**
 - Add `slot_` to `VofCurvature` and `slot` to `VofCurvJob` and `VofCurvFallbackJob`.
@@ -558,7 +558,7 @@ reported, not blocking).
 
 **WO-4: record.**
 - Update `doc/vof_perf_STATE.md` and `doc/vof_step_performance_log.md`.
-- Add the register entries in `../docs/decisions/flow.md` (and the `DECISIONS.md` index line) if
+- Add the register entries in `../../docs/decisions/flow.md` (and the `../../docs/DECISIONS.md` index line) if
   WO-3 did not already.
 - Update the flow CLAUDE.md VoF paragraph only if a prohibition must be inlined (the longer-column
   rejection, one line).
@@ -590,7 +590,7 @@ measurements in §2 are the shipped algorithm's numbers.
 
 ---
 
-## 8. Register entries to add (`suite/docs/decisions/flow.md`, area flow; index lines in `DECISIONS.md`)
+## 8. Register entries to add (`suite/docs/decisions/flow.md`, area flow; index lines in `../../docs/DECISIONS.md`)
 
 1. **Tier-3 PV fit: each interfacial cell's PLIC polygon data is built ONCE per curvature pass (a
    per-cell cache filled in the planes pass, indexed by a slot map), never once per target.**

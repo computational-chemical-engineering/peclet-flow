@@ -1,7 +1,7 @@
 # Anderson acceleration of steady marches — design note
 
 *2026-10-02, architect pass on `doc/steady_acceleration_brief.md`. Status: **proposed**, not
-implemented. The decisions in §1 go to `../docs/decisions/flow.md` once approved. An implementer
+implemented. The decisions in §1 go to `../../docs/decisions/flow.md` once approved. An implementer
 should not need to choose anything this note leaves open. Where a choice depends on a measurement,
 §10 states the default to use and the experiment that would change it.*
 
@@ -408,7 +408,7 @@ only and loses P.
 and the Python driver.
 - *Rejected:* flow-local first, promoted when amr adopts it. A later move is a second port with its
   own bit-identity proof; the core is grid-agnostic already and sits naturally beside core's
-  `solver/` layer (BiCGStab, GraphAMG); amr's lmax = 0 march has the same (u, P) structure.
+  `../../core/include/peclet/core/solver/` layer (BiCGStab, GraphAMG); amr's lmax = 0 march has the same (u, P) structure.
 - *Cost:* core must be tagged and published before flow ships WO-4 (suite release order).
 
 ### 1.1 Evidence: a throwaway prototype (2026-10-02, measured)
@@ -922,7 +922,7 @@ instrument, with no consequence.
 
 | file | content |
 |---|---|
-| **core:** `include/peclet/core/solver/anderson.hpp` | `peclet::core::solver::AndersonCore` (D13) — grid-agnostic: takes a core-level descriptor `AndersonState`, which since rev 2 holds the state views, the roles Velocity/Carried, the ghost width `G` and the collectives `AndersonComm`; the rev-0 fields fluid mask, `cP` and `gauged` and the Pressure role are deleted by WO-3b part 2, and rev 1's `innerTolerance` by WO-3c. It implements §4 (kernels MIX/COPY/DIFF/R/COUNT, the reductions, host LS, the safeguards of D5, MPI packets). Header-only, `inline` members, beside `csr_bicgstab.hpp`/`vector_ops.hpp`. No flow dependency — unit-testable with synthetic maps. The parameter signature (dt, ρ, μ, F) is NOT in the core descriptor; the flow adapter checks it. |
+| **core:** `include/peclet/core/solver/anderson.hpp` | `peclet::core::solver::AndersonCore` (D13) — grid-agnostic: takes a core-level descriptor `AndersonState`, which since rev 2 holds the state views, the roles Velocity/Carried, the ghost width `G` and the collectives `AndersonComm`; the rev-0 fields fluid mask, `cP` and `gauged` and the Pressure role are deleted by WO-3b part 2, and rev 1's `innerTolerance` by WO-3c. It implements §4 (kernels MIX/COPY/DIFF/R/COUNT, the reductions, host LS, the safeguards of D5, MPI packets). Header-only, `inline` members, beside `../../core/include/peclet/core/solver/csr_bicgstab.hpp`/`../../core/include/peclet/core/solver/vector_ops.hpp`. No flow dependency — unit-testable with synthetic maps. The parameter signature (dt, ρ, μ, F) is NOT in the core descriptor; the flow adapter checks it. |
 | `src/anderson_accelerator.hpp` | `template <class Grid> class AndersonAccelerator` — holds `Solver<Grid>&` + an `AndersonCore`; `step(bool accelerate)` = §4.3 around `solver.step()`; signature read; status accessors. Explicitly instantiated in `src/flow_solver_staggered.cpp` / `src/flow_solver_colocated.cpp` with a matching `extern template` at the end of the header (the G.8 pattern; link via `peclet_flow_solver`). |
 | `src/flow_ibm.hpp` | declare `struct MarchState` (= a `core::solver::AndersonState` + the flow signature) and `MarchState marchState();` (public C++, **not bound**). |
 | `src/flow_ibm_diagnostics.hpp` | define `marchState()`: builds the field list and roles of §3.1 (velocity components Velocity, `P_` and the face field Carried), `e_`, `G`, the signature values, and (MPI) `comm_`/`distributed_`; throws `std::runtime_error` naming the first refusal of §5.3. |
@@ -1256,7 +1256,7 @@ the plain march decides. The reasons a march can return are "certified", "max_st
 | **G7** unstable / unsteady (rev 2) | (a) both drivers on a case whose plain march diverges; (b) the core converges on an unstable and on a stable non-normal map and judges neither (U4, U4b); the driver's instrument never passes a growing tail (WO-7 scripted test iv); (c) no false failure | (a) staggered §11 sphere N = 16, μ = 0.0158, dt = 1.234e-2, SOU, production, windows 3, 5 and 8 (plain NaN at step ≈ 440, measured); (b) core U4, U4b; flow ctest `march_to_steady`; (c) every G1–G6 run | (a) `converged=False` for accelerate False and True at every window, reason ∈ {"diverged", "max_steps"}, no K reported (rev-2 oracle: diverged at 312 / 270 / 208 steps); (b) as specified under U4 / U4b and WO-7; (c) every accelerated run whose plain march converges returns `converged=True` and meets its own bar (rev-2 oracle: 16 of 16 tight runs, 42 of 42 production). *Superseded by rev 2:* (b) "status 'unstable' within 3m steps of engagement"; (c) "status never 'unstable', and every eligible Ritz reading ≤ 1.0005" |
 | **G8** performance + memory | accelerator time (inside the adapter, excluding `solver.step()`), mean over 50 steps; `memory_bytes` | 64³ §11-type case, staggered + collocated, CUDA and host | overhead ≤ 5 % (CUDA), ≤ 8 % (host) of the mean plain step; `memory_bytes` = formula §6.3 exactly |
 
-**Core unit tests** (in **core**: `tests/test_anderson.cpp`, Kokkos-gated like `test_graph_amg_device.cpp`; U7 in core's MPI tests; synthetic maps on Views, host and CUDA):
+**Core unit tests** (in **core**: `../../core/tests/test_anderson.cpp`, Kokkos-gated like `../../core/tests/test_graph_amg_device.cpp`; U7 in core's MPI tests; synthetic maps on Views, host and CUDA):
 - **U1 linear contraction**, as re-specified in core-anderson `2defc9c` (U1a: fast bulk + one
   isolated mode 0.996 converges in 32 steps; U1b: the continuum [0, 0.996] stated as a limit of a
   window of 5; U1c: three isolated modes). *Superseded:* this note's original U1 (a continuum in
@@ -1284,7 +1284,7 @@ the plain march decides. The reasons a march can return are "certified", "max_st
 - **U7 (MPI):** U1 distributed over np = 1, 2, 4. γ is equal on all ranks, and iterates are within
   1e-13 of np = 1 after 20 steps.
 - **U8, U9 (rev 1) — deleted in rev 2** with the guard (they tested the Ritz eligibility rule and
-  floor). So is the Gelfand unit test of `test_anderson.cpp`.
+  floor). So is the Gelfand unit test of `../../core/tests/test_anderson.cpp`.
 - **U10 (rev 1, WO-3b part 2) — Carried fields.** A two-field state (Velocity + Carried) whose map
   moves only the Carried field after step 10. Assert:
   - the residual is 0 from then on;
@@ -1397,7 +1397,7 @@ commits, so that part 2 reverts on its own.
 - Add a CLAUDE.md subsection "Steady marches" covering usage, scope, refusals, the memory formula,
   and "checkpoint with get_field/set_field".
 - Add a "Measured" table to this note, replacing the §1.1 estimates.
-- Draft the register entries for `../docs/decisions/flow.md` (and core.md for WO-3b); the caller
+- Draft the register entries for `../../docs/decisions/flow.md` (and core.md for WO-3b); the caller
   commits them once approved. Rev 1 changes two entries already in the register, each as a new
   recorded decision that names what changed:
   - "Steady marches are accelerated by type-II Anderson on the full march state…": its quoted
@@ -1460,7 +1460,7 @@ parallel with it).** One commit.
 - Pass 2: the per-(velocity field, column) reduction becomes `SumN<2>` {⟨dR_s, dR_j⟩, ⟨dR_j, X⟩},
   reading dR_s, dR_j and X only; the packet is 2·nCols + 2 doubles; the host copies the RR row and
   column and b. dG views stay (MIX reads them).
-- Tests (`tests/test_anderson.cpp`, `tests/anderson_test_maps.hpp`): U4 rewritten and U4b added as
+- Tests (`../../core/tests/test_anderson.cpp`, `../../core/tests/anderson_test_maps.hpp`): U4 rewritten and U4b added as
   §8 specifies (the 2×2 block generalisation); U8, U9 and the Gelfand unit test deleted; the rest
   untouched.
 - Doc comments of §4.1–§4.3, §4.6 and §6.1 updated to match.
