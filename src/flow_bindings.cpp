@@ -2406,14 +2406,14 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def_prop_ro(
           "diagnostics", [](S& s) { return D{&s}; }, nb::keep_alive<0, 1>(),
           "The developer tier of this solver (instruments, tuning, ablations, internals).")
-      .def("__init__", &chk::init_cells<S>, nb::arg("nx"), nb::arg("ny"), nb::arg("nz"),
+      .def("__init__", &chk::initCells<S>, nb::arg("nx"), nb::arg("ny"), nb::arg("nz"),
            "Create a solver on an nx x ny x nz grid of UNIT cells (x-fastest, I = x + y*nx + "
            "z*nx*ny). Everything is then in cell units: the cell size is 1 and lengths, "
            "velocities and the SDF are measured in cells. Prefer the physical form "
            "Solver((nx,ny,nz), extent=(Lx,Ly,Lz)). Set the domain BCs before the geometry (a later "
            "set_domain_bc raises).")
       .def(
-          "__init__", &chk::init_physical<S>, nb::arg("cells"), nb::arg("extent") = nb::none(),
+          "__init__", &chk::initPhysical<S>, nb::arg("cells"), nb::arg("extent") = nb::none(),
           nb::arg("origin") = std::array<double, 3>{0.0, 0.0, 0.0},
           nb::arg("global_cells") = nb::none(),
           "Create a solver on a PHYSICAL domain: `cells` = (nx, ny, nz), `extent` = the box side "
@@ -2512,11 +2512,11 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "at i -- the same body given as a scene and as an SDF sampled here lands half a cell "
           "apart. With an extent both use origin + (i + 1/2) * spacing. Unifying the cell-unit "
           "convention changes results; deferred to 2.0.0.")
-      .def("set_rho", &chk::set_rho<S>, nb::arg("rho"),
+      .def("set_rho", &chk::setRho<S>, nb::arg("rho"),
            "Set the fluid density rho (the caller's units). Under a physical domain the FIRST call "
            "pins the reference density the internal scales are built on; a later change rebuilds "
            "the momentum operator at the next step.")
-      .def("set_mu", &chk::set_mu<S>, nb::arg("mu"),
+      .def("set_mu", &chk::setMu<S>, nb::arg("mu"),
            "Set the dynamic viscosity mu (the caller's units); a change after the geometry "
            "rebuilds the momentum operator at the next step.")
       .def("set_viscous_stress", &S::setViscousStress, nb::arg("form"),
@@ -2557,13 +2557,13 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "The selected VoF viscous interface mode, 'auto', 'sharp' or 'averaged' (see "
            "set_vof_viscous_interface; what 'auto' resolved to shows in "
            "diagnostics.vof_viscous_interface_census()).")
-      .def("set_dt", &chk::set_dt<S>, nb::arg("dt"),
+      .def("set_dt", &chk::setDt<S>, nb::arg("dt"),
            "Set the time step dt (the caller's time unit); the momentum solve is scaled by 1/dt "
            "(well-conditioned at large dt). Under a physical domain the FIRST call pins the "
            "reference time the internal scales are built on; any later call (step_adaptive "
            "makes them) rebuilds the momentum operator at the next step.")
       .def(
-          "set_body_force", &chk::set_body_force<S>, nb::arg("force"),
+          "set_body_force", &chk::setBodyForce<S>, nb::arg("force"),
           "Set the body force per unit volume (fx, fy, fz) as one 3-sequence — e.g. a mean "
           "pressure gradient.")
       .def(
@@ -2700,7 +2700,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
                    "Measured in cells (a count, not a length).")
       .def("set_implicit_advection", &S::setImplicitAdvection, nb::arg("on"),
            "Use implicit-FOU advection with deferred-correction TVD.")
-      .def("set_velocity_residual_tolerance", &chk::set_velocity_residual_tolerance<S>,
+      .def("set_velocity_residual_tolerance", &chk::setVelocityResidualTolerance<S>,
            nb::arg("rtol"),
            "Residual-based momentum stop: a component's implicit solve ends once max|b - A u| <= "
            "rtol * max(max|b|, max|A u|) over the solved unknowns (at least one sweep always runs; "
@@ -2711,7 +2711,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "warm-started near-steady step is noise and cost the whole sweep cap). Every path.")
       .def("velocity_residual_tolerance", &S::velocityResidualTolerance,
            "The momentum residual tolerance in force (resolves the follow-the-pressure default).")
-      .def("set_backflow_stabilization", &chk::set_backflow_stabilization<S>, nb::arg("beta"),
+      .def("set_backflow_stabilization", &chk::setBackflowStabilization<S>, nb::arg("beta"),
            "Outflow backflow-stabilization coefficient (Bazilevs 2009 / Esmaily-Moghadam 2011): "
            "beta "
            "in [0,1] scales the dissipative outflow term that prevents backflow divergence when "
@@ -2719,10 +2719,10 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "reverses at the outlet (e.g. a separated wake / BFS recirculation). Default 0.2; 0 = "
            "off. "
            "Inert where the outlet is purely outgoing.")
-      .def("set_pressure_solver_params", &chk::set_pressure_solver_params<S>, nb::arg("iters"),
+      .def("set_pressure_solver_params", &chk::setPressureSolverParams<S>, nb::arg("iters"),
            "Set the pressure smoother iteration count.")
       .def(
-          "set_pressure_multigrid", &chk::set_pressure_multigrid<S>, nb::arg("on"),
+          "set_pressure_multigrid", &chk::setPressureMultigrid<S>, nb::arg("on"),
           nb::arg("levels") = 0,
           "Set the pressure multigrid depth, fixed at the next geometry build. levels=0 (the "
           "default) derives it: the shallowest depth >= 4 whose global coarsest grid the exact "
@@ -2731,7 +2731,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "coarse grid; levels >= 2 => exactly that depth. The resolved depth is "
           "len(diagnostics.pressure_mg_level_ratios()). set_pressure_bottom_extent must precede "
           "the geometry to enter the depth (doc/mg_depth_policy.md).")
-      .def("set_pressure_chebyshev", &chk::set_pressure_chebyshev<S>, nb::arg("on"),
+      .def("set_pressure_chebyshev", &chk::setPressureChebyshev<S>, nb::arg("on"),
            nb::arg("max_iter") = 120, nb::arg("rtol") = 1e-9,
            "Use the communication-light Chebyshev pressure accelerator. Mutually exclusive with the "
            "two CG drivers (on=True clears an FCG selection); on=False deselects Chebyshev and "
@@ -2785,7 +2785,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "the automatic depth (set_pressure_multigrid levels=0) the mode also enters the depth, at "
           "the geometry build: a later call changes the bottom solve but not the depth already "
           "resolved.")
-      .def("set_pressure_pcg", &chk::set_pressure_pcg<S>, nb::arg("on"), nb::arg("max_iter") = 200,
+      .def("set_pressure_pcg", &chk::setPressurePcg<S>, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
            "Use the MG-PCG pressure accelerator (single-GPU default) and set its iteration cap and "
            "relative tolerance. on=True GENUINELY selects: it clears both competing selections "
@@ -2795,7 +2795,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "(set_pressure_chebyshev(True, ...) or set_pressure_fcg(True, ...)). Under "
            "diagnostics.set_ghost_projection the nonsymmetric operator is solved by BiCGStab; this call still "
            "sets that solve's cap/tolerance (they are shared) and does not change its method.")
-      .def("set_pressure_fcg", &chk::set_pressure_fcg<S>, nb::arg("on"), nb::arg("max_iter") = 200,
+      .def("set_pressure_fcg", &chk::setPressureFcg<S>, nb::arg("on"), nb::arg("max_iter") = 200,
            nb::arg("rtol") = 1e-8,
            "Use the FLEXIBLE MG-CG pressure accelerator: the same V-cycle-preconditioned CG as "
            "set_pressure_pcg, the same stopping estimate/mean removal, and the same cap+tolerance "
@@ -2807,7 +2807,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "iteration count. Unlike set_pressure_pcg this flag GENUINELY selects: on=True clears "
            "the Chebyshev selection (so it works after diagnostics.set_density_mode/set_porous), on=False "
            "returns to MG-PCG, and a later set_pressure_chebyshev(True, ...) wins over it.")
-      .def("set_velocity_multigrid", &chk::set_velocity_multigrid<S>, nb::arg("on"),
+      .def("set_velocity_multigrid", &chk::setVelocityMultigrid<S>, nb::arg("on"),
            nb::arg("levels") = 4,
            nb::arg("vcycles") = 8,
            "Enable velocity (momentum) multigrid for the implicit diffusion solve.")
@@ -2815,7 +2815,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "set_domain_bc",
           [](S& s, const std::string& face, const std::string& type,
              std::array<double, 3> velocity) {
-            chk::finite_each("set_domain_bc", "velocity", velocity, "length/time");
+            chk::finiteEach("set_domain_bc", "velocity", velocity, "length/time");
             s.setDomainBc(face_index(face, "set_domain_bc"),
                           enum_index(type, kBcTypes, "set_domain_bc", "type"), velocity[0],
                           velocity[1], velocity[2]);
@@ -2896,7 +2896,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "set_instance_motion",
           [](S& s, int i, std::array<double, 3> lin, std::array<double, 3> ang,
              std::optional<std::array<double, 3>> center) {
-            chk::instance_motion(lin, ang, center);
+            chk::instanceMotion(lin, ang, center);
             s.setInstanceMotion(i, lin, ang, center ? center->data() : nullptr);
           },
           nb::arg("instance"), nb::arg("lin_vel") = std::array<double, 3>{0.0, 0.0, 0.0},
@@ -2917,7 +2917,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "set_instance_transform",
           [](S& s, int i, std::array<double, 3> t, std::array<double, 4> q) {
-            chk::instance_transform(t, q);
+            chk::instanceTransform(t, q);
             s.setInstanceTransform(i, t, q);
           },
           nb::arg("instance"), nb::arg("translation"),
@@ -3139,7 +3139,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "add_scalar",
           [](S& s, const std::string& name, double diffusivity, const std::string& scheme,
              std::optional<int> iters, bool cutcell) {
-            chk::scalar_args(diffusivity, iters);
+            chk::scalarArgs(diffusivity, iters);
             if (cutcell && iters)
               throw std::invalid_argument(
                   "add_scalar: iters must be None for a cut-cell scalar (it solves to a residual "
@@ -3359,7 +3359,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "max over-throttles badly (measured on Zalesak: 0.314 at a quiescent domain corner while "
           "the interface never exceeded 0.157). Pick dt as dt*cfl_target/vof_max_courant().")
       .def(
-          "set_vof_cfl_limit", &chk::set_vof_cfl_limit<S>, nb::arg("value"),
+          "set_vof_cfl_limit", &chk::setVofCflLimit<S>, nb::arg("value"),
           "Weymouth-Yue boundedness cap on the interface-local Courant number. Default 0.25 — the "
           "PROVEN 3D bound 1/(2(N-1)) from Weymouth's thesis eq. A.33; the widely-quoted 0.5 is "
           "the 2D value. step() throws when it is exceeded. Conservation is INDEPENDENT of "
@@ -3508,7 +3508,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "enable_vof_blocks",
           [](S& s, std::optional<std::vector<std::array<double, 4>>> seeds) {
-            chk::vof_seeds(seeds);
+            chk::vofSeeds(seeds);
             if (seeds)
               s.enableVofBlocks(*seeds);
             else
@@ -3775,7 +3775,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "phase pair under enable_vof_momentum, otherwise min(rho)+max(rho) over the field. "
           "In the caller's time units.")
       .def(
-          "set_capillary_cfl", &chk::set_capillary_cfl<S>, nb::arg("factor"),
+          "set_capillary_cfl", &chk::setCapillaryCfl<S>, nb::arg("factor"),
           "Safety factor on the capillary limit: step() raises when dt > factor * capillary_dt(). "
           "Default 1.0 — the Brackbill formula was measured to be the boundary itself, so it "
           "carries no built-in margin. Set it huge to disable the check, the same escape hatch "
@@ -3827,7 +3827,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "needs the net vapour production to leave somewhere: use an outflow face, or "
           "set_divergence_source() with a balancing sink, or rho_g = rho_l (then S == 0).")
       .def(
-          "set_mass_flux_uniform", &chk::set_mass_flux_uniform<S>, nb::arg("mdot"),
+          "set_mass_flux_uniform", &chk::setMassFluxUniform<S>, nb::arg("mdot"),
           "P0: prescribe a UNIFORM interfacial mass flux (mass per area per time; positive = "
           "evaporation, liquid consumed). Turns the thermal mass flux OFF. Under an extent, call "
           "set_rho and set_dt first: the value is converted into the 'mdot' field once.")
@@ -4001,7 +4001,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
               k = peclet::flow::ClosureKind::ArrheniusMu;
             else
               throw std::runtime_error("set_property_model: unknown kind '" + kind + "'");
-            chk::finite_each("set_property_model", "params", params, "the closure's units");
+            chk::finiteEach("set_property_model", "params", params, "the closure's units");
             s.setPropertyModel(target, k, in0, in1, params);
           },
           nb::arg("target"), nb::arg("kind"), nb::arg("field"),
@@ -4018,7 +4018,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
           "units (a density, a viscosity, a force per volume: rho0*g*beta*(T-T0) as written); "
           "any other target takes its field's INTERNAL units (see unit_scales).")
       .def(
-          "set_property_table", &chk::set_property_table<S>, nb::arg("target"), nb::arg("field"),
+          "set_property_table", &chk::setPropertyTable<S>, nb::arg("target"), nb::arg("field"),
           nb::arg("x"), nb::arg("y"),
           "Register a tabulated property: target = piecewise-linear interpolation of (x, y) at the "
           "input field value (x ascending, clamped at the ends). Units as set_property_model: y in "
@@ -4104,7 +4104,7 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
       .def(
           "init_mpi",
           [](S& s, int gnx, int gny, int gnz) {
-            chk::global_dims("init_mpi", gnx, gny, gnz);
+            chk::globalDims("init_mpi", gnx, gny, gnz);
             ensure_mpi_init();
             s.initMpi(gnx, gny, gnz, MPI_COMM_WORLD);
           },
