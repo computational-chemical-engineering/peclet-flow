@@ -16,7 +16,7 @@ float-representable metric: `extent = (16, 10, 16)`, `spacing (1, 0.25, 2)`, `hR
 `w = (1/16, 1, 1/64)`, `mu' = 80` (measured **1.388e-15**). The §5.3 configuration
 `(16, 12, 16)`, `spacing (1, 0.3, 2)`, stays in the same test as a second stretched case at
 **`1e-7`**: it is a real production-shaped configuration (`mu' = 55.5…` unrepresentable) and what it
-measures is the WO-M float operator-storage floor (`docs/SCALING_ISSUES.md` #1) — a one-signed
+measures is the WO-M float operator-storage floor (`../../docs/SCALING_ISSUES.md` #1) — a one-signed
 multiplicative factor of ~1e-7 that `-DPECLET_FLOW_OPERATOR_DOUBLE` removes. It is a **tripwire for
 that floor, not an exactness statement**. Option 3 (gate the whole thing in a double build) is
 rejected: a gate on a build nobody ships proves nothing about the shipped one. The other three
@@ -64,7 +64,7 @@ constant across all fifteen fluid rows), i.e. the computed profile is the analyt
 `1 − 1.06e-07`. That is an error in the effective viscous coefficient, not a discretization error and
 not a solve residual.
 
-It is the **float momentum-operator storage** (`IbmSolver::FV`, `MReal`; WO-M, `docs/SCALING_ISSUES.md`
+It is the **float momentum-operator storage** (`IbmSolver::FV`, `MReal`; WO-M, `../../docs/SCALING_ISSUES.md`
 #1). The x/z couplings of an x/z-independent profile cancel only if the stored `AC` equals
 `idiag + 2bx + 2by + 2bz` to the last bit:
 

@@ -155,7 +155,7 @@ curvature numerics; AMR; Snellius runs; CUDA graphs and the fine-level Krylov fu
 | D-T4 | **Device fluid count per level** (S1), counted once per operator build into a device scalar. The per-call mean is a single-result async reduction | the `{sum, count}` combined reducer into device Views (fences twice, §3.3); a host read of the count at every `setOpenness` (a sync per step, plus a transfer) |
 | D-T5 | **Instance-scoped host reads** (S2): `deep_copy(CCExec(), pinned, dev)` + `CCExec().fence(label)` | the exec-less copy (two global fences) |
 | D-T6 | **No global synchronization inside `step()` on device** (S4): exec-less device copies and fills become `deep_copy(CCExec(), …)`, `Kokkos::fence()` becomes `CCExec().fence(label)`, and no per-step View allocation | leaving them (≈ 10 µs drain each; they also defeat X) |
-| D-T7 | **No CUDA graphs and no fused coarse V-cycle in this package** | Graphs: the register already rejected fill-then-sweep with graph capture (`docs/decisions/flow.md:3374`). The per-iteration host decision cuts every PCG iteration into a graph segment anyway, the FP32 V-cycle takes a host-side scale exponent per call, and Kokkos 5.1 graphs would mean restructuring every launch site. Worth ≤ 0.4–0.8 ms of the 1.24 ms of < 5 µs gaps. Re-measure after S4 (Q-5). Fused coarse V-cycle: §3.4 (B1's failure mode, and L2 is 0.15–0.2 ms in all). **Lagged or speculative stop test**: rejected by the same register entry (not bitwise), and a speculative iteration costs a whole V-cycle |
+| D-T7 | **No CUDA graphs and no fused coarse V-cycle in this package** | Graphs: the register already rejected fill-then-sweep with graph capture (`../../docs/decisions/flow.md:3374`). The per-iteration host decision cuts every PCG iteration into a graph segment anyway, the FP32 V-cycle takes a host-side scale exponent per call, and Kokkos 5.1 graphs would mean restructuring every launch site. Worth ≤ 0.4–0.8 ms of the 1.24 ms of < 5 µs gaps. Re-measure after S4 (Q-5). Fused coarse V-cycle: §3.4 (B1's failure mode, and L2 is 0.15–0.2 ms in all). **Lagged or speculative stop test**: rejected by the same register entry (not bitwise), and a speculative iteration costs a whole V-cycle |
 | D-T8 | **D-1 stands.** Re-examined: a multi-SM dense FP32 inverse applied as a GEMV (9.4 MB, ≈ 10 µs) still needs FP64 refinement (D-1 (e)), so the FCG becomes ≈ 20 launches per solve (≈ 50 µs), and the inverse must be rebuilt every step from the factor (≈ 0.1–0.2 ms). Net ≈ 0.15 ms/step better than B2, for a second engine and 9.4 MB more | reversing D-1 toward (a) dense, a vendor solver, or (d) deeper coarsening; no new evidence favours any of them |
 
 ## 5. The design (normative)
@@ -537,7 +537,7 @@ Set-up:
 - **R-4: `side_` lifetime.** It is a Kokkos handle and must be released before `Kokkos::finalize`,
   like a View. Release it where the hierarchy's Views are released.
 
-## 9. Register entries (drafted in WO-D; the caller adds them to `docs/DECISIONS.md` / `docs/decisions/flow.md`)
+## 9. Register entries (drafted in WO-D; the caller adds them to `../../docs/DECISIONS.md` / `../../docs/decisions/flow.md`)
 
 - **R-1** Device bottom FCG v2: M's plane products in 4 fixed j-segments, reductions in 64 fixed
   chunks, T = 512. The bottom's bits are independent of T. *Rejected:* T-dependent team reductions

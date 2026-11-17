@@ -1799,7 +1799,7 @@ the design. Default until then: collocated stays averaged.
 - Acceptance: `python sweep.py …` reproduces §3.4.
 
 **WO-1. Region fractions** (container-free; in `core`).
-- `core/include/peclet/core/vof/plic.hpp`, or a sibling `plic_regions.hpp`, per that file's own rule
+- `core/include/peclet/core/vof/plic.hpp`, or a sibling `../../core/include/peclet/core/vof/plic_regions.hpp`, per that file's own rule
   ("new container-free VoF math belongs in core"):
   - `plicFaceFraction(m, α, axis, ξ_p, q0, b0)`, box × box;
   - `plicHatBoxFraction(m, α, plane_axis, ξ_p, hat_axis, q_c, b0)`;
@@ -2060,7 +2060,7 @@ Docs. Branch `sharpvisc-land`; host tree first, CUDA under the GPU lock. Commit-
   G-SV12. Log each as one summary line in the landing log.
 - **WO-9.5 Docs.** One sentence in the flow `CLAUDE.md` sharp paragraph ("owner ties: mean over the
   owner set within 1e-6 cells; offset order for sums only"); the §13 amendment into
-  `docs/decisions/flow.md` and `docs/DECISIONS.md` (umbrella, coordinator); CHANGELOG.
+  `../../docs/decisions/flow.md` and `../../docs/DECISIONS.md` (umbrella, coordinator); CHANGELOG.
 
 Escalate WO-9 to the architect, do not tune, if any of these happens:
 - the triggers of §5.9 (b), which replace this list's earlier "`max_tie_spread` > 1e-8" trigger.
@@ -2353,7 +2353,7 @@ slope of log e against log h over the stated resolutions.
 
 ---
 
-## 13. Register entry (text for `docs/DECISIONS.md` and `docs/decisions/flow.md`)
+## 13. Register entry (text for `../../docs/DECISIONS.md` and `../../docs/decisions/flow.md`)
 
 **Decision.** The VoF interface viscous stress on the staggered MAC grid is the *sharp conservative*
 operator. It applies when VoF is on, μ = LinearMix(C) and full stress is active. It has three parts:

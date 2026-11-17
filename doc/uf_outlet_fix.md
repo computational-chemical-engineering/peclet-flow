@@ -148,7 +148,7 @@ interpolation gives the face value v. As an UPWIND state it carried u_n (2v − 
 | ctest `scalar_inflow` (new, both grids, FOU + Koren) | pass. Inlet \|c−1\| 3e-14; plug inventory − U t ≤ 6e-14; front at U t. Pre-fix: FAIL (0.5). With defect 1 fixed alone: FAIL (inventory +0.500). |
 | full non-bench battery, OMP 4, -j4, MPI tree (`--bind-to none`) | 190/190 pass. 182 passed in the first run. On a host at load ~87 the outer 7000 s timeout stopped the last 8 (`vof_advect/blocks/redistribute_mpi`); rerun at -j2, they passed. |
 
-## Proposed register entry (`../docs/decisions/flow.md`; not edited from this branch)
+## Proposed register entry (`../../docs/decisions/flow.md`; not edited from this branch)
 
 ```
 ### A MAC face field's HIGH-side domain face is kept across every ghost fill

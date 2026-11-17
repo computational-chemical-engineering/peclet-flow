@@ -133,7 +133,7 @@ rejects the combination at configure time with that explanation, so do not re-at
 
 *Env knobs, the two API tiers, and the call-order rules with the init_mpi incident.*
 
-- **No environment variable changes a result** (`../docs/QUALITY_PLAN.md` D3, executed 2026-09-08
+- **No environment variable changes a result** (`../../docs/QUALITY_PLAN.md` D3, executed 2026-09-08
   in `ad917b1`). Every numerics-changing or algorithm-selecting read became a per-solver setter
   with the old unset behaviour as its default, or was deleted with the ablation it served; the
   process-global statics went with them. Only debug *printing* reads remain, and
@@ -227,13 +227,13 @@ anisotropic box (its *particle model* has no single length to form `Re_p` — no
   default since 2026-09-11 (`dc6ae78`); `-DPECLET_FLOW_OPERATOR_DOUBLE=OFF` (`pip install . -C
   cmake.define.PECLET_FLOW_OPERATOR_DOUBLE=OFF`) is the float storage, bit-identical to before G.6. Float rounding breaks `A·1 = 0`, and on a high-contrast
   bed the residual floors and then **rebounds** — the run is **invalid, not degraded**
-  (`../docs/SCALING_ISSUES.md` #1). `tests/python/test_no_float_operator_casts.py` (ctest
+  (`../../docs/SCALING_ISSUES.md` #1). `tests/python/test_no_float_operator_casts.py` (ctest
   `no_float_operator_casts`) fails on a new hard `(float)` cast / `float`-typed operator view in
   `src/` outside its allow-list (a `// PRECISION-EXEMPT: <reason>` marker, or one of the whole-file
   exemptions it documents). **`GpOverlay`'s two remaining `PRECISION-EXEMPT` casts are a real,
   cross-repo gap, not dead code:** `buildGpOverlay`'s per-face SDF/theta samples still narrow to
   `float` before reaching `peclet::core::scheme::gpFillRow`/`gpClassifyFace`
-  (`ghost_closure.hpp`), which are float-hardcoded — templating them needs the same
+  (`../../core/include/peclet/core/scheme/ghost_closure.hpp`), which are float-hardcoded — templating them needs the same
   `Real`-templating `IbmOverlayT`'s siblings got, done in `core`, out of this repo's scope.
   `PECLET_FLOW_OPERATOR_DOUBLE=ON` therefore widens `gpOv_`'s SoA storage (so it no longer
   round-trips a computed value through a *second*, separate float narrowing) without changing the
@@ -284,7 +284,7 @@ anisotropic box (its *particle model* has no single length to form `Re_p` — no
   16.2), and under MPI only if *every rank's block* is even on it. **Telescoping is the default**
   (`set_pressure_telescope`): a level that cannot coarsen in place merges ORB siblings onto fewer
   ranks and continues to 3³. The in-place requirement on intermediate levels is the top open item
-  at scale (`../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.8).
+  at scale (`../../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.8).
 - **The stage machinery is core's** (2026-09-24, S4 of `../amr/docs/amr_mg_core_boundary.md`,
   proved byte-identical): the depth search is `peclet::core::decomp::chooseStageTarget` with
   flow's lift rule `CutcellMG::teleLiftable` as the predicate (the forced test telescope is
@@ -294,7 +294,7 @@ anisotropic box (its *particle model* has no single length to form `Re_p` — no
 - **A weighted level-0 decomposition gets Repartition stages** (S5). After
   `diagnostics.rebalance_by_weights` the ORB has odd splits, and the sibling-merge search alone
   collapsed the level at the shallowest odd split onto ONE rank when the root split was odd
-  (`../docs/SCALING_ISSUES.md` #2 TRAP: projection ×2.25–2.6, iterations unchanged). The Solver
+  (`../../docs/SCALING_ISSUES.md` #2 TRAP: projection ×2.25–2.6, iterations unchanged). The Solver
   now calls `CutcellMG::setRepartition(true)` for a weighted `dec0` only, which caps the block a
   stage hands a rank at the largest level-0 block and repartitions the level onto a proportional
   ORB on `np_L` ranks instead (`[mg]` trace: `-> REPARTITION`). A run that never rebalances takes
@@ -414,7 +414,7 @@ immersed solid, use `set_pressure_geometry(all_fluid_sdf)`.
   face velocity (`fillVelGhostsTo(..., doOutflow = false)` now saves and restores the plane over the
   INNER transverse range; the transverse ghost rows are the neighbour's inner values and must stay).
   `test_vof_bc_mpi`'s composed budget is the gate: 1.25e-14 → 2.46e-02 with the openness half alone
-  → 2.89e-14 with both, at np=1. `docs/SCALING_ISSUES.md` #8.
+  → 2.89e-14 with both, at np=1. `../../docs/SCALING_ISSUES.md` #8.
 - **Which divergence to read at an outlet:** `max_open_divergence()` refills the outflow ghost with
   the zero-gradient extrapolation before measuring, so at a partly blocked outlet it reports how far
   zero-gradient is from the mass-conserving face and does NOT decay.
@@ -547,7 +547,7 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - **The iteration count measures the MG level table.** An axis coarsens only while it stays even,
     so an odd or 2-poor box gives a shallow table: G5b at n = 77 takes 78 iterations, at n = 80 six.
     Gate and benchmark on boxes with factors of two (D-WO4-1;
-    `../docs/DECOMPOSITION_AND_MULTIGRID.md` §3.1). The bottom is smoothing only, so a full-table
+    `../../docs/DECOMPOSITION_AND_MULTIGRID.md` §3.1). The bottom is smoothing only, so a full-table
     solve (steady, or κ_A ≥ 25) whose table stops above `set_pressure_bottom_extent` (4) on any axis
     warns once per scalar (D-WOR-4).
   - **rtol and MPI parity.**
@@ -563,7 +563,7 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
   - **Conjugate contacts and sub-cell gaps are not resolved.** The point-sampled SDF closes fluid
     wedges thinner than ~h, so a contact neck comes out √(a² + Rh) instead of a, and conducting
     sub-cell gaps fuse.
-- **Do not reverse** (register: `../docs/decisions/flow.md`, the cut-cell scalar entries of 2026-10-04):
+- **Do not reverse** (register: `../../docs/decisions/flow.md`, the cut-cell scalar entries of 2026-10-04):
   - a short or κ-dependent probe (AMReX; erratic order 0.4–1.2);
   - unit storage (first order; it loses 2–12 % of the mass);
   - the series-resistance / GFM wall flux (first order);
@@ -587,7 +587,7 @@ first line of the `advanceScalars` loop, and the 12 state hashes are the gate.
     lose the grid-independent iteration count; only the warning exists.
   - Host performance: advance ÷ projection ≈ 1.05 at OMP 4 after D-WO9-3, and 1.4–1.6 before it (the
     smoother is 38 % of the advance). The GPU sits at 0.96–0.98 under contention.
-  - Q5, Q7 and the three NAMING rows: DECIDED by Frank 2026-10-22 (rows placed in `../docs/NAMING.md` §2).
+  - Q5, Q7 and the three NAMING rows: DECIDED by Frank 2026-10-22 (rows placed in `../../docs/NAMING.md` §2).
 
 ## 11. Steady marches
 

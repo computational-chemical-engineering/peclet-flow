@@ -68,7 +68,7 @@ problem per step.
 
 ## 5. Already decided — not open
 - **Dodd–Ferrante constant-coefficient splitting is REJECTED twice in the register**
-  (`docs/decisions/flow.md`: "Part III bubbly-flow container reuses V0–V4 kernels; Dodd–Ferrante
+  (`../../docs/decisions/flow.md`: "Part III bubbly-flow container reuses V0–V4 kernels; Dodd–Ferrante
   FFT not needed" — "varRho MG projection is stronger"; "S-ladder plan; Dodd–Ferrante splitting
   rejected for the pressure driver" — "error ~ σκ = the dominant field at pore scale"). You may
   analyse a scoped fast path (e.g. solid-free periodic/walled boxes only, as an opt-in driver)
@@ -102,7 +102,7 @@ problem per step.
 - Chebyshev vs MG-PCG on one GPU: 104 vs 54 ms/step (re-estimation dominates).
 
 ## 8. Verification
-`ctest -LE bench` (175), `tests/state_hash.py` (12 cases + np2, bitwise for structural changes),
+`ctest -LE bench` (175), `../tests/regression/state_hash.py` (12 cases + np2, bitwise for structural changes),
 the bubble-column 50-step bitwise dump from `scratchpad/perf/ckpt_t43.npz`, MPI np-independence
 tests, and the Snellius same-node comparison script `/projects/0/prjs1022/peclet/bubble-cpu/
 bubble_cpu.slurm` (reruns in 15 min). Hysing rising bubble and the static-drop parasitic-current

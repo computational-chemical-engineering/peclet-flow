@@ -88,7 +88,7 @@ algorithm (Q-6), the bottom engine (Q-5), and decomposition or layout policy (Q-
    run on device builds too and must be bitwise there. The serial-copy cutoff, K4 and K5 are host-only
    (`if constexpr` on the memory space).
 7. **Register.**
-   - "Domain-BC paths stay blocking (VelocityMG precedent)" (`docs/decisions/flow.md:747`, undated,
+   - "Domain-BC paths stay blocking (VelocityMG precedent)" (`../../docs/decisions/flow.md:747`, undated,
      no reason given) is already not true of the pressure MG: its distributed smoother and residual
      overlap on every path (`mac_cutcell_mg.hpp:4290–4307`, `:3545–3556`). K2 touches this entry
      (Q-1).
@@ -178,7 +178,7 @@ The reference that would show "communication-free" cost on the same memory syste
 
 ## 5. The design (normative)
 
-### 5.1 K1: GridHalo host fast path (core `grid_halo.hpp`)
+### 5.1 K1: GridHalo host fast path (core `../../core/include/peclet/core/halo/grid_halo.hpp`)
 
 - **(a) One gather launch.** `exchangeBegin` runs one `parallel_for` over `[0, nSelf_ + nSend_)`:
   `i < nSelf_` → `f(selfDst(i)) = f(selfSrc(i))`, else `sendBuf(i−nSelf_) = f(sendIdx(i−nSelf_))`.

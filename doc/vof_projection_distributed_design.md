@@ -61,7 +61,7 @@ V-cycle preconditioner on the distributed (`init_mpi`, any np including 1) PCG/F
 initial guess on the distributed PCG/FCG; (F) the criterion and the isolated commit that make
 `'auto'` the default of `set_pressure_vcycle_precision` on device backends.
 
-**Out of scope:** E's default (stays `'zero'`); Snellius or any billed run; `amr/`; D under BiCGStab,
+**Out of scope:** E's default (stays `'zero'`); Snellius or any billed run; `../../amr/`; D under BiCGStab,
 the standalone V-cycle, Chebyshev; the velocity MG; curvature; performance beyond "D and E are no
 slower than FP64 at np > 1"; a distributed device-resident Krylov driver; D5 (FP64-data deferral) on
 the distributed path; FP32 below a telescope point; editing the decision register (proposed entries
@@ -574,7 +574,7 @@ restart on failure); `CLAUDE.md` pressure-solve paragraph; this note's Outcome.
   wall time on a realistic case.
 - **Q-4 [pref] A Python-visible restart counter.** *Default:* no new public name (warning line,
   `pressure_vcycle_precision()` reads `'fp64'` after the latch, C++ counters for tests). If wanted:
-  `diagnostics.num_pressure_vcycle_restarts()` per `docs/NAMING.md` (`num_*`), one commit.
+  `diagnostics.num_pressure_vcycle_restarts()` per `../../docs/NAMING.md` (`num_*`), one commit.
 - **Q-5 [fact] D5 deferral on the distributed path.** *Default:* off (+≈ 27 B/cell, ≈ 1.3 % of the
   device peak). Revisit when multi-GPU memory binds.
 - **Q-6 [pref] Should any cap set `pressure_solve_failed()`?** *Default:* no — unchanged semantics;
