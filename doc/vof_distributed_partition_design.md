@@ -95,7 +95,7 @@ ms/step depending on the layout.
 
 | # | fact | source |
 |---|---|---|
-| F1 | Legacy ORB (`initImpl`, core `block_decomposer.hpp:432`): split the longest *physical* axis; `n1 = ⌊n/2⌋`; cut = round(S·n1/n); then snap to `align` (flow `coarsenAlignment`, capped at 16), and skip the snap if the box is narrower than 2·align | code |
+| F1 | Legacy ORB (`initImpl`, core `../../core/include/peclet/core/decomp/block_decomposer.hpp`): split the longest *physical* axis; `n1 = ⌊n/2⌋`; cut = round(S·n1/n); then snap to `align` (flow `coarsenAlignment`, capped at 16), and skip the snap if the box is narrower than 2·align | code |
 | F2 | 24 ranks on 128×96×64 [sim, matches IMBAL]: a 3-rank node (32,48,64) cuts z at round(64/3)=21 → snapped to 16. Its 2-rank sibling (32,48,48) cuts y at 24 → snapped to 32. That gives 8 blocks of 32×32×48 = 49152 and 16 of 24576, imbalance 2.000. The same mechanism gives 12 ranks 1.500 (max/mean 1.125), 3 ranks 1.200 (1.125), 32 ranks 2.000, 96 ranks 4.000 | sim; IMBAL Q1 |
 | F3 | Coarse-first search (`CutcellMG::decomposition`, `mac_cutcell_mg.hpp:1415`): for L = levels…2, build the ORB on the grid coarsened L−1 times and refine; take the deepest L with max/min ≤ budget (1.05). At 12 ranks only L = 2 fits the budget with the longest-axis rule. Telescoping then puts coarse levels and the bottom on ⅓ of the ranks: local 12×2 48.9 → 52.3 | code; IMBAL Q3.2 |
 | F4 | Coarse-first L5 locally at 24×1: 59.4 → 53.4 (imbalance 1.048), iterations equal (10.05). Genoa per-rank arithmetic: heavy "rest" 54.0 → mean 39.2, ≈ −15 ms | IMBAL Q3.2 |
@@ -107,7 +107,7 @@ ms/step depending on the layout.
 | F10 | Velocity MG uses the solver's decomposition in place, without telescoping (`mac_velocity_mg.hpp:447`), so it needs ≥ 3 in-place halvings for `vmgLevels = 4` | code |
 | F11 | Every level-0 decomposition in flow goes through `CutcellMG::decomposition`: `flow_ibm_mpi.hpp:23`, `flow_bindings.cpp:3842` (`mpi_block`), `mac_cutcell_mg.hpp:1495, 6803` (`predict_hierarchy`). `scripts/check_decomposition.py` calls the bindings | grep |
 | F12 | CFD-DEM: a moving multi-rank run co-decomposes through the *weighted* ORB (`rebalance_by_weights` + dem `migrate_to_weights`). A fixed bed adopts flow's init partition through `block_origin()` | `coupling/python/peclet_coupling/driver.py:351` |
-| F13 | Register invariant: "the ORB must never split the wall-normal axis (y) in wall-bounded flow". It comes from the channel, where the driver hard-aborts. The factory is BC-agnostic and does not enforce it. The legacy default already splits the bubble column's wall axis y at np 6, 8, 12 and 24, and the 8×3 bench layout (4×2×1) splits y. Those runs pass G-NUM-H against single-rank (H-6: 2.3–3.6e-14, iterations identical), and the campaign recorded "no rule change" (DECISIONS_DISTCPU.log, Q-7). The y-unsplit 4×1×2 is not slower (98.4 vs 100.4) | `docs/decisions/flow.md:1273`; [sim]; S-2C |
+| F13 | Register invariant: "the ORB must never split the wall-normal axis (y) in wall-bounded flow". It comes from the channel, where the driver hard-aborts. The factory is BC-agnostic and does not enforce it. The legacy default already splits the bubble column's wall axis y at np 6, 8, 12 and 24, and the 8×3 bench layout (4×2×1) splits y. Those runs pass G-NUM-H against single-rank (H-6: 2.3–3.6e-14, iterations identical), and the campaign recorded "no rule change" (DECISIONS_DISTCPU.log, Q-7). The y-unsplit 4×1×2 is not slower (98.4 vs 100.4) | `../../docs/decisions/flow.md:1273`; [sim]; S-2C |
 
 ## 3. Constraints and invariants
 
@@ -279,7 +279,7 @@ Results [sim]:
 
 ### 5.1 core: `SplitAxis::Balanced` (opt-in)
 
-**API** (core `block_decomposer.hpp`; minor version 1.7.0):
+**API** (core `../../core/include/peclet/core/decomp/block_decomposer.hpp`; minor version 1.7.0):
 - `enum class SplitAxis { Longest, Balanced };`
 - member `splitAxis_ = SplitAxis::Longest`;
 - a new overload `init(numBlocks, globalSize, align, cellExtent, SplitAxis rule)` that sets
@@ -428,12 +428,12 @@ No API, no flag, no result effect.
 **Documentation:**
 - flow CLAUDE.md (MPI/decomposition bullets);
 - the docstrings of `init_mpi` / `mpi_block`;
-- `docs/DECOMPOSITION_AND_MULTIGRID.md`:
+- `../../docs/DECOMPOSITION_AND_MULTIGRID.md`:
   - §3: new rule 9, "threads per rank divide the L3 domain; prefer one rank per L3 domain",
     with the 8×3 / 6×4 numbers;
   - §4 item 13: "auto policy since …, legacy = levels 1";
   - items 2/3: partially addressed by `Balanced`; the cap is unchanged;
-- `docs/SNELLIUS.md`: a genoa recipe for 3×8 and 6×4 inside one NUMA domain (`--cpus-per-task=T
+- `../../docs/SNELLIUS.md`: a genoa recipe for 3×8 and 6×4 inside one NUMA domain (`--cpus-per-task=T
   --cpu-bind=cores`, `OMP_PLACES=cores OMP_PROC_BIND=close`). Verify it against the file's sbatch
   conventions; ctests keep `--bind-to none`.
 - Genoa numbers enter only after S-PART.
@@ -609,7 +609,7 @@ legacy (or A′ where it is better and nests as deep). The census prints the cha
 **Risk.** A ctest that silently depends on the legacy partition at a changed (grid, np). The census
 list is the safeguard: any hash change outside it is a bug, not a re-baseline.
 
-## 11. Register entries (drafts for `docs/decisions/flow.md`, `core.md`)
+## 11. Register entries (drafts for `../../docs/decisions/flow.md`, `../../docs/decisions/core.md`)
 
 1. **The default level-0 decomposition is the auto policy.**
    - Policy: legacy aligned ORB when exactly balanced; else coarse-first with the balance-aware
@@ -940,7 +940,7 @@ By cause:
 3. Never use a thread count per rank that does not divide the CCD (8×3: 100.1). `init_mpi` names
    the offending ranks.
 4. Multi-node: the same rule per node, i.e. 24 ranks × 8 threads on a 2-socket genoa node. The
-   recipe is in `docs/SNELLIUS.md`.
+   recipe is in `../../docs/SNELLIUS.md`.
 
 ### 13.6 Work orders (dependency order)
 
@@ -954,7 +954,7 @@ interleaved reps, median. The baseline is a flow `dfd62c4` host MPI build.
 | **WO-C** | On the WO-A build, run 12×2 at levels 0 and 1, with traces. Apply the §13.4(2) landing rule; log R in the campaign log | MEAS | one summary line with R | R ≈ 1.03 [model], so WO-D lands |
 | **WO-D** | §13.4(2) in `CutcellMG::decomposition`, in all three candidate tests. The replica (`part/orb_sim/cf2.py`) gets the same condition. Census ctest `decomposition_policy`: assertion 7 adds the condition and prints the reverted list. Update the flow CLAUDE.md "Decomposition" bullet and the `set_decomposition`/`mpi_block` docstrings | G-BIT per configuration (reverted ones equal `levels=1`; all others equal the `dfd62c4` auto partition) | C++ census == replica: exactly the 14 reverts of §13.4(2) (asserted by name in the census). np 12 `state_hash` == the `levels=1` hash; np 3/24 hashes unchanged. Coupling MPI tests green. Local 12×2 at levels 0 and 1 equal within ±1 % | 12×2 = legacy |
 | **WO-M** | Bottom-solve facts: (1) inner FCG iterations per bottom solve (mean and max over 50 steps); (2) per-M time of `BottomDirect::laneSubstitute` at T = 1, on the case's 12-plane bottom and on a 4-plane bottom (Q = 262 KB, L2-resident on both machines); (3) whether the lane loop is vectorized (packed `vmulps`/`vaddps` in `objdump -d` of the host TU, or `-fopt-info-vec`) | MEAS | one table in the campaign log | decides P-B2 |
-| **WO-G** | Docs: `docs/DECOMPOSITION_AND_MULTIGRID.md` rule 9 with the S-PART numbers (the §13.5 list). flow CLAUDE.md: correct the B1 line ("halves the 1-thread solve; 0.25–0.40 ms per solve on genoa, §13.2") and the decomposition bullet if WO-D lands. `docs/SNELLIUS.md`: the 3×8 recipe, now confirmed | NONE | coordinator review | — |
+| **WO-G** | Docs: `../../docs/DECOMPOSITION_AND_MULTIGRID.md` rule 9 with the S-PART numbers (the §13.5 list). flow CLAUDE.md: correct the B1 line ("halves the 1-thread solve; 0.25–0.40 ms per solve on genoa, §13.2") and the decomposition bullet if WO-D lands. `../../docs/SNELLIUS.md`: the 3×8 recipe, now confirmed | NONE | coordinator review | — |
 | **WO-S** | Genoa confirmation, folded into the next billed milestone (no dedicated job): 12×2 at levels 0 and 1, 6×4, 3×8 and 24×1 on the WO-A(+D) build, plus one 12×2 trace pair | MEAS, billed, user OK | the §13.8 numbers within their bands | — |
 
 **Order and landing.**
