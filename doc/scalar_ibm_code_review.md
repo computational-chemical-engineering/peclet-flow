@@ -5,7 +5,7 @@ the brief `doc/scalar_ibm_review_brief.md`. The ranges were flow `39680a4..d2118
 CMakeLists) and core `6859d4e..HEAD`. I read the design (§1–§6, A1, A2, A3) and the log rulings
 D-WO2 to D-WO9. I read in full the driver (`flow_ibm_scalars_cutcell.hpp`), the operator kernels,
 `scalar_krylov.hpp`, the ScalarMG build, V-cycle, smoothers and fills, the geometry kernels, core's
-`probe_flux.hpp`, and the small edits in `flow_ibm_project/scalars/mpi`. I also read the
+`../../core/include/peclet/core/scheme/probe_flux.hpp`, and the small edits in `flow_ibm_project/scalars/mpi`. I also read the
 `scalar-units` diff of `flow_ibm_closures.hpp`. Two probes were run on `build_dev` (host OpenMP, 4
 threads); their scripts are in the session scratchpad and are reproduced inline where they matter.*
 
@@ -226,7 +226,7 @@ the discretisation:
 
 ## Not examined
 
-- The internals of core's `cut_cell_geometry.hpp` (tet fractions, two-facet grouping) beyond the
+- The internals of core's `../../core/include/peclet/core/scheme/cut_cell_geometry.hpp` (tet fractions, two-facet grouping) beyond the
   interface, and the core tests.
 - `test_units.cpp`, `flow_ibm_phase_change.hpp`'s units diff in detail, and the bindings beyond the
   solid-field docstrings.

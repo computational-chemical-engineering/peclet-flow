@@ -574,7 +574,7 @@ distinguishes R1 from the chosen form.
 - Host, 8 threads: ≤ 1.03 × off.
 - Case A d/h 40 GPU: ≤ 1.05 × off.
 
-## 14. Register entry (draft, for `docs/decisions/flow.md` and the DECISIONS.md index)
+## 14. Register entry (draft, for `../../docs/decisions/flow.md` and the DECISIONS.md index)
 
 ```
 ### Variable viscosity uses the full deviatoric stress (staggered): explicit conservative MAC transpose term on uⁿ

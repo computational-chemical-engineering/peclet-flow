@@ -49,7 +49,7 @@ to §5 / §6.7 with work-order changes.
 The A1 contraction guard still passes (0.135), because it sees only S.
 
 **Building blocks.**
-- core `solver/` has a functor BiCGStab, multicolour GS, and GraphAMG (smoothed aggregation, device
+- core `../../core/include/peclet/core/solver/` has a functor BiCGStab, multicolour GS, and GraphAMG (smoothed aggregation, device
   apply).
 - flow's VelocityMG handles a Helmholtz operator with upwind advection (`src/mac_velocity_mg.hpp`).
 - flow's momentum uses implicit FOU + deferred correction.

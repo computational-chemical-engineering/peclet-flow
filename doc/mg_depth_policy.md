@@ -5,7 +5,7 @@ Answers `bubble_column_perf/gpu_diag/BRIEF_ARCH_MGDEPTH.md` (recon digest `RECON
 Implementer: `opus-implementer`, who has seen neither the brief nor the conversation; everything
 needed is here. Anchors are `file:line` at `89e5fa7`. Parents: `doc/vof_step_performance_design.md`
 §13 (the direct bottom engine) and §14 (H-1 host, H-6 distributed host), `doc/vof_gpu_coarse_tail_design.md`,
-`../docs/DECOMPOSITION_AND_MULTIGRID.md`.
+`../../docs/DECOMPOSITION_AND_MULTIGRID.md`.
 
 Terms. **Depth D** = number of levels including the fine one (`nLevels`); level ℓ = 0 … D−1; the
 **bottom** is level D−1. **g_ℓ** = level ℓ's GLOBAL inner dims (`Level::gdim`). **Singular** operator =
@@ -58,7 +58,7 @@ RTX 5080: the pathology starts exactly where the bottom leaves the direct engine
 **Evidence that depth is not free** (decisive for the rule): `doc/vof_step_performance_log.md` E1,
 bubble column, exact bottom one/two levels deeper than 16×12×8: 13.00 → 21.50 / 22.05 iterations
 (`auto` and `agglomerated` identical at each depth, so the cost is the deeper *coarse operators*,
-not the bottom solve). `DECOMPOSITION_AND_MULTIGRID.md` §2.7, single-phase 2048×64×64 channel:
+not the bottom solve). `../../docs/DECOMPOSITION_AND_MULTIGRID.md` §2.7, single-phase 2048×64×64 channel:
 exact bottom 4.0 iterations at depths 4, 6 and 8 — depth is free there. The penalty is a
 high-contrast phenomenon and it saturates (E1: L5 21.5, L6 22.05; swarm 192³: L6 9.0, L7 9.0). Its
 mechanism is on the register (flow.md, 2026-08-31, "S3 coarsening indefiniteness is real …" and
@@ -113,7 +113,7 @@ iteration at 256³ costs ≈ 12 ms on an H100 (96 ms of kernels / 7.93); an admi
 ms per step at most (§4.7). So the iteration count dominates, and the exact bottom should be as fine
 as the exact engine can take cheaply — i.e. the shallowest admissible level. The risks are
 asymmetric: being one level too shallow costs ≤ ≈ 5 % (bottom cost), one level too deep can cost
-+65 % (E1). It is also design rule 3 of `DECOMPOSITION_AND_MULTIGRID.md` ("hold the coarsest grid
++65 % (E1). It is also design rule 3 of `../../docs/DECOMPOSITION_AND_MULTIGRID.md` ("hold the coarsest grid
 fixed, not the level count") made automatic: under refinement or weak scaling the bottom stays
 between ≈ 1/8 and 1× the admission size.
 
@@ -373,8 +373,8 @@ New (written in the commit that carries each):
   with the failing numbers).
 
 Docs to update with WO-2/WO-5: `flow/CLAUDE.md` (:229, :267-270, :290-293), `doc/CLAUDE_reference.md`
-(:253-278), `doc/anisotropic_metric.md:281`, `../docs/DECOMPOSITION_AND_MULTIGRID.md` §1.1 (:32) and
-§3 rule 3, `../docs/SCALING_ISSUES.md` row #2, the comment at `mac_cutcell_mg.hpp:1376-1380` ("cap at
+(:253-278), `doc/anisotropic_metric.md:281`, `../../docs/DECOMPOSITION_AND_MULTIGRID.md` §1.1 (:32) and
+§3 rule 3, `../../docs/SCALING_ISSUES.md` row #2, the comment at `mac_cutcell_mg.hpp:1376-1380` ("cap at
 2^(default nLevels − 1)": the cap 16 stays; deeper AUTO levels telescope), CHANGELOG.
 
 ## 6. Work orders
@@ -479,9 +479,9 @@ fails, do not land; record N4 as "anchored keeps 4" with the numbers.
 ### Amendment A1 (2026-10-25, USER) — the divergence gates judge the projection's contract
 
 Provenance: USER decision of 2026-10-25 ("I go with your recommendation"; corrected version: "Yes, that
-is fine"), registered in the umbrella `docs/decisions/flow.md`, entry "A pressure-solver change is judged
+is fine"), registered in the umbrella `../../docs/decisions/flow.md`, entry "A pressure-solver change is judged
 on the divergence contract, not on a per-step divergence ratio" (umbrella 7c569d6; index line in
-`docs/DECISIONS.md`). Evidence: the WO-2 gate record in `doc/mg_depth_policy_log.md` (25929ec) and the
+`../../docs/DECISIONS.md`). Evidence: the WO-2 gate record in `doc/mg_depth_policy_log.md` (25929ec) and the
 diagnosis `bubble_column_perf/gpu_diag/mgd/WO2_DIAG.md`.
 
 G-CONV (c) and G-IBM's "flux divergence ≤ 2 × L4's" are REPLACED by two conditions:
@@ -515,7 +515,7 @@ A'_ℓ = min_{b≠s} H_b / H_s (= 2^(ℓ−β), isotropic metric), and the redis
 L2 at 4. An error smooth along s and oscillatory across it is invisible to the coarse grid (it coarsens only across
 s), and point Jacobi damps it by 1 − 2/(2 + A'²) per sweep: 0.67 at A' = 2, 0.89 at 4, 0.97 at 8 (red-black GS no
 better in order). That is the +61 %. It is `doc/anisotropic_metric.md` §5.2's own bound (coefficient ratio ≤ θ² = 4,
-A' ≤ θ = 2) and its named remedy (line relaxation, `../docs/DECOMPOSITION_AND_MULTIGRID.md` open item 11).
+A' ≤ θ = 2) and its named remedy (line relaxation, `../../docs/DECOMPOSITION_AND_MULTIGRID.md` open item 11).
 
 **A2.2 Decisions.**
 - **(a) No blocked-axis term in D_auto or `mgChooseRatio`; no flag; §5.4 untouched.** Counting s only defers and
@@ -632,7 +632,7 @@ Galerkin coarse operators, odd-grid coarsening/padding. Evidence: M10, A2." The 
 Provenance: brief `gpu_diag/mgd/BRIEF_ARCH_MG_SYM.md`; evidence `gpu_diag/mgd/WO7_DIAG.md` (D2, D3) and the A3
 transfer-pair matrix `gpu_diag/mgd/a3/` (replica `symdiag.cpp`, `build.sh`, logs `run.log`, `run2.log`, `cut.log`;
 host, single rank, flow-mglr 4d745b0). Anchors are `src/mac_cutcell_mg.hpp` lines at 4d745b0. **Reverses part of
-register entry E2** (umbrella `docs/decisions/flow.md:767`, 2026-09-07: "no auto-FCG/symmetric-V-cycle decision
+register entry E2** (umbrella `../../docs/decisions/flow.md:767`, 2026-09-07: "no auto-FCG/symmetric-V-cycle decision
 needed") by a new recorded decision (A3.7); E2's finding (the aspect rule fixes the stretched-grid stall) stands.
 
 **A3.1 What is wrong.** PCG's short recurrence (Fletcher–Reeves β = r_{k+1}ᵀz_{k+1}/r_kᵀz_k) and its A-norm optimality
@@ -842,7 +842,7 @@ Risks:
 - **R5 — census completeness:** a C++ test building a `Solver` at a large grid with the default
   depth moves; the WO-1 census covers every test the battery runs, coupling's included.
 - **R6 — gallery/benchmark results at large grids move** (within tolerance); re-checked at the next
-  release's gallery pass (`docs/RELEASE.md`).
+  release's gallery pass (`../../docs/RELEASE.md`).
 
 Open questions (each with a default; work proceeds on the default):
 - **Q1 [fact] — is the engine's admission the right target size?** Default: yes (n ≤ 8192, plane

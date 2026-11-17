@@ -1,14 +1,14 @@
 # flow playbook (overrides the cce-code-health seed by id)
 
 Read the seed first (`plugins/cce-code-health/skills/refactor-loop/playbook-seed.md`, tool pin 93a36d8), then this file.
-Read `CLAUDE.md` ("Settled decisions", "Conventions and hard rules") and the register `../docs/decisions/flow.md`
+Read `CLAUDE.md` ("Settled decisions", "Conventions and hard rules") and the register `../../docs/decisions/flow.md`
 before touching any solver file; a refactor never reverses one.
 Gate: `PECLET_SUITE=<suite> codehealth gate`; bitwise = two reference tiers on the host/OpenMP build at ONE thread:
 `state_hash` (stdout of `tests/regression/state_hash.py`: 13 single-rank cases + the np = 2 distributed step) and
 `sharp_vof` (`.codehealth/sharp_vof_hash.py`: two VoF drops with the SHARP viscous interface in force, which no
 state_hash case reaches; a run on the averaged path prints `SHARP INACTIVE` and fails the tier).
 
-## Keep-out (session vof, 11-15; suite `docs/code_health/RULES.md`)
+## Keep-out (session vof, 11-15; suite `../../docs/code_health/RULES.md`)
 
 Verbatim from RULES.md:
 
@@ -122,7 +122,7 @@ sorted .bin records). SASS 836 S0; GPU state_hash + sharp VoF bitwise.
 
 ## Anti-patterns (review rejects)
 
-- **Settled-decision drift** (flow `CLAUDE.md`, `../docs/decisions/flow.md`): the collocated coupling is the
+- **Settled-decision drift** (flow `CLAUDE.md`, `../../docs/decisions/flow.md`): the collocated coupling is the
   Almgren–Bell–Colella approximate projection, NEVER Rhie–Chow; collocated pressure and forces stay INSIDE the
   implicit momentum predictor, never a face acceleration after the viscous solve (gate `collocated_stability_guard`);
   the rotational (Timmermans) pressure update; PCG not RB-GS for cut-cell pressure; backward Euler; ε-conservative

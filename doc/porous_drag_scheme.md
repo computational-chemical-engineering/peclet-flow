@@ -101,7 +101,7 @@ singular (no outflow). `diagnostics.set_pressure_graph_amg` propagates to the MG
 - **Ergun ΔP, porous path** (`coupling/tests/test_fixed_bed_ergun_porous.py`): uniform fixed bed,
   periodic + body force, Gidaspow closure — (f_drive, U=ε·u_i) lands on the Ergun curve to ~3%
   across the viscous → inertial regimes, no fitted factors.
-- **Ergun ΔP, incompressible path** (`test_fixed_bed_ergun.py`): 0.0% (unchanged).
+- **Ergun ΔP, incompressible path** (`../../coupling/tests/test_fixed_bed_ergun.py`): 0.0% (unchanged).
 - Synthetic fixed bed (hand-set ε, β): 300 steps, porous residual → 1e-11, ΔP = Σβ_f·w_f·h.
 - Real frozen beds (deposited ε, Gidaspow β up to ~10³ at the packing floor): steady, square and
   cylindrical vessels, CUDA + OpenMP.
