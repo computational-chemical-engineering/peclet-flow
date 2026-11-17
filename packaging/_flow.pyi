@@ -3621,3 +3621,129 @@ def predict_hierarchy(gnx: int, gny: int, gnz: int, np: int, levels: int, telesc
     """
 
 has_mpi: bool
+
+class _AndersonAccelerator:
+    """
+    Anderson accelerator of a steady march (doc/steady_acceleration.md): type-II Anderson on the march state (velocity + P, plus the collocated face field under projected-face advection), velocity-only metric. Created by s.diagnostics.anderson_accelerator(); the public driver is peclet.flow.march_to_steady. step(accelerate) is ONE call of the solver's step() (preceded by the lazy mix when accelerate and a mix is pending); between calls the solver always holds a genuine step output.
+    """
+
+    def step(self, accelerate: bool = True) -> None:
+        """
+        One map evaluation: when accelerate and a mix is pending, the solver's state is replaced by the Anderson mix first; then one solver.step(). accelerate=False is a plain step that still records history. Raises if the configuration became unsupported (the same refusals as the constructor).
+        """
+
+    @property
+    def residual(self) -> float:
+        """
+        Relative velocity residual ||g_u - x_u|| / ||g_u|| of the last evaluation (inf before the first).
+        """
+
+    @property
+    def status(self) -> str:
+        """'active' or 'disabled' (acceleration stopped; steps are plain)."""
+
+    @property
+    def reason(self) -> str:
+        r"""Why the status is not 'active' (\'\' while active)."""
+
+    @property
+    def num_restarts(self) -> int:
+        """History restarts so far."""
+
+    @property
+    def num_resets(self) -> int:
+        """
+        History resets because the state or the parameters (dt, rho, mu, body force, advection on / scheme / implicit) were changed from outside.
+        """
+
+    @property
+    def num_columns(self) -> int:
+        """Window columns in use."""
+
+    @property
+    def window(self) -> int:
+        """The window m."""
+
+    @property
+    def mixing(self) -> float:
+        """The mixing beta."""
+
+    @property
+    def memory_bytes(self) -> int:
+        """Bytes of the history: (2m+3) * n_fields * 8 * n_padded (this rank)."""
+
+    @property
+    def seconds(self) -> float:
+        """
+        Cumulative wall time spent in the accelerator, solver.step() excluded (device-fenced), seconds, this rank.
+        """
+
+    def reset(self) -> None:
+        """Clear the history (the next call starts a new window)."""
+
+    def disable(self) -> None:
+        """Stop accelerating for good; step() is then a plain step."""
+
+
+class _AndersonAcceleratorColocated:
+    """
+    Anderson accelerator of a steady march (doc/steady_acceleration.md): type-II Anderson on the march state (velocity + P, plus the collocated face field under projected-face advection), velocity-only metric. Created by s.diagnostics.anderson_accelerator(); the public driver is peclet.flow.march_to_steady. step(accelerate) is ONE call of the solver's step() (preceded by the lazy mix when accelerate and a mix is pending); between calls the solver always holds a genuine step output.
+    """
+
+    def step(self, accelerate: bool = True) -> None:
+        """
+        One map evaluation: when accelerate and a mix is pending, the solver's state is replaced by the Anderson mix first; then one solver.step(). accelerate=False is a plain step that still records history. Raises if the configuration became unsupported (the same refusals as the constructor).
+        """
+
+    @property
+    def residual(self) -> float:
+        """
+        Relative velocity residual ||g_u - x_u|| / ||g_u|| of the last evaluation (inf before the first).
+        """
+
+    @property
+    def status(self) -> str:
+        """'active' or 'disabled' (acceleration stopped; steps are plain)."""
+
+    @property
+    def reason(self) -> str:
+        r"""Why the status is not 'active' (\'\' while active)."""
+
+    @property
+    def num_restarts(self) -> int:
+        """History restarts so far."""
+
+    @property
+    def num_resets(self) -> int:
+        """
+        History resets because the state or the parameters (dt, rho, mu, body force, advection on / scheme / implicit) were changed from outside.
+        """
+
+    @property
+    def num_columns(self) -> int:
+        """Window columns in use."""
+
+    @property
+    def window(self) -> int:
+        """The window m."""
+
+    @property
+    def mixing(self) -> float:
+        """The mixing beta."""
+
+    @property
+    def memory_bytes(self) -> int:
+        """Bytes of the history: (2m+3) * n_fields * 8 * n_padded (this rank)."""
+
+    @property
+    def seconds(self) -> float:
+        """
+        Cumulative wall time spent in the accelerator, solver.step() excluded (device-fenced), seconds, this rank.
+        """
+
+    def reset(self) -> None:
+        """Clear the history (the next call starts a new window)."""
+
+    def disable(self) -> None:
+        """Stop accelerating for good; step() is then a plain step."""
+

@@ -199,6 +199,8 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_steady.py
 # generated against an MPI-enabled host build, so it also lists the distributed names -- after
 # changing a binding, regenerate it and drop the two build-specific constant values:
 #   PYTHONPATH=<build> python -m nanobind.stubgen -m peclet.flow._flow -o packaging/_flow.pyi
+#   then append the two private accelerator classes that public methods return (generate once with -P and copy
+#   the `_AndersonAccelerator` and `_AndersonAcceleratorColocated` class blocks); tests/python/test_stub_sync.py checks them.
 #   sed -i "s/^execution_space: str = .*/execution_space: str/; s/^has_mpi: bool = .*/has_mpi: bool/" \
 #       packaging/_flow.pyi
 # tests/python/test_stub_sync.py (ctest stub_sync) fails when a public name is missing from it.

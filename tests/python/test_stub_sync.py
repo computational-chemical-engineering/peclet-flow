@@ -19,6 +19,11 @@ MPI_ONLY = {"mpi_block", "predict_hierarchy", "Solver.init_mpi", "SolverColocate
             "SolverColocatedDiagnostics.rebalance_by_weights"}
 
 
+# Private handle classes that public methods return (`Solver.anderson_accelerator`): the stub must
+# define them, or its return annotations name an undefined type.
+RETURNED_PRIVATE = {"_AndersonAccelerator", "_AndersonAcceleratorColocated"}
+
+
 def _public(name):
     return not name.startswith("_") or name == "__init__"
 
@@ -41,7 +46,7 @@ def _stub_names():
 def _runtime_names():
     names = set()
     for name in dir(_flow):
-        if name.startswith("_"):
+        if name.startswith("_") and name not in RETURNED_PRIVATE:
             continue
         names.add(name)
         obj = getattr(_flow, name)
