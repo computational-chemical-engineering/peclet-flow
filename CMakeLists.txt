@@ -325,6 +325,14 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(vof_viscous_interface_auto PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # The binding refuses a NaN/Inf or inadmissible setter argument with ValueError naming the
+  # parameter, and a valid one still passes, on both solvers (src/flow_bindings_checks.hpp).
+  add_test(NAME input_validation
+           COMMAND ${Python_EXECUTABLE} -m pytest -q -p no:cacheprovider
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_input_validation.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(input_validation PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS verify SKIP_RETURN_CODE 77)
   # The same face plane under MPI: an x-only split at np = 3, so the +x face has one owning rank
   # and the middle rank touches neither open face; distributed == serial to 1e-12 for the outlet
   # scalar, the backflow census and a high-side inflow, both grids (doc/uf_outlet_fix.md).
