@@ -147,3 +147,28 @@ sorted .bin records). SASS 836 S0; GPU state_hash + sharp VoF bitwise.
   not. dem S7 measured seams (and combinations of seams, and dead locals) changing contracted results.
 - **Moving uncovered code**: a seam in a branch no state_hash / sharp_vof case or ctest reaches is not proven by any
   gate. Cover it first (a new case belongs in the gate script, which is frozen: ask), or leave it.
+
+## User-facing round (WO-29, 2026-11-17; deltas from dem's recipe in dem-health-api's playbook)
+- **Checked setters, not lambdas**: bind_solver is a brain function and the file's debt is the sum of its two
+  binders (NLOC/10 + CCN-10; 432.9 at f5f0b87, gate cap 433). A setter bound as `&S::setX` is rebound as
+  `&chk::set_x<S>`, a free template in `src/flow_bindings_checks.hpp` that checks then calls the member: 0 NLOC
+  in bind_solver, same `__nb_signature__` (dumped and diffed). Lambdas that already parse enums get one `chk::`
+  line; compound checks are named helpers there. Moving the constructor's cell loop out paid for the unit text
+  (CCN 36 -> 32; debt 432.9 -> 428.8, 430.5 after the docstrings).
+- **Grep usage before fixing a range**: mu = 0 (inviscid) is used by scripts and the gallery, so mu >= 0.
+- **Switches, finite only or unchecked** (audit lists 6 left): set_pressure_bottom_extent <= 0 restores the
+  default 4 (mac_cutcell_mg setAgglomerationExtent), set_pressure_multigrid levels 0 = auto, velocity rtol < 0
+  follows the pressure, dynamic contact-angle sigma <= 0 takes set_surface_tension's, block reassign every 0 =
+  never, uniform mass flux sign = direction.
+- **Found beyond the audit**: Solver(-1, n, n) asked Kokkos for 1.7e7 TiB and Solver(0, n, n) was accepted;
+  set_velocity_multigrid clamped levels/vcycles < 1 to 1 silently; set_pressure_solver_params is a no-op
+  (presIters_ is never read).
+- **Fixtures**: phase change, superficial velocity staggered-only (outcome = callable of the class).
+- **Stub**: MPI-only names are mpi_block, predict_hierarchy, *.init_mpi, *Diagnostics.rebalance_by_weights;
+  drop the values of execution_space AND has_mpi. Docstrings carry em dashes; the stub copies them verbatim.
+- **Units regex is case-sensitive**: "In cells" misses `\bin cells\b`; "Measured in cells (a count, not a
+  length)" satisfies no_units and the cell_units exemption at once.
+- **Iterate beside the base battery** in a second tree, `--target peclet_flow` only (cold 268 s, incr. 38 s).
+- **Wall clock (TRS2, load ~20)**: base build cold 233 s, head incremental 26 s; state_hash 1 s; sharp_vof < 1 s;
+  ctest 275/277 tests 1853 s base, 911 s head (-j8, OMP 2); clang-format 4 s; api audit 16 s (all nine 53 s);
+  codehealth diff 2 s; targeted pytest 0.5 s (260 cases).
