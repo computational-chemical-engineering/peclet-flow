@@ -195,6 +195,16 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_init.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/__init__.py COPYONLY)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_steady.py
                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/steady.py COPYONLY)   # march_to_steady
+# Type stub of the extension (packaging/_flow.pyi), staged beside it with the PEP 561 marker. It is
+# generated against an MPI-enabled host build, so it also lists the distributed names -- after
+# changing a binding, regenerate it and drop the two build-specific constant values:
+#   PYTHONPATH=<build> python -m nanobind.stubgen -m peclet.flow._flow -o packaging/_flow.pyi
+#   sed -i "s/^execution_space: str = .*/execution_space: str/; s/^has_mpi: bool = .*/has_mpi: bool/" \
+#       packaging/_flow.pyi
+# tests/python/test_stub_sync.py (ctest stub_sync) fails when a public name is missing from it.
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/packaging/_flow.pyi
+               ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/_flow.pyi COPYONLY)
+file(TOUCH ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/py.typed)
 target_include_directories(peclet_flow PRIVATE src "${PECLET_CORE_INCLUDE}")
 target_link_libraries(peclet_flow PRIVATE Kokkos::kokkos)
 # G.8: the solver instantiation. STATIC, so its objects land INSIDE _flow.so -- nothing extra to
@@ -333,6 +343,13 @@ if(PECLET_FLOW_BUILD_TESTS)
            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
   set_tests_properties(input_validation PROPERTIES ENVIRONMENT "${_flow_py_env}"
                        LABELS verify SKIP_RETURN_CODE 77)
+  # The shipped type stub packaging/_flow.pyi lists every public name of the extension.
+  add_test(NAME stub_sync
+           COMMAND ${Python_EXECUTABLE} -m pytest -q -p no:cacheprovider
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tests/python/test_stub_sync.py
+           WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+  set_tests_properties(stub_sync PROPERTIES ENVIRONMENT "${_flow_py_env}"
+                       LABELS quality SKIP_RETURN_CODE 77)
   # The same face plane under MPI: an x-only split at np = 3, so the +x face has one owning rank
   # and the middle rank touches neither open face; distributed == serial to 1e-12 for the outlet
   # scalar, the backflow census and a high-side inflow, both grids (doc/uf_outlet_fix.md).
@@ -478,4 +495,7 @@ if(DEFINED SKBUILD)
           DESTINATION peclet/flow RENAME __init__.py COMPONENT python)
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/flow_steady.py
           DESTINATION peclet/flow RENAME steady.py COMPONENT python)
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/packaging/_flow.pyi
+                ${CMAKE_CURRENT_BINARY_DIR}/peclet/flow/py.typed
+          DESTINATION peclet/flow COMPONENT python)
 endif()
