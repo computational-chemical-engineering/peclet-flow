@@ -3228,6 +3228,33 @@ class CutcellMG {
     removeMean(l0, r);     // compatibility: project rhs/residual onto the range
     return maxabs(l0, r);  // host read (once per solve)
   }
+  // An attempt's starting residual (E, §5.3). With a projected guess armed, r0 is rref = max|P b|,
+  // the zero-guess residual, and r0w the guess's own residual (traced only); else r = b - A x
+  // (initialResidual on the resident driver, guessResidual on the host-scalar ones) and r0w = r0.
+  // fused: projectedGuess's fused pass. The guess trace (collective; rank 0 prints) saves x.
+  struct StartResidual {
+    double r0, r0w;
+    bool traceGuess;  // the guess trace is on: the attempt ends with guessTraceExit
+  };
+  StartResidual startResidual(CCField b, CCField x, CCField r, CCField Ap, CCField z,
+                              const StarOverlay* star, int nStar, C3 nnStar, bool fused,
+                              bool resident) {
+    Level& l0 = lv_[0];
+    const bool guessOn = guessV1_.extent(0) > 0;
+    const bool traceGuess = guessOn && mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
+    double r0 = 0.0, r0w = 0.0;
+    if (guessOn && guessHist_ > 0) {
+      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar, fused,
+                          traceGuess ? &r0w : nullptr);
+    } else {
+      r0 = resident ? initialResidual(l0, b, x, r, Ap, star, nStar, nnStar)
+                    : guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
+      r0w = r0;
+    }
+    if (traceGuess)
+      guessTraceSave(x);
+    return StartResidual{r0, r0w, traceGuess};
+  }
   // solvePCGResident's Ap = A p and p^T Ap into slot kPAp: C1's one fused pass when fuse (and no
   // "all"-scope mean removal), else the matvec, that mean removal and the dot.
   void matvecDotPAp(Level& l0, CCField Ap, CCField p, bool fuse, const StarOverlay* star, int nStar,
@@ -3276,6 +3303,110 @@ class CutcellMG {
       Kokkos::deep_copy(CCExec(), p, z);
     return readSlot(kRz);  // host read (the initial guard)
   }
+  // solvePCGResident's alpha = rz / pAp on the device, or the pAp breakdown flag. The R test hook
+  // (dbgBrkWhich_ 1) poisons p^T Ap at iteration dbgBrkIter_ first.
+  void residentAlpha(int it) {
+    if (dbgBrkWhich_ == 1 && it == dbgBrkIter_)
+      setSlot(kPAp, std::numeric_limits<double>::quiet_NaN());
+    auto ks = ks_;
+    const double brkPAp = kBrkPAp;  // by value into the kernel
+    Kokkos::parallel_for(           // alpha = rz / pAp, or the pAp breakdown flag
+        "mgpcg_alpha", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
+          const double pAp = ks(kPAp);
+          if (ks(kStop) == 0.0) {
+            if (Kokkos::isfinite(pAp) && pAp > 1e-300)
+              ks(kAlpha) = ks(kRz) / pAp;
+            else
+              ks(kStop) = brkPAp;
+          }
+        });
+  }
+  // solvePCGResident's x += alpha p, r -= alpha Ap onto the range and max|r| into slot kRn, all
+  // skipped once the stop flag is set: C2 + C3 when fuse, else the update kernel, the
+  // stop-guarded mean removal and maxabsTo.
+  void residentUpdate(Level& l0, CCField xx, CCField rr, CCField pp, CCField aa, bool fuse) {
+    if (fuse) {
+      pcgUpdateSum(l0, xx, rr, pp, aa);  // C2: the update + the fluid sum of r
+      meanSubtractMaxTo(l0, rr, kRn);    // C3: the stop-guarded subtract + max|r|
+    } else {
+      auto ks = ks_;
+      const std::size_t n = xx.extent(0);
+      Kokkos::parallel_for(  // x += alpha p; r -= alpha Ap (axpy's expressions)
+          "mgpcg_update", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
+          KOKKOS_LAMBDA(std::size_t i) {
+            if (ks(kStop) != 0.0)
+              return;
+            const double a = ks(kAlpha), na = -a;
+            xx(i) += a * pp(i);
+            rr(i) += na * aa(i);
+          });
+      removeMean(l0, rr, /*stopGuard=*/true);
+      maxabsTo(l0, rr, kRn);
+    }
+  }
+  // solvePCGResident's one host read per iteration (the packet {pAp, rn, stop, bottomFlag}) and its
+  // exit test: a breakdown (it then names the iteration that computed it) or convergence (it then
+  // counts this one). Returns true to leave the loop; rn is max|r|.
+  bool residentPacketExit(int& it, double rtol, double rref, double r0, bool trace, double& rn) {
+    Kokkos::deep_copy(CCExec(), kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));
+    CCExec().fence("peclet::flow::mg_packet");  // THE read
+    const double pAp = kpk_(0), stop = kpk_(2);
+    rn = kpk_(1);
+    noteBottomFlag(kpk_(3));  // a non-finite scalar in a device bottom solve
+    if (stop == kBrkRz) {     // r^T z of the previous iteration was non-finite
+      solveFailed_ = true;    // ISSUES sweep item 6: a breakdown, not a convergence
+      --it;                   // report the iteration that computed it
+      return true;
+    }
+    if (stop == kBrkPAp) {
+      if (!std::isfinite(pAp))
+        solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
+      return true;            // keep the last finite iterate
+    }
+    if (trace)
+      printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
+    if (rn < rtol * rref) {
+      lastSolveConverged_ = true;
+      ++it;
+      return true;
+    }
+    return false;
+  }
+  // solvePCGResident's z = M r with r^T z into slot kRzNew (C4: from the V-cycle's exit pass, else
+  // dotTo), e = ilogb(rn) the FP32 V-cycle's scale; with the health instrument (rzOld = r_{k+1}^T
+  // z_k) and the R test hook (dbgBrkWhich_ 2), which poisons r^T z at iteration dbgBrkIter_.
+  void residentPrecondRz(Level& l0, bool f32, bool fuse, int e, CCField z, CCField r, int it,
+                         bool health, bool trace) {
+    const double rzOld = health ? dot(l0, r, z) : 0.0;         // r_{k+1}^T z_k (the instrument)
+    if (!precondDotTo(f32, fuse, e, kRzNew, z, r, CCField()))  // C4: from the exit pass
+      dotTo(l0, r, z, kRzNew);
+    if (health)
+      noteHealth(rzOld, it, trace, f32);
+    if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
+      setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
+  }
+  // solvePCGResident's beta = r^T z_new / r^T z and rz = r^T z_new on the device (or the r^T z
+  // breakdown flag), then p = z + beta p; both skipped once the stop flag is set.
+  void residentBetaAypx(CCField pp, CCField zz, std::size_t n) {
+    auto ks = ks_;
+    const double brkRz = kBrkRz;  // by value into the kernel
+    Kokkos::parallel_for(         // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
+        "mgpcg_beta", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
+          const double rznew = ks(kRzNew);
+          if (Kokkos::isfinite(rznew)) {
+            ks(kBeta) = rznew / ks(kRz);
+            ks(kRz) = rznew;
+          } else {
+            ks(kStop) = brkRz;
+          }
+        });
+    Kokkos::parallel_for(  // p = z + beta p (aypx's expression)
+        "mgaypx", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n), KOKKOS_LAMBDA(std::size_t i) {
+          if (ks(kStop) != 0.0)
+            return;
+          pp(i) = zz(i) + ks(kBeta) * pp(i);
+        });
+  }
   int solvePCGResident(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                        double rtol, int pre, int post, int bottom, const StarOverlay* star,
                        int nStar, C3 nnStar) {
@@ -3290,23 +3421,14 @@ class CutcellMG {
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
     // E (§5.3): with a projected guess r0 below is rref = max|P b|, the zero-guess residual (the
     // guard, the stop and the FP32 V-cycle's scale exponent read it; the host holds no other)
-    const bool guessOn = guessV1_.extent(0) > 0;
-    double r0 = 0.0, r0w = 0.0;
-    if (guessOn && guessHist_ > 0) {
-      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
-                          hostKrylovFusion() && star == nullptr, trace ? &r0w : nullptr);
-    } else {
-      r0 = initialResidual(l0, b, x, r, Ap, star, nStar, nnStar);
-      r0w = r0;
-    }
-    if (trace && guessOn)
-      guessTraceSave(x);
+    const StartResidual s0 =
+        startResidual(b, x, r, Ap, z, star, nStar, nnStar, hostKrylovFusion() && star == nullptr,
+                      /*resident=*/true);
+    const double r0 = s0.r0;
     // X1: the stop reference, as in solvePCG's distributed loop, solveFCG and solveChebyshev: r0,
     // or the caller's FULL right-hand-side norm when one is set (setStopReference; only the
     // balanced-force projection sets it). Unset, rref IS r0: `rtol * rref` is the old test bitwise.
-    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
-    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
-    cgStopRtol_ = rtol;
+    const double rref = armStopTest(r0, rtol);
     int it = 0;
     if (trace)
       printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
@@ -3325,97 +3447,25 @@ class CutcellMG {
     const bool f32 = beginAttemptPrecision(maxit);
     const bool health = trace || healthTrace_;
     healthLog_.clear();
-    int eNext = 0;
     lastSolveConverged_ = r0 == 0.0;  // R (§4): the loop is skipped on a zero residual
     if (r0 > 0.0 && std::isfinite(r0)) {
-      eNext = std::ilogb(r0);
-      const double rz0 = firstPrecondRz(l0, f32, fuseC, eNext, z, r, p);  // the initial guard
+      const double rz0 = firstPrecondRz(l0, f32, fuseC, std::ilogb(r0), z, r, p);  // the guard
       if (!std::isfinite(rz0))
         return failNonFiniteZ("solvePCG", l0, x, maxit);
       setSlot(kStop, 0.0);
-      auto ks = ks_;
       const std::size_t n = x.extent(0);
-      CCField xx = x, rr = r, pp = p, zz = z, aa = Ap;
-      const double brkPAp = kBrkPAp, brkRz = kBrkRz;  // by value into the kernels
       bool exited = false;
       for (; it < maxit; ++it) {
         matvecDotPAp(l0, Ap, p, fuseC, star, nStar, nnStar);
-        if (dbgBrkWhich_ == 1 && it == dbgBrkIter_)
-          setSlot(kPAp, std::numeric_limits<double>::quiet_NaN());
-        Kokkos::parallel_for(  // alpha = rz / pAp, or the pAp breakdown flag
-            "mgpcg_alpha", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
-              const double pAp = ks(kPAp);
-              if (ks(kStop) == 0.0) {
-                if (Kokkos::isfinite(pAp) && pAp > 1e-300)
-                  ks(kAlpha) = ks(kRz) / pAp;
-                else
-                  ks(kStop) = brkPAp;
-              }
-            });
-        if (fuseC) {
-          pcgUpdateSum(l0, x, r, p, Ap);  // C2: the update + the fluid sum of r
-          meanSubtractMaxTo(l0, r, kRn);  // C3: the stop-guarded subtract + max|r|
-        } else {
-          Kokkos::parallel_for(  // x += alpha p; r -= alpha Ap (axpy's expressions)
-              "mgpcg_update", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
-              KOKKOS_LAMBDA(std::size_t i) {
-                if (ks(kStop) != 0.0)
-                  return;
-                const double a = ks(kAlpha), na = -a;
-                xx(i) += a * pp(i);
-                rr(i) += na * aa(i);
-              });
-          removeMean(l0, r, /*stopGuard=*/true);
-          maxabsTo(l0, r, kRn);
-        }
-        Kokkos::deep_copy(CCExec(), kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));
-        CCExec().fence("peclet::flow::mg_packet");  // THE read
-        const double pAp = kpk_(0), rn = kpk_(1), stop = kpk_(2);
-        noteBottomFlag(kpk_(3));  // a non-finite scalar in a device bottom solve
-        if (stop == kBrkRz) {     // r^T z of the previous iteration was non-finite
-          solveFailed_ = true;    // ISSUES sweep item 6: a breakdown, not a convergence
-          --it;                   // report the iteration that computed it
+        residentAlpha(it);
+        residentUpdate(l0, x, r, p, Ap, fuseC);
+        double rn = 0.0;
+        if (residentPacketExit(it, rtol, rref, r0, trace, rn)) {
           exited = true;
           break;
         }
-        if (stop == kBrkPAp) {
-          if (!std::isfinite(pAp))
-            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
-          exited = true;
-          break;  // keep the last finite iterate
-        }
-        if (trace)
-          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * rref) {
-          lastSolveConverged_ = true;
-          ++it;
-          exited = true;
-          break;
-        }
-        eNext = std::ilogb(rn);
-        const double rzOld = health ? dot(l0, r, z) : 0.0;  // r_{k+1}^T z_k (the instrument)
-        if (!precondDotTo(f32, fuseC, eNext, kRzNew, z, r, CCField()))  // C4: from the exit pass
-          dotTo(l0, r, z, kRzNew);
-        if (health)
-          noteHealth(rzOld, it, trace, f32);
-        if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
-          setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
-        Kokkos::parallel_for(  // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
-            "mgpcg_beta", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
-              const double rznew = ks(kRzNew);
-              if (Kokkos::isfinite(rznew)) {
-                ks(kBeta) = rznew / ks(kRz);
-                ks(kRz) = rznew;
-              } else {
-                ks(kStop) = brkRz;
-              }
-            });
-        Kokkos::parallel_for(  // p = z + beta p (aypx's expression)
-            "mgaypx", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n), KOKKOS_LAMBDA(std::size_t i) {
-              if (ks(kStop) != 0.0)
-                return;
-              pp(i) = zz(i) + ks(kBeta) * pp(i);
-            });
+        residentPrecondRz(l0, f32, fuseC, std::ilogb(rn), z, r, it, health, trace);
+        residentBetaAypx(p, z, n);
       }
       if (!exited && maxit > 0 && readSlot(kStop) == kBrkRz) {
         solveFailed_ = true;  // the last iteration's r^T z was non-finite
@@ -3423,8 +3473,8 @@ class CutcellMG {
       }
     }
     removeMean(l0, x);  // H-2b: in place (was the l0.x round trip; same cells, same values)
-    if (trace && guessOn)
-      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
+    if (s0.traceGuess)
+      guessTraceExit(l0, b, x, r0, s0.r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
