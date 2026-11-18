@@ -6743,6 +6743,95 @@ class CutcellMG {
     return m > 0 ? A[top][top] : 0.0;
   }
 
+  // estimateEigenvalues' seed when cold: the right-hand side plus a broadband, np-independent
+  // component of the same max amplitude (doc/mg_depth_policy_log.md 2026-10-29): a right-hand side
+  // confined to an invariant subspace of M^{-1}A (an x-y-uniform hydrostatic load) otherwise hides
+  // the top of the spectrum from the power iteration, and the symmetric V-cycle's top lies above 1.
+  void eigSeedRhs(Level& l0, CCField srhs, CCConst seed) {
+    Kokkos::deep_copy(CCExec(), srhs, seed);
+    if (symVcycle_) {  // off: the pre-A3 estimate bit for bit (A3.3 item 4)
+      const double sm = maxabs(l0, srhs);
+      addSeedNoise(l0, srhs, sm > 0.0 ? sm : 1.0);
+    }
+  }
+  // estimateEigenvalues' T = M^{-1} A: out = M^{-1} A in, projected onto the fluid range; w = A in
+  // is left for the Rayleigh quotient.
+  void eigApplyT(Level& l0, CCField out, CCField in, CCField w) {
+    matvecOverlap(l0, w, in);
+    precondVcycle(out, w);  // A5
+    removeMean(l0, out);
+    maskSolid(l0, out);
+  }
+  // x / |x|; returns |x|.
+  double eigNormalize(Level& l0, CCField x) {
+    double nr = std::sqrt(dot(l0, x, x));
+    if (nr > 0)
+      scale(x, 1.0 / nr);
+    return nr;
+  }
+  // x = src onto the fluid range, normalized; returns its norm before.
+  double eigSeed(Level& l0, CCField x, CCField src) {
+    Kokkos::deep_copy(CCExec(), x, src);
+    removeMean(l0, x);
+    maskSolid(l0, x);
+    return eigNormalize(l0, x);
+  }
+  // Keeps x in dst (allocated at n cells on first use): a later warm estimate's seed.
+  void eigKeep(CCField& dst, CCField x, const char* label, std::size_t n) {
+    if (dst.extent(0) != n)
+      dst = CCField(label, n);
+    Kokkos::deep_copy(CCExec(), dst, x);
+  }
+  // estimateEigenvalues' power iteration for lambda_max from v (iters steps; 1 with none); v
+  // leaves as the last iterate.
+  double eigPowerMax(Level& l0, CCField v, CCField w, CCField z, int iters) {
+    double lmax = 1.0;
+    for (int k = 0; k < iters; ++k) {
+      eigApplyT(l0, z, v, w);
+      if (symVcycle_) {
+        // T = M^{-1} A is self-adjoint in the A inner product when M is symmetric, so the
+        // Rayleigh quotient is taken there: (Av . Tv) / (Av . v), w = A v as eigApplyT left it,
+        // both sums in ONE reduction. It never exceeds lambda_max and its error is quadratic in
+        // the iterate's; the Euclidean v . Tv is not a Rayleigh quotient of this T (with it the
+        // true top reached 1.129 x the estimate, doc/mg_depth_policy_log.md 2026-10-29/30).
+        double wz = 0.0, wv = 0.0;
+        dotPair(l0, w, z, v, wz, wv);
+        lmax = wv > 0.0 ? wz / wv : 0.0;
+      } else {  // the trilinear V-cycle (M not symmetric): the pre-A3 estimate bit for bit
+        lmax = dot(l0, v, z);
+      }
+      Kokkos::deep_copy(CCExec(), v, z);
+      eigNormalize(l0, v);
+    }
+    return lmax;
+  }
+  // estimateEigenvalues' shifted power iteration on shift*I - T from v (iters steps); returns the
+  // Rayleigh quotient mu (0 with none), v leaving as the last iterate.
+  double eigPowerMin(Level& l0, CCField v, CCField w, CCField z, int iters, double shift) {
+    double mu = 0.0;
+    for (int k = 0; k < iters; ++k) {
+      eigApplyT(l0, z, v, w);
+      lin(z, shift, v, -1.0, z);  // z = shift*v - T v
+      mu = dot(l0, v, z);
+      Kokkos::deep_copy(CCExec(), v, z);
+      eigNormalize(l0, v);
+    }
+    return mu;
+  }
+  // estimateEigenvalues' bounds from the direct (max) and shifted (min) Rayleigh estimates: a
+  // robust min/max bracket with lmin >= 0.02 lmax, then the one-shot test hook's scale.
+  void eigBracket(double shift, double mu, double& lmin, double& lmax) {
+    double e_hi = lmax, e_lo = shift - mu;  // direct (max) + shifted (min) Rayleigh estimates
+    lmin = e_lo < e_hi ? e_lo : e_hi;
+    lmax = e_lo < e_hi ? e_hi : e_lo;  // robust min/max bracket
+    if (lmin < 0.02 * lmax)
+      lmin = 0.02 * lmax;
+    if (dbgEigScale_ != 1.0) {  // test hook (debugSetEigenScale): one estimate only
+      lmin *= dbgEigScale_;
+      lmax *= dbgEigScale_;
+      dbgEigScale_ = 1.0;
+    }
+  }
   // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power
   // iteration (direct for the max + a shifted iteration for the min), seeded by `seed` (or, with
   // EigenStart::Warm, by the iterates a previous estimate kept). Communication-heavy, so the CUDA
@@ -6761,44 +6850,9 @@ class CutcellMG {
     CCField v = workVector(0, n, "ev_v"), w = workVector(1, n, "ev_w"),
             z = workVector(2, n, "ev_z"), srhs = workVector(3, n, "ev_srhs");
     const bool warm = start == EigenStart::Warm, keep = start != EigenStart::Cold;
-    if (!warm) {
-      // The right-hand side plus a broadband, np-independent component of the same max amplitude
-      // (doc/mg_depth_policy_log.md 2026-10-29): a right-hand side confined to an invariant
-      // subspace of M^{-1}A (an x-y-uniform hydrostatic load) otherwise hides the top of the
-      // spectrum from the power iteration, and the symmetric V-cycle's top lies above 1.
-      Kokkos::deep_copy(CCExec(), srhs, seed);
-      if (symVcycle_) {  // off: the pre-A3 estimate bit for bit (A3.3 item 4)
-        const double sm = maxabs(l0, srhs);
-        addSeedNoise(l0, srhs, sm > 0.0 ? sm : 1.0);
-      }
-    }
-    auto matvec = [&](CCField y, CCField x) { matvecOverlap(l0, y, x); };
-    auto applyT = [&](CCField out,
-                      CCField in) {  // out = M^{-1} A in, projected onto the fluid range
-      matvec(w, in);
-      precondVcycle(out, w);  // A5
-      removeMean(l0, out);
-      maskSolid(l0, out);
-    };
-    auto normalize = [&](CCField x) {
-      double nr = std::sqrt(dot(l0, x, x));
-      if (nr > 0)
-        scale(x, 1.0 / nr);
-      return nr;
-    };
-    auto seedf = [&](CCField x, CCField src) {
-      Kokkos::deep_copy(CCExec(), x, src);
-      removeMean(l0, x);
-      maskSolid(l0, x);
-      return normalize(x);
-    };
-    auto keepf = [&](CCField& dst, CCField x, const char* label) {
-      if (dst.extent(0) != n)
-        dst = CCField(label, n);
-      Kokkos::deep_copy(CCExec(), dst, x);
-    };
-    const double nrMax = seedf(v, warm ? eigVmax_ : srhs);
-    lmax = 1.0;
+    if (!warm)
+      eigSeedRhs(l0, srhs, seed);
+    const double nrMax = eigSeed(l0, v, warm ? eigVmax_ : srhs);
     if (symVcycle_ && !warm) {
       // A cold estimate on the symmetric V-cycle ((c), DECISIONS_GPU.log 2026-10-30 "A3
       // finish"): lambda_max is the top Ritz value of a short PCG run from the seed, v leaves as
@@ -6806,25 +6860,9 @@ class CutcellMG {
       // top 9 % under (collocated_stability_guard: 0.995 of 1.088).
       lmax = lanczosTop(l0, v, keep);
     } else
-      for (int k = 0; k < iters; ++k) {
-        applyT(z, v);
-        if (symVcycle_) {
-          // T = M^{-1} A is self-adjoint in the A inner product when M is symmetric, so the
-          // Rayleigh quotient is taken there: (Av . Tv) / (Av . v), w = A v as applyT left it, both
-          // sums in ONE reduction. It never exceeds lambda_max and its error is quadratic in the
-          // iterate's; the Euclidean v . Tv is not a Rayleigh quotient of this T (with it the true
-          // top reached 1.129 x the estimate, doc/mg_depth_policy_log.md 2026-10-29/30).
-          double wz = 0.0, wv = 0.0;
-          dotPair(l0, w, z, v, wz, wv);
-          lmax = wv > 0.0 ? wz / wv : 0.0;
-        } else {  // the trilinear V-cycle (M not symmetric): the pre-A3 estimate bit for bit
-          lmax = dot(l0, v, z);
-        }
-        Kokkos::deep_copy(CCExec(), v, z);
-        normalize(v);
-      }
+      lmax = eigPowerMax(l0, v, w, z, iters);
     if (keep)
-      keepf(eigVmax_, v, "ev_vmax");
+      eigKeep(eigVmax_, v, "ev_vmax", n);
     // The min iteration runs on shift*I - T. A shift below the true lambda_max makes it converge
     // to the wrong end of the spectrum and the lower bound collapse (pressure_wallbounded case B
     // diverged on it, doc/mg_depth_policy_log.md 2026-10-29). The power iteration approaches the
@@ -6837,33 +6875,17 @@ class CutcellMG {
       if (shift < lmax)
         shift = lmax;
     }
-    const double nrMin = seedf(v, warm ? eigVmin_ : srhs);
-    double mu = 0.0;
-    for (int k = 0; k < iters; ++k) {
-      applyT(z, v);
-      lin(z, shift, v, -1.0, z);  // z = shift*v - T v
-      mu = dot(l0, v, z);
-      Kokkos::deep_copy(CCExec(), v, z);
-      normalize(v);
-    }
+    const double nrMin = eigSeed(l0, v, warm ? eigVmin_ : srhs);
+    const double mu = eigPowerMin(l0, v, w, z, iters, shift);
     if (keep) {
-      keepf(eigVmin_, v, "ev_vmin");
+      eigKeep(eigVmin_, v, "ev_vmin", n);
       // Only a non-degenerate estimate may seed a warm one: a zero seed (a zero right-hand side,
       // e.g. a fluid at rest) leaves zero iterates and lmax = 0, from which a warm estimate would
       // return zero bounds -- and a Chebyshev solve on them NaN, which maxabs cannot see.
       eigWarm_ =
           nrMax > 0.0 && nrMin > 0.0 && std::isfinite(lmax) && lmax > 0.0 && std::isfinite(mu);
     }
-    double e_hi = lmax, e_lo = shift - mu;  // direct (max) + shifted (min) Rayleigh estimates
-    lmin = e_lo < e_hi ? e_lo : e_hi;
-    lmax = e_lo < e_hi ? e_hi : e_lo;  // robust min/max bracket
-    if (lmin < 0.02 * lmax)
-      lmin = 0.02 * lmax;
-    if (dbgEigScale_ != 1.0) {  // test hook (debugSetEigenScale): one estimate only
-      lmin *= dbgEigScale_;
-      lmax *= dbgEigScale_;
-      dbgEigScale_ = 1.0;
-    }
+    eigBracket(shift, mu, lmin, lmax);
   }
   // Test hook: the NEXT estimateEigenvalues returns both bounds multiplied by `s` (s < 1 forces a
   // lambda_max below the spectrum's top, the growth guard's trigger). One-shot.
