@@ -1244,6 +1244,9 @@ class Solver {
 
 
   void setSolidGhostProjectionOverlay(CCField din);
+  // setSolidGhostProjectionOverlay() phase (WO-HO), public for its device lambda: the pocket-decoupled
+  // projection sdf uploaded into sdfGp (block + halo exchange, or periodic wrap).
+  void gpUploadSdf(const std::vector<double>& sdfGpHost, std::size_t nInner, CCField sdfGp);
 
 
   void setSolidInitPressureMg();
@@ -1602,6 +1605,13 @@ class Solver {
   void projectCorrectStaggered();
   // Staggered: the high-side outflow normal faces.
   void projectCorrectStaggeredOutflow();
+
+  // ---- setSolidGhostProjectionOverlay() phases (WO-HO): contiguous blocks, called once each. ----
+  // The fragmentation guard: the inner sdf on the host (allgathered when distributed), pockets
+  // outside the main coupled component decoupled, this rank's block returned.
+  std::vector<double> gpPocketGuardSdf(CCField din);
+  // The binary openness, the overlay build (+ debug report) and the MG surrogate openness.
+  void gpBuildOverlay(CCField sdfGp);
 
  public:  // nvcc forbids extended __host__ __device__ lambdas inside private/protected members.
   // Advection treated implicitly (implicit-FOU upwind + deferred correction): the user opt-in
