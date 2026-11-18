@@ -1554,6 +1554,41 @@ class Solver {
     int nCut = 0;
   };
 
+  // ---- step() phases (WO-HO): contiguous blocks of step(), called once each in its order. ----
+  // The two-phase stability checks and the configuration refusals, before the first mutator.
+  void stepPrechecks();
+  // VoF momentum + colour, phase change, properties, the hoisted operator build, the body-force /
+  // drag ghosts, curvature and the porous rho_eff. Returns whether the operator build was hoisted.
+  bool stepHeadFields();
+  // The sharp-interface geometry and the diffusion stencil rebuild of this step.
+  void stepStencils();
+  // The u^n time base and the full-stress prelude. Returns fullStressActive().
+  bool stepTimeBase();
+  // The incremental grad(P^n) ghosts and the V8 density ghosts.
+  void stepPressureGhosts();
+  // The coefficient-build flag, the restart split of P and the balanced-force projection.
+  void stepBalancedForce(bool hoisted);
+  // Per Picard iteration: velocity ghosts, advection inputs and the porous div(u) compensation.
+  void stepPredictorInputs();
+  // Per Picard iteration: the momentum right-hand side. Returns colocatedFaceForce().
+  bool stepPredictorRhs();
+  // Per Picard iteration: the CSF and full-stress terms added to that right-hand side.
+  void stepPredictorForces(bool coloFF, bool fullStress);
+  // Per Picard iteration: the implicit-FOU stencil and the outflow backflow stabilization.
+  void stepPredictorOperator();
+  // Per Picard iteration: the advecting velocity restricted to the velocity-MG coarse levels.
+  void stepPredictorCoarseAdvection();
+  // Per Picard iteration: the momentum solves and the u* stash for the reaction force.
+  void stepMomentumSolve();
+  // Per Picard iteration: the cut-cell projection (and the porous-continuity refusal).
+  void stepProjection();
+  // Per Picard iteration: domain BCs re-imposed and the scalar open-face flux captured.
+  void stepPostProjection();
+  // After the Picard loop: colour advection, energy properties, scalars, superficial velocity.
+  void stepTransport();
+  // The one-time warning for reversed flow on an outflow face without backflow stabilization.
+  void stepBackflowWarning();
+
  public:  // nvcc forbids extended __host__ __device__ lambdas inside private/protected members.
   // Advection treated implicitly (implicit-FOU upwind + deferred correction): the user opt-in
   // (set_implicit_advection) on any path, OR the DEFAULT on the domain-BC path (inflow/outflow),
