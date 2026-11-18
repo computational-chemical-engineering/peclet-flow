@@ -6080,6 +6080,97 @@ class CutcellMG {
       fflush(stdout);
     }
   }
+  // pcgAmg's rhs anatomy (PECLET_FLOW_AGMG_DEBUG), BEFORE the null-space projection (b is
+  // gid-ordered): max|b| over the solid and the fluid rows, the fluid and all-row means, and the
+  // max per-component |sum(b)| / |b|_max (the per-pocket incompatibility).
+  struct AmgRhsAnatomy {
+    double bSolidMax = 0, bFluidMax = 0, bFluidMean = 0, bAllMean = 0, bCompMax = 0;
+  };
+  AmgRhsAnatomy amgRhsAnatomy(const std::vector<double>& b) const {
+    const std::size_t n = (std::size_t)amgGlobalN_;
+    AmgRhsAnatomy a;
+    long nf = 0;
+    double sf = 0, sa = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+      sa += b[i];
+      if (i < amgSolid_.size() && amgSolid_[i])
+        a.bSolidMax = std::max(a.bSolidMax, std::fabs(b[i]));
+      else {
+        a.bFluidMax = std::max(a.bFluidMax, std::fabs(b[i]));
+        sf += b[i];
+        ++nf;
+      }
+    }
+    a.bFluidMean = nf ? sf / (double)nf : 0.0;
+    a.bAllMean = n ? sa / (double)n : 0.0;
+    if (amgNComp_ > 1) {
+      std::vector<double> cs((std::size_t)amgNComp_, 0.0);
+      for (std::size_t i = 0; i < n; ++i)
+        if (amgComp_[i] >= 0)
+          cs[(std::size_t)amgComp_[i]] += b[i];
+      for (double s : cs)
+        a.bCompMax = std::max(a.bCompMax, std::fabs(s));
+      a.bCompMax /= (a.bFluidMax > 0 ? a.bFluidMax : 1.0);
+    }
+    return a;
+  }
+  // pcgAmg's null-space projection of v: the mean of each connected fluid component.
+  void amgMeanZero(std::vector<double>& v) const {
+    if (!removeMean_)
+      return;  // Dirichlet-anchored (outflow) operator: non-singular, no null space to project
+    // The null space is one constant PER CONNECTED FLUID COMPONENT — solid cells are identity
+    // rows (non-singular) and a coarse level can pinch fluid off into pockets, each carrying its
+    // own constant. Projecting the ALL-cell mean out instead (the old code) both leaves null
+    // components alive and writes a spurious value onto every solid coordinate; the next matvec
+    // (identity rows) feeds that back into the residual, the effective preconditioner turns
+    // nonsymmetric, and the inner CG stalls at its iteration cap (measured on random_spheres:
+    // every bottom solve capped at 200 with relres up to ~1, +41% outer iterations).
+    if (amgNComp_ <= 0)
+      return;
+    const std::size_t n = (std::size_t)amgGlobalN_;
+    std::vector<double> m((std::size_t)amgNComp_, 0.0);
+    std::vector<long> cnt((std::size_t)amgNComp_, 0);
+    for (std::size_t i = 0; i < n; ++i)
+      if (amgComp_[i] >= 0) {
+        m[(std::size_t)amgComp_[i]] += v[i];
+        ++cnt[(std::size_t)amgComp_[i]];
+      }
+    for (std::size_t c = 0; c < m.size(); ++c)
+      m[c] = cnt[c] ? m[c] / (double)cnt[c] : 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+      if (amgComp_[i] >= 0)
+        v[i] -= m[(std::size_t)amgComp_[i]];
+  }
+  // pcgAmg's dot product over the first n entries, in index order.
+  static double amgDot(const std::vector<double>& a, const std::vector<double>& c, std::size_t n) {
+    double s = 0;
+    for (std::size_t i = 0; i < n; ++i)
+      s += a[i] * c[i];
+    return s;
+  }
+  // pcgAmg's per-call report (PECLET_FLOW_AGMG_DEBUG; every call at level 2, else the first 60,
+  // every 50th and every capped one): iterations, relative residual, the rhs anatomy and max|x|
+  // over the solid and the fluid rows.
+  void amgReport(const AmgRhsAnatomy& a, const std::vector<double>& x, const std::vector<double>& r,
+                 int it, double r0, int dbg) {
+    const std::size_t n = (std::size_t)amgGlobalN_;
+    double xSolidMax = 0, xFluidMax = 0;
+    for (std::size_t i = 0; i < n; ++i)
+      if (i < amgSolid_.size() && amgSolid_[i])
+        xSolidMax = std::max(xSolidMax, std::fabs(x[i]));
+      else
+        xFluidMax = std::max(xFluidMax, std::fabs(x[i]));
+    const double rn = std::sqrt(amgDot(r, r, n));
+    ++agmgCalls_;
+    if (dbg >= 2 || agmgCalls_ <= 60 || it >= 100 || agmgCalls_ % 50 == 0) {
+      printf(
+          "[agmg] call=%ld iters=%d relres=%.2e  |b|sol=%.3e |b|fl=%.3e  "
+          "mean(b) fl=%.3e all=%.3e  compat=%.2e  |x|sol=%.3e |x|fl=%.3e%s\n",
+          agmgCalls_, it, r0 > 0 ? rn / r0 : 0.0, a.bSolidMax, a.bFluidMax, a.bFluidMean,
+          a.bAllMean, a.bCompMax, xSolidMax, xFluidMax, it >= 100 ? "  CAP" : "");
+      fflush(stdout);
+    }
+  }
   // GraphAMG-preconditioned CG on the global bottom operator. For the periodic/all-Neumann case the
   // operator is singular (constant null space) and the mean must be projected out of the rhs and
   // the preconditioned residual (compatibility). With a Dirichlet outflow (removeMean_ == false)
@@ -6089,71 +6180,14 @@ class CutcellMG {
   void pcgAmg(std::vector<double>& b, std::vector<double>& x) {
     const std::size_t n = (std::size_t)amgGlobalN_;
     const int dbg = agmgDebug();
-    double bSolidMax = 0, bFluidMax = 0, bFluidMean = 0, bAllMean = 0;
-    if (dbg) {  // rhs anatomy BEFORE the null-space projection (b is gid-ordered)
-      long nf = 0;
-      double sf = 0, sa = 0;
-      for (std::size_t i = 0; i < n; ++i) {
-        sa += b[i];
-        if (i < amgSolid_.size() && amgSolid_[i])
-          bSolidMax = std::max(bSolidMax, std::fabs(b[i]));
-        else {
-          bFluidMax = std::max(bFluidMax, std::fabs(b[i]));
-          sf += b[i];
-          ++nf;
-        }
-      }
-      bFluidMean = nf ? sf / (double)nf : 0.0;
-      bAllMean = n ? sa / (double)n : 0.0;
-    }
-    double bCompMax = 0;  // max per-component |sum(b)| / |b|_max: the per-pocket incompatibility
-    if (dbg && amgNComp_ > 1) {
-      std::vector<double> cs((std::size_t)amgNComp_, 0.0);
-      for (std::size_t i = 0; i < n; ++i)
-        if (amgComp_[i] >= 0)
-          cs[(std::size_t)amgComp_[i]] += b[i];
-      for (double s : cs)
-        bCompMax = std::max(bCompMax, std::fabs(s));
-      bCompMax /= (bFluidMax > 0 ? bFluidMax : 1.0);
-    }
-    auto meanZero = [&](std::vector<double>& v) {
-      if (!removeMean_)
-        return;  // Dirichlet-anchored (outflow) operator: non-singular, no null space to project
-      // The null space is one constant PER CONNECTED FLUID COMPONENT — solid cells are identity
-      // rows (non-singular) and a coarse level can pinch fluid off into pockets, each carrying its
-      // own constant. Projecting the ALL-cell mean out instead (the old code) both leaves null
-      // components alive and writes a spurious value onto every solid coordinate; the next matvec
-      // (identity rows) feeds that back into the residual, the effective preconditioner turns
-      // nonsymmetric, and the inner CG stalls at its iteration cap (measured on random_spheres:
-      // every bottom solve capped at 200 with relres up to ~1, +41% outer iterations).
-      if (amgNComp_ <= 0)
-        return;
-      std::vector<double> m((std::size_t)amgNComp_, 0.0);
-      std::vector<long> cnt((std::size_t)amgNComp_, 0);
-      for (std::size_t i = 0; i < n; ++i)
-        if (amgComp_[i] >= 0) {
-          m[(std::size_t)amgComp_[i]] += v[i];
-          ++cnt[(std::size_t)amgComp_[i]];
-        }
-      for (std::size_t c = 0; c < m.size(); ++c)
-        m[c] = cnt[c] ? m[c] / (double)cnt[c] : 0.0;
-      for (std::size_t i = 0; i < n; ++i)
-        if (amgComp_[i] >= 0)
-          v[i] -= m[(std::size_t)amgComp_[i]];
-    };
-    meanZero(b);
+    const AmgRhsAnatomy rhs = dbg ? amgRhsAnatomy(b) : AmgRhsAnatomy{};
+    amgMeanZero(b);
     x.assign(n, 0.0);
     std::vector<double> r = b, z(n), p(n), Ap(n);
     amg_->apply(r, z);
-    meanZero(z);
+    amgMeanZero(z);
     p = z;
-    auto dot = [&](const std::vector<double>& a, const std::vector<double>& c) {
-      double s = 0;
-      for (std::size_t i = 0; i < n; ++i)
-        s += a[i] * c[i];
-      return s;
-    };
-    double rz = dot(r, z), r0 = std::sqrt(dot(r, r));
+    double rz = amgDot(r, z, n), r0 = std::sqrt(amgDot(r, r, n));
     // 1e-8 is deliberate: the V-cycle's outer iteration count is unchanged from a far looser
     // bottom (measured), while 1e-10 sits at/below the double-precision floor of this
     // projected solve (rounding of the per-iteration null-space projection), where CG grinds
@@ -6168,7 +6202,7 @@ class CutcellMG {
       // residual (8 x -0x1.ffffffffffffcp-103 -> 8 x 0x1p-154 on the uniform periodic porous bed),
       // the AMG maps it to z = 0, and rz / pAp = 0/0 poisoned x with NaN, which the outer PCG then
       // reported as a non-finite preconditioner and a CAPPED solve.
-      const double pAp = dot(p, Ap);
+      const double pAp = amgDot(p, Ap, n);
       if (!(pAp > 0.0))
         break;
       const double a = rz / pAp;
@@ -6176,35 +6210,19 @@ class CutcellMG {
         x[i] += a * p[i];
         r[i] -= a * Ap[i];
       }
-      if (std::sqrt(dot(r, r)) <= 1e-8 * r0)
+      if (std::sqrt(amgDot(r, r, n)) <= 1e-8 * r0)
         break;
       amg_->apply(r, z);
-      meanZero(z);
-      const double rzn = dot(r, z);
+      amgMeanZero(z);
+      const double rzn = amgDot(r, z, n);
       const double beta = rzn / rz;
       rz = rzn;
       for (std::size_t i = 0; i < n; ++i)
         p[i] = z[i] + beta * p[i];
     }
-    meanZero(x);
-    if (dbg) {
-      double xSolidMax = 0, xFluidMax = 0;
-      for (std::size_t i = 0; i < n; ++i)
-        if (i < amgSolid_.size() && amgSolid_[i])
-          xSolidMax = std::max(xSolidMax, std::fabs(x[i]));
-        else
-          xFluidMax = std::max(xFluidMax, std::fabs(x[i]));
-      const double rn = std::sqrt(dot(r, r));
-      ++agmgCalls_;
-      if (dbg >= 2 || agmgCalls_ <= 60 || it >= 100 || agmgCalls_ % 50 == 0) {
-        printf(
-            "[agmg] call=%ld iters=%d relres=%.2e  |b|sol=%.3e |b|fl=%.3e  "
-            "mean(b) fl=%.3e all=%.3e  compat=%.2e  |x|sol=%.3e |x|fl=%.3e%s\n",
-            agmgCalls_, it, r0 > 0 ? rn / r0 : 0.0, bSolidMax, bFluidMax, bFluidMean, bAllMean,
-            bCompMax, xSolidMax, xFluidMax, it >= 100 ? "  CAP" : "");
-        fflush(stdout);
-      }
-    }
+    amgMeanZero(x);
+    if (dbg)
+      amgReport(rhs, x, r, it, r0, dbg);
   }
 #ifdef PECLET_FLOW_MPI
   template <class T>
