@@ -2586,6 +2586,28 @@ class CutcellMG {
     removeMean(l0, l0.x);
     Kokkos::deep_copy(CCExec(), x, l0.x);
   }
+  // The host-scalar attempts' p^T Ap guard: true leaves the loop with the last finite iterate. A
+  // non-finite pAp is a failed solve; pAp <= 1e-300 is a CONVERGED direction.
+  bool pApBreakdown(double pAp) {
+    if (!std::isfinite(pAp) || pAp <= 1e-300) {
+      if (!std::isfinite(pAp))
+        solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
+      return true;            // keep the last finite iterate
+    }
+    return false;
+  }
+  // The Krylov drivers' stop test on max|r| = rn (traced per iteration): true when converged, it
+  // then counting this iteration.
+  bool cgConverged(int& it, double rn, double r0, double rtol, double rref, bool trace) {
+    if (trace)
+      printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
+    if (rn < rtol * rref) {
+      lastSolveConverged_ = true;
+      ++it;
+      return true;
+    }
+    return false;
+  }
   // solvePCGAttempt's z = M r and r^T z, summed over the ranks; p = z too when p is given (the
   // first application). f32 (§5.7): the FP32 V-cycle takes e = ilogb(rn) from the GLOBAL max the
   // host already holds and forms the local r^T z (slot k) in its exit pass; the Allreduce sums it.
@@ -3363,14 +3385,7 @@ class CutcellMG {
         solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
       return true;            // keep the last finite iterate
     }
-    if (trace)
-      printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-    if (rn < rtol * rref) {
-      lastSolveConverged_ = true;
-      ++it;
-      return true;
-    }
-    return false;
+    return cgConverged(it, rn, r0, rtol, rref, trace);
   }
   // solvePCGResident's z = M r with r^T z into slot kRzNew (C4: from the V-cycle's exit pass, else
   // dotTo), e = ilogb(rn) the FP32 V-cycle's scale; with the health instrument (rzOld = r_{k+1}^T
@@ -3524,6 +3539,20 @@ class CutcellMG {
       Kokkos::deep_copy(CCExec(), p, z);
     return dot(l0, r, z);
   }
+  // solveFCGAttempt's DIAGNOSTIC (PECLET_FLOW_MG_DEBUG>=2): `pr` is |r_{k+1}^T z_k| /
+  // |r_{k+1}^T z_{k+1}| -- the term Fletcher-Reeves keeps and Polak-Ribiere removes. With a
+  // preconditioner that is symmetric w.r.t. the fine operator this is EXACTLY zero in exact
+  // arithmetic, so a measured pr ~ 1e-14 says "the V-cycle is symmetric here (and FCG == PCG by
+  // construction)" while pr = O(1) says "it is not" -- a direct read-out of the hypothesis, per
+  // iteration, that needs no extra solve. The health log (§4.4.5) records it too: FCG forms this
+  // dot anyway.
+  void fcgNotePr(int it, double beta, double rznew, double rzcross, bool trace) {
+    if (trace)
+      printf("[mg]   it %3d  beta=%.6e  pr=%.3e (|r^T z_k| / |r^T z_{k+1}|)\n", it + 1, beta,
+             rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
+    if (healthTrace_)  // §4.4.5: FCG forms this dot anyway
+      healthLog_.push_back(rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
+  }
   // One flexible-CG attempt (R, §4: solveFCG's body before the restart wrapper).
   int solveFCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField zp, CCField Ap,
                       int maxit, double rtol, int pre, int post, int bottom,
@@ -3547,18 +3576,10 @@ class CutcellMG {
     // E (§5.3): with a projected guess r0 is rref = max|P b| (see solvePCGResident). The guess
     // trace is collective (E-dist §6 item 2: every rank runs it, rank 0 prints), so it does not
     // take `trace`'s rank-0 restriction; single rank the two coincide.
-    const bool guessOn = guessV1_.extent(0) > 0;
-    const bool traceGuess = guessOn && mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
-    double r0 = 0.0, r0w = 0.0;
-    if (guessOn && guessHist_ > 0) {
-      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
-                          hostKrylovFusion() && star == nullptr, traceGuess ? &r0w : nullptr);
-    } else {
-      r0 = guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
-      r0w = r0;
-    }
-    if (traceGuess)
-      guessTraceSave(x);
+    const StartResidual s0 =
+        startResidual(b, x, r, Ap, z, star, nStar, nnStar, hostKrylovFusion() && star == nullptr,
+                      /*resident=*/false);
+    const double r0 = s0.r0;
     const double rref = armStopTest(r0, rtol);
     int it = 0;
     if (trace)
@@ -3574,20 +3595,12 @@ class CutcellMG {
         return failNonFiniteZ("solveFCG", l0, x, maxit);
       for (; it < maxit; ++it) {
         const double pAp = matvecPAp(l0, Ap, p, star, nStar, nnStar);
-        if (!std::isfinite(pAp) || pAp <= 1e-300) {
-          if (!std::isfinite(pAp))
-            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
-          break;                  // keep the last finite iterate
-        }
+        if (pApBreakdown(pAp))
+          break;
         const double alpha = rz / pAp;
         const double rn = cgUpdate(l0, x, r, p, Ap, alpha, fuseC23);
-        if (trace)
-          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * rref) {
-          lastSolveConverged_ = true;
-          ++it;
+        if (cgConverged(it, rn, r0, rtol, rref, trace))
           break;
-        }
         Kokkos::deep_copy(CCExec(), zp, z);  // z_k, before the preconditioner overwrites it
         const double rznew = fcgPrecondRz(l0, f32, fuseC4, z, r, rn, CCField());
         const double rzcross = dot(l0, r, zp);
@@ -3596,24 +3609,14 @@ class CutcellMG {
           break;                // preconditioner breakdown: keep the last finite iterate
         }
         const double beta = (rznew - rzcross) / rz;  // Polak-Ribiere: r^T (z_{k+1} - z_k) / r^T z
-        // DIAGNOSTIC (PECLET_FLOW_MG_DEBUG>=2): `pr` is |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| --
-        // the term Fletcher-Reeves keeps and Polak-Ribiere removes. With a preconditioner that is
-        // symmetric w.r.t. the fine operator this is EXACTLY zero in exact arithmetic, so a
-        // measured pr ~ 1e-14 says "the V-cycle is symmetric here (and FCG == PCG by construction)"
-        // while pr = O(1) says "it is not" -- a direct read-out of the hypothesis, per iteration,
-        // that needs no extra solve.
-        if (trace)
-          printf("[mg]   it %3d  beta=%.6e  pr=%.3e (|r^T z_k| / |r^T z_{k+1}|)\n", it + 1, beta,
-                 rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
-        if (healthTrace_)  // §4.4.5: FCG forms this dot anyway
-          healthLog_.push_back(rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
+        fcgNotePr(it, beta, rznew, rzcross, trace);
         aypx(p, beta, z);
         rz = rznew;
       }
     }
     finalRemoveMean(l0, x);
-    if (traceGuess)
-      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
+    if (s0.traceGuess)
+      guessTraceExit(l0, b, x, r0, s0.r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
