@@ -68,7 +68,7 @@ this campaign's problem; noted so nobody rediscovers it as the cause.
   order.
 - No numerics-changing environment variables; new behaviour behind per-solver setters with the
   old behaviour reachable (`enabled=False`).
-- `core/` is not touched this session: the clip lives in flow's cascade driver
+- `../../core/` is not touched this session: the clip lives in flow's cascade driver
   (`src/vof/curvature_field.hpp`), not in `core/.../curvature.hpp`.
 
 ## 4. The decision
@@ -366,7 +366,7 @@ over-damped collisions, try ρ-only).
   counters on the existing block scenes. Acceptance: the two new ctests green at np 1/2/4.
 - **WO-5 reproducers.** G2, G3, G4(a) run; numbers into `doc/vof_overlap_STATE.md`; the
   CLAUDE.md scope sentence ("colliding markers are outside the rating") rewritten to the measured
-  state; a decision-register entry queued for `../docs/decisions/flow.md` (umbrella is off-limits
+  state; a decision-register entry queued for `../../docs/decisions/flow.md` (umbrella is off-limits
   this session — write the entry text into this note's §10 and land it later).
 - **WO-6 the chain.** G4(b) ≥ 5 turnovers; where it runs is the user's call (§8 Q6).
 
@@ -409,7 +409,7 @@ the union does define is ρ and μ, and it keeps doing that. No exchange of `(κ
 owner-side assembly. W4 items 2–5 (contact census, coalescence and breakup as explicit models)
 remain valid future work and are unaffected by this note.
 
-## 10. Decision-register entry (to land in `../docs/decisions/flow.md` when the umbrella is free)
+## 10. Decision-register entry (to land in `../../docs/decisions/flow.md` when the umbrella is free)
 
 *Block VoF surface tension: per-step per-marker debris removal (interfacial cells with no
 `C > 1/2` in their 5³ neighbourhood, §11) and sub-`wispEps` residue clearing (§13), both with exact

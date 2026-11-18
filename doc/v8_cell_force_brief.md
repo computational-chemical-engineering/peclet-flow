@@ -3,7 +3,7 @@
 Written 2026-09-25 by the orchestrating session. It adds to `suite/docs/HANDOFF_COLLOCATED_VARRHO_CELL_FORCE.md`,
 which it summarises here: you do not need to read that file. Worktree:
 `/home/frankp/Codes/suite/flow-v8-cellforce` (branch `v8-cellforce` = flow `1fdee46` + the test SKIP removed).
-Builds: `build_omp/` (Python module, host-openmp), `build_ktest_omp/` (tests/kokkos).
+Builds: `<build_omp>/` (Python module, host-openmp), `<build_ktest_omp>/` (tests/kokkos).
 
 ## 1. The question
 
@@ -145,10 +145,10 @@ combinations pass: order 1.99–2.00, drag ≤ 1.5e-12.
 ## 5. Settled — do not relitigate
 
 - **ABC, not Rhie–Chow.** The collocated coupling is the Almgren–Bell–Colella approximate
-  projection. Never Rhie–Chow, and not as an "upgrade" either (`docs/decisions/flow.md:494`,
+  projection. Never Rhie–Chow, and not as an "upgrade" either (`../../docs/decisions/flow.md:494`,
   `:2053`, suite-wide).
 - **The Basilisk face-acceleration form was rejected** as the collocated projection's form
-  (`docs/decisions/suite-wide.md:300-312`, 2026-09-03). The quote:
+  (`../../docs/decisions/suite-wide.md:300-312`, 2026-09-03). The quote:
 
   > flow uses the incremental predictor with the cell pressure gradient = the EXACT TRANSPOSE of
   > the centre→face constraint (gauge-exact `gpCenterGrad`), used in both the predictor and the
@@ -159,7 +159,7 @@ combinations pass: order 1.99–2.00, drag ≤ 1.5e-12.
   V8 (WO-T) nevertheless implemented Basilisk `centered.h`. Your note must say explicitly how the
   chosen design stands against this entry. If it keeps a face-acceleration form, it needs a
   **new recorded decision** that says what changed.
-- **USER rule 2026-09-25** (`docs/decisions/flow.md:3162`).
+- **USER rule 2026-09-25** (`../../docs/decisions/flow.md:3162`).
   - Volumetric forces go where the velocity is defined; on the collocated grid that is the
     **cell value**. They are force_x/y/z, Boussinesq, ρg, and drag β in both the RHS target and
     the diagonal (`Grid::atVelocity`, `src/grid_layout.hpp:43-51,88-92`).
@@ -230,7 +230,7 @@ It must contain:
 - (d) what changes for the balance of pressure, gravity and surface tension;
 - (e) the work orders for `opus-implementer`, each with its gate;
 - (f) the byte-identity argument for everything outside V8;
-- (g) a register entry, drafted in the `docs/decisions/flow.md` format.
+- (g) a register entry, drafted in the `../../docs/decisions/flow.md` format.
 
 Also:
 - Write no production code and do not commit; the orchestrator commits the note.

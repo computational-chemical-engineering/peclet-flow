@@ -109,7 +109,7 @@ no scalar transport in amr yet.
   the new option is off. `tests/regression/state_hash.py` is the byte gate.
 - **Settings:** no environment variable may change a result; every switch is a per-solver setter.
   Strings, not integer codes. Two API tiers: public surface vs `s.diagnostics`. Naming canon
-  `../docs/NAMING.md`.
+  `../../docs/NAMING.md`.
 - **Device-first:** everything on device. Host code only as oracle/tests. MPI-distributable on the
   core ORB with GridHalo exchange (G = 2).
 - **Kokkos:** `.hpp` only, iteration order through `MDRange3` from `policy.hpp` (ctest

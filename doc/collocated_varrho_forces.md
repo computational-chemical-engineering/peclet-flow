@@ -145,7 +145,7 @@ The collocated multiphase-with-solids phase is the NEXT package. Its plan is
 
 - The steady state is $-\mu Lu=(I-\Delta t\mu LM^{-1})(\dots)$, a factor $(1+\Delta t\mu\Lambda)$.
 - The register already records the symptoms: Z&H −40 %; face-primary mode 8 −75 %
-  (`docs/decisions/flow.md:866`).
+  (`../../docs/decisions/flow.md:866`).
 - [MODEL]: V8 steady states at dt 0.3 / 3 / 30 differ by 3e-2 to 0.51.
 
 **Placement.** At uniform ρ, V8's cell sees $R\Pi f=\tfrac14(1,2,1)f$.
@@ -366,7 +366,7 @@ as today) and after properties, curvature and ghost fills; before the Picard loo
   (§9 G8(g)). A write through `diagnostics.field_view` is invisible to the rule: restore with
   `set_field`.
 
-**4.6.3 API.** Names follow `docs/NAMING.md`: `set_` + a leading `enabled` bool, a readback without
+**4.6.3 API.** Names follow `../../docs/NAMING.md`: `set_` + a leading `enabled` bool, a readback without
 `get_`, public tier.
 
 - **Python:** `s.set_balanced_force_projection(enabled)` and `s.balanced_force_projection`, on
@@ -599,7 +599,7 @@ arithmetic $G_cP/\rho_c$, not from where the force sits.
 
 **7.1 Reconciliation.**
 
-- **Suite-wide "Basilisk face-acceleration form REJECTED"** (`docs/decisions/suite-wide.md:300`).
+- **Suite-wide "Basilisk face-acceleration form REJECTED"** (`../../docs/decisions/suite-wide.md:300`).
   WO-T violated it; this design removes it. The entry's positive rule (the transpose pair in
   predictor and correction) is kept and extended to variable ρ as $M\Gamma=-C^T$.
 - **ABC, never Rhie–Chow.** Kept.
@@ -800,7 +800,7 @@ at ratio 3 against staggered. Report only.
 **WO-G1 — register the guard.**
 
 - Register `collocated_stability_guard` in flow's ctest list.
-- **amr counterpart** (amr worktree `amr-stability-guard`): `tests/test_amr_stability_guard.cpp`
+- **amr counterpart** (amr worktree `amr-stability-guard`): `../../amr/tests/test_amr_stability_guard.cpp`
   or a Python ctest. Run §7.6's G2/G3 protocol on `Flow` at lmax = 0 and with one refined region
   (all-fluid and with a solid).
 - The perturbation is seeded through whichever pressure/velocity accessor amr exposes. If none can
@@ -810,12 +810,12 @@ at ratio 3 against staggered. Report only.
 
 **WO-G2 — documents and register.**
 
-- §12's entries: C → `docs/decisions/suite-wide.md`; A, B, D → `docs/decisions/flow.md`.
+- §12's entries: C → `../../docs/decisions/suite-wide.md`; A, B, D → `../../docs/decisions/flow.md`.
 - §7.4's bullet in the three CLAUDE.md files.
 - §7.5(d)(e)(f).
-- `docs/DECISIONS.md` index lines.
+- `../../docs/DECISIONS.md` index lines.
 - Rename `colocatedFaceForce()` → `colocatedVarRho()` (mechanical).
-- `NAMING.md` needs no divergence row (the name is canonical).
+- `../../docs/NAMING.md` needs no divergence row (the name is canonical).
 
 ## 9. Verification gates
 
@@ -863,7 +863,7 @@ Other combinations unchanged.
 - np > 1: u/uf 1e-11, P 1e-9, C 1e-11;
 - iterations ±1 (both counts);
 - thread counts 1/2/4/8;
-- `wo_vof_mpi_parity_gates.md` §8.
+- `../../docs/wo_vof_mpi_parity_gates.md` §8.
 
 **G6 — byte-identity.**
 
@@ -938,7 +938,7 @@ Other combinations unchanged.
 
 ## 12. Draft register entries
 
-**A — flow** (`docs/decisions/flow.md`):
+**A — flow** (`../../docs/decisions/flow.md`):
 
 ```
 ### Collocated variable density (V8): the mass-adjoint ABC pair; the face-acceleration form is retired
@@ -1002,7 +1002,7 @@ Other combinations unchanged.
     one setter, one meaning on both grids
 ```
 
-**C — suite-wide** (`docs/decisions/suite-wide.md`; supersedes the scope, not the content, of
+**C — suite-wide** (`../../docs/decisions/suite-wide.md`; supersedes the scope, not the content, of
 line 300's clause):
 
 ```
@@ -1058,11 +1058,11 @@ line 300's clause):
 
 ## 13. Transfer to amr (the end goal: amr + solids + multiphase)
 
-1. **At uniform ρ this scheme *is* amr's current step.** `amr/flow.hpp` and `flow_oracle.hpp` are
+1. **At uniform ρ this scheme *is* amr's current step.** `amr/flow.hpp` and `../../amr/include/peclet/amr/flow_oracle.hpp` are
    incremental-rotational, with −∇pⁿ and f inside the implicit momentum and the ABC face average.
    Adopting the design changes nothing in amr's single-phase numerics. Variable density is a change
    of face weights (ρ_c/ρ_f in Γ, ρ-weights in Π), not of structure.
-2. **Coarse–fine faces** (L3, L4). With amr's C/F face interpolation weights $w_k$ (`cf_scheme.hpp`,
+2. **Coarse–fine faces** (L3, L4). With amr's C/F face interpolation weights $w_k$ (`../../amr/include/peclet/amr/cf_scheme.hpp`,
    standard or quadratic):
    - the constraint's face velocity is $\sum w_k\rho_ku_k/\sum w_k\rho_k$;
    - the operator's face density is $\sum w_k\rho_k$ (the same weights);
@@ -1080,7 +1080,7 @@ line 300's clause):
    aperture-adjoint pair (companion plan §3), i.e. amr's aperture-projection family with these
    weights. Q11 flags the two-family consequence.
 5. **Core** (Q10). The pointwise formulas of L5 go to `peclet::core::scheme`, next to
-   `ghost_closure.hpp`, and the CSF pair (`csfFaceForce`, `csfFaceCurvature`, today in flow's
+   `../../core/include/peclet/core/scheme/ghost_closure.hpp`, and the CSF pair (`csfFaceForce`, `csfFaceCurvature`, today in flow's
    `src/vof/surface_tension.hpp`) goes to `peclet::core::vof`, following the precedent of
    plic / curvature / cutcell / wetting. Nothing else moves, because the drivers are
    container-bound. This happens in amr multiphase's first WO, with a core minor release before

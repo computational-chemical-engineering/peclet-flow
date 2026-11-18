@@ -1,0 +1,126 @@
+# WO-30 unresolved references (flow docs, no rule fits)
+
+Format: file:line | target | reason. Count = broken count reported by `codehealth docs` on this branch.
+
+- .codehealth/playbook.md:102 | branch_probe.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- .codehealth/playbook.md:110 | krylov_probe.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- CLAUDE.md:116 | centered.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/CLAUDE_reference.md:97 | centered.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/CLAUDE_reference.md:288 | ../amr/docs/amr_mg_core_boundary.md | no such file in flow history or the suite
+- doc/anisotropic_vof.md:243 | vofAdv_.h() | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/collocated_invisible_subspace.md:251 | kernel_study.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_invisible_subspace.md:333 | centered.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/collocated_multiphase_solids_plan.md:42 | embed.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/collocated_paper_plan.md:108 | probe_localize.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_paper_plan.md:116 | incidence_check.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_paper_plan.md:125 | exact_aperture_ab.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_paper_plan.md:127 | gp_row_audit.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_paper_plan.md:140 | kernel_study.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_varrho_forces.md:588 | centered.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/collocated_varrho_forces.md:614 | centered.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/collocated_varrho_forces.md:628 | centered.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/collocated_varrho_forces.md:714 | centered.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/collocated_varrho_forces.md:1166 | aperture.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_varrho_forces.md:1166 | aperture_hydro.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_varrho_forces.md:1166 | stag.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_varrho_forces.md:1167 | amend_runs.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/collocated_varrho_forces.md:1167 | col_perr.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/flow_multigrid_plan.md:19 | tests/profile_mg_scaling.cu | target deleted from flow
+- doc/flow_multigrid_plan.md:24 | cfd_solver_multigrid.cu | target deleted from flow
+- doc/flow_multigrid_plan.md:111 | tests/profile_mg_scaling.cu | target deleted from flow
+- doc/full_viscous_stress.md:6 | CASE_A_SETUP.md | no such file in flow history or the suite
+- doc/full_viscous_stress.md:7 | CASE_A_ABLATE.md | no such file in flow history or the suite
+- doc/full_viscous_stress.md:483 | CASE_A_ABLATE.md | no such file in flow history or the suite
+- doc/mg_depth_policy.md:4 | RECON_MGDEPTH.md | no such file in flow history or the suite
+- doc/mg_depth_policy.md:633 | build.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/mg_depth_policy.md:633 | symdiag.cpp | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/mg_depth_policy.md:761 | heavy.lock | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/scalar_ibm_literature/L1_cutcell_eb.md:8 | amrex/ | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/scalar_ibm_literature/L1_cutcell_eb.md:169 | embed.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/scalar_ibm_literature/L1_cutcell_eb.md:200 | embed.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/scalar_ibm_literature/L2_interface_conjugate.md:391 | embed.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/scalar_ibm_literature/L2_interface_conjugate.md:515 | embed.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/steady_acceleration.md:422 | aa_proto.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/steady_acceleration_brief2.md:44 | random_arrays.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/v8_cell_force_brief.md:159 | centered.h | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/vof_constcoef_pressure_brief.md:35 | poissonEqn.f90:127 | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/vof_constcoef_pressure_brief.md:36 | main.f90:201,261 | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/vof_curvature_cost_design.md:49 | census.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_curvature_cost_design.md:49 | harness.cpp | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_host_comm_design.md:337 | trace_attr.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_host_comm_design.md:367 | pin.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_host_comm_design.md:456 | h6cmp.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:461 | bench_lv.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:490 | numcmp.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:539 | bench_peclet.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:539 | tabulate_s2c.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:540 | l3map.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:659 | kper.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:659 | trace_attr.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:851 | guard.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:853 | guard.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:947 | pin.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:952 | kper.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_distributed_partition_design.md:952 | trace_attr.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_gpu_coarse_tail_design.md:407 | numcmp.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_gpu_coarse_tail_design.md:428 | bench_gpu.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_gpu_coarse_tail_design.md:433 | ana.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_gpu_coarse_tail_design.md:458 | bench_gpu.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_gpu_coarse_tail_design.md:464 | gcmp.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_gpu_coarse_tail_design.md:478 | numcmp.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_gpu_coarse_tail_design.md:492 | bench_gpu.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_gpu_coarse_tail_design.md:493 | ana.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_momentum_second_order.md:386 | run_hr.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_momentum_second_order.md:387 | run_hr.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_momentum_second_order.md:397 | CHANGELOG.md | flow has no CHANGELOG.md (umbrella one is a different file)
+- doc/vof_overlap_STATE.md:36 | diag_c18.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_overlap_design.md:99 | VOF.f90:395 | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/vof_overlap_design_brief.md:134 | VOF.f90:2201 | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/vof_overlap_design_brief.md:135 | VOF.f90:1272 | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/vof_perf_STATE.md:74 | gate_s1merge.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_perf_STATE.md:74 | gate_s1merge/ | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_perf_STATE.md:74 | s1/ | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_projection_cost_brief.md:75 | summary_main.txt | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_projection_cost_design.md:399 | porous-scaling-benchmark.md | no such file in flow history or the suite
+- doc/vof_projection_distributed_design.md:428 | build.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_projection_distributed_design.md:429 | battery.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_projection_distributed_design.md:429 | gcmp.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_projection_distributed_design.md:429 | grun.sh | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_projection_distributed_design.md:429 | numcmp.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:5 | RECON_VISCOUS.md | no such file in flow history or the suite
+- doc/vof_sharp_viscous_stress.md:231 | res_gsv1.json | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1423 | heavy.lock | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1429 | exp_a.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1429 | exp_b.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1434 | b2.jsonl | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1501 | w6judge.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1555 | b2.jsonl | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1564 | b.jsonl | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1566 | b2.jsonl | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1671 | summ_resid.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1693 | resid.jsonl | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1950 | exp_a.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1953 | w6judge.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_sharp_viscous_stress.md:1977 | heavy.lock | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_brief.md:52 | main.f90:194-261 | external third-party code (Basilisk, AMReX, Fortran reference), not in any suite repo
+- doc/vof_step_performance_design.md:725 | run_peclet.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_design.md:866 | run_peclet.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_design.md:1583 | tests/kokkos/test_pressure_constant_coefficient.cpp | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_design.md:1592 | tests/kokkos_mpi/test_pressure_constant_coefficient_mpi.cpp | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_design.md:1604 | tests/study/vof_constcoef_pressure.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_design.md:2218 | bench_peclet.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_design.md:2272 | bench_peclet.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_design.md:2276 | bench_peclet.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- doc/vof_step_performance_design.md:2518 | bench_peclet.py | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+- examples/sdflow_intro.ipynb:3 | ../src/sdflow_bindings.cpp | not a .md file (target was renamed to src/flow_bindings.cpp)
+- tests/study/sdf_campaign/README.md:10 | .sdf-campaign-probes/ | not in flow or any suite repo (scratch script/log/output of a past run, or removed)
+
+## Not flagged by the checker, but drifted (rule 2 fixed the path; the line suffix was kept)
+
+Line suffixes into the umbrella register that no longer point at the cited entry (checked 2026-11-17):
+- doc/collocated_varrho_forces.md:148 docs/decisions/flow.md:866
+- doc/uf_advection.md:30 docs/decisions/flow.md:977
+- doc/v8_cell_force_brief.md:162 docs/decisions/flow.md:3162
+- doc/vof_distributed_partition_design.md:110 docs/decisions/flow.md:1273
+- doc/vof_gpu_coarse_tail_design.md:158 docs/decisions/flow.md:3374
+Still correct: flow.md:767, :494, :747. suite-wide.md:300 and :300-312 not checked against the cited text.

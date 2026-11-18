@@ -369,7 +369,7 @@ today. Rewrite the header's empty "transported velocity in the flux" section and
 `MusclPhase` on the uniform gate gives `max|u - U| == 0.0` at ratios 1, 1e3, 1e4.
 
 **WO-2 — solver and bindings** (`src/flow_ibm_vof.hpp`, `src/flow_bindings.cpp`, solver header as
-needed, `../docs/NAMING.md` row — the umbrella file goes to the coordinator, do not commit the
+needed, `../../docs/NAMING.md` row — the umbrella file goes to the coordinator, do not commit the
 umbrella). *Accept:* a Python smoke test: every name round-trips through the getter, `'bogus'` raises
 `ValueError`, `set_vof_momentum_muscl(True)` then the getter returns `'muscl_mixed'`.
 

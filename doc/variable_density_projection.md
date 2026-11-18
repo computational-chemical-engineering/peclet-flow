@@ -74,7 +74,7 @@ rebuild) and is immune. Consequence, implemented in `setDensityMode`:
 
 > **SUPERSEDED 2026-08-30 by the WO-B (rung S0) measurement battery — the mechanism above is a
 > misdiagnosis.** Keep Chebyshev as the varRho default for now, but not for this reason. Full
-> numbers: `doc/vof_workorders.md`, the WO-B findings entry;
+> numbers: `history/vof_workorders.md`, the WO-B findings entry;
 > reproduce with `tests/study/vardensity_solver_probe.py`. Three measured facts:
 >
 > 1. **`set_pressure_pcg(True, …)` cannot select PCG.** `setPressurePcg(bool /*on*/, …)` ignores
@@ -218,7 +218,7 @@ identical anyway** at every np on both backends, as does CUDA `walls-z` at np = 
   constant-coefficient philosophy for variable density).
 - ~~MPI/CUDA validation deferred~~ — **done, §3 + §3.1** (VoF rung V-1 / WO-A). Two limitations were
   found while gating it, both in the *domain-BC* machinery rather than in the variable-ρ/μ path
-  itself; **both were FIXED by WO-F (2026-08-30)** — see `doc/vof_workorders.md`, WO-F and its
+  itself; **both were FIXED by WO-F (2026-08-30)** — see `history/vof_workorders.md`, WO-F and its
   findings entry, and §3.1 above for the re-measured multi-rank table:
   - ~~**Per-face domain BCs are not rank-aware.**~~ `applyVelocityBcCompTo` (and the flux-openness
     construction, the implicit wall fold, the P/φ ghosts, `bcCorrectOutflow`, and the pressure MG's
