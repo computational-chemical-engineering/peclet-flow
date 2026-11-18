@@ -1877,143 +1877,172 @@ void Solver<Grid>::constraintDivergence(CCConst fx, CCConst fy, CCConst fz, CCFi
 template <class Grid>
 void Solver<Grid>::projectCorrectVelocities() {
   if constexpr (Grid::collocated) {
-    // phi: zero-gradient (Neumann) at non-periodic walls so the cell-centered central-difference
-    // correction carries no spurious normal acceleration through the wall (the periodic fill
-    // wrapped the opposite boundary's phi). Outflow (Dirichlet p=0) is handled by hasOutflow_
-    // above (phase 5b).
-    if (hasBc_) {
-      B3 e{e_.x, e_.y, e_.z};
-      for (int a = 0; a < 3; ++a)
-        for (int s = 0; s < 2; ++s) {
-          const int t = bc_[2 * a + s];
-          if (t != 0 && t != 3 && touchesGlobalFace(2 * a + s))
-            bcNeumannGhost(phi_, e, G, a, s);
-        }
-    }
-    // Correct the face field (-> discretely divergence-free; transient this step) and the cell
-    // field (central-difference cell gradient).
-    // rung V8: per-face 1/rho_f on the gradient, matching the operator coefficient
-    // c_f = o_f*rho0/rho_f — the SAME exact-adjoint face correction the staggered path uses.
-    // Phase 2 C2 (doc/anisotropic_metric.md §3): the per-axis weight w_a multiplies the whole
-    // existing correction, matching the w_a on the operator row of that axis.  1.0 isotropic.
-    if (varRho_)
-      projectCorrectVar(uf_, vf_, wf_, CCConst(phi_), CCConst(rhoField_), rho_, e_, G, u_.w[0],
-                        u_.w[1], u_.w[2]);
-    else
-      projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
-      starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
-                       C3{nx_, ny_, nz_}, e_, G, e_, G, exactResidual_, u_.w[0], u_.w[1], u_.w[2]);
-    // Complete the face field's ghosts, KEEPING each high-side boundary face: a plain fillGhosts
-    // wraps the inlet plane onto the outlet, so bcCorrectOutflow below would correct the wrong
-    // value (doc/uf_outlet_fix.md). Momentum never saw it (openFaceView), the scalars and the
-    // backflow census did.
-    fillFaceGhostsKeepBoundary(uf_, 0);
-    fillFaceGhostsKeepBoundary(vf_, 1);
-    fillFaceGhostsKeepBoundary(wf_, 2);
-    if (hasOutflow_) {  // correct the high-side outflow face on the face field so mass leaves
-                        // (phi=0 there)
-      B3 e{e_.x, e_.y, e_.z};
-      CCField fa[3] = {uf_, vf_, wf_};
-      // WO-R2 item 1: same rule as the staggered path below — with the operator's outflow row
-      // carrying rho0/rho_f (setOutflowCoefficient) the consistent correction carries it too.
-      const bool var = varRho_ && !porous_ && outflowRhoCorr_;
-      for (int a = 0; a < 3; ++a)
-        if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
-          if (var)
-            bcCorrectOutflowVar(fa[a], phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_, u_.w[a]);
-          else
-            bcCorrectOutflow(fa[a], phi_, e, G, a, u_.w[a]);
-        }
-    }
+    projectPhiWallGhosts();
+    projectCorrectFaceField();
+    projectCorrectFaceFieldOutflow();
     // The face field is now final for this step. Derive the OPEN-boundary view the next
     // predictor's advection and the divergence diagnostic read (buildOpenFaceField explains why
     // the outflow face cannot be the mass-balance closure there); a no-op without an outflow.
     buildOpenFaceField();
-    if (colocatedFaceForce()) {
-      // Rung V8 (S8.5): the cell correction is the predictor's face-to-cell reconstruction applied
-      // to the face corrections k(j) = w (rho0/rho_f)(phi(j) - phi(j-s)) — the transpose of the
-      // constraint, so the pair stays adjoint (collocated_varrho.hpp). Replaces the whole
-      // constant-density cell-correction chain below.
-      CCField oax[3] = {ox_, oy_, oz_};
-      for (int cc = 0; cc < 3; ++cc)
-        correctCellFaceAverageVar(C[cc].u, CCConst(phi_),
-                                  CCConst(varRho_ ? rhoField_ : C[cc].rscale), CCConst(oax[cc]),
-                                  varRho_, rho_, strideOf(cc), e_, G, u_.w[cc]);
-    } else if (ghostProjection_ || faceInterp_ == 9) {
-      // Ghost cell correction (also the gauge-exact scheme): the directional gpCenterGrad
-      // gradient of phi — 2nd-order one-sided at cut cells, never reads a decoupled
-      // (solid/pocket) phi. The same operator supplies the momentum's -grad(P^n) predictor
-      // (buildRhs), so the pressure force the momentum feels and the correction stay one
-      // operator family.
-      for (int cc = 0; cc < 3; ++cc) {
-        gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G,
-                     u_.w[cc]);
-        subtractField(C[cc].u, CCConst(tgp_), e_, G);
-      }
-    } else if (faceInterp_ == 5) {  // embed 5: cell correction = the TRANSPOSE of the
-      // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
-      CCField xcs[3] = {xcx_, xcy_, xcz_};
-      CCField oax[3] = {ox_, oy_, oz_};
-      for (int cc = 0; cc < 3; ++cc) {
-        transposeGradWallAware(tgp_, CCConst(phi_), CCConst(sdf_), CCConst(oax[cc]),
-                               CCConst(xcs[cc]), true, cc, e_, G, u_.w[cc]);
-        subtractField(C[cc].u, CCConst(tgp_), e_, G);
-      }
-    } else if (faceInterp_ == 6 || faceInterp_ == 7) {  // embed: openness-WEIGHTED cell correction
-      // (full open-face pressure force at cut cells) — Basilisk centered_grad
-      projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
-                               CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    } else {
-      projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
-                           CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    }
+    projectCorrectCellField();
   } else {
-    if (porous_ && porousCons_)  // eps-conservative gradient rho*idt/(eps_f rho idt + beta_f),
-                                 // matching buildPorousCoeffCons (see mac_pressure.hpp)
-      projectCorrectPorousCons(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(epsField_),
-                               CCConst(dragBeta_), hasDrag_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
-                               u_.w[2]);
-    else if (porous_ &&
-             hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
-      projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_),
-                               rho_ / dt_, e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    else if (varRho_ && rhoFaceHarmonic_)  // the WO-J harmonic knob: coefficient AND correction
-      projectCorrectVarHarm(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
-                            u_.w[0], u_.w[1], u_.w[2]);
-    else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
-      projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
-                        u_.w[0], u_.w[1], u_.w[2]);
-    else
-      projectCorrect(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses
-                        // (mass leaves)
-      B3 e{e_.x, e_.y, e_.z};
-      // WO-R item 4: with variable density every OTHER corrected face carries the mobility
-      // factor rho0/rho_f (projectCorrectVar) and this one did not — a ratio-sized error on the
-      // outflow face, invisible at constant density (rho_f == rho0) which is why the channel/BFS
-      // validations never saw it. The porous branches keep the plain correction: their
-      // coefficient is the drag/eps relaxation, not 1/rho, and a two-phase porous outlet is not
-      // this rung. `!varRho_` is byte-identical.
-      // `set_outflow_rho_correction(False)` drops the 1/rho_f
-      // factor. DEFAULT ON since WO-R2 fixed the operator's outflow-face coefficient — see
-      // setOutflowRhoCorrection for the before/after table and the mechanism.
-      const bool var = varRho_ && !porous_ && outflowRhoCorr_;
-      for (int a = 0; a < 3; ++a)
-        if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
-          if (var)
-            bcCorrectOutflowVar(C[a].u, phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_, u_.w[a]);
-          else
-            bcCorrectOutflow(C[a].u, phi_, e, G, a, u_.w[a]);
-        }
-      outflowCorrValid_ = true;  // the outflow face now carries the mass that leaves
-    }
+    projectCorrectStaggered();
+    projectCorrectStaggeredOutflow();
   }
   // the grad(phi) correction also touches solid faces; re-impose no-slip there so the decoupled
   // solid velocity cannot accumulate (matches the CUDA apply_mask/mask_k after correct_k ->
   // stability).
   for (int c = 0; c < 3; ++c)
     maskVelocity(c);
+}
+
+template <class Grid>
+void Solver<Grid>::projectPhiWallGhosts() {
+  // phi: zero-gradient (Neumann) at non-periodic walls so the cell-centered central-difference
+  // correction carries no spurious normal acceleration through the wall (the periodic fill
+  // wrapped the opposite boundary's phi). Outflow (Dirichlet p=0) is handled by hasOutflow_
+  // above (phase 5b).
+  if (hasBc_) {
+    B3 e{e_.x, e_.y, e_.z};
+    for (int a = 0; a < 3; ++a)
+      for (int s = 0; s < 2; ++s) {
+        const int t = bc_[2 * a + s];
+        if (t != 0 && t != 3 && touchesGlobalFace(2 * a + s))
+          bcNeumannGhost(phi_, e, G, a, s);
+      }
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectFaceField() {
+  // Correct the face field (-> discretely divergence-free; transient this step) and the cell
+  // field (central-difference cell gradient).
+  // rung V8: per-face 1/rho_f on the gradient, matching the operator coefficient
+  // c_f = o_f*rho0/rho_f — the SAME exact-adjoint face correction the staggered path uses.
+  // Phase 2 C2 (doc/anisotropic_metric.md §3): the per-axis weight w_a multiplies the whole
+  // existing correction, matching the w_a on the operator row of that axis.  1.0 isotropic.
+  if (varRho_)
+    projectCorrectVar(uf_, vf_, wf_, CCConst(phi_), CCConst(rhoField_), rho_, e_, G, u_.w[0],
+                      u_.w[1], u_.w[2]);
+  else
+    projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
+  if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
+    starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
+                     C3{nx_, ny_, nz_}, e_, G, e_, G, exactResidual_, u_.w[0], u_.w[1], u_.w[2]);
+  // Complete the face field's ghosts, KEEPING each high-side boundary face: a plain fillGhosts
+  // wraps the inlet plane onto the outlet, so bcCorrectOutflow below would correct the wrong
+  // value (doc/uf_outlet_fix.md). Momentum never saw it (openFaceView), the scalars and the
+  // backflow census did.
+  fillFaceGhostsKeepBoundary(uf_, 0);
+  fillFaceGhostsKeepBoundary(vf_, 1);
+  fillFaceGhostsKeepBoundary(wf_, 2);
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectFaceFieldOutflow() {
+  if (hasOutflow_) {  // correct the high-side outflow face on the face field so mass leaves
+                      // (phi=0 there)
+    B3 e{e_.x, e_.y, e_.z};
+    CCField fa[3] = {uf_, vf_, wf_};
+    // WO-R2 item 1: same rule as the staggered path below — with the operator's outflow row
+    // carrying rho0/rho_f (setOutflowCoefficient) the consistent correction carries it too.
+    const bool var = varRho_ && !porous_ && outflowRhoCorr_;
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
+        if (var)
+          bcCorrectOutflowVar(fa[a], phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_, u_.w[a]);
+        else
+          bcCorrectOutflow(fa[a], phi_, e, G, a, u_.w[a]);
+      }
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectCellField() {
+  if (colocatedFaceForce()) {
+    // Rung V8 (S8.5): the cell correction is the predictor's face-to-cell reconstruction applied
+    // to the face corrections k(j) = w (rho0/rho_f)(phi(j) - phi(j-s)) — the transpose of the
+    // constraint, so the pair stays adjoint (collocated_varrho.hpp). Replaces the whole
+    // constant-density cell-correction chain below.
+    CCField oax[3] = {ox_, oy_, oz_};
+    for (int cc = 0; cc < 3; ++cc)
+      correctCellFaceAverageVar(C[cc].u, CCConst(phi_), CCConst(varRho_ ? rhoField_ : C[cc].rscale),
+                                CCConst(oax[cc]), varRho_, rho_, strideOf(cc), e_, G, u_.w[cc]);
+  } else if (ghostProjection_ || faceInterp_ == 9) {
+    // Ghost cell correction (also the gauge-exact scheme): the directional gpCenterGrad
+    // gradient of phi — 2nd-order one-sided at cut cells, never reads a decoupled
+    // (solid/pocket) phi. The same operator supplies the momentum's -grad(P^n) predictor
+    // (buildRhs), so the pressure force the momentum feels and the correction stay one
+    // operator family.
+    for (int cc = 0; cc < 3; ++cc) {
+      gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G,
+                   u_.w[cc]);
+      subtractField(C[cc].u, CCConst(tgp_), e_, G);
+    }
+  } else if (faceInterp_ == 5) {  // embed 5: cell correction = the TRANSPOSE of the
+    // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
+    CCField xcs[3] = {xcx_, xcy_, xcz_};
+    CCField oax[3] = {ox_, oy_, oz_};
+    for (int cc = 0; cc < 3; ++cc) {
+      transposeGradWallAware(tgp_, CCConst(phi_), CCConst(sdf_), CCConst(oax[cc]), CCConst(xcs[cc]),
+                             true, cc, e_, G, u_.w[cc]);
+      subtractField(C[cc].u, CCConst(tgp_), e_, G);
+    }
+  } else if (faceInterp_ == 6 || faceInterp_ == 7) {  // embed: openness-WEIGHTED cell correction
+    // (full open-face pressure force at cut cells) — Basilisk centered_grad
+    projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
+                             CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
+  } else {
+    projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
+                         CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectStaggered() {
+  if (porous_ && porousCons_)  // eps-conservative gradient rho*idt/(eps_f rho idt + beta_f),
+                               // matching buildPorousCoeffCons (see mac_pressure.hpp)
+    projectCorrectPorousCons(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(epsField_),
+                             CCConst(dragBeta_), hasDrag_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
+                             u_.w[2]);
+  else if (porous_ &&
+           hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
+    projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_), rho_ / dt_,
+                             e_, G, u_.w[0], u_.w[1], u_.w[2]);
+  else if (varRho_ && rhoFaceHarmonic_)  // the WO-J harmonic knob: coefficient AND correction
+    projectCorrectVarHarm(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
+                          u_.w[0], u_.w[1], u_.w[2]);
+  else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
+    projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
+                      u_.w[0], u_.w[1], u_.w[2]);
+  else
+    projectCorrect(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectStaggeredOutflow() {
+  if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses
+                      // (mass leaves)
+    B3 e{e_.x, e_.y, e_.z};
+    // WO-R item 4: with variable density every OTHER corrected face carries the mobility
+    // factor rho0/rho_f (projectCorrectVar) and this one did not — a ratio-sized error on the
+    // outflow face, invisible at constant density (rho_f == rho0) which is why the channel/BFS
+    // validations never saw it. The porous branches keep the plain correction: their
+    // coefficient is the drag/eps relaxation, not 1/rho, and a two-phase porous outlet is not
+    // this rung. `!varRho_` is byte-identical.
+    // `set_outflow_rho_correction(False)` drops the 1/rho_f
+    // factor. DEFAULT ON since WO-R2 fixed the operator's outflow-face coefficient — see
+    // setOutflowRhoCorrection for the before/after table and the mechanism.
+    const bool var = varRho_ && !porous_ && outflowRhoCorr_;
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
+        if (var)
+          bcCorrectOutflowVar(C[a].u, phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_, u_.w[a]);
+        else
+          bcCorrectOutflow(C[a].u, phi_, e, G, a, u_.w[a]);
+      }
+    outflowCorrValid_ = true;  // the outflow face now carries the mass that leaves
+  }
 }
 
 template <class Grid>

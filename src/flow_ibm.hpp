@@ -1589,6 +1589,20 @@ class Solver {
   // The one-time warning for reversed flow on an outflow face without backflow stabilization.
   void stepBackflowWarning();
 
+  // ---- projectCorrectVelocities() phases (WO-HO): contiguous blocks, called once each. ----
+  // Collocated: phi's Neumann ghosts at non-periodic walls.
+  void projectPhiWallGhosts();
+  // Collocated: the face-field correction and its ghosts (high-side boundary faces kept).
+  void projectCorrectFaceField();
+  // Collocated: the high-side outflow faces of the face field.
+  void projectCorrectFaceFieldOutflow();
+  // Collocated: the cell-field correction of the configured scheme.
+  void projectCorrectCellField();
+  // Staggered: the gradient correction of the configured coefficient.
+  void projectCorrectStaggered();
+  // Staggered: the high-side outflow normal faces.
+  void projectCorrectStaggeredOutflow();
+
  public:  // nvcc forbids extended __host__ __device__ lambdas inside private/protected members.
   // Advection treated implicitly (implicit-FOU upwind + deferred correction): the user opt-in
   // (set_implicit_advection) on any path, OR the DEFAULT on the domain-BC path (inflow/outflow),
