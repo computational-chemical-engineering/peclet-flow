@@ -7895,15 +7895,16 @@ class CutcellMG {
   // (setRepartition(true): `chooseStageTarget` with maxBlockCells = the largest level-0 block, so
   // a stage may be a Repartition). `*align`, when given, receives that partition's alignment 2^a
   // -- rebalanceByWeights' return value. Without weights the forecast is unchanged.
-  static std::vector<PlanRow> predict(int gnx, int gny, int gnz, int np, int nLevels,
-                                      bool telescope, int minExtent = 4, int decompLevels = 0,
-                                      double maxImbalance = 1.05,
-                                      const std::vector<peclet::core::Real>* weights = nullptr,
-                                      int* align = nullptr) {
+  // predict's level-0 partition of the gs grid: core's aligned weighted ORB at its 1.05 budget
+  // (maxBlockCells = its largest block, as setRepartition arms it; *align = 2^a) with weights,
+  // else decomposition() (*align = 1).
+  static peclet::core::decomp::BlockDecomposer<3> predictLevel0(
+      C3 gs, int np, int decompLevels, double maxImbalance,
+      const std::vector<peclet::core::Real>* weights, int* align,
+      peclet::core::Index& maxBlockCells) {
     using Dec = peclet::core::decomp::BlockDecomposer<3>;
-    std::vector<PlanRow> rows;
+    const int gnx = gs.x, gny = gs.y, gnz = gs.z;
     Dec cur;
-    peclet::core::Index maxBlockCells = 0;  // 0: sibling merges only (an unweighted dec0)
     if (weights) {
       if (weights->size() != (std::size_t)gnx * (std::size_t)gny * (std::size_t)gnz)
         throw std::invalid_argument(
@@ -7919,7 +7920,60 @@ class CutcellMG {
       if (align)
         *align = 1;
     }
+    return cur;
+  }
+  // predict's telescoping stage out of level gs (telescope on): initMpi's trigger (a block that
+  // cannot be lifted, or one below minExtent, while some axis can still halve on several ranks)
+  // and core's policy. maxBlockCells = 0: flow's sibling-merge search, which never returns a
+  // Repartition; > 0 for a weighted dec0, as setRepartition arms it. A stage replaces cur and
+  // marks r.tele (and r.repartition).
+  static void predictStage(peclet::core::decomp::BlockDecomposer<3>& cur, C3 gs, int minExtent,
+                           peclet::core::Index maxBlockCells, PlanRow& r) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    const bool canAny = canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z);
+    auto liftable = [&](const Dec& d) { return teleLiftable(d, gs); };
+    const bool blocked = !liftable(cur);
+    const bool tooSmall =
+        minExtent > 0 && peclet::core::decomp::minBlockExtent(cur) < (peclet::core::Index)minExtent;
+    if ((blocked || tooSmall) && canAny && cur.numBlocks() > 1) {
+      auto t = peclet::core::decomp::chooseStageTarget(cur, peclet::core::IVec<3>{gs.x, gs.y, gs.z},
+                                                       liftable, minExtent, maxBlockCells);
+      if (t.kind == peclet::core::decomp::StageKind::SiblingMerge ||
+          t.kind == peclet::core::decomp::StageKind::Repartition) {
+        r.repartition = t.kind == peclet::core::decomp::StageKind::Repartition;
+        cur = std::move(t.dec);
+        r.tele = true;
+      }
+    }
+  }
+  // predict's coarsening out of level gs on partition cur: each axis that can halve on every
+  // block (r.ratio 2 there); returns the next level's extent.
+  static C3 predictRatio(const peclet::core::decomp::BlockDecomposer<3>& cur, C3 gs, PlanRow& r) {
+    C3 next = gs;
+    if (canHalve(gs.x) && evenBlocksOn(cur, 0)) {
+      r.ratio.x = 2;
+      next.x = gs.x / 2;
+    }
+    if (canHalve(gs.y) && evenBlocksOn(cur, 1)) {
+      r.ratio.y = 2;
+      next.y = gs.y / 2;
+    }
+    if (canHalve(gs.z) && evenBlocksOn(cur, 2)) {
+      r.ratio.z = 2;
+      next.z = gs.z / 2;
+    }
+    return next;
+  }
+  static std::vector<PlanRow> predict(int gnx, int gny, int gnz, int np, int nLevels,
+                                      bool telescope, int minExtent = 4, int decompLevels = 0,
+                                      double maxImbalance = 1.05,
+                                      const std::vector<peclet::core::Real>* weights = nullptr,
+                                      int* align = nullptr) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    std::vector<PlanRow> rows;
+    peclet::core::Index maxBlockCells = 0;  // 0: sibling merges only (an unweighted dec0)
     C3 gs{gnx, gny, gnz};
+    Dec cur = predictLevel0(gs, np, decompLevels, maxImbalance, weights, align, maxBlockCells);
     // doc/mg_depth_policy.md §4.3: nLevels == 0 forecasts the AUTO depth for the SINGULAR operator
     // (extent 4, mode auto, all-periodic), as initMpi resolves it.
     const bool autoDepth = nLevels == 0;
@@ -7936,35 +7990,9 @@ class CutcellMG {
       const bool autoStop =
           autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissible(gs, 4, false, -1, perBc);
       if (L + 1 < nLevelsCap && !autoStop) {
-        const bool canAny = canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z);
-        auto liftable = [&](const Dec& d) { return teleLiftable(d, gs); };
-        const bool blocked = !liftable(cur);
-        const bool tooSmall = minExtent > 0 && peclet::core::decomp::minBlockExtent(cur) <
-                                                   (peclet::core::Index)minExtent;
-        // initMpi's trigger + core's policy (maxBlockCells = 0: flow's sibling-merge search,
-        // which never returns a Repartition; > 0 for a weighted dec0, as setRepartition arms it)
-        if (telescope && (blocked || tooSmall) && canAny && cur.numBlocks() > 1) {
-          auto t = peclet::core::decomp::chooseStageTarget(
-              cur, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable, minExtent, maxBlockCells);
-          if (t.kind == peclet::core::decomp::StageKind::SiblingMerge ||
-              t.kind == peclet::core::decomp::StageKind::Repartition) {
-            r.repartition = t.kind == peclet::core::decomp::StageKind::Repartition;
-            cur = std::move(t.dec);
-            r.tele = true;
-          }
-        }
-        if (canHalve(gs.x) && evenBlocksOn(cur, 0)) {
-          r.ratio.x = 2;
-          next.x = gs.x / 2;
-        }
-        if (canHalve(gs.y) && evenBlocksOn(cur, 1)) {
-          r.ratio.y = 2;
-          next.y = gs.y / 2;
-        }
-        if (canHalve(gs.z) && evenBlocksOn(cur, 2)) {
-          r.ratio.z = 2;
-          next.z = gs.z / 2;
-        }
+        if (telescope)
+          predictStage(cur, gs, minExtent, maxBlockCells, r);
+        next = predictRatio(cur, gs, r);
       }
       rows.push_back(r);
       if (next.x == gs.x && next.y == gs.y && next.z == gs.z)
