@@ -2653,18 +2653,9 @@ class CutcellMG {
     // E-dist (doc/vof_projection_distributed_design.md §6 item 3): solvePCGResident's guess branch,
     // unfused (distributed); with a projected guess r0 below is rref = max|P b|, the zero-guess
     // residual. The guess trace is collective (every rank runs it, rank 0 prints).
-    const bool guessOn = guessV1_.extent(0) > 0;
-    const bool traceGuess = guessOn && mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
-    double r0 = 0.0, r0w = 0.0;
-    if (guessOn && guessHist_ > 0) {
-      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar, /*fused=*/false,
-                          traceGuess ? &r0w : nullptr);
-    } else {
-      r0 = guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
-      r0w = r0;
-    }
-    if (traceGuess)
-      guessTraceSave(x);
+    const StartResidual s0 = startResidual(b, x, r, Ap, z, star, nStar, nnStar, /*fused=*/false,
+                                           /*resident=*/false);
+    const double r0 = s0.r0;
     // D-dist (doc/vof_projection_distributed_design.md §5.7): the FP32 V-cycle on an eligible
     // solve (a global decision: fp32VcycleIneligible reads global data only); pcgPrecondRz. The
     // driver allreduces its r^T z (the Allreduce dot() spends). z is zeroed once (§5.5: the exit
@@ -2694,20 +2685,12 @@ class CutcellMG {
         return failNonFiniteZ("solvePCG", l0, x, maxit);
       for (; it < maxit; ++it) {
         const double pAp = matvecPAp(l0, Ap, p, star, nStar, nnStar);
-        if (!std::isfinite(pAp) || pAp <= 1e-300) {
-          if (!std::isfinite(pAp))
-            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
-          break;                  // keep the last finite iterate
-        }
+        if (pApBreakdown(pAp))
+          break;
         const double alpha = rz / pAp;
         const double rn = cgUpdate(l0, x, r, p, Ap, alpha, fuseK4);
-        if (trace)
-          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * rref) {
-          lastSolveConverged_ = true;
-          ++it;
+        if (cgConverged(it, rn, r0, rtol, rref, trace))
           break;
-        }
         const double rznew = pcgPrecondRz(l0, f32, fuseK4, z, r, rn, kRzNew, CCField());
         const double beta = rznew / rz;
         if (!std::isfinite(rznew)) {
@@ -2719,8 +2702,8 @@ class CutcellMG {
       }
     }
     finalRemoveMean(l0, x);
-    if (traceGuess)
-      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
+    if (s0.traceGuess)
+      guessTraceExit(l0, b, x, r0, s0.r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
