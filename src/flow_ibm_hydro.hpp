@@ -161,10 +161,7 @@ std::vector<double> Solver<Grid>::hydroForceTorque() {
 }
 
 template <class Grid>
-std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
-  std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 6, 0.0);
-  if (!hasScene_ || nInst_ <= 0)
-    return out;
+void Solver<Grid>::hydroReactionChecks() {
   if constexpr (Grid::collocated)
     throw std::runtime_error("hydro_force_torque_reaction: staggered only (v1)");
   if (implicitAdv() || porous_ || varRho_ || varProps_ || hasBc_ || ghostProjection_ || hasDrag_ ||
@@ -181,6 +178,14 @@ std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
     throw std::runtime_error(
         "hydro_force_torque_reaction: the advective RHS term was not "
         "stashed -- set_advection was enabled after the last step()");
+}
+
+template <class Grid>
+std::vector<double> Solver<Grid>::hydroForceTorqueReaction() {
+  std::vector<double> out((std::size_t)(nInst_ > 0 ? nInst_ : 0) * 6, 0.0);
+  if (!hasScene_ || nInst_ <= 0)
+    return out;
+  hydroReactionChecks();
   // u* ghosts: refresh with the standard fill (periodic wrap single-rank, halo exchange under
   // MPI; hasBc_ is refused above so no BC is imposed). The audit's viscous term reads +-1.
   for (int c = 0; c < 3; ++c)

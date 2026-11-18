@@ -1622,6 +1622,10 @@ class Solver {
   // The ghost exchange of the interface fields, domain-face ghosts zeroed.
   void pcExchangeInterfaceGhosts();
 
+  // ---- hydroForceTorqueReaction() phase (WO-HO). ----
+  // The refusals: collocated, the momentum terms the budget does not carry, no stashed u*/advection.
+  void hydroReactionChecks();
+
  public:  // nvcc forbids extended __host__ __device__ lambdas inside private/protected members.
   // Advection treated implicitly (implicit-FOU upwind + deferred correction): the user opt-in
   // (set_implicit_advection) on any path, OR the DEFAULT on the domain-BC path (inflow/outflow),
