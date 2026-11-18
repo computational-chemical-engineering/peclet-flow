@@ -43,7 +43,7 @@ frozen = ["cmake/*", "CMakeLists.txt", "tests/regression/*", "CLAUDE.md", "AGENT
 # tests/packaging/pyproject as in dem/pnm, then EVERY flow keep-out path of the vof session (RULES.md, 11-15).
 # The sharp-viscous block of src/flow_bindings.cpp is not a path: it is in the playbook's keep-out.
 forbid = ["tests/*", "packaging/*", "pyproject.toml",
-          "src/vof/sharp_viscous.hpp", "src/vof/curvature_field.hpp",
+          "src/vof/sharp_viscous.hpp", "src/vof/curvature_field.hpp", "src/flow_ibm*.hpp",
           "doc/vof_sharp_viscous_stress.md", "doc/full_viscous_stress.md"]
 literals = false
 public_api = false
@@ -83,7 +83,7 @@ cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release 
   -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
   -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  && cmake --build {repo}/build_health_host -j8'''
+  && cmake --build {repo}/build_health_host -j32'''
 
 # The battery runs at TWO threads per process (flow CLAUDE.md: "on a shared, loaded host run _np* with
 # OMP_NUM_THREADS=2"); state_hash and sharp_vof stay at the [gate.env] one. At one thread four ctests fail at
@@ -103,7 +103,7 @@ cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release 
   -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
   -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null \
-  && cmake --build {repo}/build_health_host -j8 >/dev/null \
+  && cmake --build {repo}/build_health_host -j32 >/dev/null \
   && OMP_NUM_THREADS=2 PYTHONPATH={repo}/build_health_host \
      ctest --test-dir {repo}/build_health_host -LE bench -E '^(device_sync_budget|prefactor_hoist_bitwise|vofmom_sync_budget|scalar_cutcell_g6_[1-6]|scalar_cutcell_gadv|regression_staggered)$' \
            -j8 --timeout 3600 --output-on-failure'''
@@ -121,7 +121,7 @@ cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release 
   -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
   -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null \
-  && cmake --build {repo}/build_health_host -j8 >/dev/null \
+  && cmake --build {repo}/build_health_host -j32 >/dev/null \
   && OMP_NUM_THREADS=2 PYTHONPATH={repo}/build_health_host \
      ctest --test-dir {repo}/build_health_host -LE bench -R '^(scalar_cutcell_g6_[1-6]|scalar_cutcell_gadv|regression_staggered)$' \
            -j8 --timeout 3600 --output-on-failure'''
@@ -141,7 +141,7 @@ cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release 
   -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
   -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-  && cmake --build {repo}/build_health_host -j8 >/dev/null \
+  && cmake --build {repo}/build_health_host -j32 >/dev/null \
   && PYTHONPATH={repo}/build_health_host python {repo}/tests/regression/state_hash.py > {out}/hashes.txt \
   && PYTHONPATH={repo}/build_health_host /usr/bin/mpirun -np 2 --bind-to none \
      python {repo}/tests/regression/state_hash.py mpi >> {out}/hashes.txt \
@@ -161,7 +161,7 @@ cmd = '''cmake -S {repo} -B {repo}/build_health_host -DCMAKE_BUILD_TYPE=Release 
   -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
   -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null \
-  && cmake --build {repo}/build_health_host -j8 >/dev/null \
+  && cmake --build {repo}/build_health_host -j32 >/dev/null \
   && PYTHONPATH={repo}/build_health_host python {repo}/.codehealth/sharp_vof_hash.py > {out}/sharp.txt \
   && test "$(grep -c band_cells= {out}/sharp.txt)" -eq 2 && cat {out}/sharp.txt'''
 
@@ -175,7 +175,7 @@ cmd = '''PATH=/usr/local/cuda/bin:$PATH cmake -S {repo} -B {repo}/build_health_c
   -DCMAKE_PREFIX_PATH=$PECLET_SUITE/extern/install/nvidia-cuda \
   -DPECLET_SIBLING_PECLET_CORE=$FLOW_CORE -DFETCHCONTENT_FULLY_DISCONNECTED=ON \
   -DPECLET_FLOW_BUILD_TESTS=ON -DPECLET_FLOW_MPI=ON -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun "-DMPIEXEC_PREFLAGS=--bind-to;none" \
-  && PATH=/usr/local/cuda/bin:$PATH cmake --build {repo}/build_health_cuda -j8'''
+  && PATH=/usr/local/cuda/bin:$PATH cmake --build {repo}/build_health_cuda -j32'''
 
 [[gate.tier]]
 name = "clang_tidy"
