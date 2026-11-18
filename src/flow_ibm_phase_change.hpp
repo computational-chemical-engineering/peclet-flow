@@ -650,7 +650,7 @@ typename Solver<Grid>::PhaseChangeDiagnostics Solver<Grid>::phaseChangeDiagnosti
 }
 
 template <class Grid>
-void Solver<Grid>::pcBuildInterface() {
+bool Solver<Grid>::pcBuildInputs() {
   // WO-P23 (a defect found in the P0/P1 code): the gradient fit reads the temperature at +-2, so
   // the energy scalar's ghost band has to be VALID here. `set_field` and the coupling drivers
   // write inner cells only, and `advanceScalars` fills the ghosts at its END — so the FIRST
@@ -689,6 +689,75 @@ void Solver<Grid>::pcBuildInterface() {
     pcDiag_.areaOrphan = pcMcOrphanArea_;
     copyInner(pcAreaCg2_, e_, G, CCConst(pcAreaCascadeField()), e3_, kVofG);
   }
+  return cascadeArea;
+}
+
+template <class Grid>
+void Solver<Grid>::pcOperatorDomain(bool opMode, bool opEnergy) {
+  // UNITS. Without the consistent energy transport the operator flux below is built from the
+  // scalar's DIFFUSIVITY, i.e. it is the heat divided by an implicit rho c_p = 1 — one unit of
+  // the solver's internal system, which is a different physical heat capacity in every unit
+  // system. In cell units that is the shipped (and gated) behaviour and stays; under an armed
+  // extent it has no physical meaning, so the combination is refused rather than guessed.
+  if (opMode && !opEnergy && u_.physical)
+    throw std::runtime_error(
+        "set_phase_change_mdot_operator / set_phase_change_energy_order(2) under a physical "
+        "domain need set_phase_change_energy(True, rho_cp_gas, rho_cp_liquid): without it the "
+        "operator's interfacial heat is a diffusivity flux with an implicit rho*c_p of one "
+        "internal unit, which is not a physical heat capacity");
+  if (opMode)
+    pcBuildInDomain();
+}
+
+template <class Grid>
+void Solver<Grid>::pcMdotExtrema(long nIface) {
+  const C3 e = e_;
+  const long sz = (long)e_.x * e_.y;
+  // extrema of mdot over interfacial cells
+  double mn = 0.0, mx = 0.0;
+  if (nIface > 0) {
+    mn = 1e300;
+    mx = -1e300;
+    CCConst md = CCConst(pcMdot_), ar = CCConst(pcArea_);
+    Kokkos::parallel_reduce(
+        "peclet::flow::pc_mdot_extrema",
+        MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
+        KOKKOS_LAMBDA(int x, int y, int z, double& lo, double& hi) {
+          const long i = (long)x + (long)y * e.x + (long)z * sz;
+          if (ar(i) > 0.0) {
+            lo = Kokkos::fmin(lo, md(i));
+            hi = Kokkos::fmax(hi, md(i));
+          }
+        },
+        Kokkos::Min<double>(mn), Kokkos::Max<double>(mx));
+    Kokkos::fence();
+  }
+  pcDiag_.mdotMin = mn;
+  pcDiag_.mdotMax = mx;
+}
+
+template <class Grid>
+void Solver<Grid>::pcExchangeInterfaceGhosts() {
+  // The exchange that makes the two consumers decomposition-independent. `fillGhosts` is the
+  // halo/periodic base; on a NON-periodic domain face the periodic wrap would import the far
+  // side's interface as a phantom source/deficit donor, so those ghosts are zeroed.
+  fillGhosts(pcMdot_);
+  fillGhosts(pcArea_);
+  fillGhosts(pcDep_);
+  fillGhosts(pcTgt_);
+  for (int d = 0; d < 3; ++d)
+    fillGhosts(pcNrm_[d]);
+  pcZeroDomainGhosts(pcMdot_);
+  pcZeroDomainGhosts(pcArea_);
+  pcZeroDomainGhosts(pcDep_);
+  pcZeroDomainGhosts(pcTgt_);
+  for (int d = 0; d < 3; ++d)
+    pcZeroDomainGhosts(pcNrm_[d]);
+}
+
+template <class Grid>
+void Solver<Grid>::pcBuildInterface() {
+  const bool cascadeArea = pcBuildInputs();
   CCConst areaCasc = CCConst(cascadeArea ? pcAreaCg2_ : pcMdot_);
   const C3 e = e_;
   const long sy = e_.x, sz = (long)e_.x * e_.y;
@@ -712,19 +781,7 @@ void Solver<Grid>::pcBuildInterface() {
   const bool opMode =
       pcMdotOperator_ && thermal && pcGphi_.extent(0) == n_ && scT->dmask.extent(0) == n_;
   const bool opEnergy = opMode && scT->energy && scT->kcell.extent(0) == n_;
-  // UNITS. Without the consistent energy transport the operator flux below is built from the
-  // scalar's DIFFUSIVITY, i.e. it is the heat divided by an implicit rho c_p = 1 — one unit of
-  // the solver's internal system, which is a different physical heat capacity in every unit
-  // system. In cell units that is the shipped (and gated) behaviour and stays; under an armed
-  // extent it has no physical meaning, so the combination is refused rather than guessed.
-  if (opMode && !opEnergy && u_.physical)
-    throw std::runtime_error(
-        "set_phase_change_mdot_operator / set_phase_change_energy_order(2) under a physical "
-        "domain need set_phase_change_energy(True, rho_cp_gas, rho_cp_liquid): without it the "
-        "operator's interfacial heat is a diffusivity flux with an implicit rho*c_p of one "
-        "internal unit, which is not a physical heat capacity");
-  if (opMode)
-    pcBuildInDomain();
+  pcOperatorDomain(opMode, opEnergy);
   CCConst mkF = CCConst(opMode ? scT->dmask : pcMdot_);
   CCConst inD = CCConst(opMode ? pcInDomain_ : pcMdot_);
   CCConst kcF = CCConst(opEnergy ? scT->kcell : pcMdot_);
@@ -983,42 +1040,8 @@ void Solver<Grid>::pcBuildInterface() {
   pcDiag_.fallbackCells = nFallback;
   pcDiag_.area = sumArea;
   pcDiag_.mdotMean = nIface > 0 ? sumMdot / (double)nIface : 0.0;
-  // extrema of mdot over interfacial cells
-  double mn = 0.0, mx = 0.0;
-  if (nIface > 0) {
-    mn = 1e300;
-    mx = -1e300;
-    CCConst md = CCConst(pcMdot_), ar = CCConst(pcArea_);
-    Kokkos::parallel_reduce(
-        "peclet::flow::pc_mdot_extrema",
-        MDRange3<CCExec>(CCExec(), {G, G, G}, {e.x - G, e.y - G, e.z - G}),
-        KOKKOS_LAMBDA(int x, int y, int z, double& lo, double& hi) {
-          const long i = (long)x + (long)y * e.x + (long)z * sz;
-          if (ar(i) > 0.0) {
-            lo = Kokkos::fmin(lo, md(i));
-            hi = Kokkos::fmax(hi, md(i));
-          }
-        },
-        Kokkos::Min<double>(mn), Kokkos::Max<double>(mx));
-    Kokkos::fence();
-  }
-  pcDiag_.mdotMin = mn;
-  pcDiag_.mdotMax = mx;
-  // The exchange that makes the two consumers decomposition-independent. `fillGhosts` is the
-  // halo/periodic base; on a NON-periodic domain face the periodic wrap would import the far
-  // side's interface as a phantom source/deficit donor, so those ghosts are zeroed.
-  fillGhosts(pcMdot_);
-  fillGhosts(pcArea_);
-  fillGhosts(pcDep_);
-  fillGhosts(pcTgt_);
-  for (int d = 0; d < 3; ++d)
-    fillGhosts(pcNrm_[d]);
-  pcZeroDomainGhosts(pcMdot_);
-  pcZeroDomainGhosts(pcArea_);
-  pcZeroDomainGhosts(pcDep_);
-  pcZeroDomainGhosts(pcTgt_);
-  for (int d = 0; d < 3; ++d)
-    pcZeroDomainGhosts(pcNrm_[d]);
+  pcMdotExtrema(nIface);
+  pcExchangeInterfaceGhosts();
 }
 
 template <class Grid>

@@ -1613,6 +1613,15 @@ class Solver {
   // The binary openness, the overlay build (+ debug report) and the MG surrogate openness.
   void gpBuildOverlay(CCField sdfGp);
 
+  // ---- pcBuildInterface() phases (WO-HO): contiguous blocks, called once each. ----
+  // The temperature ghosts, the stale-mask refresh and the cascade interfacial area. Returns
+  // whether the cascade area is in use.
+  bool pcBuildInputs();
+  // The unit refusal of the operator flux and the in-domain mask it reads.
+  void pcOperatorDomain(bool opMode, bool opEnergy);
+  // The ghost exchange of the interface fields, domain-face ghosts zeroed.
+  void pcExchangeInterfaceGhosts();
+
  public:  // nvcc forbids extended __host__ __device__ lambdas inside private/protected members.
   // Advection treated implicitly (implicit-FOU upwind + deferred correction): the user opt-in
   // (set_implicit_advection) on any path, OR the DEFAULT on the domain-BC path (inflow/outflow),
@@ -4659,6 +4668,9 @@ class Solver {
   /// the OWNER's values — which is what makes both decomposition-independent WITHOUT any
   /// reverse/add halo and without an atomic scatter (bitwise MPI, not a reduction floor).
   void pcBuildInterface();
+  // pcBuildInterface() phase (WO-HO), public for its device lambda: the min/max of mdot over the
+  // interfacial cells into pcDiag_ (zeros when there are none).
+  void pcMdotExtrema(long nIface);
 
 
 
