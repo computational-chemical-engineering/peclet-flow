@@ -1,11 +1,11 @@
 # SDF-campaign dev probes
 
 Regression net beyond the ctest suites — see `../../../doc/` and the suite's
-`docs/archive/ANALYTIC_SDF_GEOMETRY.md` for what each gates.
+`../../../../docs/archive/ANALYTIC_SDF_GEOMETRY.md` for what each gates.
 
 **Provenance.** These lived as `suite/.sdf-campaign-probes/` (untracked, a session-independent
 copy) from the analytic-SDF geometry campaign, 2026-08-29 .. 09-02. They moved here on 2026-09-22
-and are now TRACKED, closing the umbrella `docs/QUALITY_PLAN.md` item that asked for exactly this
+and are now TRACKED, closing the umbrella `../../../../docs/QUALITY_PLAN.md` item that asked for exactly this
 move: nine tracked documents cite these gates and their measured numbers, so a fresh clone had
 references to files it did not have. If you are following a link that says `.sdf-campaign-probes/`,
 this is the directory it means.

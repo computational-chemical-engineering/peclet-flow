@@ -27,7 +27,7 @@ Three independent statements, all pre-existing, all pointing the same way:
    on the stencil `divergOpen` measures makes the conservative flux form non-conservative by
    exactly that residual.
 
-3. **The FOU operator's row-sum identity needs it.** `../docs/decisions/flow.md:977` already
+3. **The FOU operator's row-sum identity needs it.** `../../docs/decisions/flow.md:977` already
    recorded that `fou_operator`'s conservative row sum equals `rho_f · div_h(u^k)` and *"holds
    only for uniform/div-free advecting field"*. With the projected field it holds exactly, so the
    implicit-FOU operator has zero row sum and the explicit `(SOU − FOU)` deferred correction
@@ -37,7 +37,7 @@ And one empirical statement: it was the **last uniform-grid difference** between
 `peclet.amr` — see §3.
 
 **It is not Rhie–Chow, and this is not a step toward it.** The suite-wide prohibition
-(`../docs/DECISIONS.md`, held independently by `flow`, `amr` and `voro`) stands: the residual
+(`../../docs/DECISIONS.md`, held independently by `flow`, `amr` and `voro`) stands: the residual
 *cell* divergence is intrinsic to cell-centred velocity placement and no advecting-velocity choice
 removes it. What changes here is only which field the *advection* reads; the pressure coupling,
 the flux reconstruction (Koren/SOU/FOU), the openness weighting and the cut-cell closures are all
@@ -180,7 +180,7 @@ one is solver-tolerance zero. This is the point of the change, and it is not a t
 | 128 | 2.2834e-05 | 3.91 | 2.3263e-05 | 3.91 |
 
 **Indistinguishable — ~1 % better, at the same observed order, at every resolution.** This matches
-what `amr` measured independently (`amr_flow_uniform_parity.md` §3a: 0.4 % apart, same order). The
+what `amr` measured independently (`../../amr/docs/amr_flow_uniform_parity.md` §3a: 0.4 % apart, same order). The
 case for the change is consistency, not accuracy; §3.1 and §3.3 are the reasons, and this table is
 the evidence that taking it costs nothing where it does not help.
 
@@ -228,7 +228,7 @@ advection, relative L2 over the shared fluid cells:
 | `amr` ablated to the average, `flow` on `uf` | 2.49e-04 | 3.95e-04 |
 
 The gap the parity study measured (2.5e-04) was exactly this one function, and it is closed. Note
-the consequence for `amr`'s gate: its `tg_advect_matched.json` case ablates `amr` to *flow's old*
+the consequence for `amr`'s gate: its `../../amr/tests/study/flow_parity/cases/tg_advect_matched.json` case ablates `amr` to *flow's old*
 choice, so it now measures the difference rather than the agreement — that case wants updating on
 the `amr` side (either drop the `"uf_advection": false` line, or ablate both engines).
 
@@ -286,15 +286,15 @@ colocated_advect_bc   93bde5cd6f16…  (build_base == build_uf + set_uf_advectio
   form is unweighted. So the advective flux sum telescopes to exactly zero where every face
   openness is 1 — the all-fluid bulk, which is what §3.1 measures — and carries a residual in the
   cut band. That residual is what §1.3's row-sum identity is subject to, and it is the same trade
-  `amr` recorded in 2026-07-24 ("div-free bulk, residual-small band", `../docs/decisions/amr.md`).
+  `amr` recorded in 2026-07-24 ("div-free bulk, residual-small band", `../../docs/decisions/amr.md`).
   It is strictly better than the average, which carries the O(h²) cell divergence *everywhere*,
   but "divergence-free advecting field" should be read as "in the bulk".
 - **Not measured: large-dt steady driving on a dense cut-cell bed at finite Re.** The
-  uf-vs-average difference scales as dt² (`amr_flow_uniform_parity.md` §3), so it is small at a
+  uf-vs-average difference scales as dt² (`../../amr/docs/amr_flow_uniform_parity.md` §3), so it is small at a
   CFL-limited dt and largest exactly there. `tests/study/uf_advection_ab.py bed` is the probe.
 
 ## 5. Reversing this
 
 `set_uf_advection(False)` restores the old numerics bit-for-bit — that is what §3.4 measures — so
 any baseline that turns out to depend on the old choice can be reproduced without reverting code.
-Changing the **default** back is a new recorded decision, per `../docs/DECISIONS.md`.
+Changing the **default** back is a new recorded decision, per `../../docs/DECISIONS.md`.

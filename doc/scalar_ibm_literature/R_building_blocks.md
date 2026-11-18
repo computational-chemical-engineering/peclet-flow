@@ -9,8 +9,8 @@
     default; velocity MG / GraphAMG possible).
   - MPI through injected `refresh` (halo) and `dotReduce` callables. The header contains no MPI.
   - Also provides defect correction.
-- **core `solver/`** also holds `csr_operator.hpp` (FaceCsrOpT, FvCsrOpT, Jacobi / multicolour GS),
-  `face_csr.hpp`, `coloring.hpp`, `graph_amg{,_device}.hpp` and `vector_ops.hpp`.
+- **core `../../../core/include/peclet/core/solver/`** also holds `../../../core/include/peclet/core/solver/csr_operator.hpp` (FaceCsrOpT, FvCsrOpT, Jacobi / multicolour GS),
+  `../../../core/include/peclet/core/solver/face_csr.hpp`, `../../../core/include/peclet/core/solver/coloring.hpp`, `graph_amg{,_device}.hpp` and `../../../core/include/peclet/core/solver/vector_ops.hpp`.
 
 ## MG
 - **`CutcellMG`** (`mac_cutcell_mg.hpp:492`, `init(nx, ny, nz, nLevels)`).

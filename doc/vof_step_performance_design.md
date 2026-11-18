@@ -594,7 +594,7 @@ bottom and raises a device flag, which the next host read (A6's packet) turns in
 **Selection.** A new developer-tier setter `diagnostics.set_pressure_bottom_solver("auto" |
 "geometric" | "algebraic")`, default `"auto"`. `"auto"` means geometric where eligible on a
 device backend and algebraic otherwise. `"geometric"` on an ineligible configuration raises with
-the failed condition named. Check the spelling against `../docs/NAMING.md` (Q15). It exists so
+the failed condition named. Check the spelling against `../../docs/NAMING.md` (Q15). It exists so
 every gate can A/B the two engines on the same build.
 
 **Unit gate (new ctest, CUDA tree).** The kernel's `M(r)` equals, bitwise, the result of running
@@ -957,7 +957,7 @@ each has a default so work can proceed unattended.
 - **Q14 [fact]: `team_size_max` of the B1 kernel on the 5080** (register pressure). With T = 256
   instead of 1024, B1 costs ≈ 1.5–2× more. **Default:** accept; report T in the trace.
 - **Q15 [pref]: the spelling of `diagnostics.set_pressure_bottom_solver`.** **Default:** as written;
-  the implementer checks `../docs/NAMING.md` and adds the row if one is required.
+  the implementer checks `../../docs/NAMING.md` and adds the row if one is required.
 - **Q16 [fact]: remaining GPU launch latency after WO-6.** It decides F2. **Default:** F2 only if
   L1–L3 kernels exceed 25 % of the projection.
 - **Risk R1: a bitwise claim fails on device through FMA contraction** when an expression moves
@@ -2132,7 +2132,7 @@ build).**
 - **Q-D3 [pref]: delete B1's preconditioner.** It is dominated: slower than GraphAMG on the 5080,
   phase-bound on every GPU, and selected by nothing. *Default:* delete (WO-D3).
 - **Q-D4 [pref]: spelling `'direct'`.** *Default:* `'direct'`. The implementer checks
-  `../docs/NAMING.md` and drafts the row (umbrella file, for the caller).
+  `../../docs/NAMING.md` and drafts the row (umbrella file, for the caller).
 - **Q-D5 [fact]: the caps b ≤ 192, n ≤ 8192.** *Default:* as stated. When a 16³ bottom (b = 256)
   first matters, measure direct against GraphAMG before raising the cap.
 - **Q-D6 [pref]: the direct engine on host backends.** *Default:* no. GraphAMG stays and host

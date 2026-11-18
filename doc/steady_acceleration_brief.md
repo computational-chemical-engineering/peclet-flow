@@ -114,7 +114,7 @@ views (nanobind; device views on CUDA).
    answer. State whether the Anderson history is part of the checkpoint or discarded on restart.
 6. **Physical-units API** (suite directive): every new setting takes physical inputs. No
    cell-unit API surface and no numerics-changing environment variables (QUALITY_PLAN D-rules;
-   `docs/NAMING.md` for any public name).
+   `../../docs/NAMING.md` for any public name).
 7. **Stability.** Anderson can diverge on non-normal maps. The step map is non-normal (the
    cut-cell momentum operator is nonsymmetric; ‖S−Sᵀ‖/‖S‖ = 1.4e-2 measured in the M1 model). It
    needs safeguards: restarts, a residual-decrease test, a damping β, and conditioning control of
@@ -188,7 +188,7 @@ The design note goes in `doc/steady_acceleration.md` in this repo (flow), with t
 9. Work orders for an `opus-implementer`, each with its gate.
 10. Risks and open questions.
 
-Commit it on a branch, not main. Record the design decisions in `docs/decisions/flow.md` of the
+Commit it on a branch, not main. Record the design decisions in `../../docs/decisions/flow.md` of the
 umbrella (`/home/frankp/Codes/suite`) when the note is approved. Write no production code.
 
 ## 9. Out of scope

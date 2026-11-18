@@ -255,7 +255,7 @@ smaller `cfac` than its neighbours (an *operator* anisotropy on isotropic cells 
 - **The isotropic hierarchy is reproduced bit for bit.** With `h' = (1,1,1)` every `H_a^L` in `C^L` is
   equal (axes leave `C` when they turn odd, and the survivors coarsen in lockstep), so `1 < 2` and every
   coarsenable axis coarsens, exactly today's decision. The existing semi-coarsening of odd axes
-  (`DECOMPOSITION_AND_MULTIGRID.md` §1) is untouched: an axis that cannot coarsen is simply not in `C`,
+  (`../../docs/DECOMPOSITION_AND_MULTIGRID.md` §1) is untouched: an axis that cannot coarsen is simply not in `C`,
   and the rule never waits for it (waiting would freeze the hierarchy on a blocked fine axis; the fix
   for *that* anisotropy is line relaxation, open item 11 of that document, out of scope here: it is
   `doc/mg_depth_policy.md` Amendment A2 -- zebra line relaxation along the blocked axis on the
@@ -320,7 +320,7 @@ defer the neighbours until the unblocked axis catches up — `(1,4,4) → (2,4,4
 today's `(2,8,8)`. That is arguably the better hierarchy (the coarse operator is 16:1 anisotropic in
 coefficient today), but it changes bits at `extent=None` on every telescoped multi-rank case, which
 is exactly what Phase 2 must not do. It is a separate, measured change for the scaling campaign
-(`docs/SCALING_ISSUES.md`); the helper and the knob make it a one-line experiment.
+(`../../docs/SCALING_ISSUES.md`); the helper and the knob make it a one-line experiment.
 
 ---
 
@@ -442,7 +442,7 @@ their own guards still refuse — after Phase 3 that is the CFD-DEM coupling dri
 was, and that was wrong.** Three specific claims, corrected:
 
 - *"`gmap()` collapses one spacing onto all three axes."* It does not, and there is nothing to
-  fix: the driver poses the WHOLE coupling in the solver's INTERNAL units (`driver.py`, "THE UNIT
+  fix: the driver poses the WHOLE coupling in the solver's INTERNAL units (`../../coupling/python/peclet_coupling/driver.py`, "THE UNIT
   LAYER"), so particle positions reach `gmap` already converted to INDEX coordinates. A spacing of
   1 is the *correct* map there, on a cubic mesh and on a box mesh alike, and `_inv_vcell_i` is
   exactly 1.0 for the same reason.
@@ -504,7 +504,7 @@ comparison measures only the operator), `rho = 1, mu = 0.1, F = 0.01, dt = 50`, 
   **(b) The §5.3 configuration** `extent = (16, 12, 16)`, `spacing() == (1, 0.3, 2)`,
   `h' = (10/3, 1, 20/3)`, walls at `3.75` / `8.55` (`H = 4.8`, `u_max = 0.288`): `≤ 1e-7`.
   The discretisation is pointwise exact in both; (b) sits at the float operator-storage floor
-  (WO-M, `docs/SCALING_ISSUES.md` #1) because `hRef = 0.3` makes `mu' = 55.5…` and
+  (WO-M, `../../docs/SCALING_ISSUES.md` #1) because `hRef = 0.3` makes `mu' = 55.5…` and
   `AC = 124.61…` unrepresentable — a one-signed multiplicative factor of `1.06e-7` on every row,
   `8.7e-15` under `-DPECLET_FLOW_OPERATOR_DOUBLE`. Not a metric defect; recorded. (b) is a
   production-SHAPED configuration and is kept as the tripwire for that floor, not as an exactness
@@ -582,7 +582,7 @@ count that changes; MPI np = 1 not bit-exact; a kernel that would need a differe
 | **C2** | U11 (weights) | §3 pressure weights at the three `setOpenness` sites and every correction / gradient kernel, `buildOpenness(hp)`, §4.2 census, the **snap + relaxed assert** (§1.4, admits the list of §7 minus the collocated policy and the hydro forces), `requireIsotropic` guards | G0, **G1**, G4-order |
 | **C3** | U11 (⚑ A) | `mgChooseRatio`, `setMetric` before `init`/`initMpi` in both MGs, `levelRatios()`, `setAspectThreshold` | G0, **G4** full (incl. MPI) |
 | **C4** | U12 (⚑ B) | §6.1–6.4 closures, slip length, `ibmVolfrac`, §4.4 forces; admits the collocated policy and the hydro forces | G0, **G2**, **G3** |
-| **C5** | docs | `flow/CLAUDE.md` "Physical domains and units" (anisotropic admitted, what Phase 3 still refuses), `suite/docs/CONVENTIONS.md` §7 one line, `PHYSICAL_UNITS_PLAN.md` §9.4 marked landed with the gate numbers of §10 | — |
+| **C5** | docs | `flow/CLAUDE.md` "Physical domains and units" (anisotropic admitted, what Phase 3 still refuses), `suite/docs/CONVENTIONS.md` §7 one line, `../../docs/PHYSICAL_UNITS_PLAN.md` §9.4 marked landed with the gate numbers of §10 | — |
 
 Commit messages name the gate and its numbers; trailer per the session brief. Push the submodule
 (`git pull --rebase origin main && git push origin HEAD:main`), bump the umbrella pointer last. Phase 3
@@ -1006,7 +1006,7 @@ baselines at `+0.00 %` with every iteration and step count equal; the six verify
    (E1). At `spacing (1, 0.3, 2)` neither `mu' = 55.5…` nor `AC = 124.61…` is representable and the
    whole profile is scaled by `1 − 1.06e-07`; `-DPECLET_FLOW_OPERATOR_DOUBLE` reads `8.674e-15`. Every
    exactness gate in this phase is therefore stated at a float-representable metric, with the
-   production-shaped configuration kept beside it as a tripwire. `docs/SCALING_ISSUES.md` #1.
+   production-shaped configuration kept beside it as a tripwire. `../../docs/SCALING_ISSUES.md` #1.
 2. **Two solver paths are not run-to-run deterministic under OpenMP**, both through
    `Kokkos::atomic_add` over an overlay: the fluid-only star elimination (`starEliminate`, 2.2e-16 on
    the collocated Z&H sphere) and `hydroForceTorqueReaction` (5.6e-16 on the moving-scene force).

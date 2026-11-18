@@ -1,0 +1,3749 @@
+"""
+flow — Kokkos cut-cell IBM incompressible Navier-Stokes solver for porous media.
+
+Two solver classes share an identical API (only the velocity-unknown placement differs):
+  Solver          — staggered MAC grid (THE flow solver; permeability/drag accuracy default)
+  SolverColocated — collocated / cell-centered velocities (ABC approximate projection)
+
+Conventions: physical units throughout (density rho, viscosity mu, physical pressure p); SDFs
+are negative inside the solid; fields are Fortran-order (nx,ny,nz) float64 (x-fastest). This is
+the single-rank module — the multi-rank MPI path is exercised by the tests/kokkos_mpi suite.
+
+Kokkos is initialized at import and finalized via a Python atexit hook that first releases every live Solver and zero-copy field view (flow.finalize() does the same on demand); nothing needs to be released before interpreter exit. execution_space names the active Kokkos backend ("OpenMP", "Cuda", "HIP"), chosen by the build's install prefix.
+"""
+
+from collections.abc import Sequence
+from typing import Annotated, overload
+
+import numpy
+from numpy.typing import NDArray
+
+
+def finalize() -> None:
+    """
+    Release every live object and zero-copy array of this module, then Kokkos::finalize() (deterministic teardown; also run automatically at interpreter exit). Idempotent. After it, the module's solver objects and *_view arrays must not be used.
+    """
+
+execution_space: str
+
+class SolverDiagnostics:
+    """
+    Developer tier of a Solver, reached as `s.diagnostics`: instruments (censuses, timers, budgets, ledgers), solver TUNING beyond the public driver selection, ablation switches and the raw zero-copy / MPI internals. Nothing here is needed to set up, run or read out a simulation. It holds a reference to the solver and no state of its own; the setters that CHANGE RESULTS say so in their docstring.
+    """
+
+    def set_face_interp(self, mode: int) -> None:
+        """
+        The two INTERMEDIATE rungs of the Basilisk embed.h port on the collocated grid (doc/history/collocated_embed_port_plan.md), reachable for the ladder that measures what each piece of the complete port ('embed' = mode 7) is worth: 5 = the FV momentum operator with the true-normal dirichlet_gradient wall drag as a defect correction, on the wall-aware face map with the transpose-gradient pressure force; 6 = plus the openness-weighted -grad(P) predictor and cell correction, on the plain face map (7 adds the wall-aware face map and the solid-cut-cell sliver mask). CHANGES RESULTS; no effect on the staggered solver. Modes 1-4 and 10-13 (ablations) were deleted with their kernels at 1.0.0.
+        """
+
+    def set_incremental_pressure(self, on: bool) -> None:
+        """Toggle the rotational incremental-pressure projection."""
+
+    def set_pressure_warmstart(self, on: bool) -> None:
+        """Seed each pressure solve from the previous step's phi (default off)."""
+
+    def set_rotational_pressure(self, on: bool) -> None:
+        """
+        PM I ablation (Guy-Fogelson 2005): False drops the rotational -mu*div(u*) term from the incremental pressure accumulation (constant-mu path only). Default True = shipped rotational (Timmermans) update.
+        """
+
+    def set_rotational_filter(self, on: bool, eps: float = 0.05) -> None:
+        """
+        Experimental filtered rotational update: smooth div(u*) (mask-aware axis-wise 1-2-1, one-sided into the fluid at walls) before accumulating -mu*div into P. Keeps the O(1) pressure-relaxation gain, removes the checkerboard feedback channel.
+        """
+
+    def set_rotational_weight(self, w: float) -> None:
+        """
+        Under-relax the rotational term: P += ct*phi - w*mu*div(u*). 1 = shipped, 0 = PM I; small w raises the boundary-mode stability threshold ~1/w at ~1/w slower smooth-mode pressure relaxation. phi=0 stays the unique fixed point for any w>0 at every dt.
+        """
+
+    def set_rotational_wall_weight(self, w0: float) -> None:
+        """
+        Wall-banded rotational blend: at fluid cells with a solid axis-neighbour use P += (rho/dt + w0*mu/dx^2)*phi - (1-w0)*mu*div(u*); bulk keeps the full rotational update. Stabilizes the boundary rows without slowing bulk pressure relaxation, and keeps them relaxing at dt->infinity. 0 (default) = off.
+        """
+
+    def set_aperture_order(self, order: int) -> None:
+        """
+        Face-aperture estimator (DEFAULT 2 since 2026-08-26): 1 = legacy one-sample linear model, 2 = marching-squares (5 samples/face, O(h^2); removes the convexity bias measured at +0.59/+0.27% bed permeability at R=8/12 -- see doc/collocated_paper_plan.md row 51). For analytic geometry, exact apertures via set_openness_override are better still. Call before set_solid (a later call raises).
+        """
+
+    def set_advection_wall_velocity(self, on: bool) -> None:
+        """
+        A0: fill the advection inputs' masked (solid) rows with the instantaneous WALL velocity instead of zeros, so a MOVING body's advective term sees the body's own motion. DEFAULT True; False is the pre-A0 ablation (measurement only). Inert on a static scene and on the collocated grid.
+        """
+
+    @property
+    def advection_wall_velocity(self) -> bool:
+        """Whether the wall-velocity advection inputs are in force."""
+
+    def set_uf_advection(self, on: bool) -> None:
+        """
+        Advect the COLLOCATED momentum with the projected, divergence-free MAC face field uf/vf/wf of the last projection instead of the un-projected cell->face average 0.5*(u_i+u_j). DEFAULT True -- the shipped scheme: doc/flow_colocated_plan.md step 3, the Almgren-Bell-Colella prescription (the field the projection just made solenoidal IS the conservative advective flux), and what the FOU operator's conservative row-sum identity needs. False is the ablation that restores the phase-2 average (measurement only; see doc/uf_advection.md). Inert on the staggered grid (the stored velocity already IS the projected face velocity) and before the first projection or set_velocity has built a face field.
+        """
+
+    @property
+    def uf_advection(self) -> bool:
+        """Whether the projected face field is the collocated advecting velocity."""
+
+    def set_comm_avoiding(self, mode: str) -> None:
+        """
+        Communication-avoiding red-black smoothing (multi-rank): exchange a 2-deep ghost layer once per red-black PAIR instead of a 1-deep layer before every colour, redundantly re-smoothing the first colour's ghost ring so the second colour reads exactly what a per-colour exchange would have delivered. BIT-IDENTICAL, at half the halo events (measured on host: np=32 weak efficiency 35% -> 62%). 'both' (DEFAULT on a host backend) | 'off' (DEFAULT on a device backend: USER 2026-10-29, H100 weak scaling measured CA off 21-39 ms/step faster) | 'momentum' (the velocity RB-GS only) | 'pressure' (the pressure-multigrid coarse levels only) -- the split exists to ATTRIBUTE a measured regression to one subsystem. Set it BEFORE init_mpi (a later call raises: the momentum half is latched with the halo topology); either half is inert on blocks smaller than 4 cells on any axis, and on a periodic axis of odd global extent (the pressure half per multigrid level).
+        """
+
+    @property
+    def comm_avoiding(self) -> str:
+        """
+        The communication-avoiding smoothing mode in force (see set_comm_avoiding).
+        """
+
+    def set_multigrid_aspect_threshold(self, theta: float) -> None:
+        """
+        Anisotropic-coarsening aspect threshold theta shared by the pressure and velocity multigrids (doc/anisotropic_metric.md §5.1): an axis is coarsened only while its cell size stays within theta of the smallest one, so a stretched grid semi-coarsens instead of building levels whose operator is dominated by one direction. DEFAULT 2.0; must be > 1; 1e9 restores full coarsening on every axis (the §8.5 item (c) ablation). Only ever consulted on an ANISOTROPIC metric, so it is inert on cubic cells.
+        """
+
+    @property
+    def multigrid_aspect_threshold(self) -> float:
+        """
+        The anisotropic-coarsening threshold in force (see set_multigrid_aspect_threshold).
+        """
+
+    def set_pressure_strict(self, on: bool) -> None:
+        """
+        Raise instead of report when the pressure preconditioner returns a non-finite correction. DEFAULT False: the shipped behaviour caps the solve, prints one line, and raises the pressure_solve_failed() flag, so a check can catch it without changing control flow. True turns the same event into an exception.
+        """
+
+    @property
+    def pressure_strict(self) -> bool:
+        """
+        Whether a non-finite pressure preconditioner output raises (see set_pressure_strict).
+        """
+
+    def set_pressure_coarse_ghost(self, on: bool) -> None:
+        """
+        Zero-gradient (Neumann) coarse ghost on wall/inflow faces before the pressure multigrid's prolongation -- the WO-H symmetry repair. DEFAULT True. False restores the pre-2026-08-30 periodic-wrap ghost, which reinstates the asymmetry that stalls MG-PCG on every 3-D wall-bounded grid: a MEASUREMENT ABLATION, never a production setting. Inert on periodic / IBM problems, where the two are the same.
+        """
+
+    @property
+    def pressure_coarse_ghost(self) -> bool:
+        """
+        Whether the Neumann coarse ghost is in force (see set_pressure_coarse_ghost).
+        """
+
+    def set_fluid_only_constraint(self, mode: str) -> None:
+        """
+        Fluid-only pressure constraint (route 2b, a collocated mechanism instrument; call before set_solid): 'filter' = Design A (openness filter), 'star' = Design B (SPD Kron star elimination), 'off'. Any setting other than 'off' disables the AUTO scheme.
+        """
+
+    def set_outer_iterations(self, n: int) -> None:
+        """Set the number of Picard/outer iterations per step."""
+
+    def set_outer_tolerance(self, tol: float) -> None:
+        """Set the outer (Picard) convergence tolerance."""
+
+    def last_outer_iterations(self) -> int:
+        """Return the outer-iteration count from the last step()."""
+
+    def set_velocity_solver(self, name: str) -> None:
+        """
+        Which solver runs the implicit momentum (diffusion) equation. 'auto' (DEFAULT) picks by the operator's condition number kappa = 1 + 4 dt mu (sum w)/rho -- the multigrid at kappa >= 13, the smoother below -- and names no geometry, so an immersed body and a domain-BC box at the same dt get the same solver. 'gauss_seidel' is the red-black smoother; 'multigrid' the 3-level velocity V-cycle; 'chebyshev' Chebyshev semi-iteration over a Gershgorin interval. ALL FOUR SOLVE THE SAME EQUATION TO THE SAME TOLERANCE, so this changes cost and not the answer -- except that 'gauss_seidel' runs out of sweeps above kappa ~ 50 and then returns a solution that never met it. MEASURED (384^3 cut-cell bed, Snellius): multigrid beats gauss_seidel 1.66x-2.23x across the CPU ladder and 2.19x on one H100; chebyshev beats gauss_seidel by the sqrt(kappa) factor theory predicts but loses to multigrid except at the smallest per-rank blocks, where the evidence is suggestive and not conclusive.
+        """
+
+    def set_velocity_mg_smoother(self, name: str, degree: int = 0, eig_ratio: float = 10.0) -> None:
+        """
+        Which smoother the velocity multigrid uses on every level -- orthogonal to set_velocity_solver, and read only when that selects 'multigrid'. 'gauss_seidel' (DEFAULT) or 'chebyshev'. ABLATION, AND CHEBYSHEV IS MEASURED SLOWER: at degree 4 / eig_ratio 6 it IS the stronger smoother per cycle (8.0 V-cycles against red-black's 9.3) and still loses 1.21x on wall time, because matching red-black's smoothing strength costs the same four halo exchanges two sweeps cost, while Chebyshev needs a separate residual and update pass where a Gauss-Seidel sweep fuses the two. Kept because it is the apparatus for a question that gets asked repeatedly. degree=0 follows the V-cycle's own pre/post/bottom counts.
+        """
+
+    def velocity_solver(self) -> str:
+        """
+        The momentum solver actually in force, resolving 'auto'. Only meaningful after the first step(), which is where the choice is made (dt and mu are final only then).
+        """
+
+    def velocity_mg_smoother(self) -> str:
+        """The velocity multigrid's smoother."""
+
+    def set_velocity_solver_params(self, iters: int, rtol: float = 0.0, min_iters: int = 2) -> None:
+        """
+        Momentum smoother control: `iters` RB-GS sweeps per component, or with rtol > 0 a TOLERANCE STOP — end the loop once the sweep's max velocity increment has contracted to rtol of the first sweep's (iters becomes the cap, min_iters the floor). Easy regimes (small nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the cap unchanged. rtol = 0 (default) is the legacy fixed count, byte-identical.
+        """
+
+    def set_velocity_multigrid_auto(self, cells_per_rank: int, min_global_cells: int = -1, min_block_extent: int = -1) -> None:
+        """
+        Narrow the rule that selects the momentum solver. Since 2026-09-15 the DEFAULT is the velocity V-cycle on every validated operator mode and at every rank count: measured on the 1.0.0 scaling benchmark it is faster at every rung of both the CPU and the GPU ladder (2.23x at 147k cells/rank, 2.19x on one H100), and the red-black smoother it replaced was running at its sweep cap -- not converging -- on every rung of both. cells_per_rank sets an upper bound in cells per rank (0 = never use the V-cycle); set_velocity_multigrid_auto(65536, 1 << 23) restores the 1.0.0 behaviour exactly. min_block_extent (default 16) is the shortest per-rank inner extent worth building a hierarchy on. An explicit set_velocity_multigrid() overrides all of it.
+        """
+
+    def velocity_multigrid_active(self) -> bool:
+        """
+        Whether the velocity (momentum) solve uses the multigrid V-cycle rather than plain RB-GS. Reads back the OUTCOME, not the setting: an explicit set_velocity_multigrid(on=...) call always wins, but absent one the AUTO rule (set_velocity_multigrid_auto) decides it when the geometry is built (set_solid / set_pressure_geometry / set_solid_from_scene) -- on for a distributed run (np > 1) in an eligible operator mode with a global problem of at least min_global_cells (default 8M) and fewer than cells_per_rank (default 65536) cells per rank, off otherwise. So the value can differ from what the caller last set explicitly, and is only meaningful after geometry has been installed (False on a fresh solver).
+        """
+
+    def scalar_geometry(self, name: str) -> dict:
+        """
+        The cut-cell scalar geometry record (doc/scalar_ibm_design.md §2) as F-order (nx, ny, nz) arrays of this rank's block: 'kappa' (fluid fraction of the fan-tetrahedron PL model), 'aperture_x/y/z' (the SNAPPED, ungated scalar aperture of the -x/-y/-z face of each cell -- the scalar's own, never the pressure openness), 'unknown' (1 where the cell is a fluid unknown: kappa > 1e-14 with an open face). Built on first use after the geometry; shared by every cut-cell scalar. A scalar with a solid field (set_scalar_solid) also gets 'kappa_solid' (1 - kappa) and 'solid_unknown' (1 where the cell is a solid unknown: kappa_solid > 0 and the cell's material conjugate, §2.7).
+        """
+
+    def scalar_census(self, name: str) -> dict:
+        """
+        Census of the cut-cell scalar (collective under MPI, summed over ranks). The solve part, of the last advance or steady solve: 'krylov_iterations', 'krylov_residual' (the true max-norm residual over the reference max(max|b|, max|A c0|)), 'krylov_converged', 'num_mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 alone), 'steady_incompatibility' (|sum b| / sum|b| of a singular steady problem before its projection, else 0), 'num_solid_unknowns' (0: single phase; the solid unknowns of a conjugate scalar, whose 'probe_rungs' then carries a 'solid' tuple too), 'solid_volume' / 'sealed_solid_volume' (physical: the conjugate solid kappa_s V, and its part in cells that are not solid unknowns -- kappa_s > 0 with no open solid face and no conjugate facet, ruling D-WO7-1). The advection part (design §6.3, the last advance or steady solve): 'num_small_cells' (cut cells whose explicit outflow would exceed the bulk's), 'num_implicit_faces' / 'num_flux_faces' (faces carrying flux that took implicit upwind / all faces carrying flux; steady: all implicit), 'bulk_courant' (C_bulk: max over full cells of dt Out/V; 0 steady), 'num_guarded_flux_faces' (faces with projection flux toward a cell that is not a fluid unknown, whose flux the operator drops), 'num_backflow_faces' (rows of an 'outflow' domain face whose flux enters the domain: their inflow takes the zero-gradient value; a steady solve warns once), 'max_cell_peclet' (the largest aperture-weighted face Peclet number |u_a| a h_a / D over the interior faces; the steady envelope of the advective preconditioner is <= 10). The geometry part: 'num_unknowns' (fluid unknowns), 'num_cut_cells' (cells carrying a facet), 'num_facets', 'num_two_sided' (cells with two facets), 'num_thin_solid' (two-facet cells with solid between two fluids -- a resolution warning), 'num_sealed' / 'sealed_volume' (kappa > 0 behind closed faces; physical volume), 'probe_rungs' ({'fluid': (R0, R1a, R1b, R2)} facet counts of the probe ladder).
+        """
+
+    def scalar_budget(self, name: str) -> dict:
+        """
+        Budget of a cut-cell scalar over the last advance (collective under MPI), physical: 'mass' = sum kappa V c, 'mass_solid' (= sum C_s kappa_s V c_s of a conjugate scalar; 0 single phase), 'd_mass' = the change of mass + mass_solid over the advance, 'wall_in' / 'boundary_in' / 'source_in' = the rates INTO the fluid from the immersed walls (the conjugate interfaces are internal: not in it), the domain faces (the Dirichlet faces' diffusive flux plus the advective flux through inflow/outflow faces) and the source, 'defect' = dt sum V r (r the linear-solver residual), and 'identity_error' = d_mass - dt (wall_in + boundary_in + source_in) + defect, which is round-off for a correct discretization. After a steady solve it is the rate balance: d_mass = 0, defect = sum V r and identity_error = defect - (wall_in + boundary_in + source_in). Computed on request from the stored state.
+        """
+
+    def scalar_facets(self, name: str) -> dict:
+        """
+        Per-facet arrays of a cut-cell scalar on this rank (facet order = x-fastest cell order): 'centroid' (n, 3) physical coordinates, 'normal' (n, 3) into the fluid, 'area' (physical), 'instance' (scene body; 0 for raw-SDF geometry), 'wall_value' (c at the wall from the elimination: robin (D u_p + k s g)/(D + k s), dirichlet g, neumann u_p + q s/D; NaN on a facet whose cell is not an unknown), 'flux' (into the fluid per area, c L/T physical, after the last advance or steady solve; local Nu/Sh maps, first order in the max norm) and 'probe_rung' (0..3 = R0, R1a, R1b, R2).
+        """
+
+    def set_scalar_max_iterations(self, name: str, max_iter: int) -> None:
+        """
+        Cut-cell scalars: the BiCGStab iteration cap (default 200). On non-convergence the iterate is kept, diagnostics.scalar_census reports it and a one-time warning is printed.
+        """
+
+    def outflow_backflow(self) -> dict:
+        """
+        Outflow REVERSAL census over the outflow faces (collective under MPI): 'max_reverse' = the largest reversed normal velocity max(0, -u.n), 'fraction' = reversed / all outlet faces, 'energy_influx' = sum over the reversed faces of rho |u.n| |u|^2 / 2 -- the kinetic-energy production the zero-gradient (do-nothing) outflow admits where the flow re-enters, which is the mechanism that diverges an inflow/outflow run whose recirculation reaches the outlet (a BFS bubble at x_r ~ L, a shed vortex). The backflow stabilization (set_backflow_stabilization, default beta 0.2) removes beta rho |u.n| |u_n|^2 of it; beta >= 0.5 is the unconditional energy bound. All zeros without an outflow face or without reversal. step() warns once, on stderr, when reversal appears while the stabilization is switched off.
+        """
+
+    def last_momentum_residual(self) -> float:
+        """
+        max over components of max|r|/max|b| at exit of the last step's momentum solves (residual mode only; -1 otherwise).
+        """
+
+    def set_deferred_correction(self, on: bool) -> None:
+        """
+        Deferred-correction advection: True (default) = 2nd order (implicit FOU + explicit high-order correction, the high-order scheme being SOU by default or Koren TVD via set_advection_scheme); False = pure implicit FOU (1st-order upwind, more dissipative but unconditionally stable at sharp shear layers).
+        """
+
+    def set_pressure_mean_removal(self, scope: str) -> None:
+        """
+        Nullspace (mean) removal scope in the pressure solve: 'fine' (DEFAULT — only the projections the Krylov iteration needs: rhs/residual, the fine-level V-cycle exit, the final iterate; ~3x fewer global-reduction latency hits per iteration, the measured winner of the multi-GPU ablation) or 'all' (legacy — every V-cycle level + after every matvec). Iteration counts are identical (A preserves mean-freeness); results equal within solver tolerance, not bit-identical.
+        """
+
+    def set_pressure_bottom_solver(self, engine: str) -> None:
+        """
+        Engine of the AGGLOMERATED pressure bottom (set_pressure_bottom 'auto' / 'agglomerated'). 'auto' (DEFAULT): single rank, the singular (periodic / wall) operator, a bottom of at most 8192 cells with at most 64 fluid components (solids allowed) and an axis whose planes hold at most 192 cells, 'direct': one team launch runs flexible CG in FP64 (inner tolerance 1e-5, cap 100) preconditioned by a block-tridiagonal FP32 direct factor of the bottom (planes along one axis, explicit Schur-complement inverses), refactored once per operator change -- no host transfer on a GPU; on a host backend the team has min(8, team_size_max) threads and the FCG's reductions run on one lane, so the result does not depend on the thread count. Everywhere else the GraphAMG solve. 'direct' forces that engine and raises at the bottom solve, naming the failed condition, where it is not eligible; 'algebraic' forces GraphAMG (the A/B instrument). doc/vof_step_performance_design.md §13, §14 H-1.
+        """
+
+    def set_pressure_line_relaxation(self, enabled: bool) -> None:
+        """
+        Zebra line relaxation in the pressure multigrid (DEFAULT True). On a level whose finest axis has stopped coarsening (its extent no longer halves) while the other two keep coarsening, so that the coarse cells are more than 2:1 elongated across it, the smoother solves each line along that axis exactly (tridiagonal; cyclic for a periodic axis) instead of relaxing point by point, which damps the error modes the coarse grid cannot see. Every other level, and every grid without such a level, is unchanged; False restores the point red-black smoother everywhere, bit for bit. Under MPI a level whose line axis is split across ranks keeps the point smoother. Live. doc/mg_depth_policy.md Amendment A2.
+        """
+
+    def set_pressure_vcycle_symmetric(self, enabled: bool) -> None:
+        """
+        The symmetric pressure V-cycle (DEFAULT True since doc/mg_depth_policy.md A3, WO-S3). True: every coarse-to-fine transfer adds the coarse parent's value to each fine cell (piecewise-constant prolongation, the transpose of the cell-average restriction up to the factor 2^k) and the smoothed coarsest level sweeps forward then in reverse, so the V-cycle is a symmetric positive definite preconditioner and the CG drivers keep their optimality on high-contrast and thin-slab grids. False: the pre-A3 trilinear prolongation and forward bottom, bit for bit (the A/B lever). Applies to every pressure driver (PCG, FCG, Chebyshev, the standalone V-cycle, the ghost projection's BiCGStab), single rank and distributed, FP64 and FP32. Live. doc/mg_depth_policy.md Amendment A3.
+        """
+
+    def set_pressure_vcycle_precision(self, mode: str) -> None:
+        """
+        Precision of the V-cycle that preconditions the pressure PCG / FCG (single rank and distributed). 'auto' (DEFAULT since 2026-10-19): 'fp32' where eligible, else 'fp64', on a DEVICE backend (CUDA, HIP), with the FP64 restart below; on a host backend (OpenMP, Serial) 'auto' is 'fp64' -- the host saves too little (~5-8 %) to pay for FP32's risks. 'fp64': the FP64 V-cycle. 'fp32': FP32 face weights (the diagonal derived, never stored), FP32 iterates and flux-form arithmetic on every level above the bottom, the input scaled by an exact power of two; the Krylov matvec, dots, mean projection and stop test stay FP64 -- raises at the solve, naming the failed condition, where not eligible (an outflow face, an overlay solve, a non-bottom level with an odd inner dimension, a float outer operator, a face weight outside [1e-30, 1e30], the mean-removal scope 'all', a driver other than PCG / FCG); forced 'fp32' runs on host backends too. Distributed, FP32 runs down to the first telescope point (FP64 below) and an np=1 run is bitwise the single-rank run in every mode. Takes effect at once. Its weight rounding is not invariant under a non-power-of-two change of units, and it can cap where 'fp64' converges (hence the restart); pass 'fp64' for an FP64-only run. RESTART: under 'auto' a PCG / FCG solve whose FP32 attempt does not meet its stop test (a cap, a non-finite breakdown) is re-solved from x = 0 with the FP64 V-cycle -- the 'fp64' solve of the same right-hand side -- with one warning line, and 'auto' then stays FP64 for the rest of the run (pressure_vcycle_precision() reads 'fp64'); calling this setter again re-arms it. Forced 'fp32' is never restarted (the A/B mode). doc/vof_projection_distributed_design.md §4, §9 (the default). It saves ~19 % of the projection on a GPU (bubble column, RTX 5080), ~11 % on a CPU. Outside the CG drivers' rated contrast (density ratio above ~1e3 with walls) both precisions may cap; FP32 may cap earlier. doc/vof_projection_cost_design.md §4.
+        """
+
+    def set_pressure_initial_guess(self, mode: str, history: int = 2) -> None:
+        """
+        Initial guess of the pressure PCG / FCG solve of the projection (single rank and distributed). 'zero' (DEFAULT): x0 = 0. 'projected': the A-norm projection of the solution onto the span of the last `history` (1 or 2) projection solutions, x0 = c1 phi^n + c2 phi^(n-1) with the 2x2 Galerkin system of the current operator (never worse than x0 = 0 in the A-norm; 0 on non-fluid cells), and the stop stays relative to the ZERO-guess residual max|P b|, so the solve is never looser than the cold one. Raises at the solve, naming the failed condition, where not eligible (the Chebyshev driver, the ghost projection, set_pressure_warmstart(True)). 'auto': 'projected' where eligible, else 'zero', on every backend. 'projected' and 'auto' are opt-in, not the default (decided 2026-10-15). Distributed, the Gram system is allreduced, so every rank takes the same guess; an np=1 run is bitwise the single-rank run. The history restarts empty (a cold solve, then one increment, then two) after this call, a geometry change (set_solid, set_pressure_geometry, init_mpi, redistribute / rebalance_by_weights), a state write (set_field of u/v/w/p/phi, set_state, set_velocity), a driver change, and a failed or capped solve. RESTARTS: no history is checkpointed, so a run restarted from saved fields takes those two cold-history steps and agrees with the uninterrupted run to the solver tolerance, not bitwise. doc/vof_projection_cost_design.md §5, doc/vof_projection_distributed_design.md §6.
+        """
+
+    def set_pressure_prefactor_hoist(self, on: bool) -> None:
+        """
+        Switch the side-instance bottom prefactor (doc/vof_gpu_coarse_tail_design.md §5.6, default ON) off: the variable-rho coefficients are then built in the projection and the direct bottom factored lazily in the bottom solve. Same state bit for bit; for tests and timing comparisons.
+        """
+
+    @property
+    def num_pressure_prefactors(self) -> int:
+        """
+        Side-instance bottom factors launched so far (0 where the prefactor is ineligible: host backends, MPI, constant density, a balanced-force or Chebyshev configuration).
+        """
+
+    def pressure_vcycle_precision(self) -> str:
+        """
+        The precision ('fp32' or 'fp64') the last pressure solve's V-cycles used (set_pressure_vcycle_precision); 'fp64' before any FP32 solve.
+        """
+
+    def set_pressure_graph_amg(self, on: bool) -> None:
+        """
+        Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a mesh-independent pressure solve that works under a WEIGHTED ORB (where the geometric coarse levels can't cleanly coarsen). Applied at the next set_solid.
+        """
+
+    def set_exact_crossings(self, t: Sequence[float]) -> None:
+        """
+        Analytic-SDF capability: exact wall-crossing fractions overriding the linear-interpolated theta in the momentum cut-cell overlay AND the ghost-projection closures. Flat array of 9*nx*ny*nz values, blocks [(c*3+k)]: component c's staggered point at inner cell i toward its +k neighbour; NaN = no crossing. Call BEFORE set_solid (a later call raises); empty list clears. Single-rank, staggered momentum placement.
+        """
+
+    def set_openness_override(self, ox: Sequence[float], oy: Sequence[float], oz: Sequence[float]) -> None:
+        """
+        Analytic-SDF capability: exact face-aperture (openness) fields for the cut-cell projection, overriding the sampled-SDF openness. Inner nx*ny*nz arrays, x-fastest; ox[i] = fluid fraction of the -x face of cell i. Call BEFORE set_solid (a later call raises); empty ox clears. Single-rank.
+        """
+
+    def set_ghost_projection(self, on: bool, matrix_order: int = 2, rhs_order: int = 2) -> None:
+        """
+        QUARANTINED 2026-08-18 (verification only, unsupported): superseded by the gauge-exact collocated scheme, which matches its accuracy at 5-6x lower cost. Kept as the independent second discretization behind the cross-IBM physics gate. Enabling it on the collocated grid silently selects the plain face map, since it owns the operators the gauge-exact scheme replaces. EXPERIMENTAL directional ghost-cell projection (second staggered IBM): point-based FD divergence with wall-anchored directional closures instead of the openness-weighted cut-cell projection; solved by MG-preconditioned BiCGStab. Call BEFORE set_solid (a later call raises). Closure orders (1=linear, 2=quadratic): (matrix_order, rhs_order) = (2,2) full quadratic 13-point matrix; (1,1) linear 7-point; (1,2) mixed/deferred — 2nd-order steady constraint on a 7-point matrix. Collocated: the same closures/matrix on the face-averaged field, plus a directional (one-sided 2nd-order) cell gradient for the -grad(P) predictor and cell correction; requires face_interp 0. v1: single-rank, periodic + IBM, stationary walls; incompatible with porous/variable-rho/domain-BC/Chebyshev.
+        """
+
+    def pressure_mg_level_ratios(self) -> list[list[int]]:
+        """
+        The pressure multigrid's per-level coarsening ratio, one (rx, ry, rz) per level (read-only).
+
+        On an isotropic domain every coarsenable axis halves, as it always has. On an ANISOTROPIC one (extent giving different spacings per axis) the hierarchy coarsens the FINEST coarsenable axis and defers one that is already at least set_multigrid_aspect_threshold (default 2) times coarser, so the coarse operators stay close to isotropic and the point smoother keeps its rate -- e.g. cells (N, 2N, N/2) on a cube gives (1,2,1), (2,2,1), (2,2,2), ... Empty until set_solid/set_pressure_geometry has built the operator. See flow/doc/anisotropic_metric.md §5.
+        """
+
+    def last_superficial_velocity_shift(self) -> float:
+        """
+        The uniform velocity shift set_superficial_velocity applied at the end of the last step() (physical velocity units; 0 when it is off). Reading it synchronises with the device.
+        """
+
+    def last_balanced_force_iterations(self) -> int:
+        """
+        Pressure-driver iterations of the last step's balanced-force solve (set_balanced_force_projection); 0 when it is off, the force divergence was zero, or the previous split already met the stop.
+        """
+
+    def last_balanced_force_failed(self) -> bool:
+        """
+        Whether the last step's balanced-force solve FAILED (driver breakdown or a non-finite result). A failed solve keeps P and p_balanced unchanged for that step; the first one warns on stderr.
+        """
+
+    def balanced_force_failures(self) -> int:
+        """
+        How many balanced-force solves have failed over the solver's lifetime (see last_balanced_force_failed).
+        """
+
+    def anderson_accelerator(self, window: int = 5, mixing: float = 1.0) -> _AndersonAccelerator:
+        """
+        A new Anderson accelerator of this solver's steady march (doc/steady_acceleration.md; the public driver is peclet.flow.march_to_steady). window in [1, 8] (default 5), mixing in (0, 1] (default 1.0). Raises on an unsupported configuration (a collocated scheme other than 'ghost', VoF, phase change, scalars, porous, variable properties, drag, cell forces, moving scenes, superficial velocity, pressure warm start, the balanced-force projection) and when the history, (2m+3) * n_fields * 8 * n_padded bytes, does not fit. Collective under MPI.
+        """
+
+    def last_pressure_iterations(self) -> int:
+        """
+        Return the pressure-solver iteration count from the last step().
+
+        A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration CAP, so the usual rule-3b 'a capped pressure solve invalidates the run' check sees it; pressure_solve_failed() distinguishes the two.
+        """
+
+    @property
+    def num_pressure_chebyshev_restarts(self) -> int:
+        """
+        How many Chebyshev pressure solves were redone on cold spectral bounds since construction. Under variable density the bounds are re-estimated every step from the previous estimate's power iterates (5 + 5 iterations instead of 15 + 15 from the right-hand side); a solve on such bounds that reaches the cap, or whose residual after 3 iterations exceeds the initial one, is redone on a cold estimate and counted here; the abandoned attempt's V-cycles count in last_pressure_iterations().
+        """
+
+    @property
+    def num_pressure_chebyshev_growth_trips(self) -> int:
+        """
+        How many Chebyshev pressure solves on cold spectral bounds (the main projection's and the balanced-force pre-projection's) saw their residual rise above the initial one, since construction. Chebyshev converges for every eigenvalue below the sum of its two bounds, so a growing residual means lambda_max was underestimated: the bounds are re-estimated with a bracketing margin (1.15 on lambda_max) and the solve is redone once from its starting iterate; the first such case prints a stderr notice. Expected 0; a solve that does not trip is unchanged bit for bit. doc/mg_depth_policy_log.md 2026-10-30.
+        """
+
+    @property
+    def num_pressure_unconverged_solves(self) -> int:
+        """
+        How many MG-PCG / flexible-CG pressure solves (main and balanced-force projection) since construction ended UNCONVERGED: capped, broken down, or stopped on their recurrence residual while the TRUE residual max|b - A x| (the stop test's norm and mean removal) exceeded max(10 rtol, 1e-8) * r0 -- the floor keeps a round-off-limited solve at a near-machine rtol silent. Each is also reported on stderr (the first, then the 10th, 100th, ...). Under the trilinear V-cycle (set_pressure_vcycle_symmetric(False)) above a density ratio of ~1e3 the preconditioner turns indefinite and both CG drivers can stop 'converged' on a field that is not a projection; the default SPD V-cycle keeps them healthy there. The check reads the result only: fields and iteration counts are unchanged. Identical on every rank.
+        """
+
+    def last_pressure_true_residual(self) -> float:
+        """
+        The last MG-PCG / flexible-CG pressure solve's TRUE residual max|b - A x| divided by its stop tolerance rtol * r0 (r0 the initial residual, or the balanced-force projection's full right-hand side): <= 1 means the exit really meets the tolerance; above max(10, 1e-8 / rtol) the solve counts in num_pressure_unconverged_solves. Unit-free. Not updated by Chebyshev or ghost-projection (BiCGStab) solves; 0 before the first CG solve and after one with a zero right-hand side.
+        """
+
+    def pressure_solve_failed(self) -> bool:
+        """
+        Did the last pressure solve break down on a non-finite recurrence scalar (a preconditioner or operator that produced NaN/Inf)?
+
+        The driver then zeroes the correction and continues -- so the projection was handed NOTHING for that step and the run is invalid. Until 2026-09-04 the only trace was one line on stdout ('preconditioner produced non-finite z') while last_pressure_iterations() reported 0, i.e. a perfectly healthy-looking solve (measured: examples/pore-scale-imbibition, a 3.1-cell throat). Set set_pressure_strict(True) to raise instead.
+        """
+
+    def last_step_timers(self) -> dict:
+        """
+        Per-phase wall times (seconds, THIS rank, device-fenced) of the last step(): 'predictor' (ghost fills + RHS/advection/stencil builds), 'momentum' (implicit-diffusion solves), 'projection' (cut-cell pressure projection), 'step' (whole step). 'pressure_allreduce'/'pressure_allreduce_count' = time in / number of global reductions (MPI_Allreduce) inside the pressure solve — the latency-bound term of the distributed solve (0 on a single rank).
+        """
+
+    def set_exact_crossings_from_scene(self) -> None:
+        """
+        Compute EXACT wall crossings from the installed scene, on device, on every rank -- the in-solver replacement for set_exact_crossings + scripts/exact_apertures_spheres.py. Bisection, not Newton: only SIGN correctness is guaranteed for bound-only leaves.
+        """
+
+    def set_wall_flux_divergence(self, on: bool) -> None:
+        """
+        Rung 3 on/off (default on = correct physics). Off leaves the moving wall's no-slip datum in the momentum operator but drops the wall's own volume flux from the cut-cell projection -- the configuration the Galilean gate uses to exhibit the failure the term fixes.
+        """
+
+    def set_fresh_cell_seed(self, on: bool) -> None:
+        """
+        Fresh-cell policy for MOVING geometry. A point a body has just uncovered inherits whatever the solid held there -- zero, or a stale masked value -- which is one of the two textbook mechanisms behind spurious force oscillations in a moving-boundary IBM. True seeds it with the LOCAL WALL VELOCITY instead, so it starts moving with the surface that released it. Bounded (no extrapolation), no new field, and exactly the old behaviour when nothing moves. DEFAULT TRUE since 2026-08-30: measured on an oscillating sphere translating through the grid, it removes a resolution-INDEPENDENT +2.6..2.9% drag bias, cuts the spurious force oscillation 20-50x to within 17% of the non-moving floor, and improves the resolved CFD-DEM loop's total-momentum conservation 95x. Pass False for the pre-2026-08-30 behaviour.
+        """
+
+    def fluid_momentum_cells(self) -> list[int]:
+        """
+        Unmasked (fluid) staggered momentum cells per component -- the exact discrete datum of the reaction identity: at steady state, sum over bodies of F_c = f_c * N_c.
+        """
+
+    def reaction_budget_terms(self) -> NDArray[numpy.float64]:
+        """
+        Diagnostic decomposition of the reaction identity, shape (2, 3): [0] the unsteady sum sum_i (rho/dt)(u_i - u^n_i) and [1] the advective sum sum_i A_i, both over the FLUID momentum cells of each component. The full discrete identity is sum_bodies F_c = f_c*N_c + sum fb + [1]_c - [0]_c; the Stokes form drops both because they vanish at steady state with advection off. sum_i A_i is the advection operator's net momentum flux through the cut walls -- an O(h) property of that operator, not of the budget.
+        """
+
+    def moving_instance_cut_cells(self) -> NDArray[numpy.float64]:
+        """
+        Per instance: inner cells on this rank it owns that touch a fractional face aperture, recounted whenever any instance moves. ZERO for a moving instance means its surface sits on grid planes (or is sub-cell) and its wall velocity is silently inert (set_solid_from_scene warns). Empty when no instance moves.
+        """
+
+    def moving_instance_degenerate_points(self) -> NDArray[numpy.float64]:
+        """
+        Per instance: staggered velocity points where the sampled SDF is EXACTLY zero -- a face on a lattice plane. Those points are fluid to the mask and not ghosts to the cut-cell fold, so a moving body's datum never enters there (set_solid_from_scene warns). Empty when no instance moves.
+        """
+
+    def instance_center_pinned(self, i: int) -> bool:
+        """
+        True if instance i's centre of rotation is PINNED (an explicit finite centre in the encoding, or set_instance_motion(center=...)); False if it follows the body's translation (NaN in the encoding, the builder's default; legacy all-zero raw arrays).
+        """
+
+    def periodic_image_overlap_cells(self) -> int:
+        """
+        Cells on this rank whose solid/fluid sign was decided by a periodic IMAGE of an instance wider than the box (set_solid_from_scene warns when nonzero): the scene evaluates the UNION of images, so a slab wider than the box refills any cavity carved from it. 0 when no instance is that wide or the images agree.
+        """
+
+    def hydro_force_torque_traction(self) -> NDArray[numpy.float64]:
+        """
+        DIAGNOSTIC -- not the force on the bodies; that is Solver.hydro_force_torque_reaction(). The reconstructed surface-TRACTION loads, shape (4, n_instances, 3): [0] force, [1] torque about the instance centre, [2] the pressure part, [3] the viscous part ([0] == [2] + [3]). The cut-cell surface integral of (-p I + mu(grad u + grad u^T)) against the exact aperture wall-area vector, with a central-difference velocity gradient that spans the wall. It UNDER-READS THE VISCOUS PART: traction / reaction drag = 0.685-0.730 over phi 0.008-0.45 and N 24-128 (measured 2026-09-30), i.e. ~30 % low at ANY resolution -- refinement does not fix it. The torque is low by the same mechanism: a steadily spinning sphere reads 0.59-0.72 of 8 pi mu a^3 Omega / (1 - phi) at R/h 6-12 (the reaction: 1.019-1.027). What it offers that the reaction does not: the pressure/viscous split, and it runs where the reaction refuses (the collocated solver, porous, variable properties, domain BCs, implicit advection). A consistent traction (from the momentum operator's small-cell-robust wall reconstruction) is planned. Was Solver.hydro_force_torque() (deprecated). Atomics: tolerance-reproducible, not bitwise.
+        """
+
+    def wall_area_probe(self) -> list[float]:
+        """
+        Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, so it separates a force-integral error in the GEOMETRY from one in the traction.
+        """
+
+    def wall_flux_imbalance(self) -> float:
+        """
+        Sum over cells of u_wall . A_wall -- the compatibility datum of the singular pressure problem. Exactly zero for a translating body in a periodic box; small but nonzero for rotation. Reported, not corrected.
+        """
+
+    def get_cut_owner(self) -> NDArray[numpy.int32]:
+        """
+        Per-inner-cell owning scene instance (the argmin behind the sampled SDF), (nx,ny,nz) int32; -1 before set_solid_from_scene. Moving geometry reads its wall velocity off the owner and resolved CFD-DEM posts the hydrodynamic force back to it.
+        """
+
+    def field_view(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Zero-copy view of a registered field's full padded buffer as a Fortran-order (nx+2g, ny+2g, nz+2g) array (g = ghost_width); host → NumPy, device → DLPack (CuPy). step() does not device-synchronize at entry: a driver that writes a view from its own non-blocking stream (cupy/torch) must synchronize that stream before calling step() (null-stream writers stay ordered).
+        """
+
+    def exchange_field(self, name: str) -> None:
+        """
+        Fill a registered field's ghost cells (cross-rank + periodic under MPI; periodic single-rank).
+        """
+
+    def exchange_field_add(self, name: str) -> None:
+        """
+        Add-reduce halo: fold ghost-layer deposits back onto their owner (cross-rank + periodic). The particle->grid deposition primitive for MPI CFD-DEM; single-rank non-periodic no-op.
+        """
+
+    def vof_last_courant(self) -> float:
+        """
+        The interface-local Courant number of the step just taken (0 before the first step).
+        """
+
+    def set_vof_step_parity(self, n: int) -> None:
+        """
+        Set the sweep-permutation counter of the NEXT colour advection: the Weymouth-Yue sweep order is kWySweepPerm[n % 6], cycled so no axis is systematically favoured. Exposed so a benchmark can hold the permutation fixed (n constant) or resume a run across a restart. Default: it increments once per advection from 0.
+        """
+
+    def vof_step_parity(self) -> int:
+        """The sweep-permutation counter of the next colour advection."""
+
+    def set_vof_wisp_eps(self, eps: float) -> None:
+        """
+        Wisp tolerance on the Weymouth-Yue mixed-cell predicate: a cell counts as carrying an interface only while eps < C < 1 - eps, and one outside that band is fluxed ALGEBRAICALLY as C_donor * a — its ACTUAL colour, so the exact telescoping conservation is untouched. The same threshold gates the interface-local Courant band (|C_i - C_j| > eps instead of an exact !=).
+
+        DEFAULT 1e-8 (the same value the V3 curvature predicate uses under surface tension); 0 restores the V1 predicate bit for bit. Two measured reasons it is not 0 (WO-R2 item 4): (i) a domain that DRAINS through an open boundary leaves nothing but round-off residue, ~1e-18, which `0 < C < 1` still calls mixed — the MYC normal of that stencil is degenerate and plicAlpha divides by it (sum C -> -inf -> NaN within three steps on one backend); (ii) the round-off wake behind a passing interface (min C ~ -3.8e-17) kept the whole wake inside the Courant band, so vof_last_courant() on Zalesak read 0.3110 by step 1000 on a case whose interface never exceeds 0.255.
+        """
+
+    def vof_wisp_eps(self) -> float:
+        """The wisp tolerance currently in force (see set_vof_wisp_eps)."""
+
+    def set_pressure_exact_residual(self, on: bool = True) -> None:
+        """
+        Apply the level-0 pressure operator EXACTLY (matrix-free, double, flux form) in the residual and the Krylov matvec instead of reading the float band storage. P1 of the suite defect-correction campaign (suite/docs/archive/DEFECT_CORRECTION_PLAN.md). Per solver, OFF at construction.
+
+        enable_vof() turns it ON, because a two-phase coefficient contrast is exactly what amplifies the float operator's broken row-sum identity A*1 = 0. Measured on Hysing case 2 (64x128x4, adaptive dt, nvidia-cuda): max|div(open u)| 1.85e-03 -> 5.15e-11, with 116/600 pressure iterations, 1123 steps, the dt-limit census and both published functionals (v_rise max 0.2574 at t = 0.671, y_c(3) 1.1082) identical to every printed digit. Everything below level 0 stays float on purpose: it is a preconditioner and its errors change the convergence RATE, never the fixed point. A flag read at every solve, so it may be changed at any time; the ablation is False AFTER enable_vof.
+        """
+
+    def pressure_exact_residual(self) -> bool:
+        """
+        Whether the exact level-0 operator apply is in force (see set_pressure_exact_residual).
+        """
+
+    def set_vof_cutcell_flux_clamp(self, on: bool) -> None:
+        """
+        Ablation: Weymouth's admissible-interval clamp on the openness-weighted cut-cell flux (ON by default). The clamp bounds |F| by what the DONOR actually holds — at most eps*C liquid and at most eps*(1-C) gas of the fluid volume o*|a| swept through the face — applied to the one value both neighbours share, so conservation still telescopes bit-exactly. It is what makes the whole-cell-PLIC-times-open-area flux approximation BOUNDED. Measured with it off on a 24^3 packing at CFL 0.2: the [0,1] clip fires at 3.2e-5 liquid volume per step and the conserved functional drifts 1.3e-8 in 30 steps; with it on the clip stops firing.
+        """
+
+    def vof_filled_color(self) -> NDArray[numpy.float64]:
+        """
+        The colour field INCLUDING the neutral solid-band fill — what the MYC and height-function stencils actually read — as a Fortran-order (nx,ny,nz) array. get_vof()/'C' is the canonical field and carries EXACTLY 0 in solid cells; the fill is a stencil device regenerated at every ghost exchange (three passes with a shrinking depth budget, src/vof/cutcell.hpp), and it is what makes the wall look 90-degree neutral instead of perfectly non-wetting.
+        """
+
+    def vof_geometry(self, which: int) -> NDArray[numpy.float64]:
+        """
+        The cut-cell geometry the colour block runs on, as a Fortran-order (nx,ny,nz) array: 0 = the cell fluid fraction eps (4^3-subsampled, a multiple of 1/64), 1/2/3 = the openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face convention, one cell shifted from the solver's ox/oy/oz), 4 = the classification (1 = SOLID, i.e. eps == 0 AND all six faces closed).
+
+        On an ALL-FLUID solver (set_pressure_geometry, or no cut-cell pressure operator) there is no geometry block and this returns the TRIVIAL geometry the V1 transport kernels actually execute: eps = 1, openness = 1, classification = 0. It used to raise, which meant one diagnostic could not serve a packed scene and its all-fluid control.
+        """
+
+    def set_contact_angle_pivot(self, mode: str) -> None:
+        """
+        ABLATION -- how the theta-plane is anchored in the fluid cell. 'volume' (DEFAULT) match the anchor cell's liquid volume with plicAlpha; 'centroid' pass through the PLIC centroid p_f (the Afkhami-Bussmann / Basilisk contact.h rule); 'projected-centroid' the work order's c = p_f - sdf(p_f) n_w; 'contact-line' the contact line on the wall. 'volume', 'centroid' and 'contact-line' are exactly idempotent (1e-15 on gate G0a); 'projected-centroid' is NOT -- projecting the centroid along n_w shifts the plane by -sdf(p_f) cos(theta), measured 0.26 in cell fraction at theta = 60, with the wrong sign (it removes liquid from the band for a wetting angle).
+        """
+
+    def contact_angle_diagnostics(self) -> dict:
+        """
+        The solid-band census of the CURRENT colour field on this rank: how many band cells each branch of pass 1 wrote ('contact_cells' the theta plane of the cell's own anchor, 'neighbour_cells' the mean of the anchor's MIXED neighbours' planes where the anchor itself is pure phase, 'pure_cells' the pure-phase continuation C_s = C_f, 'parallel_cells' an interface parallel to the wall where no rotation is defined, 'neutral_cells' the WO-Q neutral-mean fallback, 'unfilled_cells' left untouched), plus 'mean_apparent_angle' — the mean angle the fluid-only normal reported at the contact cells BEFORE the rotation, in degrees. That last number is the direct read-out of how far the fluid-side interface still is from the prescribed angle, measured on the fill's own data rather than on a post-processed shape.
+
+        Rung V6 (WO-V6) adds, all zero unless set_contact_angle_dynamic / set_contact_angle_hysteresis is configured: 'dynamic_cells' (band cells the V6 pass produced an angle for), 'pinned_cells' / 'advancing_cells' / 'receding_cells' (the hysteresis branch census), 'mean_imposed_theta' and 'mean_apparent_theta' in degrees, 'max_Ca_cl' = max |mu_l U_cl / sigma| and 'max_contact_speed' = max |U_cl| in solver velocity units.
+        """
+
+    def wall_slip_sandwich_cells(self) -> tuple:
+        """
+        Per velocity component, the number of cut-cell AXES at which a one-cell fluid gap made the Navier closure inapplicable and the no-slip one was kept. Nonzero means part of the wall is silently no-slip; report it.
+        """
+
+    def set_contact_angle_smoothing(self, on: bool) -> None:
+        """
+        ABLATION - the 3-point in-wall mean of U_cl (default ON). A MAC velocity next to a wall is noisy cell to cell and the cube root of the Cox-Voinov relation puts that noise straight into the imposed angle; off measures what the smoothing is worth.
+        """
+
+    def set_contact_angle_clamp(self, lo: float, hi: float) -> None:
+        """
+        The clamp on the Cox-Voinov cube, in degrees (default 1 / 179). The cubic has no solution beyond the maximum receding capillary number (film entrainment) and the fill's plane construction degenerates at 0/180.
+        """
+
+    def vof_dynamic_field(self, which: int) -> NDArray[numpy.float64]:
+        """
+        The V6 per-cell dynamic-wetting state on the inner region, as (nx,ny,nz): 0 the IMPOSED angle in degrees, 1 the measured APPARENT angle in degrees, 2 the smoothed U_cl (positive = the liquid ADVANCES), 3 Ca_cl, 4 the state (0 not a contact cell, 1 Cox-Voinov on the static base, 2 PINNED, 3 advancing, 4 receding). Regenerates the fill, so it is also the direct gate on the pass's decomposition independence.
+        """
+
+    def set_vof_timing(self, on: bool) -> None:
+        """
+        WO-V9: arm (or disarm) the VoF pipeline's per-stage timers, and reset them. OFF by default. When armed, every stage boundary calls Kokkos::fence() before reading the clock -- the same rule the step's three coarse phase timers already follow, because on a device backend queued work would otherwise be billed to whichever stage next reads the clock. A fence changes WHEN work happens, never WHAT it computes: a run with the timers armed is bit-identical to the same run without them (gated in tests/kokkos/test_vof_timing.cpp). When disarmed the cost is one branch per stage and no fence at all.
+        """
+
+    def reset_vof_timing(self) -> None:
+        """Zero the VoF stage timers and the step counter without disarming them."""
+
+    def vof_timing(self) -> dict:
+        """
+        WO-V9: cumulative VoF stage times in SECONDS since the last set_vof_timing/reset_vof_timing, on this rank. `steps` is the number of step() calls in the window, so every entry divides down to a per-step cost. `step`/`predictor`/`momentum_solve`/`projection` are the step's three coarse phases summed over the SAME window (the remainder of `step` is BC re-imposition, Picard bookkeeping and the scalars). `vof_advect` is the whole colour stage and `vof_bridge` the part of it spent in the G=2 <-> g=3 bridges and the C ghost policy; `vof_momentum_advect` is its V2b twin. `k_*` are the advector's own kernels, shared by the colour, momentum-consistent and consistent-energy drivers, so they are the per-KERNEL breakdown of whichever of the two stages is running: `k_reconstruct` the MYC + plicAlpha pass, `k_fluxes` the geometric face fluxes, `k_sweep` the update, `k_clip` the V5a cut-cell clip, `k_exchange` the g = 3 ghost exchange, `k_sweeps` the number of sweeps (3 per advect call). Returns zeros unless the timers are armed.
+        """
+
+    def set_vof_worklist(self, on: bool) -> None:
+        """
+        WyAdvector::useWorklist -- compact the PLIC reconstruction pass onto the mixed cells (a parallel_scan over the reconstruction region, then a dense parallel_for over the compacted list) instead of a guarded parallel_for over the whole region. Default ON. Pure optimization: the flux never reads a non-mixed cell's plane, so the two paths produce the same field BIT FOR BIT (gated in tests/kokkos/test_vof_advect.cpp and measured in WO-V9).
+        """
+
+    def vof_worklist(self) -> bool:
+        """Whether the reconstruction-pass compaction is on."""
+
+    def set_vof_curvature_worklist(self, on: bool) -> None:
+        """
+        WO-V9: run the V3 curvature cascade (the PLIC plane pass, the height functions and the PV fallback) over a COMPACTED list of the interfacial cells instead of over the whole inner region. Default ON. The cascade is the most divergent kernel in the pipeline -- on a resolved droplet the interfacial cells are well under 1 % of the block, so a dense parallel_for puts one or two active lanes in a warp and the other thirty run the guard and then idle for the whole height function. Compaction is a pure re-ordering (each cell reads the same neighbours and writes the same value), so the two paths are BIT-IDENTICAL; tests/kokkos/test_vof_timing.cpp gates that and WO-V9 records the gain.
+        """
+
+    def vof_curvature_worklist(self) -> bool:
+        """Whether the curvature-cascade compaction is on."""
+
+    def vof_diagnostics(self) -> dict:
+        """
+        Colour census over THIS RANK's inner cells: sum (cell-volume units), min, max, the number of mixed cells (0<C<1) and of wisps (C within 1e-8 of 0 or 1). No clipping is applied at this rung, so min/max may leave [0,1] if the CFL cap is raised.
+
+        With an immersed solid (rung V5a) the dict also carries the cut-cell quantities, all zero without one: 'volume' = sum eps_eff*C over fluid cells, the functional the openness-weighted scheme conserves EXACTLY (eps_eff = max(eps, 1/64), the 4^3 subsampling resolution — see src/vof/cutcell.hpp rule 1); 'raw_volume' = sum eps*C, which differs only on eps==0 cells that still own an open face and is therefore NOT the conserved functional; 'solid_sum' = sum of C over solid cells (0 by construction — the neutral band fill lives on the working block, not on 'C'); 'min_fluid'/'max_fluid' over UNCUT fluid cells (eps==1), where Weymouth's boundedness applies verbatim; 'clipped_volume' / 'clipped_signed' = the liquid volume the cut-cell clip moved during the last advection (a TRIPWIRE on the flux approximation, not a mechanism: if it is not negligible the fix is the solid-clipped flux polygon); 'cut_cells' / 'solid_cells'.
+
+        'inflow_volume' / 'outflow_volume' are the liquid volume that ENTERED / LEFT through the domain faces during the LAST colour advection, in the same cell-volume units as 'sum' (0 unless a VoF boundary colour is set — rung V-BC). They are the advector's OWN face fluxes, so sum(C) - sum(C_0) = integral(inflow - outflow) holds to round-off whatever the interface does; vof_bc_volumes() breaks them out per face.
+        """
+
+    def vof_block_stats(self) -> list:
+        """
+        Per-bubble Lagrangian census, one dict per block, in block-id order. 'lo'/'hi' (the global index box) and 'master' are replicated on every rank; the MEASURED entries — 'volume' (sum of C over the box, cell volumes), 'centroid', 'velocity' (d(centroid)/dt of the last advection), 'moments' (the central second moments xx, yy, zz, xy, xz, yz divided by the volume, i.e. the deformation) — are filled only on the block's MASTER and are zero elsewhere.
+
+        'discarded' is the colour a re-centring dropped, cumulatively: Weymouth-Yue leaves round-off residue in every cell its sweeps touch and the box tracks the BUBBLE, not that wake, so the residue falling outside the new box is discarded. Never physical liquid (measured -9.5e-17 over a 20-cell translation, against a bubble volume of 524), but it is reported rather than hidden — a container that silently loses mass is not acceptable.
+
+        'debris_cells' / 'debris_volume' are this step's marker DEBRIS removal (block CSF on only; master only; see set_vof_block_debris): interfacial cells with every cell of the marker within two cells below C = 1/2, and their summed colour. 'debris_returned', 'debris_lost' and 'debris_unresolved' are the cumulative ledger (doc/vof_overlap_design.md 5.3): volume + discarded + debris_lost is conserved. 'full_axis' counts re-centrings whose box had to span a whole periodic axis (it is then [0, L) and copied with the wrap, losslessly; 12.3). 'residue_returned' is the cumulative SIGNED sub-wisp-threshold residue cleared after each advection and returned to the interface with the debris (13): volume + discarded + debris_lost is exact.
+
+        'overlap_*' are the GLOBAL marker-overlap census of the last block advection (vof_overlap_design 5.6; block CSF or the overlap density on), the same in every dict: 'overlap_max_sum' = max over cells of S = sum_k C_k, 'overlap_excess' = sum of (S - 1)^+ (cell volumes), 'overlap_cells' = cells with S > 1 + 1e-8, and 'overlap_bound_active' = the phantom-aware capillary limit (2 rho_min in place of rho_l + rho_g) is in force for the next step (triggered by max S > 1 + 1e-2).
+        """
+
+    def set_vof_phantom_capillary_bound(self, enabled: bool = True) -> None:
+        """
+        The phantom-aware capillary limit of the block container (doc/vof_overlap_design.md 5.6, 11.3), DEFAULT True: while two block markers overlap (max S > 1 + 1e-2) the capillary limit of vof_step_limits() and step() uses 2 rho_min in place of rho_l + rho_g -- the part of one marker's surface inside another is an interface with gas on both sides. False restores the pre-5.6 bound (the ablation; a fixed-dt driver at a density ratio above ~31 otherwise throws at first contact).
+        """
+
+    def set_vof_block_debris(self, enabled: bool) -> None:
+        """
+        Per-step marker DEBRIS removal of the block container (doc/vof_overlap_design.md 5.3, 11). Default: ON under enable_vof_block_csf, off otherwise. A debris cell is an interfacial cell of a marker (1e-8 < C < 1-1e-8) with every cell of that marker within two cells below C = 1/2: colour with no resolvable interface near it (what two overlapping markers tear off each other). Its colour is zeroed and the volume is returned to the marker's attached interfacial cells weighted C(1-C), in a fixed summation order, so the marker volume is exact and the state decomposition-independent. Ledger in vof_block_stats(): debris_cells / debris_volume (this step), debris_returned, debris_lost, debris_unresolved (cumulative, migrate with the block). enabled=False keeps the census (what WOULD be removed) and moves nothing.
+        """
+
+    def set_vof_block_overlap_density(self, enabled: bool) -> None:
+        """
+        OPT-IN MODEL, default False (the MAX union verbatim). With it the union colour that feeds rho(C) and mu(C) -- and the registered 'C' -- becomes C_eff = max_k C_k where S = sum_k C_k <= 1 + 1e-8 and max(0, 2 - S) where markers overlap: the overlap volume is treated as the sub-grid FILM liquid (the 'tent'), so the phantom interface of one marker inside another is an ordinary liquid-gas interface under the base capillary bound. Its cost: the lens holds liquid the real state does not (buoyancy and mixture weight off by 2 V_overlap during a contact), and it changes collision dynamics. See doc/vof_overlap_design.md 5.6.
+        """
+
+    def vof_block_imbalance(self) -> float:
+        """
+        max/mean of the per-rank block-cell load under the CURRENT master assignment (round robin by block id at rung W0). 1.0 is perfect; the weighted-ORB assignment of rung W1 is what this number is here to grade.
+        """
+
+    def vof_block_census(self) -> dict:
+        """
+        Per-rank load census of the block container: 'masters'[r] = blocks rank r masters, 'cells'[r] = the inner cells those blocks carry (the actual VoF work).
+        """
+
+    def vof_block_imbalance_of(self, mode: int) -> float:
+        """
+        The max/mean per-rank block-cell load the given assignment mode WOULD give on the current blocks, without applying it — so a study can put the three modes side by side on one swarm without perturbing the run.
+        """
+
+    def set_vof_block_device_staging(self, on: bool) -> None:
+        """
+        Pack/unpack the block gather and scatter in the block's own MEMORY SPACE (rung W1 item b, default True), with a host staging copy only per MPI MESSAGE — and none at all for the master's own cells, which are a device-to-device copy. False selects rung W0's host-staged path (a full mirror of the local patch per step), which is what the device-vs-host measurement compares against. Every step is a copy of a double, so the two paths are BITWISE identical; the ctest gates that rather than asserting it.
+        """
+
+    def set_vof_block_pool(self, on: bool) -> None:
+        """
+        Recycle the advectors a re-centring retires, keyed by the exact box extent (rung W1 item c, default True). A translating bubble keeps its box SIZE and only moves its origin, so the hit rate is ~100 % and the ten Views of the new box are not allocated. A recycled advector is handed back in the state a freshly initialised one is in (colour and the three face-velocity fields zeroed), so the pool is bitwise inert.
+        """
+
+    def vof_block_pool_stats(self) -> dict:
+        """
+        Block-pool census: 'hits' = advectors recycled, 'misses' = advectors allocated.
+        """
+
+    def vof_block_kappa(self, id: int) -> NDArray[numpy.float64]:
+        """
+        One marker's OWN curvature (internal units, 1/cell) over its block box, the layout of vof_block_color; empty unless this rank masters it and the block CSF is on. A diagnostic.
+        """
+
+    def vof_block_force(self, component: int) -> NDArray[numpy.float64]:
+        """
+        The block CSF face force of component c (0,1,2) as scattered (summed over markers) into the solver's LOW-face slot of each cell, internal units; the field the momentum RHS adds. A diagnostic.
+        """
+
+    def vof_block_curvature_stats(self) -> dict:
+        """
+        Branch census of the last block-CSF curvature pass, SUMMED over this rank's blocks (local to the rank). 'no_estimate' must be 0 on any gated case. 'clipped' = cells whose |kappa| the admissibility clip bounded (set_vof_block_kappa_clip; a NaN counts too); 0 on a resolved interface.
+        """
+
+    def set_outflow_rho_correction(self, on: bool = True) -> None:
+        """
+        The 1/rho_f mobility factor on the HIGH-side outflow face correction. DEFAULT TRUE since WO-R2; pass False for the ablation.
+
+        A projection correction cancels the discrete divergence only if it uses the SAME face coefficient the operator row used. Until WO-R2 the multigrid re-imposed the literal openness 1.0 at every Dirichlet domain face, overwriting buildRhoCoeff's open_f*rho0/rho_f, so the plain phi difference was the consistent partner and WO-R measured this factor making things seven orders WORSE. WO-R2 fixed the operator (CutcellMG::setOutflowCoefficient) and the verdict inverted. Stratified duct, ratio 10, 5 steps, max|div(open u)| of the PROJECTED field:
+                                      old operator   fixed operator
+          without the factor            8.76e-10        9.97e-05
+          with    the factor            9.24e-03        8.31e-10
+        (tests/kokkos/test_vof_bc.cpp gate F2.) Bitwise inert at constant density (rho_f == rho0 makes the factor exactly 1) and gated on the variable-density path.
+        """
+
+    def outflow_rho_correction(self) -> bool:
+        """
+        Whether the 1/rho_f factor is applied to the outflow face correction (WO-R item 4, reversed by WO-R2's operator fix; default True).
+        """
+
+    def set_vof_curvature_weight_width(self, width: float) -> None:
+        """
+        Wendland support width of the PLIC-volumetric fallback fit, in CELL units. Default 2.5, which is Han et al.'s recommended pairing with the 5^3 stencil. Their translating droplet recovers first-order convergence of the spurious currents at 3.5 and loses convergence entirely at 4.5 (over-smoothing), so this is a real trade-off between the locality of the estimate and its robustness to transport error — not a free knob.
+        """
+
+    def set_vof_curvature_mixed_height_fit(self, on: bool = True) -> None:
+        """
+        Enable cascade branch 3, the mixed height-position fit (a paraboloid through the interface positions of whichever columns closed). DEFAULT OFF and it should stay off: measured on an exact-fraction sphere at 16/32/64 it takes over the 19.5-59.6% of cells the height function cannot serve and DESTROYS the convergence of the max curvature error (order 0.00 vs 1.86 with the PLIC-volumetric fallback instead), because its data set is the columns that closed - a slope-selected, asymmetric subset whose lever-arm bias is scale invariant. Shipped as a re-measurable instrument, not a configuration.
+        """
+
+    def csf_diagnostics(self) -> dict:
+        """
+        Census of the CSF face force on THIS RANK: per component the max |F|, the number of faces that carried a force, and the number of ORPHAN faces — faces the colour jumps across but where neither cell has a curvature estimate, so the force was dropped. An orphan is a defect and must be 0; it is counted rather than hidden.
+        """
+
+    def set_phase_change_plane_dirichlet(self, on: bool) -> None:
+        """
+        The PLANE-ANCHORED (ghost-fluid) interfacial Dirichlet condition. ON by default.
+
+        Rungs P0/P1 pinned the whole interfacial CELL at T_G, so the numerical thermal boundary sat at the cell CENTRE while the mass-flux gradient is fitted from the PLIC PLANE — a mismatch of up to half a cell that CHANGES SIGN as the interface sweeps through a cell, and the first-order component of the P1 Stefan error (WO-P01 finding 6). With this on, the condition becomes PER FACE: for a pure cell i whose neighbour j is interfacial, that face's row carries k*open*(T_i - T_G)/theta with theta the distance in cells from i's centre to j's PLIC plane along the face's own axis, and the interfacial cell's own value is never read by any neighbour.
+
+        A per-CELL value (the literal reading of the work order) does NOT work and the measurement is in the findings: giving the interfacial cell the value the one-sided profile takes at its centre is right for the side the fit came from and wrong for the other side — on the P1 Stefan ladder it heats the saturated liquid through the interfacial cell's liquid-side face, which gives the liquid a spurious gradient that feeds straight back into mdot: +6.20/+5.62/+5.42 % at N = 64/128/256, order 0.10, against +1.31/+0.59/+0.20 % and order 1.37 for the cell-centre pinning it was meant to improve on. The per-face form has no such asymmetry (the liquid-side face reads T_G at its own theta, i.e. exactly zero flux for a saturated liquid).
+
+        False restores the rung P0/P1 behaviour bit-for-bit.
+        """
+
+    def set_phase_change_quadratic_fit(self, on: bool) -> None:
+        r"""
+        Fit the one-sided interfacial temperature gradients QUADRATICALLY through the interface value (T - T_G = G phi + Q phi^2) instead of linearly. This is VOF_PLAN section 9 item 1's Aslam quadratic extrapolation in least-squares form — the same 5^3 pure-cell samples, the same Malan collinearity weights, one more basis function, no PDE sweeps. Once the plane-anchored Dirichlet has removed the cell-centre mismatch, the linear fit's O(T\'\' h) curvature bias is the leading error of the rung: its samples start about one cell from the plane and reach two and a half, so a curved profile tilts the straight line through the origin. ON by default (WO-P23): with the plane-anchored Dirichlet it takes the P1 Stefan interface position from +0.195 % to +0.003 % at N = 256, and the mdot kernel itself from order 1.1 to order 2.0. set(False) is the ablation.
+        """
+
+    def set_phase_change_area(self, mode: str) -> None:
+        """
+        WO-P3c: WHICH GEOMETRY the interfacial area A_Gamma comes from. A_Gamma sets the plane shift dV = mdot A dt / rho_l and the divergence source S = mdot A (1/rho_g - 1/rho_l), so a bubble grows as int mdot dA and a biased area is a biased growth rate.
+          'plic' (DEFAULT, rungs P0/P1): plicArea = |m|_2 dV/dalpha on the MYC normal.
+          'cascade-metric': the V3 curvature cascade's own geometry -- the height function's area element sqrt(1 + h_x^2 + h_y^2) from the SAME central differences the curvature differentiates once more (tiers 1/2), the PV paraboloid's gradient (tier 3) -- applied to the PLIC polygon's projected footprint, so the cells of a column still tile.
+          'cascade-normal': the same normals, but the plane is rebuilt on them, plicArea(n*, plicAlpha(n*, C)).
+          'cascade-footprint': the height function's OWN footprint times its own metric, the only per-cell variant whose pieces tile.
+          'sheet-color-centroid' / 'sheet-color-split' / 'sheet-plic-centroid' / 'sheet-plic-split' = WO-P3d, the JOINED sheet: marching tetrahedra on the cell-centre lattice, one watertight surface whose triangles are booked to cells -- the C = 1/2 level set with whole triangles to the cell holding the centroid, the same sheet clipped to each cell's cube, and the same two deposits on the zero of the PLIC-reconstructed signed distance (exact on a TILTED plane, where interpolating C is not, because C(d) is the SZ piecewise cubic). The sheet modes are the only ones whose SUM converges on a curved interface: WO-P3c proved with two analytic controls that every PER-CELL area is first order in h/R because the pieces do not JOIN across cells.
+        All of the per-cell modes are EXACT on a plane, so every planar gate (P0a/P0b/P1/P2) is unmoved. The default is 'plic' because the measurement says so: on a sphere whose colour field is resolved (16^3 sub-sampling), summed plicArea is within 0.5 % of 4 pi R^2 and the cascade does not improve it. WO-P3b's 5.5-9.3 % 'PLIC area deficit' was its probe's own 4^3 sub-sampling, which quantizes C to 1/64 and drops a QUARTER of the interfacial cells (their volume is 1e-4 %, their area 6 %).
+        """
+
+    def phase_change_area(self) -> str:
+        """The set_phase_change_area mode in force, as its name."""
+
+    def set_phase_change_energy_muscl(self, on: bool) -> None:
+        """
+        MinMod-limited donor reconstruction of the face temperature in the CONSISTENT energy flux, instead of the default plain donor-cell (first-order upwind) value. OFF by default. The consistency is what the geometric flux buys; its first-order upwind numerical diffusion |u| h (1 - CFL)/2 thickens the thermal boundary layer and therefore LOWERS the interfacial gradient, which is exactly what mdot is — measured on the P3 Scriven bubble at Ja = 0.5: -2.24 % on R(t) with plain upwind against -1.46 % for the scalar module's Koren TVD (which is NOT consistent). This buys the accuracy back; it is a switch and not a default because it is the energy twin of set_vof_momentum_muscl.
+        """
+
+    def phase_change_diagnostics(self) -> dict:
+        """
+        Per-rank phase-change census of the LAST step: mdot extrema/mean and the interfacial cell count, the total PLIC interface area, the liquid volume the regression removed, the clip-and-redistribute ledger (|deficit| moved, and how many cells clipped at 0 / 1), the deposited divergence source (its sum and how many cells received it), how many interfacial cells found NO pure gas cell within two cells along +n (the source then stays put — a fallback that must be 0 on a resolved interface), the colour extrema, 'band_div' = max|div(open u)| over the INTERFACIAL cells (WO-P23: the direct read-out of whether the field Weymouth-Yue advects with is the liquid velocity there — the band-extended velocity of VOF_PLAN section 9 item 3 is needed iff this is not at the projection floor), and the energy-scalar extrema under the consistent transport.
+        Units are the solver's physical ones: mdot_* a mass flux, interface_area/area_orphan an area, q_* a power, removed_volume/redistributed/unresolved a liquid VOLUME (colour x cell volume), source_sum and band_div 1/time; colours and temperatures as given.
+        """
+
+    def set_phase_change_fit_curvature(self, kappa: float) -> None:
+        """
+        WO-P3f INSTRUMENT (default 0, bitwise inert): prescribe the interface curvature `kappa = div(n)` that the one-sided temperature fits use to measure a sample's distance to the CURVED interface instead of to the interfacial cell's tangent plane (`vof::pcCurvedDistance`). For a spherical GAS bubble of radius R, whose PLIC normal points inward, kappa = -2/R.
+
+        Why it exists: the tangent-plane distance makes the fit FIRST ORDER in h/R on a curved interface, and every off-axis sample is hotter than the plane model expects, so the fitted dT/dn and with it mdot come out HIGH. Measured a priori on an exact sphere with an exactly linear profile: +19.2 / +12.1 / +8.8 / +6.2 % at R = 6 / 10 / 14 / 20, observed order 0.91-0.98 in h/R. This entry point takes a PRESCRIBED kappa so that bias can be measured against a known geometry; it is not a curvature estimator.
+        """
+
+    def set_phase_change_energy_order(self, order: int) -> None:
+        """
+        WO-P3g: the ORDER of the interfacial energy operator. 1 (the shipped WO-P23...P3f scheme) or 2.
+
+        `order = 2` turns on, TOGETHER, the four pieces WO-P3f's instruments indicated:
+          1. `set_phase_change_mdot_operator(True)` -- mdot is the energy operator's OWN interfacial flux q/(h_lv A) instead of a separate least-squares fit, so the heat the energy equation loses and the mass the regression produces are one discrete quantity (and the interfacial AREA cancels out of the mass balance entirely);
+          2. `set_phase_change_gfm_order(2)` -- the Gibou-Fedkiw three-point ghost-fluid row (2/((1+theta) theta), 2/(1+theta)) instead of the two-point (1/theta, 1), which is exact on a quadratic profile at every theta;
+          3. `set_phase_change_curvature_distance(True)` -- the row's theta and the one-sided fits' sample distances are measured to the CURVED interface, with kappa taken per cell from the V3 curvature cascade;
+          4. `set_phase_change_carry_conserve(True)` -- WO-P3f's enthalpy-conserving Dirichlet overwrite.
+
+        Why together and not one at a time: WO-P3f measured the shipped scheme's 1 % Scriven error to be the residue of a CANCELLATION between the fit's +6 % curvature bias, the two-point row's -5 % flux deficit and the overwrite's -0.7...-4.3 % enthalpy destruction, so repairing any ONE alone makes the gate worse.
+        """
+
+    def set_phase_change_deposit_fallback(self, on: bool = True) -> None:
+        """
+        WO-P3f open item 6 / WO-P3g (OFF by default): give an interfacial cell whose two along-the-normal deposit candidates are BOTH still interfacial a target from the 5^3 box instead of leaving the divergence source in place. A cell that keeps its source carries div(open u) = S on its own faces, so Weymouth-Yue advects the colour with a field that is not the liquid velocity -- read it out with `phase_change_diagnostics()['band_div']` and the 'fallback_cells' count.
+        """
+
+    def set_phase_change_mdot_operator(self, on: bool = True) -> None:
+        """
+        WO-P3g item 1 (default OFF): take mdot from the energy operator's own interfacial flux -- the sum of the ghost-fluid rows' Dirichlet couplings evaluated with the converged T -- instead of the one-sided least-squares fit, which stays as `phase_change_diagnostics()['mdot_fit']`. Under a physical domain this needs set_phase_change_energy: the constant-diffusivity flux carries no heat capacity, so the step raises rather than assume one.
+        """
+
+    def set_phase_change_gfm_order(self, order: int) -> None:
+        """
+        WO-P3g item 2 (default 1): the order of the one-sided (ghost-fluid) Dirichlet row. 1 = the shipped two-point form k o (T_Gamma - T_i)/theta; 2 = Gibou-Fedkiw's three-point form through (T_behind, T_i, T_Gamma), which reproduces a quadratic temperature profile exactly at every theta.
+        """
+
+    def set_phase_change_curvature_distance(self, on: bool = True) -> None:
+        """
+        WO-P3g item 3 (default OFF): measure the GFM row's theta and the one-sided fits' sample distances to the CURVED interface, with the mean curvature taken PER CELL from the V3 curvature cascade (the same kappa surface tension uses; positive for a convex blob of liquid, i.e. -2/R for a gas bubble). Supersedes `set_phase_change_fit_curvature`, which prescribes one curvature for the whole field; where both are set the cascade wins.
+        """
+
+    def set_phase_change_carry_conserve(self, on: bool = True) -> None:
+        """
+        WO-P3f OPTION (default OFF): make the interfacial cells' per-cell Dirichlet OVERWRITE enthalpy-conserving.
+
+        An interfacial cell's row is the identity `T = dval`, so whatever the geometric energy transport left there is discarded every step. Over a cell's interfacial lifetime that telescopes to rho c_p (T_entry - dval_exit): a liquid cell the interface sweeps enters with its superheat and leaves as vapour at T_sat, and the difference goes nowhere. Measured on Scriven 128^3 by `phase_change_budget()['d_overwrite']`: -0.7 % of mdot h_lv A_Gamma at Ja = 0.5 and -4.3 % at Ja = 2, one-signed.
+
+        With this on, that enthalpy is handed to the interfacial cell's face neighbours that are still in the solve, weighted by n_d^2 (the clip-and-redistribute allocation), as a fixed-order gather so it is decomposition-independent. Which side receives is decided per axis by which pure neighbour deviates from T_Gamma in the same direction as the interfacial cell itself, i.e. the phase the enthalpy came from -- the superheated liquid on an evaporating bubble, the superheated vapour on the Stefan problem.
+        """
+
+    def phase_change_carry_ledger(self) -> dict:
+        """
+        WO-P3f: the last `set_phase_change_carry_conserve` pass — the enthalpy actually handed back ('deposited') and the enthalpy of the interfacial cells that had NO neighbour left in the solve ('lost', which stays destroyed). Both 0 when the option is off. Units as phase_change_budget's enthalpies.
+        """
+
+    def set_phase_change_budget(self, on: bool = True) -> None:
+        """
+        WO-P3f INSTRUMENT: turn on the energy budget of the phase-change energy solve. Costs one extra cell field and two reductions per energy solve, and is skipped entirely when off (the solve is then bit-identical). Read it with `phase_change_budget()`.
+
+        What it exists for: interfacial cells are Dirichlet rows, i.e. they are OUTSIDE the energy solve, so the set over which enthalpy is conserved changes membership every step as the interface sweeps. A liquid cell that becomes interfacial LEAVES that set carrying its superheat rho c_p (T - T_sat) and an interfacial cell that becomes pure RE-ENTERS it carrying `pcCarriedValue`; neither transfer appears in the latent-heat book-keeping.
+        """
+
+    def phase_change_budget(self) -> dict:
+        """
+        WO-P3f: the ENERGY BUDGET of the LAST energy solve, in the solver's physical units: energies for the enthalpies and powers for `q_gfm`/`q_behind` with set_phase_change_energy on; without it the constant-diffusivity scalar carries no heat capacity and they are temperature x volume (and per time).
+          h_open / h_open_new  sum rho c_p (T - T_sat) over the UNMASKED cells, before / after the solve
+          h_liquid, h_masked   the same over the pure-liquid and the interfacial cells
+          d_overwrite          sum rho c_p (dval - T) over masked cells: what the Dirichlet rows inject when they overwrite the transported temperature (negative = destroyed)
+          d_overwrite_new      the part of it on cells that were NOT masked last step
+          e_enter / e_leave    the enthalpy carried OUT of / INTO the solved set by the cells that changed class this step
+          q_gfm                the heat the plane-anchored rows deliver INTO the unmasked set (negative while a bubble grows); the energy equation's own interfacial flux, to be compared with the regression's `mdot h_lv A_Gamma`
+          n_enter_*/n_leave_*  the class-change census
+        The discrete balance the entries close over one solve is `sum rho c_p (T^{n+1} - T*)/dt = q_gfm + (domain boundary flux) + (solve residual)`.
+        """
+
+    def set_csf_mode(self, mode: str) -> None:
+        """
+        ABLATION. 'face' (default, the only production mode) evaluates the surface-tension force as sigma*kappa_f*(C(i)-C(i-s))/h at the face -- the projection's own gradient operator. 'cell' evaluates a CELL-CENTRED sigma*kappa*grad(C) and face-interpolates it with the arithmetic mean, exactly as the per-cell body-force machinery carries a rho*g field: consistent, convergent, and wrong for surface tension, because the result is not in the range of the operator the projection inverts. Shipped so the difference is a measured number (see the vof_surface_tension ctest), not an argument.
+        """
+
+    def set_vof_interface_eps(self, eps: float) -> None:
+        """
+        Wisp threshold on the curvature cascade's interfacial predicate once surface tension is on: a cell carries an interface only while eps < C < 1-eps. Default 1e-8.
+
+        This is NOT optional and it is not cosmetic. Weymouth-Yue leaves round-off colour residue (measured down to -3e-35) in every cell its sweeps touch; those cells satisfy 0 < C < 1, so the cascade builds a PLIC polygon of area ~0 for them and returns |kappa| up to 1e8 where the physical value is 0.125. A face between such a cell and a REAL interfacial cell then carries a surface-tension force eight orders too large. Measured on a 32^3 static droplet with eps = 0: max|u| 4.5e-4 at step 1 -> 2.7e-1 by step 20, and at 96^3 the run trips the Weymouth-Yue CFL cap. Setting eps = 0 reproduces that, which is the ablation. compute_vof_curvature() called WITHOUT surface tension keeps the rung-V3 predicate (0 < C < 1) unchanged.
+        """
+
+    def vof_interface_eps(self) -> float:
+        """The wisp threshold set by set_vof_interface_eps."""
+
+    def set_vof_block_kappa_clip(self, enabled: bool, kappa_max: float | None = None) -> None:
+        """
+        Curvature admissibility clip of the BLOCK container (doc/vof_overlap_design.md 5.1, 11): after each marker's cascade every interfacial cell gets |kappa| <= kappa_max. DEFAULT ON at kappa_max = 1/Delta_min. kappa_max is PHYSICAL (1/length); None selects the default. enabled=False restores the pre-clip block cascade verbatim (the ablation). The single-field cascade never clips: there a large |kappa| is legitimate (an under-resolved droplet, a contact-line cell).
+
+        Why: a mixed cell with no body of its marker near it (debris left where two markers overlapped) has no closing height-function column and a PLIC-volumetric fit through polygons of area ~0, so its paraboloid is arbitrary (measured |kappa| 273 and 428 per cell against a true 0.4 on channel_18; one-step velocity blow-up). |kappa| <= 1/Delta is a sphere of R >= 2 Delta, the smallest the height function can see, and bounds every CSF face force by sigma |dC| / Delta^2. The value is written only where it changes, so a resolved interface is bit-identical; vof_block_curvature_stats() reports 'clipped'.
+        """
+
+    def set_vof_kappa_frozen(self, on: bool = True) -> None:
+        """
+        INSTRUMENT: stop recomputing the curvature at the head of each step and use whatever is in the 'kappa'/'kappa_branch' fields. With set_vof_kappa_constant this isolates the balanced-force identity from the curvature estimator.
+        """
+
+    def set_vof_kappa_constant(self, kappa: float) -> None:
+        """
+        INSTRUMENT: set kappa to a constant everywhere (inner + ghosts), mark every cell as carrying a valid estimate, and freeze it. The CSF force is then EXACTLY the discrete gradient of sigma*kappa*C, so the projection must annihilate it to round-off from any colour field whatsoever — the exactness gate of rung V4, independent of curvature accuracy and of resolution.
+        """
+
+    def set_rho_face_harmonic(self, on: bool = True) -> None:
+        """
+        Use the HARMONIC instead of the arithmetic face mean of rho in the pressure projection (both the operator coefficient and the velocity correction, so the projection stays exact). DEFAULT OFF, and it should stay off: the arithmetic mean of rho IS the harmonic mean of the mobility 1/rho — the series-correct choice for a normal flux — and it is what makes the discrete hydrostatic balance EXACT, because the momentum time term and the face body force interpolate rho arithmetically and are not switched by this flag. Shipped as a measured knob for the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
+        """
+
+    def set_vof_rho_floor(self, fraction: float) -> None:
+        """
+        Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of min(rho_c0, rho_c1). Default 1e-6. rho^c leaves [rho_c0, rho_c1] only through a wisp in the half-shifted colour and reaching zero would need C^c ~ -1/(ratio-1), so this is a guard, not a model — vof_momentum_diagnostics()['floored'] reports how many control volumes it actually touched.
+        """
+
+    def vof_rho_floor(self) -> float:
+        """The absolute rho^c floor used by the last recovery."""
+
+    def set_vof_momentum_scheme(self, name: str) -> None:
+        """
+        The transported face velocity of the VoF momentum flux (flow doc/vof_momentum_second_order.md). 'upwind': donor cell, convex at every density ratio, first order (the default until 2026-10-31). 'muscl_mixed': a MinMod slope of the MIXED control-volume velocity; it converges to a WRONG limit at high ratio (P1, ratio ~1e3: +3.0/+3.1 % at d/h 16/24; the mechanism is open). 'muscl_mixed_capped': that slope times the mass-aware cap (the diagnosis ablation). 'muscl_phase': each phase's mass flux carries its own face velocity from an interface-biased MC slope, scaled by the cap - second order, a discrete maximum principle at any ratio, the uniform-velocity identity bit-exact; the DEFAULT. vof_momentum_diagnostics()['capped'] counts the faces the cap scaled in the last step. Any other name raises ValueError.
+        """
+
+    def vof_momentum_scheme(self) -> str:
+        """The selected VoF momentum scheme (see set_vof_momentum_scheme)."""
+
+    def vof_viscous_interface_census(self) -> dict:
+        """
+        The sharp interface band of the last step, LOCAL to this rank (sum over ranks yourself): 'band_cells' (interfacial cells, PLIC and virtual planes), 'virtual_cells' (pure cells carrying a face plane), 'film_cells' (virtual cells whose two neighbours along the plane axis are both of the other phase) and 'fit_fallbacks' (cells whose interface fit was singular: tau = D_nn = 0, first order locally). The edge-owner ties (§5.8; every in-domain edge of the owned cells, an edge on a non-periodic high domain face not counted): 'tied_edges' (band edges whose owner set's plateau, the candidates within 1e-6 cells of the closest plane, has two or more members), 'max_tie_spread' (the largest distance spread within a plateau, index units; 0.0 if none), 'min_untied_gap' (the smallest distance from the closest plane to a candidate outside the plateau; inf if none) and 'blended_edges' (band edges with a candidate on the owner-weight ramp, 1e-6 to 1e-5 cells beyond the closest, which enters the edge's weighted mean with a partial weight) -- INFO, not a defect signal; take max/min over ranks yourself. All zero (gap inf) while the sharp interface is inactive.
+        """
+
+    def vof_viscous_interface_fit(self) -> dict:
+        """
+        The sharp interface fit of the last step (doc/vof_sharp_viscous_stress.md §5.3), LOCAL to this rank, as (nx, ny, nz) arrays: 'tau_x', 'tau_y', 'tau_z' (the interface traction tau_hat) and 'dnn' (D_nn_hat), both in internal units, zero off the band, and 'fallback' (1 where the fit was singular). Empty while the sharp interface is inactive. A read-out for verification; it changes nothing.
+        """
+
+    def set_vof_momentum_muscl(self, on: bool = True) -> None:
+        """
+        Former spelling of set_vof_momentum_scheme: on = 'muscl_mixed' (a MinMod slope of the mixed control-volume velocity), off = 'upwind'. Use set_vof_momentum_scheme; 'muscl_phase' is the second-order scheme that stays bounded at high density ratio.
+        """
+
+    def set_vof_momentum_cell_flag(self, on: bool = True) -> None:
+        """
+        ABLATION: use the PRESSURE-cell frozen dilation flag H(C^n-1/2) on the shifted control volume instead of its structural analogue H(C^c,n-1/2). The flag that must be shared is the one of the pair that telescopes, and both members of that pair live on the shifted volume — this switch is the literal reading of the work order, kept as a measurement.
+        """
+
+    def set_vof_flux_clamp(self, on: bool = True) -> None:
+        """
+        ABLATION: drop the Weymouth flux clamp max(0,|a|-(1-C^c_don)) <= |F| <= min(|a|,C^c_don) on the half-shifted control volume. The geometric flux is bounded by what the CURRENT cell planes see in the donor, not by the ADVECTED C^c; the gap is O(a^2) and at density ratio 1e4 a 2.6e-2 undershoot drives rho^c to -255, which the recovery would divide by. Default ON; off is how that statement stays a measured number.
+        """
+
+    def vof_momentum_diagnostics(self) -> dict:
+        """
+        Census over THIS RANK's momentum control volumes: per-component min/max of the half-shifted colour C^c, the summed momentum rho^c u_c (the conservation census), the minimum rho^c before the floor, and the number of control volumes the floor touched; 'clamped' and 'capped' count the faces the Weymouth clamp and the mass-aware cap (set_vof_momentum_scheme) touched in the last step.
+        """
+
+    def vof_advected_velocity(self, component: int) -> NDArray[numpy.float64]:
+        """
+        The recovered advected velocity (rho^c u_c)/rho^c of component c on the inner cells — the momentum RHS's time base. Exposed so the uniform-velocity consistency identity can be gated on the ADVECTION ALONE, with the projection and the momentum solve out of the picture.
+        """
+
+    def set_property_mode(self, mode: str = 'variable', harmonic: bool = False) -> None:
+        """
+        Enable variable-coefficient momentum (variable viscosity): mode 'variable' binds the 'mu' field (get/set_field('mu')) into the diffusion operator; 'constant' reverts. harmonic = harmonic face-viscosity mean (continuous shear stress across a jump) vs arithmetic. A closure targeting 'mu' enables this automatically. The incremental-rotational pressure scheme (large-dt / steady-Stokes) stays active — see set_variable_rotational.
+        """
+
+    def set_variable_rotational(self, mode: str = 'min', chi: float = 1.0) -> None:
+        """
+        Rotational-pressure term under variable viscosity (the constant-mu Timmermans term -mu*div(u*) is only valid for homogeneous viscosity — Deteix & Yakoubi 2018). 'min' (default): constant coefficient chi*mu_min — provably stable at any contrast, exact fallback to the constant-mu scheme for uniform mu. 'full': pointwise chi*mu(i) — better pressure consistency at MILD contrast only. 'off': plain incremental (no rotational term). All modes keep the incremental predictor (large-dt / steady-Stokes capability).
+        """
+
+    def set_density_mode(self, mode: str = 'variable') -> None:
+        """
+        Enable variable density: binds the 'rho' field (get/set_field('rho'), created seeded with set_rho's value if absent) into the momentum time term, the advection weight, the per-cell body force (face-interpolated), and the pressure projection (face coefficient openness*rho0/rho_f with the matching 1/rho_f velocity correction; rho0 = set_rho's value, so a uniform field reduces exactly to the constant solver). A closure targeting 'rho' (e.g. a linear mixture of a transported phase fraction) enables this automatically. For gravity, register a closure force_z = linear(rho, params=[0, -g]).
+
+        COLLOCATED (SolverColocated, rung V8): supported since 2026-09-02, ALL-FLUID only (set_pressure_geometry; an immersed solid, the ghost projection and set_rho_face_harmonic throw). The face coefficient and the face correction are the same as on the staggered grid, applied to the ABC projection's MAC face field, which is the MOMENTUM-weighted map (rho_L u_L + rho_R u_R)/(rho_L + rho_R) of the cell velocities; the CELL correction is the average of the two face corrections of each axis (never a cell-centred grad(phi)/rho_c). The pressure, the CSF and set_body_force (a mean pressure gradient) enter the implicit momentum predictor as the matching face integral rho_c * avg_faces((f - grad_f P)/rho_f); a per-cell force enters at the cell value. The pair is adjoint, so the step is stable at every dt and density ratio and its steady state is dt-independent (doc/collocated_varrho_forces.md). Rated to density ratio ~10 for cases WITH MOTION (a translating drop exceeds the VoF CFL cap at ratio 100 and 1000; momentum consistency needs Favre face states and is not in this rung); exact at rest at ratio 1000.
+        """
+
+    def set_pressure_underrelax(self, omega: float) -> None:
+        """
+        Pressure under-relaxation factor omega_p in (0,1] for the incremental accumulation (MFIX §10.1); 1.0 = off (default). <1 damps the incremental predictor overshoot on stiff porous+drag.
+        """
+
+    def set_porous_deps_dt(self, on: bool) -> None:
+        """
+        Include (default True) or drop the d(eps)/dt source in the porous projection RHS. Drop it to enforce div(eps u)=0 when the per-cell eps deposit's time-derivative is too jagged and destabilizes the eps-weighted pressure solve.
+        """
+
+    def set_porous_conservative(self, on: bool) -> None:
+        """
+        eps-conservative porous momentum + projection pair (default True): time term (eps_f rho/dt) u, eps rho-weighted advective form, projection coefficients open*(eps rho idt)/(eps rho idt+beta) with matching correction. False = the legacy plain-u pair (A/B only; it lets the projection drag gas with the moving porosity at zero inertia cost — a spurious late-time energy source in clustering flows).
+        """
+
+    def rebalance_by_weights(self, weights: Sequence[float]) -> int:
+        """
+        Dynamic load balancing: redistribute the solver's state onto the weighted ORB of per-cell weights (global x-fastest, gnx*gny*gnz), its split planes aligned to 2^a cells with a the largest alignment whose weight imbalance stays within 1.05, so the pressure multigrid keeps coarsening in place for a levels. Returns that alignment (1 = the plain weighted ORB). Pass fluid work + gamma*particle_count; a coupled dem migrates onto the SAME partition with migrate_to_weights(weights, align=<the return value>). State-preserving (bit-exact at np=1, reduction floor at np>1).
+        """
+
+    def bcast_from_root(self, value: object) -> object:
+        """
+        Broadcast a value from rank 0 (identity in the single-rank module; mirrors the MPI API).
+        """
+
+class Solver:
+    """
+    One incompressible Navier-Stokes solver on a block of the grid (staggered MAC, the reference) -- or, for SolverColocated, the same API with cell-centered velocities and the ABC approximate projection. Construct on a (physical) domain; set_rho / set_mu / set_dt and the domain BCs; give it a geometry (set_solid, set_pressure_geometry or a scene); step(); read out with the get_* arrays. Developer instruments and tuning live on `.diagnostics`.
+    """
+
+    @overload
+    def __init__(self, nx: int, ny: int, nz: int) -> None:
+        """
+        Create a solver on an nx x ny x nz grid of UNIT cells (x-fastest, I = x + y*nx + z*nx*ny). Everything is then in cell units: the cell size is 1 and lengths, velocities and the SDF are measured in cells. Prefer the physical form Solver((nx,ny,nz), extent=(Lx,Ly,Lz)). Set the domain BCs before the geometry (a later set_domain_bc raises).
+        """
+
+    @overload
+    def __init__(self, cells: Sequence[int], extent: Sequence[float] | None = None, origin: Sequence[float] = [0.0, 0.0, 0.0], global_cells: Sequence[int] | None = None) -> None:
+        """
+        Create a solver on a PHYSICAL domain: `cells` = (nx, ny, nz), `extent` = the box side lengths (Lx, Ly, Lz) and `origin` = its lower corner, all in the caller's own consistent units. The cell size is extent/cells and is never written by the user: rho, mu, dt, body forces, boundary velocities, surface tension, the SDF handed to set_solid and the coordinates of set_scene are all physical, and the velocity, pressure and curvature that come back are physical too.
+
+        extent=None (the default) keeps the historical CELL-UNIT behaviour, bit for bit: the spacing is 1 and every quantity is in cells.
+
+        ANISOTROPIC cells (extent/cells different per axis) are supported since Phase 2 on the staggered Solver AND (since commit C4) on SolverColocated: sampled or scene geometry, constant or variable properties, variable density, porous continuity with or without implicit drag, every domain-BC type, every pressure driver and bottom, the velocity multigrid, scalar transport, the hydrodynamic force and torque integrals, and MPI. moving geometry included. What still REFUSES one, with a message naming the three spacings and what lifts it: enable_vof (Phase 3). Three spacings that agree to 1e-12 relative are SNAPPED to one, so an isotropic domain stays bit-identical however its extent was written. Under MPI `cells` is this rank's block (from mpi_block) while `extent`/`origin` describe the GLOBAL domain, so pass the global grid as `global_cells` - the same numbers init_mpi gets.
+        """
+
+    @property
+    def diagnostics(self) -> SolverDiagnostics:
+        """
+        The developer tier of this solver (instruments, tuning, ablations, internals).
+        """
+
+    @property
+    def cells(self) -> list[int]:
+        """
+        This rank's inner block resolution (nx, ny, nz) -- the shape of every field array (get_u, get_p, the SDF for set_solid). Under MPI it is the LOCAL block from mpi_block().
+        """
+
+    @property
+    def global_cells(self) -> list[int]:
+        """
+        The GLOBAL grid resolution (gnx, gny, gnz); == `cells` single-rank, the numbers init_mpi gets under MPI (the CFD-DEM co-decomposition weight field is this shape).
+        """
+
+    @property
+    def extent(self) -> list[float]:
+        """
+        The GLOBAL domain side lengths. Equal to the cell counts without a physical domain.
+        """
+
+    @property
+    def origin(self) -> list[float]:
+        """The physical lower corner of the GLOBAL domain (0,0,0 by default)."""
+
+    @property
+    def spacing(self) -> list[float]:
+        """
+        The cell size [dx, dy, dz] = extent/cells as three floats; [1.0, 1.0, 1.0] without a physical domain (the cell-unit default). Three spacings within 1e-12 relative are snapped to one value, so an isotropic box is exactly isotropic.
+        """
+
+    @property
+    def unit_scales(self) -> dict:
+        """
+        The factors between the caller's units and the ones the solver computes in.
+
+        The solver keeps computing on the UNIT LATTICE and folds the metric into constants at its API boundary, so every array reached through the RAW field registry (diagnostics.field_view / get_field / set_field) is in those INTERNAL units, unlike get_u/get_p, which convert. `identity` is True when no extent was given, and then every factor is exactly 1.0 and internal == physical. Multiply a physical value by *_to_internal, and an internal one by force_to_physical (a total force) to come back. The registered 'mdot' field is in mass_flux_to_internal units and 'pc_source' / 'div_source' in divergence_to_internal units; a transported scalar is never rescaled.
+        """
+
+    @property
+    def physical_units(self) -> bool:
+        """
+        True when the solver was given an extent, i.e. lengths are physical rather than cells.
+        """
+
+    def cell_centers(self) -> tuple:
+        """
+        The physical cell-center coordinates of THIS rank's inner block as three 1-D float64 arrays (x, y, z), i.e. origin + (i + 1/2) * spacing per axis. np.meshgrid(*s.cell_centers(), indexing='ij') is the grid an SDF for set_solid is sampled on. Under MPI these are the LOCAL block's centers in GLOBAL coordinates. CELL-UNIT TRAP: without an extent this is i + 1/2, while set_scene puts cell i's centre at i -- the same body given as a scene and as an SDF sampled here lands half a cell apart. With an extent both use origin + (i + 1/2) * spacing. Unifying the cell-unit convention changes results; deferred to 2.0.0.
+        """
+
+    def set_rho(self, rho: float) -> None:
+        """
+        Set the fluid density rho (the caller's units). Under a physical domain the FIRST call pins the reference density the internal scales are built on; a later change rebuilds the momentum operator at the next step.
+        """
+
+    def set_mu(self, mu: float) -> None:
+        """
+        Set the dynamic viscosity mu (the caller's units); a change after the geometry rebuilds the momentum operator at the next step.
+        """
+
+    def set_viscous_stress(self, form: str) -> None:
+        """
+        Viscous stress form under variable viscosity: 'auto' (default), 'full' or 'laplacian'. 'full' = div(mu (grad u + grad u^T)), the transpose term explicit on u^n as conservative MAC stress elements (doc/full_viscous_stress.md); 'laplacian' = div(mu grad u), the form before the AUTO default (it reproduces earlier variable-mu numbers). The Laplacian form imposes the wrong tangential stress condition at a viscosity jump (an h-independent interface force: +19.5 % rise velocity for a drop at viscosity ratio 0.1). 'auto' resolves at each step to 'full' on the staggered Solver with the arithmetic face viscosity, no porous momentum, no moving scene instances and no immersed solid, else to 'laplacian' with a one-time stderr notice. Inert for a constant mu. An explicit 'full' is staggered-only (SolverColocated raises) and is refused at step() with the harmonic face viscosity, porous momentum or moving scene instances. With solids it stays allowed, but it drops the transpose flux across the staircase face: an O(gamma h) near-wall error on oblique walls (gamma the wall shear rate), present for any non-uniform mu; the repair is open. The form is a name, not a physical quantity.
+        """
+
+    def set_vof_viscous_interface(self, mode: str) -> None:
+        """
+        The viscous stress at the VoF interface (doc/vof_sharp_viscous_stress.md): 'auto' (default), 'sharp' or 'averaged'. 'averaged' = the cell mu(C) and the 4-cell mean on the MAC edges, first order across an oblique interface (the operator before the sharp interface; it reproduces earlier numbers bitwise). 'sharp' = on every band edge the row's own PLIC face-fraction viscosity (implicit band and explicit transpose), a per-link interface-traction correction from a kinked least-squares fit of the interface state, and the cell midsection force of the normal-stress jump 2[mu]D_nn (explicit on u^n): second order. 'auto' resolves at each step to 'sharp' when VoF is on, mu = LinearMix(C) (set_property_model('mu', 'linear', 'C', ...)) varies and the full viscous stress is active (set_viscous_stress), with no immersed solid, porous momentum, moving scene instances or phase change; else to 'averaged' with a one-time stderr notice. SolverColocated always resolves 'auto' to 'averaged' and raises on 'sharp'. An explicit 'sharp' raises at step() outside that scope and with the harmonic face viscosity. Inert for a constant mu. A cell is interfacial iff eps < C < 1 - eps with eps = diagnostics.vof_interface_eps() (the wisp guard, default 1e-8). Read-outs: diagnostics.vof_viscous_interface_census() / vof_viscous_interface_fit(). Any other mode raises ValueError.
+        """
+
+    def vof_viscous_interface(self) -> str:
+        """
+        The selected VoF viscous interface mode, 'auto', 'sharp' or 'averaged' (see set_vof_viscous_interface; what 'auto' resolved to shows in diagnostics.vof_viscous_interface_census()).
+        """
+
+    def set_dt(self, dt: float) -> None:
+        """
+        Set the time step dt (the caller's time unit); the momentum solve is scaled by 1/dt (well-conditioned at large dt). Under a physical domain the FIRST call pins the reference time the internal scales are built on; any later call (step_adaptive makes them) rebuilds the momentum operator at the next step.
+        """
+
+    def set_body_force(self, force: Sequence[float]) -> None:
+        """
+        Set the body force per unit volume (fx, fy, fz) as one 3-sequence — e.g. a mean pressure gradient.
+        """
+
+    def set_superficial_velocity(self, enabled: bool, axis: str = 'x', velocity: float = 0.0) -> None:
+        """
+        Hold the SUPERFICIAL velocity along a periodic axis at `velocity` (physical units): the volume mean of that velocity component, i.e. the volume flux of the MIXTURE through any cross-section divided by the cross-section's full area. In multiphase flow 'velocity' alone is ambiguous between superficial and interstitial (per-phase); this is the superficial one. At the end of every step() one uniform shift is added to that component on every face; on an axis with no boundary a uniform shift of the normal velocity leaves every cell divergence unchanged, so the field stays discretely divergence-free. `velocity = 0` is a closed (batch) column: the flow can circulate but not pass through (TBFsolver's constant flow rate at 0). The mean is a device reduction, global under MPI; single-rank the step makes no host round trip for it. Staggered Solver, all-fluid domain (set_pressure_geometry), periodic `axis` only -- step() raises otherwise. set_superficial_velocity(False) turns it off. diagnostics.last_superficial_velocity_shift() is the shift the last step applied.
+        """
+
+    def set_balanced_force_projection(self, enabled: bool) -> None:
+        """
+        Balanced-force projection (flow doc/collocated_varrho_forces.md §4.6), on both grids. Once per step, before the momentum predictor, the gradient part of the forces (set_body_force, the per-cell force fields, the CSF) is moved into the pressure with one extra solve of the projection's own operator, so static balances -- a hydrostatic column, a constant-curvature drop -- are exact from the first step at every viscosity, dt, density ratio and immersed-solid aperture. The solve does not depend on the flow state, so stability and the converged steady state are identical on and off; off leaves a decaying transient balance residue. get_p() stays the total physical pressure; its balanced part is the registered field 'p_balanced', which is RESTART STATE: registered as soon as the option is active, restoring it with 'p' (set_field) keeps the split, and omitting it (or switching the option on after steps with it off) re-splits P -- never a second copy of the balanced pressure. Cost: one extra pressure solve per step while the forces change, solved for the increment of the previous split and skipped when that is already converged -- a static interface costs no iterations. Default: ON on SolverColocated with variable density or surface tension, OFF otherwise; with an inflow/outflow face that default resolves OFF (a one-time stderr notice says so); an explicit call always wins. Refused (named error) with porous continuity, the ghost projection, set_fluid_only_constraint(2), the block CSF, inflow/outflow faces, the non-incremental pressure, and on the constant-density SolverColocated path (nothing to balance there).
+        """
+
+    @property
+    def balanced_force_projection(self) -> bool:
+        """
+        Whether the balanced-force projection runs (see set_balanced_force_projection).
+        """
+
+    def set_advection(self, on: bool) -> None:
+        """
+        Enable/disable momentum advection (high-order scheme SOU by default; implicit FOU + deferred correction on the domain-BC path). ON by default since 2026-10-23; False => Stokes (no inertia), which a creeping-flow script must now ask for. Inert under enable_vof_momentum, whose VoF fluxes carry the momentum advection.
+        """
+
+    def set_advection_scheme(self, scheme: str) -> None:
+        """
+        High-order momentum advection scheme: 'sou' (second-order upwind, the default) or 'koren' (Koren TVD).
+        """
+
+    def set_collocated_scheme(self, name: str) -> None:
+        """
+        Collocated cut-cell projection scheme (no effect on the staggered solver). DEFAULT since 2026-08-25: AUTO = 'ghost' where supported, falling back to 'gauge-exact' with a stderr notice on porous/variable-rho/domain-BC/Chebyshev configurations (ghost v1 limits); any explicit selection here disables AUTO.
+          'ghost' -- the fluid-only constraint scheme (binary-openness divergence + directional closures + the same gauge-exact gradient). Family-free, unconditionally stable (dt 60..1e20, no stabilizer), protocol-independent (C2), both-bed clean ladder -1.4% (R=8) -> +0.22% asymptote, Z&H anchor -0.018% at N=128. Costs: nonsymmetric BiCGStab pressure solve (~2.3-2.7x), ~1.6 KB/cell overlay (single-GPU size cap), fragmentation guard. MPI-capable (np=1,2,4 ctests); at-scale np>=16 hardening in progress. Equivalent to diagnostics.set_ghost_projection(True, 2, 2); the (1, 2) mixed mode stays quarantined there.
+          'gauge-exact' (the AUTO fallback) -- the aperture constraint with the directional gauge-exact pressure gradient. Cheapest scheme measured (symmetric MG-PCG, no fragmentation guard). CAVEATS from the 2026-08 campaign (doc/collocated_invisible_subspace.md): possesses an attractor FAMILY of steady states (support-inconsistent gradient/constraint pair) selected by march protocol, and a rotational-update instability whose wall-blend stopgap (diagnostics.set_rotational_wall_weight) has a resolution-dependent margin -- UNSTABLE at (R>=16 cells/radius, dt>=600); use fixed dt<=60 protocols at high resolution. Clean-protocol bias vs the staggered reference: -2.5% (R=8) -> ~+0.2% asymptote.
+          'embed' -- the complete Basilisk embed.h port (doc/history/collocated_embed_port_plan.md): the finite-volume momentum operator with the true-normal dirichlet_gradient wall drag applied as a defect correction on the IBM matrix, the openness-weighted -grad(P) predictor and cell correction, the wall-aware face map and the solid-cut-cell sliver mask. The live candidate for removing the collocated accuracy ceiling; its two intermediate rungs are diagnostics.set_face_interp(5 | 6).
+          'plain' -- the legacy path: plain 1/2-1/2 face average + central-difference grad(P). FIRST order at curved cut cells (the cell gradient reads the decoupled p=0 of solid-centred neighbours, an O(1/h) gauge error), and on a dense bed it also fails to reach steady state within 800 steps at coarse resolution. Kept for reproducing published results.
+        """
+
+    def set_decomposition(self, levels: int, max_imbalance: float = 1.05) -> None:
+        """
+        Choose how this solver's shared MPI decomposition is built. levels=0 (DEFAULT) = AUTO: the aligned ORB (split positions on the FINE grid snapped to a power of two, capped at 16, i.e. 5 nested multigrid levels) whenever it is exactly balanced; otherwise the coarse-first partition at depth 5, then 4, built with a balance-aware split axis, the first whose max-block/min-block ratio stays within max_imbalance (default 1.05) and that nests at least as many levels in place as the aligned ORB (every block even and at least 4 cells wide at each); otherwise the balance-aware aligned ORB if it has a smaller largest block and nests at least min(3, the aligned ORB's) levels; otherwise the aligned ORB. AUTO never cuts an axis the aligned ORB leaves whole, and changes its set of cut axes only when the aligned ORB's largest block is at least 5/4 of the mean. levels=1 = the aligned ORB as is (the default before 2026-10: use it to reproduce an older np > 1 partition). levels >= 2 = COARSE-FIRST: build the ORB on the grid coarsened levels-1 times and refine the partition upward, so every block is a multiple of the coarsening factor BY CONSTRUCTION and the hierarchy nests for the full requested depth; each depth from `levels` down to 2 is built and MEASURED, and the deepest one within max_imbalance is taken, else the aligned ORB. levels < 0 or max_imbalance <= 1.0 raise ValueError. Call BEFORE init_mpi() (a later call raises), and pass the SAME levels / max_imbalance to flow.mpi_block() -- both derive the same partition and must agree.
+        """
+
+    @property
+    def decomposition_levels(self) -> int:
+        """
+        This solver's decomposition mode (0 = auto, 1 = aligned ORB, >= 2 = coarse-first with that depth).
+        """
+
+    @property
+    def decomposition_max_imbalance(self) -> float:
+        """
+        The load-imbalance budget the auto and coarse-first searches stay within.
+        """
+
+    def set_pressure_bottom_extent(self, cells: int) -> None:
+        """
+        The threshold set_pressure_bottom('auto') applies: agglomerate the coarsest level onto a global operator once the coarsest GLOBAL grid exceeds this many cells on any AXIS (not cell count -- what a few smoother sweeps cannot fix is a mode spanning many cells along one axis). DEFAULT 4. Under the automatic depth (set_pressure_multigrid levels=0) it also enters the depth, at the geometry build: a later call changes the agglomeration but not the depth already resolved. `cells` is in cells (a count, not a length); <= 0 restores the default.
+        """
+
+    @property
+    def pressure_bottom_extent(self) -> int:
+        """
+        The agglomerated-bottom extent threshold (see set_pressure_bottom_extent). Measured in cells (a count, not a length).
+        """
+
+    def set_implicit_advection(self, on: bool) -> None:
+        """Use implicit-FOU advection with deferred-correction TVD."""
+
+    def set_velocity_residual_tolerance(self, rtol: float) -> None:
+        """
+        Residual-based momentum stop: a component's implicit solve ends once max|b - A u| <= rtol * max(max|b|, max|A u|) over the solved unknowns (at least one sweep always runs; a round-off floor stops a solve that cannot improve). rtol < 0 (DEFAULT) FOLLOWS THE PRESSURE SOLVER'S rtol -- the projection consumes u* and resolves the divergence the momentum residual leaves to its own tolerance; rtol > 0 fixes it; rtol == 0 restores the legacy update criterion (relative to the FIRST sweep's update, which on a warm-started near-steady step is noise and cost the whole sweep cap). Every path.
+        """
+
+    def velocity_residual_tolerance(self) -> float:
+        """
+        The momentum residual tolerance in force (resolves the follow-the-pressure default).
+        """
+
+    def set_backflow_stabilization(self, beta: float) -> None:
+        """
+        Outflow backflow-stabilization coefficient (Bazilevs 2009 / Esmaily-Moghadam 2011): beta in [0,1] scales the dissipative outflow term that prevents backflow divergence when flow reverses at the outlet (e.g. a separated wake / BFS recirculation). Default 0.2; 0 = off. Inert where the outlet is purely outgoing.
+        """
+
+    def set_pressure_solver_params(self, iters: int) -> None:
+        """Set the pressure smoother iteration count."""
+
+    def set_pressure_multigrid(self, on: bool, levels: int = 0) -> None:
+        """
+        Set the pressure multigrid depth, fixed at the next geometry build. levels=0 (the default) derives it: the shallowest depth >= 4 whose global coarsest grid the exact bottom solver admits (<= 8192 cells, a plane of <= 192; an operator with an outflow face keeps depth 4), or where coarsening ends by itself. levels=1 => pure RB-GS, no coarse grid; levels >= 2 => exactly that depth. The resolved depth is len(diagnostics.pressure_mg_level_ratios()). set_pressure_bottom_extent must precede the geometry to enter the depth (doc/mg_depth_policy.md).
+        """
+
+    def set_pressure_chebyshev(self, on: bool, max_iter: int = 120, rtol: float = 1e-09) -> None:
+        """
+        Use the communication-light Chebyshev pressure accelerator. Mutually exclusive with the two CG drivers (on=True clears an FCG selection); on=False deselects Chebyshev and falls back to FCG if that is selected, otherwise to MG-PCG.
+        """
+
+    def set_pressure_telescope(self, on: bool) -> None:
+        """
+        Coarse-level TELESCOPING of the pressure multigrid (multi-rank). The geometric hierarchy coarsens a level in place, which needs every rank's block even on that axis; once a block turns odd the hierarchy used to STOP, leaving a coarsest grid far too large to solve (384^3 on 1536 ranks: blocks die at 3x6x4 with the coarsest extent still 48, and the pressure iteration count grows 16.6 -> 38.7 across the ladder). With this on, a blocked level instead merges ORB siblings onto fewer ranks (the merged block's origin is its parent's split value, so parity is restored), moves the residual down / correction up within rank groups, and the roots keep coarsening on a sub-communicator to a tiny bottom. Idle ranks below the telescope point cost nothing that matters; the iteration count becomes a property of the problem rather than the rank count. ON by default since 2026-09-02 (the FoxBerry ladder); False restores the in-place-only hierarchy, byte-identical to before telescoping existed. See suite/docs/archive/MG_TELESCOPING_PLAN.md.
+        """
+
+    def pressure_telescope(self) -> bool:
+        """
+        Whether the pressure multigrid's coarse levels telescope (merge ORB siblings onto fewer ranks once a level's block turns odd) rather than stop coarsening in place. Reads back set_pressure_telescope's current setting; ON by default since 2026-09-02 (the FoxBerry ladder), so this is normally True even though it was never called explicitly -- check it rather than assuming the legacy in-place-only hierarchy.
+        """
+
+    def set_pressure_bottom(self, mode: str) -> None:
+        """
+        Coarse-level (bottom) solve of the pressure multigrid. A V-cycle converges at a domain-independent rate only if its COARSEST level is effectively solved, and a geometric hierarchy cannot always get small enough: an axis stops coarsening once it turns odd, and under MPI once ANY rank's block turns odd -- so at fixed cells/rank the coarsest GLOBAL grid grows with the rank count and the bottom is progressively under-solved. 'auto' (DEFAULT) agglomerates the coarsest level onto a global operator and solves it exactly whenever it exceeds set_pressure_bottom_extent (4) cells on any axis, and uses the cheap smoothed bottom otherwise (byte-identical to 'smoother' then). 'smoother' = never agglomerate (legacy). 'agglomerated' = always. Measured on one GPU (2048x64x64 channel): a smoothed bottom needs 13.5 pressure iterations/step at 4 levels and 6.0 at 6, against 4.4 at full geometric depth; agglomerated it is 4.0 at BOTH depths, and faster in wall-clock than the deep hierarchy. Works on the cut-cell IBM and ghost-projection paths (per-fluid-component null-space projection, 2026-08-13). Under the automatic depth (set_pressure_multigrid levels=0) the mode also enters the depth, at the geometry build: a later call changes the bottom solve but not the depth already resolved.
+        """
+
+    def set_pressure_pcg(self, on: bool, max_iter: int = 200, rtol: float = 1e-08) -> None:
+        """
+        Use the MG-PCG pressure accelerator (single-GPU default) and set its iteration cap and relative tolerance. on=True GENUINELY selects: it clears both competing selections (Chebyshev and FCG), so it works after diagnostics.set_density_mode / set_porous -- last set wins. on=False RAISES: MG-PCG is the terminal fallback of the driver dispatch, so it cannot be deselected on its own -- select the driver you want instead (set_pressure_chebyshev(True, ...) or set_pressure_fcg(True, ...)). Under diagnostics.set_ghost_projection the nonsymmetric operator is solved by BiCGStab; this call still sets that solve's cap/tolerance (they are shared) and does not change its method.
+        """
+
+    def set_pressure_fcg(self, on: bool, max_iter: int = 200, rtol: float = 1e-08) -> None:
+        """
+        Use the FLEXIBLE MG-CG pressure accelerator: the same V-cycle-preconditioned CG as set_pressure_pcg, the same stopping estimate/mean removal, and the same cap+tolerance (they are shared -- it is the same solve), differing only in the beta recurrence (Polak-Ribiere r^T(z_{k+1}-z_k)/r^T z_k instead of Fletcher-Reeves). Costs one extra level-0 vector and one extra global dot per iteration; buys tolerance of a preconditioner that is not symmetric with respect to the fine operator. On a symmetric preconditioner the two betas are algebraically identical, so FCG reproduces PCG's iteration count. Unlike set_pressure_pcg this flag GENUINELY selects: on=True clears the Chebyshev selection (so it works after diagnostics.set_density_mode/set_porous), on=False returns to MG-PCG, and a later set_pressure_chebyshev(True, ...) wins over it.
+        """
+
+    def set_velocity_multigrid(self, on: bool, levels: int = 4, vcycles: int = 8) -> None:
+        """Enable velocity (momentum) multigrid for the implicit diffusion solve."""
+
+    def set_domain_bc(self, face: str, type: str, velocity: Sequence[float] = [0.0, 0.0, 0.0]) -> None:
+        """
+        Set a per-face domain BC. `face` is one of '-x', '+x', '-y', '+y', '-z', '+z'; `type` is 'periodic' (the default on every face), 'wall' (no-slip), 'inflow' (Dirichlet `velocity` -- an inlet, or a lid with a tangential velocity), 'outflow' (zero-gradient velocity, p = 0) or 'slip' (free-slip / symmetry plane: zero normal velocity, zero normal derivative of the tangential components, pressure Neumann like a wall; `velocity` is ignored). The TYPE must be set BEFORE the geometry (set_solid / set_pressure_geometry / set_solid_from_scene): it is folded into the operators when the geometry is built, and a call that would CHANGE it raises afterwards. A VALUE update on a face whose type is unchanged (ramping an inflow jet, a lid's tangential speed) is allowed at any time and takes effect the next step. A half-domain closed by a 'slip' face reproduces the full symmetric domain pointwise (tests/kokkos/test_freeslip). Both grids (Solver and SolverColocated). `velocity` is in the caller's units (length/time).
+        """
+
+    def set_domain_bc_profile(self, face: str, profile: Annotated[NDArray[numpy.float64], dict(order='C')]) -> None:
+        """
+        Prescribe a per-position inlet velocity profile (Nb,Nc,3) over a face (one of '-x', '+x', '-y', '+y', '-z', '+z'; sets it to 'inflow'). Like set_domain_bc, the TYPE (making a face inflow for the first time) must be set BEFORE the geometry; updating the profile on a face that is ALREADY inflow is allowed after the geometry.
+        """
+
+    def set_pressure_geometry(self, sdf: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Set an all-fluid SDF for the cut-cell pressure operator without an immersed solid (the channel/BFS domain-BC path). For a no-slip immersed BODY in an inflow/outflow domain, call set_solid(sdf, cutcell_pressure=True) instead -- do NOT also call this (a second geometry setter overwrites the SDF and wipes the solid).
+        """
+
+    def set_scene(self, node_ints: Annotated[NDArray[numpy.int32], dict(order='C')], node_reals: Annotated[NDArray[numpy.float64], dict(order='C')], instance_ints: Annotated[NDArray[numpy.int32], dict(order='C')], instance_reals: Annotated[NDArray[numpy.float64], dict(order='C')], periodic: bool = False) -> None:
+        """
+        Install an analytic geometry scene from core's flat encoding (3 ints + 16 reals per node, 2 ints + 18 reals per instance -- reals[17] is the centre-pinned flag; legacy 17-real records are accepted, reading an all-zero centre as 'follows the body'). Coordinates are the caller's own PHYSICAL ones when the solver was given an extent -- so ONE scene serves flow, dem and voro unchanged -- and CELL UNITS on the global inner grid otherwise (cell (i,j,k)'s centre at (i,j,k) -- half a cell from cell_centers(), which returns i + 1/2 in cell units). The scene is replicated on every rank, so scene-derived geometry needs no communication and -- unlike diagnostics.set_exact_crossings -- is NOT single-rank only. periodic=True treats the scene as min-image periodic over the global grid (one instance per body, no images); periodic=False leaves images to the caller.
+        """
+
+    def set_solid_from_scene(self, cutcell_pressure: bool = True) -> None:
+        """
+        Sample the installed scene onto this rank's inner grid and install it as the solid, entirely on device (no nx*ny*nz float64 host round trip). The scene's coordinates are physical (the caller's length units) under an extent.
+        """
+
+    def has_scene(self) -> bool:
+        """
+        True once set_scene has installed an analytic CSG scene on this solver. False for geometry set any other way (set_solid with a sampled SDF, set_pressure_geometry), and false again if no scene has been given yet. set_solid_from_scene and the scene-derived per-body hydrodynamic force/motion bookkeeping all require this to be True first.
+        """
+
+    def set_instance_motion(self, instance: int, lin_vel: Sequence[float] = [0.0, 0.0, 0.0], ang_vel: Sequence[float] = [0.0, 0.0, 0.0], center: Sequence[float] | None = None) -> None:
+        """
+        Rigid-body motion of one scene instance, in the scene's own coordinates per time (the caller's physical length with an extent, CELLS without one; the angular velocity is 1/time either way). Any nonzero component switches the solver onto the moving-geometry path: the momentum operator's no-slip datum becomes the local wall velocity and the cut-cell projection gains the wall's own volume flux. All-zero keeps the static path, bit for bit. Staggered grid only in v1 (no ghost projection / porous / variable rho).
+        """
+
+    def has_moving_instance(self) -> bool:
+        """True when at least one scene instance carries a nonzero velocity."""
+
+    def num_scene_instances(self) -> int:
+        """
+        Number of instances in the scene set by set_scene (0 before it). Instance indices run 0..num_scene_instances()-1 in set_instance_transform / set_instance_motion, scene_owner() and the hydrodynamic force/torque accessors.
+        """
+
+    def set_instance_transform(self, instance: int, translation: Sequence[float], quat: Sequence[float] = [0.0, 0.0, 0.0, 1.0]) -> None:
+        """
+        Move one scene instance (quat as (x,y,z,w)). Takes effect at the next rebuild_geometry(): the SDF, the cut-cell overlay, the apertures and the pressure operator are all derived from the transforms, so moving one without rebuilding would run the solver on stale geometry.
+        """
+
+    def refresh_wall_velocity(self) -> None:
+        """
+        Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in, for a driver that changes an instance's VELOCITY every step while its transform stays put -- the linearised oscillating body, a shear cell driven by counter-moving plates. set_instance_motion alone does not reach those fields (they are built in set_solid_from_scene), so the alternative is a full rebuild_geometry() per step to update a boundary condition. Refuses if a transform has changed since the last geometry build, because it does NOT re-sample the SDF, the apertures, the ownership field or the pressure operator. Velocity and pressure are untouched. Velocities stay in the caller's units (set_instance_motion).
+        """
+
+    def rebuild_geometry(self) -> None:
+        """
+        Re-derive all geometry from the current instance transforms. Velocity and pressure are PRESERVED across the rebuild (set_solid zeroes them by design). Full rebuild: the measured cost is ~65% momentum/IBM stencils, ~35% pressure/MG, scene sampling in the noise. Cells uncovered by the motion inherit zero, not an extrapolated fluid value.
+        """
+
+    def hydro_force_torque_reaction(self) -> NDArray[numpy.float64]:
+        """
+        THE hydrodynamic force and torque on each scene instance: the DISCRETE REACTION -- the momentum the fluid actually lost to each body, assembled from the composed step's budget (time term, body force, and the viscous fluxes at u*; the pressure telescopes inside each owner region and needs no field). Shape (2, n_instances, 3): [0] force, [1] torque about the instance centre. The force is exactly conservative (sum = f * V_fluid at steady state, to the solver residual) and as accurate as the flow solution it sustains: Zick & Homsy's drag within 0.7 % at N = 24 (tests/python/test_hydro_force_units.py). The torque carries the closed-form transposed-stress wall term; measured 2026-09-30 on a steadily spinning sphere it reads 1.019-1.027 of 8 pi mu a^3 Omega / (1 - phi) at R/h 6-12 (over-reads ~2 %, falling with resolution), and on a translating sphere whose true torque is zero it is zero to 1e-15 on a symmetric placement and |T| / (|F| R) = 5e-5 to 1e-3 off it. diagnostics.hydro_force_torque_traction() is the surface-traction estimate: ~30 % low, but it carries the pressure/viscous split. Staggered only; EXPLICIT advection is carried (the stashed advective RHS term is subtracted); implicit advection / porous / variable properties / domain BCs are refused loudly (v2); call after step(). Atomics: tolerance-reproducible, not bitwise.
+        """
+
+    def hydro_force_torque(self) -> NDArray[numpy.float64]:
+        """
+        DEPRECATED (warns) -- the canonical names are hydro_force_torque_reaction() for the force and torque on the bodies, and diagnostics.hydro_force_torque_traction() for what this returns. It is NOT the force on the bodies: it is the reconstructed surface-traction integral, which under-reads the drag by ~30 % at any resolution (the viscous part; traction / reaction 0.685-0.730 over phi 0.008-0.45, N 24-128). Returns exactly what diagnostics.hydro_force_torque_traction() returns (shape (4, n_instances, 3): force, torque, pressure part, viscous part); see that method for the details. Where the reaction refuses (SolverColocated, porous, variable properties, domain BCs, implicit advection) the traction is the only estimate there is -- call it by its diagnostic name and allow for the under-read. Kept working under the suite's rule for a shipped name (docs/NAMING.md section 0); removal needs a major release. Force and torque come back in the caller's (physical) units.
+        """
+
+    def instance_center(self, i: int) -> list[float]:
+        """
+        The resolved centre of rotation of instance i (world coordinates). In the caller's length units.
+        """
+
+    def set_solid(self, sdf: Annotated[NDArray[numpy.float64], dict(order='F')], cutcell_pressure: bool = False) -> None:
+        """
+        Set the solid SDF as a Fortran-order (nx,ny,nz) float64 array sampled at cell_centers() (negative inside the solid, positive in fluid, in the solver's length unit). cutcell_pressure=True enables the open-face-weighted cut-cell pressure operator (proper no-slip); it composes with domain BCs, so this is the single call for a no-slip immersed body in an inflow/outflow domain. The multigrid coarse operators are always the rediscretized per-level cut-cell operators (the former `pressure_coarse=` mode selector is gone).
+        """
+
+    def set_state(self, u: Annotated[NDArray[numpy.float64], dict(order='F')], v: Annotated[NDArray[numpy.float64], dict(order='F')], w: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Upload an initial velocity field (u,v,w each a Fortran-order (nx,ny,nz) float64 array).
+        """
+
+    def step(self) -> None:
+        """
+        Advance the solver one time step (semi-implicit: diffusion + projection).
+
+        ATOMIC across the two explicit two-phase stability caps: the Weymouth-Yue boundedness cap and the Brackbill capillary limit are evaluated at the HEAD of the call, so a rejected dt leaves every field bitwise as it was and a retry at a smaller dt is exact. (Before 2026-09-04 the momentum half had already advanced by the rejected dt, so catch-and-halve desynchronised colour and momentum.) The WY pre-check reads the field the call starts from; where the projection itself accelerates the field inside the step, use step_adaptive().
+        """
+
+    def step_adaptive(self, cfl_target: float = 0.4, capillary_cfl: float = 0.4, dt_max: float = float('inf')) -> float:
+        """
+        One step at a dt re-picked from the CURRENT state; returns the dt used.
+
+        dt = min(cfl_target * cfl_dt, capillary_cfl * capillary_dt, dt_max) with both limits taken from vof_step_limits() at the moment of the call, then set_dt(dt) + step(). Needs enable_vof().
+
+        WHY: both limits are INSTANTANEOUS. Re-picking every ten steps is safe for a free bubble or a falling film and is NOT safe in a packing -- a throat jet can grow max|uf| by more than 50 %% inside ten steps (measured, examples/bubble-through-packing) and the WY cap is a hard throw; and capillary_dt itself reads the density field, so a value taken before the closures have run can be 7x too large (measured, examples/pore-scale-imbibition). This is bitwise the `dt = 0.4*min(L['cfl_dt'], L['capillary_dt']); s.set_dt(dt); s.step()` loop the gallery drivers write by hand (IEEE multiplication is monotone, so f*min(a,b) == min(f*a,f*b)). set_dt/step semantics are unchanged. cfl_target and capillary_cfl are dimensionless; dt_max and the returned dt are in the caller's time units.
+        """
+
+    def set_velocity(self, c: int, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Write component c's inner velocity from a Fortran-order (nx,ny,nz) float64 array (solid rows re-masked). Initial-condition hook: a uniform stream around a fixed body is the Galilean twin of the same body towed through fluid at rest. The array is in the caller's velocity units (length/time), as get_u returns it.
+        """
+
+    def get_u(self) -> NDArray[numpy.float64]:
+        """
+        Return the x-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).
+        """
+
+    def get_v(self) -> NDArray[numpy.float64]:
+        """
+        Return the y-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).
+        """
+
+    def get_w(self) -> NDArray[numpy.float64]:
+        """
+        Return the z-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).
+        """
+
+    def get_p(self) -> NDArray[numpy.float64]:
+        """
+        Return the physical pressure as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).
+        """
+
+    def get_ox(self) -> NDArray[numpy.float64]:
+        """
+        The -x face openness field of the cut-cell operator: the fluid area fraction (0..1, dimensionless) of the face between cells (i-1,j,k) and (i,j,k), as a Fortran-order (nx,ny,nz) float64 array over THIS rank's inner cells. Computed by set_solid from the SDF (1 everywhere without a solid); it is what the momentum operator and the geometric cut-cell projection see. get_ox_proj is the openness the PROJECTION actually conserves fluxes through, which differs under diagnostics.set_ghost_projection (binary/coupled faces).
+        """
+
+    def get_oy(self) -> NDArray[numpy.float64]:
+        """The geometric -y face openness per inner cell, (nx,ny,nz); see get_ox."""
+
+    def get_oz(self) -> NDArray[numpy.float64]:
+        """The geometric -z face openness per inner cell, (nx,ny,nz); see get_ox."""
+
+    def get_ox_proj(self) -> NDArray[numpy.float64]:
+        """
+        -x face openness whose fluxes the projection CONSERVES (binary/COUPLED under diagnostics.set_ghost_projection, geometric cut-cell otherwise). Use for flux bookkeeping (peclet.pnm extract_network_flow).
+        """
+
+    def get_oy_proj(self) -> NDArray[numpy.float64]:
+        """-y face openness the projection conserves (see get_ox_proj)."""
+
+    def get_oz_proj(self) -> NDArray[numpy.float64]:
+        """-z face openness the projection conserves (see get_ox_proj)."""
+
+    def get_uf(self) -> NDArray[numpy.float64]:
+        """
+        Return the divergence-free FACE x-velocity (collocated: projected MAC field; staggered: == get_u).
+        """
+
+    def get_vf(self) -> NDArray[numpy.float64]:
+        """
+        Return the divergence-free FACE y-velocity (collocated: projected MAC field; staggered: == get_v).
+        """
+
+    def get_wf(self) -> NDArray[numpy.float64]:
+        """
+        Return the divergence-free FACE z-velocity (collocated: projected MAC field; staggered: == get_w).
+        """
+
+    def add_field(self, name: str) -> None:
+        """
+        Register a new zero-initialised cell-centred field on the grid (for transported scalars or material properties). Idempotent.
+        """
+
+    def has_field(self, name: str) -> bool:
+        """Whether a field of this name is registered."""
+
+    def field_names(self) -> list[str]:
+        """
+        Names of all registered fields (velocity u/v/w, p, sdf, plus any added), sorted.
+        """
+
+    def get_field(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Return a registered field's inner region as a Fortran-order (nx,ny,nz) float64 array.
+        """
+
+    def set_field(self, name: str, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Write a Fortran-order (nx,ny,nz) float64 array into a registered field's inner region (ghosts refilled on the next diagnostics.exchange_field/step).
+        """
+
+    def add_scalar(self, name: str, diffusivity: float = 0.0, scheme: str = 'koren', iters: int | None = None, cutcell: bool = False) -> None:
+        """
+        Register a transported scalar (temperature/concentration/...): constant diffusivity (length^2/time, in the solver's physical units -- cells^2 per time unit without an extent), advection scheme 'fou' (first-order upwind), 'koren' (Koren TVD, the default) or 'sou' (second-order upwind), and RB-GS diffusion sweeps (iters, default 50). The scalar is a registered field (get_field/set_field/diagnostics.field_view). Requires geometry (set_solid/set_pressure_geometry) for the openness-weighted operators.
+
+        cutcell=True selects the cut-cell discretization (doc/scalar_ibm_design.md): kappa (fluid fraction) storage, the scalar's own apertures, wall conditions per body (set_scalar_wall, default insulating), sources (set_scalar_source), BiCGStab to a residual tolerance (set_scalar_residual_tolerance; iters must then be None), a steady solve (solve_scalar_steady) and per-body wall fluxes (scalar_wall_flux). Cells that are not fluid unknowns hold 0. Advection is not yet part of the cut-cell operator.
+        """
+
+    @overload
+    def set_scalar_bc(self, name: str, face: str, type: str, value: float = 0.0) -> None:
+        """
+        Scalar boundary condition on a domain face ('-x', '+x', '-y', '+y', '-z', '+z'): type 'periodic', 'neumann' (zero flux, adiabatic) or 'dirichlet' (the given value, in the scalar's own units: the solver never rescales a transported scalar). Single-rank for a legacy scalar; a cut-cell scalar takes it under MPI too, and its periodic / non-periodic faces must match set_domain_bc (checked at the first advance). For a cut-cell scalar `value` may also be a per-face profile (next overload).
+        """
+
+    @overload
+    def set_scalar_bc(self, name: str, face: str, type: str, value: Annotated[NDArray[numpy.float64], dict(shape=(None, None), device='cpu')]) -> None:
+        """
+        Cut-cell scalars: a Dirichlet domain face with a per-face PROFILE, shape (N_t1, N_t2) over this rank's face cells in the face's tangential axes in x, y, z order (-x/+x: (ny, nz); -y/+y: (nx, nz); -z/+z: (nx, ny)), as set_domain_bc_profile. The value is the scalar at the boundary face centre.
+        """
+
+    def set_scalar_wall(self, name: str, type: str, value: float = 0.0, coefficient: float = 0.0, instance: int | None = None) -> None:
+        """
+        Cut-cell scalars: the condition on the immersed walls of one scene instance (instance=int, needs a scene) or of every body (instance=None, which also clears the per-instance settings). 'neumann': value = the flux INTO the fluid per area (c L/T; 0, the default for every body, is insulating). 'dirichlet': value = the wall concentration. 'robin': flux into the fluid = coefficient * (value - c_wall), coefficient = k (L/T, >= 0; a first-order surface reaction is k_r with value 0). Physical units under an extent; takes effect at the next advance or steady solve.
+        """
+
+    def set_scalar_solid(self, name: str, diffusivity: float, capacity: float = 1.0, partition: float = 1.0, contact_resistance: float = 0.0, instance: int | None = None) -> None:
+        """
+        Cut-cell scalars, conjugate transport (doc/scalar_ibm_design.md §1.1): the solid interior of one scene instance (instance=int, needs a scene) or of every body (instance=None, which also clears the per-instance settings) carries the scalar too. diffusivity = D_s (L^2/T, the solid's own, >= 0), capacity = C_s (> 0; heat: (rho c_p)_s/(rho c_p)_f, a porous particle: its porosity), partition = K (> 0; c_s = K c at equilibrium), contact_resistance = R_c (T/L, >= 0; the interface flux is (c_s/K - c)/R_c). The solid field is the registered field '<name>_solid' (it holds c_s/K, internal; get_scalar_solid returns c_s). A later set_scalar_wall for the same instance makes it a wall again (last call wins). Takes effect at the next advance or steady solve. Physical units under an extent.
+        """
+
+    def get_scalar_solid(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Cut-cell scalars: a copy of the solid concentration c_s = K psi_s of a conjugate scalar, (nx, ny, nz) F-order on this rank's block, NaN outside the solid unknowns (all NaN before the first advance or steady solve with a conjugate body).
+        """
+
+    @overload
+    def set_scalar_source(self, name: str, source: float) -> None:
+        """
+        Cut-cell scalars: a uniform volumetric source S (c/T, physical), weighted by the fluid fraction kappa.
+        """
+
+    @overload
+    def set_scalar_source(self, name: str, source: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Cut-cell scalars: a per-cell volumetric source S (c/T, physical), an (nx, ny, nz) F-order array on this rank's block, weighted by kappa.
+        """
+
+    def set_scalar_residual_tolerance(self, name: str, rtol: float) -> None:
+        """
+        Cut-cell scalars: the max-norm relative residual tolerance of the solve, max|b - A c| <= rtol * max(max|b|, max|A c0|) (default 1e-10).
+        """
+
+    def set_scalar_mean_gradient(self, name: str, gradient: Sequence[float]) -> None:
+        """
+        Cut-cell scalars: the closure (mean-gradient) mode. The field then holds the periodic fluctuation theta of c = G.x + theta, written in the frame moving with the fluid's mean velocity; G = `gradient` (c/L, physical; x the cell_centers() coordinates). Every axis with a nonzero component must be periodic (checked at the next advance or solve). (0, 0, 0) turns it off. Read the result with scalar_mean_flux.
+        """
+
+    def scalar_mean_flux(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Cut-cell scalars: the box-averaged total flux vector (3,), c L/T (physical), of the last advance or steady solve: the diffusive face sum of -D a A (c_j - c_i) with c = theta + G.x (the face's true displacement), plus the advective (1/V_box) sum_i (U_i - kappa_i V Ubar) theta_i in the moving frame, V_box the whole box (solid included). Exact as a plane average for steady fields without wall sources. Effective diffusivity k* = -J.G/(D|G|^2); dispersion D* = -J/(phi G), phi the discrete porosity. Collective under MPI.
+        """
+
+    def solve_scalar_steady(self, name: str) -> None:
+        """
+        Cut-cell scalars: solve the steady problem now (no storage term) from the current field as the initial guess. Statistics in diagnostics.scalar_census.
+        """
+
+    def scalar_wall_flux(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Cut-cell scalars: the integrated flux INTO the fluid per body over the last advance or steady solve, shape (num_bodies,) (one body without a scene), in c L^3/T (physical). Collective under MPI.
+        """
+
+    def has_scalar(self, name: str) -> bool:
+        """Whether a transported scalar of this name is registered."""
+
+    def advance_scalars(self) -> None:
+        """
+        Advance all registered scalars one dt with the current velocity (also done by step()).
+        """
+
+    def enable_vof(self) -> None:
+        """
+        Enable the geometric (PLIC + Weymouth-Yue) VoF colour field 'C'. Registers 'C' as an ordinary cell field (get_field/set_field/diagnostics.field_view/closure input) and allocates the colour field's OWN g=3 working block + halo; the solver's G=2 is untouched. C is advected at the end of every step() with the just-projected face velocities.
+
+        RUNG V2a SCOPE — read before using: there is NO surface tension (rung V4) and NO momentum-consistent transport (rung V2b). Mass and momentum are advected by different fluxes, so a mixed cell carries a spurious interfacial momentum source of order delta-rho; the literature (Rudman 1998, Arrufat 2021) is unambiguous that this breaks down around density ratio 1000 unless the resolution is absurd. **V2a is valid only at MODEST density ratios** for cases with motion. A high-ratio case AT REST (the hydrostatic acid test) is exact, because there is no momentum to mis-advect. COLLOCATED (SolverColocated) is supported since rung V8 (2026-09-02), ALL-FLUID only: the colour is advected by the PROJECTED face field uf_/vf_/wf_ (the field the ABC approximate projection makes exactly divergence-free, which is what Weymouth-Yue's conservation proof needs), and the CSF enters the implicit momentum predictor as the mass-adjoint face integral (doc/collocated_varrho_forces.md). An immersed solid on that grid THROWS (the cut-cell colour transport of rung V5a is staggered-only), and so does enable_vof_momentum. On the collocated grid the SPURIOUS-CURRENT number to read is the FACE field (get_uf/get_vf/get_wf): the CELL field additionally carries the approximate projection's invisible odd-even mode, which centerToFace annihilates and the projection therefore cannot remove. An IMMERSED SOLID is supported since rung V5a: the geometric fluxes are openness-weighted and the update is done in fluid-volume units, so sum eps_eff*C is conserved exactly against the projection's own openness-weighted divergence; it needs set_solid(..., cutcell_pressure=True) (the staircase operator has no face openness to weight with) and it approximates the solid-clipped flux polygon by (whole-cell PLIC slab) x (open area) — see diagnostics.vof_diagnostics()['clipped_volume'].
+        """
+
+    def set_vof(self, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Set the colour field from a Fortran-order (nx,ny,nz) float64 array: C = the LIQUID volume fraction of the cell, in [0,1]. Enables VoF if it is not on yet. Initialise it SHARP (0/1 with the exact fraction in the interface cells) — geometric VoF keeps a sharp interface and a diffuse initial profile is simply a different problem.
+        """
+
+    def get_vof(self) -> NDArray[numpy.float64]:
+        """
+        The colour field's inner region as a Fortran-order (nx,ny,nz) float64 array (== get_field('C')).
+        """
+
+    def vof_max_courant(self) -> float:
+        """
+        INTERFACE-LOCAL Courant number max|uf|*dt/h over the faces of mixed cells and their face neighbours, with the current velocity and dt (all-reduce max under MPI). This — not the global max — is the number Weymouth's boundedness bound applies to: a global max over-throttles badly (measured on Zalesak: 0.314 at a quiescent domain corner while the interface never exceeded 0.157). Pick dt as dt*cfl_target/vof_max_courant().
+        """
+
+    def set_vof_cfl_limit(self, value: float) -> None:
+        """
+        Weymouth-Yue boundedness cap on the interface-local Courant number. Default 0.25 — the PROVEN 3D bound 1/(2(N-1)) from Weymouth's thesis eq. A.33; the widely-quoted 0.5 is the 2D value. step() throws when it is exceeded. Conservation is INDEPENDENT of boundedness (the telescoping is algebraic), so an over-CFL run loses 0<=C<=1, not volume.
+        """
+
+    def vof_cfl_limit(self) -> float:
+        """The Weymouth-Yue boundedness cap currently in force."""
+
+    def advect_vof(self, dt: float) -> None:
+        r"""
+        KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity over `dt` (seconds), with NO Navier-Stokes step. This is the advection-benchmark entry point (Zalesak, LeVeque, and the cut-cell conservation gates): a frozen projected velocity advecting a colour field is a pure statement about the transport scheme, with the momentum and pressure solves out of the picture.\n\nIt THROWS if the current velocity is not discretely divergence-free to 1e-10, measured with max_open_divergence_projected() (the NON-mutating diagnostic). That is not a nicety: Weymouth-Yue's exact conservation is CONDITIONAL on sum_f o_f u_f = 0 per cell, because the dilation term adds H(C-1/2) times that residual to every full cell's volume budget. Run step() to a steady state (or project()) and advect with the solver's own output; never with an analytic sample, which is solenoidal only to O(h^2).
+
+        It ALSO throws when no cut-cell pressure operator exists (WO-R2): without one the divergence guard measures nothing at all — max_open_divergence() returns 0.0 — and a cell-centre-sampled LeVeque field (true max|div| 0.612) was silently accepted and lost 4.93 % of the liquid in 50 steps. Call set_pressure_geometry(sdf) on an all-fluid box, or set_solid(sdf, cutcell_pressure=True).
+        """
+
+    def set_contact_angle(self, theta: float) -> None:
+        """
+        Rung V5b (WO-S). Prescribe a STATIC contact angle, in DEGREES, measured THROUGH THE LIQUID, on every immersed SDF wall. Needs set_solid(..., cutcell_pressure=True) + enable_vof; with no call the wall stays at the neutral 90-degree fill of rung V5a and every V5a number is byte-identical.
+
+        What it changes is PASS 1 of the solid-band fill and nothing else: the band cells receive the volume fractions of the plane that continues the fluid-side interface into the solid at angle theta (m . n_w = cos theta, with n_w = grad(sdf)/|grad(sdf)| the solid->fluid wall normal and m the PLIC normal pointing into the gas). The unmodified V3 height-function/MYC cascade then returns the curvature of an interface meeting the wall at theta and the V4 balanced force does the rest — NO force is added at the wall. theta = 0 fills the band with liquid (complete wetting), theta = 180 empties it.
+
+        Construction (src/vof/wetting.hpp): the anchor fluid cell is found by walking along n_w; its fluid-only Youngs normal supplies the AZIMUTH of the contact line (its in-wall component, which a fluid-restricted stencil measures to ~1e-14 on a plane) while the angle to the wall is replaced by the prescribed one — the wall-normal component of a fluid-only estimator is unusable (measured 23 deg of error at theta = 30 against 2.3 for the full stencil, gate G0e). The plane is then anchored by matching the anchor cell's own liquid volume, which makes the fill EXACTLY idempotent: an interface that already meets the wall at theta is reproduced to 1e-15 (gate G0a), so theta is a fixed point of the scheme.
+        """
+
+    def set_contact_angle_field(self, theta: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Per-cell static contact angle in DEGREES, as a Fortran-order (nx,ny,nz) array. Only the value AT the solid band cell being filled is read, so cells away from a wall are irrelevant. theta is a field so the dynamic-angle rung (V6) changes only what fills it.
+        """
+
+    def contact_angle(self) -> float:
+        """The prescribed static contact angle in degrees (90 if none was set)."""
+
+    def set_contact_angle_dynamic(self, enabled: bool, theta_e: float = 90.0, slip_length_cells: float = 0.0, mu_liquid: float = 0.0, sigma: float = 0.0) -> None:
+        """
+        Rung V6 (WO-V6). The DYNAMIC contact angle -- `enabled=False` turns it (and the hysteresis) off so the static angle stands again; `enabled=True` imposes at the grid scale the Cox-Voinov apparent angle of a contact line moving at speed U_cl, with the outer cut-off at the CELL SIZE and an EXPLICIT slip length lambda (Afkhami, Zaleski & Bussmann, JCP 228:5370, 2009):
+
+            theta_Delta^3 = theta_e^3 + 9 Ca_cl ln(Delta/lambda),   Ca_cl = mu_l U_cl / sigma
+
+        angles in radians internally, arguments in DEGREES; Ca_cl > 0 advancing, < 0 receding; theta_Delta is clamped into [1, 179] degrees (diagnostics.set_contact_angle_clamp).
+
+        `slip_length_cells` is lambda/Delta and must lie in (0, 1). It is not a tuning knob you may omit from a report: a VoF contact line's NUMERICAL slip is proportional to the cell size, so without an explicit lambda the imposed angle is silently grid-dependent (VOF_PLAN section 6). ALWAYS state lambda alongside a dynamic-wetting result.
+
+        `mu_liquid` is the liquid dynamic viscosity entering Ca_cl (solver units); `sigma` defaults to whatever set_surface_tension holds. theta_e also becomes the static base angle, so this call replaces set_contact_angle. U_cl is measured as -u.t_hat at the anchor fluid cell of each band cell, with t_hat the IN-WALL direction of the fluid-side PLIC normal (m points into the gas, so the liquid advances along -t_hat), then smoothed with a 3-point mean along t_hat. Needs set_solid(..., cutcell_pressure=True) + enable_vof; with no call every V5b number is byte-identical.
+        """
+
+    def set_contact_angle_hysteresis(self, theta_a: float, theta_r: float) -> None:
+        """
+        Rung V6 (WO-V6). Advancing / receding contact-angle hysteresis, in DEGREES. While the measured apparent angle lies in [theta_r, theta_a] the contact line is PINNED and the fill imposes the APPARENT angle itself — which reproduces the current interface exactly, because the V5b fill is idempotent (WO-S finding 1), so no Young force appears and the line does not move. Above theta_a the advancing angle is imposed and below theta_r the receding one, each with the Cox-Voinov correction of set_contact_angle_dynamic when that is also configured. Sets the static base to (theta_a+theta_r)/2 if no angle was set yet.
+        """
+
+    def set_wall_slip_length(self, lambda_cells: float) -> None:
+        """
+        Rung V6b (WO-V6b) - the VELOCITY half of the dynamic contact line. In the Robust-Scaled cut-cell IBM closure the TANGENTIAL wall datum stops being no-slip and becomes the NAVIER condition
+
+            u_t(wall) - u_body = lambda * d(u_t)/dn
+
+        with `lambda_cells` the slip length in the caller's own units (CELLS without a physical domain, where the cell size is 1); the model needs lambda < one cell. The wall-NORMAL component is untouched: the wall stays impermeable, with the moving-body velocity as its datum. 0 (the default) restores the validated no-slip closure BIT-IDENTICALLY - the closure polynomials are the lambda = 0 members of the same family, and the lambda > 0 branch is never entered.
+
+        It is ONE lambda with set_contact_angle_dynamic: either call overwrites the shared value (last call wins), so the Cox-Voinov inner cut-off and the momentum wall closure cannot disagree. Only this call switches the MOMENTUM half on, so every WO-V6 result taken with the angle half alone is unchanged.
+
+        Why it exists, measured: with no-slip the contact line advances only at the scheme's own numerical slip, ~1/180 of Lucas-Washburn (WO-V6 finding 6), and WO-V7's pore-scale campaign found every IMBIBITION verdict inverted below the capillary number at which the imposed velocity crosses that numerical slip velocity. Typical values are 0.01-0.5 cells; state lambda with every dynamic-wetting result. Staggered grids only; needs set_solid(..., cutcell_pressure=True). Changing it rebuilds the three cut-cell overlays and the momentum operator in place (the velocity field is NOT reset).
+
+        APPROXIMATIONS, both stated because they are invisible from the call: the tangential projector is taken DIAGONAL (the cross terms -n_c n_j u_j are dropped; they vanish exactly for an axis-aligned wall and are O(n_c n_j) otherwise), and an axis whose BOTH neighbours are solid (a one-cell fluid gap) keeps the no-slip closure - counted by diagnostics.wall_slip_sandwich_cells().
+        """
+
+    def wall_slip_length(self) -> float:
+        """The Navier slip length in force, in the caller's units (0 = no-slip)."""
+
+    def vof_has_geometry(self) -> bool:
+        """
+        True when the colour advection is running the CUT-CELL (openness-weighted) kernels, i.e. an immersed solid is present and set_solid ran with cutcell_pressure=True. False means the uncut rung-V1 kernels are running, byte-identically to a solid-free build.
+        """
+
+    def enable_vof_blocks(self, seeds: Sequence[Sequence[float]] | None = None) -> None:
+        """
+        Carry each bubble on its OWN VoF block (the TBFsolver vofBlock pattern, VOF_PLAN §10): one Weymouth-Yue advector per marker on a small moving global index box (bubble extent + 3 cells, its own g = 3 halo on top) with a master rank of its own, and the registered 'C' the closures see is the UNION C = max_blocks C_block.
+
+        WHY: two bubbles that touch CANNOT coalesce numerically — colliding markers overlap in space but never merge, so coalescence becomes an explicit model decision (rung W4) instead of a numerical accident of a single global colour field. Measured on the gate: 236 cells carry BOTH markers at closest approach (30.0 cells of shared liquid) while each marker's own volume is conserved to 2.6e-15, and the single-field control merges them irreversibly (neck colour 0.77 against the blocks' 0.00 after the reversal).
+
+        `seeds=None` DROPS the container (the structured colour field 'C' and advect_vof are unaffected). Otherwise 'seeds' is a list of (cx, cy, cz, radius) spheres in CELL units, global indices -- these are GRID coordinates and a physical domain does not convert them. The colour is the same exact sphere fraction set_vof would take.
+
+        SCOPE at W0: ALL-FLUID (an immersed solid raises — the cut-cell block is rung W12) and KINEMATIC (advect_vof_blocks(dt); NS coupling is W12). Masters are assigned round robin by block id, deliberately independent of where the bubble's cells live — the weighted-ORB assignment is rung W1; diagnostics.vof_block_imbalance() is the number to beat.
+        """
+
+    def vof_blocks_enabled(self) -> bool:
+        """
+        True while the block container exists (enable_vof_blocks with seeds; None drops it).
+        """
+
+    def advect_vof_blocks(self, dt: float) -> None:
+        """
+        Advance every block by dt with the CURRENT (projected) face velocity and union the result into 'C' — the block twin of advect_vof(dt), and it carries the same precondition: it RAISES unless the face field is discretely divergence-free to 1e-10, because Weymouth-Yue's exact conservation is conditional on it.
+
+        Per step: gather the face velocity from the ranks that own each block's cells to its master (plain Isend/Irecv — the block table and the decomposition are both replicated, so every rank knows every message size and an NBX handshake would only rediscover it), run the three sweeps on the dense block, re-centre the box, replicate the table, and scatter the inner colour back with UNPACK_MAX.
+
+        NOTE on the union: max() from an empty union CLIPS the negative Weymouth-Yue round-off residue to an exact 0 — measured up to 6.2e-17 on the LeVeque gate, and every measured union/global-field difference was exactly that and nothing else. dt is in the caller's time units.
+        """
+
+    def enable_vof_blocks_from_field(self, boxes: Sequence[Sequence[int]]) -> None:
+        """
+        Seed the block container from the CURRENT colour field: one marker per given global index box (lo_x, lo_y, lo_z, hi_x, hi_y, hi_z; half-open), its colour copied out of the field set_vof installed. The general seeding path — enable_vof_blocks(spheres) is a convenience over it — and the way a marker of any shape enters (a quasi-2-D Hysing cylinder, a scanned bubble, an arbitrary blob found with a host connected-component labelling).
+
+        The boxes are the BUBBLE extents; the container grows each by its own 3-cell margin. They must not share a cell: the seeding gather is a copy, not a union, so a cell inside two boxes would be handed to both markers.
+        """
+
+    def vof_block_color(self, id: int) -> NDArray[numpy.float64]:
+        """
+        One marker's OWN inner color as a Fortran-order (nx,ny,nz) float64 array over its block box (diagnostics.vof_block_stats()['lo'/'hi']); empty on a rank that does not master it.
+
+        This is the block's ONLY state, so {box, color} per marker is a COMPLETE checkpoint of the container -- and it is the only exact one: re-seeding from the union color field (enable_vof_blocks_from_field) hands each of two TOUCHING markers a slice of the other, because that gather is a copy of the union clipped to the seed extent. enable_vof_blocks_from_colors(boxes, colors) restarts the container from these.
+        """
+
+    def enable_vof_blocks_from_colors(self, boxes: Sequence[Sequence[int]], colors: list) -> None:
+        """
+        Restart the block container from a vof_block_color() checkpoint: one marker per (lo_x, lo_y, lo_z, hi_x, hi_y, hi_z) INNER box (exactly the 'lo'/'hi' of diagnostics.vof_block_stats(), NOT grown by the margin again) with its colour written directly. Exact whatever the markers are doing -- nothing is gathered out of the union field.
+        """
+
+    def set_vof_block_assign(self, mode: str, every: int = 0) -> None:
+        """
+        Master assignment of the block container (rung W1). 'round-robin' by block id (rung W0's, blind to block SIZE), 'lpt' = LONGEST-PROCESSING-TIME greedy on the block cell counts, 'orb' = weighted ORB over a 1-D block space (core's BlockDecomposer<1> with the cell counts as weights). 'every' > 0 re-runs the assignment every 'every' block steps and MIGRATES the colour of any block that changed master (nothing else in a block is state, so the migration is exact and the bitwise gates hold across it).
+
+        All three are pure functions of the REPLICATED block table, so every rank computes the same assignment without an exchange -- which is what lets a re-assignment happen mid-run without breaking a bitwise gate. LPT is the measured winner (see the WO-W12 findings): the ORB's blocks must be CONTIGUOUS in block id, which LPT is free of.
+        """
+
+    def vof_block_assign(self) -> str:
+        """The current master-assignment mode ('round-robin' | 'lpt' | 'orb')."""
+
+    def enable_vof_block_csf(self) -> None:
+        """
+        Form the surface-tension force PER BLOCK (rung W2): each marker runs its own curvature cascade on its own dense box and forms the V4 balanced-force face force there (sigma kappa_f (C(i) - C(i-s))/h with the same selective face-curvature rule addCsfRhs uses), and the three face fields are scattered into the global RHS with UNPACK_SUM — TBFsolver's VOF.f90::computeSurfaceTension structure on the suite's kernels.
+
+        WHY THE FORCE AND NOT THE CURVATURE IS SCATTERED: kappa is not additive and the union colour is a max, so a face between two OVERLAPPING markers has no single (kappa, dC) pair to build a force from. The force is the additive quantity, and forming it where each marker's own colour still exists is the only place the balanced-force pairing (the same face difference the projection's gradient uses) is available per marker.
+
+        Requires set_surface_tension(sigma) and the block container; STAGGERED only. Once on, step() drives the whole two-phase stage through the blocks: the union C feeds the closures exactly as before, and the colour is advected by the blocks in the advect_vof slot.
+        """
+
+    def set_vof_inflow(self, face: str, value: float) -> None:
+        """
+        Colour of the fluid ENTERING through inflow face 'face' ('-x', '+x', '-y', '+y', '-z', '+z'); 1 = liquid, 0 = gas. The face must already be an inflow (set_domain_bc(face, 'inflow', ...)) or this raises.
+
+        The value may be FRACTIONAL, and it then means 'this fraction of the incoming flux is liquid' — a flux statement, not a sub-cell interface position. That is exactly how it is implemented: on a face whose donor is outside the domain the geometric flux is replaced by the algebraic C_donor*a (wyFaceFluxBc), because a uniform prescribed ghost band has no usable MYC normal and the inflow colour is boundary DATA.
+
+        Setting this also makes the property ghosts of that face follow the inflow colour through the registered closures (rho_ghost = rho(C_inflow)) instead of copying the interior — without it the inlet FACE density is the interior's, wrong by up to the density ratio at a liquid inlet into a gas domain. Default (nothing set): the zero-gradient copy, i.e. today's behaviour, bit for bit.
+        """
+
+    def set_vof_inflow_profile(self, face: str, profile: Annotated[NDArray[numpy.float64], dict(order='C')]) -> None:
+        """
+        Per-position inflow colour (Nb,Nc) on the INNER grid of the face's two perpendicular axes, resampled with the same clamp rule set_domain_bc_profile uses for the velocity. This is how a liquid distributor over part of an inlet is expressed: the colour profile says WHERE liquid enters, the velocity profile says how fast.
+        """
+
+    def set_vof_backflow(self, face: str, value: float = 0.0) -> None:
+        """
+        inletOutlet colour on OUTFLOW face 'face' ('-x' ... '+z'; default 0 = gas): where the boundary face velocity points back INTO the domain, the colour ghost carries this value instead of the zero-gradient copy. This is OpenFOAM's inletOutletFvPatchField (Rusche 2002 thesis section 4), the standard VoF outlet — an outlet is a place where you know what leaves (whatever is inside) but must STATE what comes back. Zero-gradient on a reversing face re-injects whatever happens to be sitting at the outlet, which for a draining film feeds the film back into the domain. Where the fluid leaves, zero-gradient is kept.
+        """
+
+    def vof_bc_volumes(self) -> list[float]:
+        """
+        Signed liquid volume that crossed each of the six domain faces during the LAST colour advection, in cell-volume units, POSITIVE for liquid ENTERING the domain. Local to this rank. Six entries in face order (-x,+x,-y,+y,-z,+z); only faces carrying a domain BC are meaningful.
+        """
+
+    def vof_bc_volumes_total(self) -> list[float]:
+        """
+        The same, accumulated since enable_vof() or the last reset_vof_bc_volumes().
+        """
+
+    def reset_vof_bc_volumes(self) -> None:
+        """
+        Zero the per-face boundary liquid ledger (both the per-step and the running totals).
+        """
+
+    def compute_vof_curvature(self) -> dict:
+        """
+        VoF rung V3: compute the interface curvature from the CURRENT colour field and store it in the registered cell fields 'kappa' and 'kappa_branch'. Returns THIS RANK's branch census as a dict.
+
+        'kappa' is the RAW registered field, kappa = 2H in 1/h (cell units); vof_curvature() returns the same thing in 1/length. POSITIVE for a convex blob of liquid: a sphere of liquid of radius R cells reads +2/R, an infinite cylinder +1/R, a plane 0.
+
+        The cascade is Popinet's (2009): a standard height function on 7-cell column sums of C over the 3x3 transverse patch in the direction of the largest |n| (branch 1), the same in the other two directions (branch 2), then the PLIC-VOLUMETRIC paraboloid fit of Jibben et al. on a 5^3 Wendland-weighted stencil (branches 4/5) — the best cost/accuracy fallback per Han, Evrard & Desjardins, IJMF 174:104769 (2024). Branch 3 (the mixed height-position fit) is off by default; branch 0 is 'not an interfacial cell' and branch 6 is 'NO estimate', which must never occur.
+
+        ALWAYS read 'kappa_branch' alongside 'kappa': kappa is 0 both where there is no interface (branch 0) and where no estimate could be made (branch 6).
+
+        Two things the literature settles and this is NOT a bug: the fallback ALWAYS fires somewhere below ~5 cells per diameter (measured here: 100% of interfacial cells at D/dx = 2.8-4.4, ~19% at D/dx = 38-48 on a sphere), and with advection-realistic volume fractions the curvature error STOPS CONVERGING below C*dx ~ 1e-2 for every known method. Curvature order is not the thing to chase; transport fidelity is.
+        """
+
+    def vof_curvature(self) -> NDArray[numpy.float64]:
+        """
+        The curvature field's inner region as a Fortran-order (nx,ny,nz) float64 array, in 1/h in 1/LENGTH. Call compute_vof_curvature() first; get_field('kappa') is the RAW solver-internal field, which is 1/h.
+        """
+
+    def vof_curvature_branch(self) -> NDArray[numpy.float64]:
+        """
+        Which cascade branch produced each cell's curvature, as a Fortran-order (nx,ny,nz) float64 array: 0 not interfacial, 1 height function, 2 height function in a non-preferred direction, 3 mixed height-position fit, 4 PLIC-volumetric paraboloid fit, 5 the same with the rank-deficient 3-parameter model, 6 NO estimate. == get_field('kappa_branch').
+        """
+
+    def set_surface_tension(self, sigma: float) -> None:
+        """
+        VoF rung V4: turn on the BALANCED-FORCE continuum surface force with coefficient sigma (0 = off, the default). Enables VoF and the curvature cascade, which then runs once per step at the head, from the same colour field the density closure sees.
+
+        The force at the staggered velocity unknown u_c(i) is
+
+            F = sigma * kappa_f * (C(i) - C(i - s_c)) / h
+
+        i.e. the colour difference is the projection's OWN face difference — the identical discrete gradient operator the pressure uses (Francois et al. 2006; Popinet 2009). That is the whole content of 'balanced force': with a constant kappa the force is exactly a discrete gradient, so the projection annihilates it and a static drop stays at machine zero. Face-interpolating a cell-centred sigma*kappa*grad(C) instead — the obvious way to reuse the per-cell body force — is not a discrete gradient of anything and leaves spurious currents of order sigma*kappa/mu that no curvature accuracy removes.
+
+        UNITS: sigma is a force per unit LENGTH in the caller's own units -- the system rho, mu and set_body_force are stated in (so per CELL without a physical domain, where the cell size is 1). SIGN: kappa is positive for a convex blob of liquid and C is the liquid fraction, so the equilibrium pressure is P = sigma*kappa*C + const — the Young-Laplace overpressure INSIDE the drop.
+
+        Surface tension is EXPLICIT, so step() enforces the Brackbill capillary time step (see capillary_dt()).
+        """
+
+    def surface_tension(self) -> float:
+        """The surface-tension coefficient (0 when the CSF is off)."""
+
+    def capillary_dt(self) -> float:
+        """
+        The Brackbill (1992) capillary time-step limit sqrt((rho_1+rho_2) h^3 / (4 pi sigma)), +inf when surface tension is off. Denner & van Wachem (2015) verified this IS the stability boundary of an explicit CSF — the prefactor 1/(4 pi), the h^{3/2} scaling and the SUM of the phase densities (both phases oscillate). The density sum is the declared phase pair under enable_vof_momentum, otherwise min(rho)+max(rho) over the field. In the caller's time units.
+        """
+
+    def set_capillary_cfl(self, factor: float) -> None:
+        """
+        Safety factor on the capillary limit: step() raises when dt > factor * capillary_dt(). Default 1.0 — the Brackbill formula was measured to be the boundary itself, so it carries no built-in margin. Set it huge to disable the check, the same escape hatch set_vof_cfl_limit is for the Weymouth-Yue cap.
+        """
+
+    def vof_step_limits(self) -> dict:
+        """
+        Both explicit two-phase step limits at the current state, and which one binds: the largest dt the interface-local Weymouth-Yue CFL cap admits ('cfl_dt'), the Brackbill capillary limit ('capillary_dt'), and min(cfl_dt, capillary_cfl*capillary_dt) with a 'capillary_binds' flag. At pore-scale capillary numbers the capillary limit is expected to bind first.
+        """
+
+    def enable_phase_change(self, rho_gas: float, rho_liquid: float, h_lv: float = 1.0) -> None:
+        """
+        Enable VoF phase change (VOF_PLAN section 9, rungs P0/P1; the Boyd & Ling 2023 / Malan 2021 pattern). rho_gas/rho_liquid are densities and h_lv the latent heat (energy per mass), all in the solver's physical units. Registers 'mdot' (the interfacial mass flux, POSITIVE = evaporation) and 'pc_source' (the deposited divergence source); both are raw-registry fields and hold INTERNAL values -- multiply by 1/unit_scales['mass_flux_to_internal'] and 1/unit_scales['divergence_to_internal'] (both 1 without an extent).
+
+        What it does per step, at the HEAD of step(): (1) reconstruct the PLIC plane of every interfacial cell and take its POLYGON AREA A analytically (A = |m|_2 dV/dalpha, not a finite difference); (2) evaluate mdot (prescribed by set_mass_flux*, or computed by set_phase_change_thermal); (3) deposit S = mdot A (1/rho_g - 1/rho_l) into the nearest PURE GAS cell along +n, so the interfacial cell's own face velocity stays the LIQUID velocity and Weymouth-Yue keeps a field its conservation proof is entitled to; (4) regress the interface by a PLIC PLANE SHIFT, C -> C - mdot A dt/rho_l, with clip-and-redistribute along -n when a cell empties. There is NEVER a volume source in the C equation (the Hardt-Wondra smeared source leaves unresolvable residue and breaks the WY bounds).
+
+        The densities are given explicitly rather than read off a closure (the same contract as enable_vof_momentum). SCOPE at this rung: staggered grid, NO immersed solid, not composable with enable_vof_momentum; all three throw with a message. A CLOSED domain needs the net vapour production to leave somewhere: use an outflow face, or set_divergence_source() with a balancing sink, or rho_g = rho_l (then S == 0).
+        """
+
+    def set_mass_flux_uniform(self, mdot: float) -> None:
+        """
+        P0: prescribe a UNIFORM interfacial mass flux (mass per area per time; positive = evaporation, liquid consumed). Turns the thermal mass flux OFF. Under an extent, call set_rho and set_dt first: the value is converted into the 'mdot' field once.
+        """
+
+    def set_mass_flux(self, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        P0: prescribe a per-cell interfacial mass flux from a Fortran-order (nx,ny,nz) float64 array, in the units of set_mass_flux_uniform (and with its call-order rule). Turns the thermal mass flux OFF.
+        """
+
+    def set_phase_change_thermal(self, enabled: bool, scalar: str = '', t_sat: float = 0.0, k_gas: float = 0.0, k_liquid: float = 0.0, r_int: float = 0.0) -> None:
+        """
+        P1: compute mdot each step from a registered scalar (the temperature) instead of prescribing it; `enabled=False` stops that (back to the prescribed mdot field):
+
+            mdot = ( k_g dT_g/dn - k_l dT_l/dn ) / h_lv ,   n = m/|m|_2 (LIQUID -> GAS)
+
+        Each one-sided derivative is a weighted least-squares fit THROUGH the interface value over the PURE-PHASE cells of a 5^3 stencil on that side, with Malan's collinearity weight w = (d.n)^2/|d|^3 and the exact normal distance from the PLIC plane. Interfacial cells are pinned at T_G = t_sat + mdot*r_int in the energy solve through a per-cell Dirichlet mask on the scalar (r_int = 0 is the hard Dirichlet; a nonzero r_int is the Schrage/IHTR Robin condition of Bures & Sato 2021).
+
+        SIGN CONVENTION -- the interfacial energy balance is mdot*h_lv = (q_l - q_g).n with q = -k grad T and n pointing OUT OF THE LIQUID, which is the form above. Check it on the Stefan problem: superheated vapour behind the interface gives grad(T_g).n > 0 and mdot > 0, i.e. evaporation. The opposite pairing (k_l grad T_l - k_g grad T_g) with the SAME n would condense a superheated vapour.
+
+        The energy scalar's diffusivity is whatever add_scalar was given (a CONSTANT); per-cell k(C) and the consistent rho c_p T geometric transport are set_phase_change_energy. That is not a limitation for the Stefan gate, where the liquid is saturated and pinned at T_sat.
+
+        Units: t_sat in the temperature scalar's own units (never rescaled); k_gas/k_liquid are thermal conductivities (power per length per kelvin) and r_int an interfacial resistance (kelvin per mass flux), all in the solver's physical units.
+        """
+
+    def vof_interface_area(self) -> float:
+        """
+        Total interfacial area of the colour field (an area in the solver's units; cells squared without an extent), summed over the inner region and globally reduced under MPI. Uses the geometry diagnostics.set_phase_change_area selects, so the number a page quotes and the number the phase change integrates are the same one. Needs enable_vof; phase change need not be on. A sphere of radius R reads 4 pi R^2 to about 0.2-0.8 % once its colour field is resolved (WO-P3c).
+        """
+
+    def set_phase_change_energy(self, enabled: bool, rho_cp_gas: float = 0.0, rho_cp_liquid: float = 0.0) -> None:
+        """
+        CONSISTENT rho*c_p*T transport (VOF_PLAN section 9 item 6) for the scalar named by set_phase_change_thermal; `enabled=False` returns to the constant-diffusivity scalar operator and the Koren TVD advective term (the rung P0/P1 energy path). Two things change together:
+         (1) TRANSPORT: H = (rho c_p) T is advected with the colour advection's OWN geometric fluxes, sweep order and frozen dilation flag (vof/energy_advect.hpp), and T is recovered as H / (rho c_p)(C^{n+1}) -- so a uniform temperature is preserved EXACTLY at any heat capacity ratio. With two different fluxes the heat carried into a mixed cell is divided by a capacity built from another flux: an error of order d(rho c_p), i.e. ~2000x at water/steam, which is the artificial interfacial heating this removes.
+         (2) DIFFUSION: the implicit operator becomes A_C = rho c_p(C)/dt + sum_f k_f open_f with k_f the arithmetic mean of the cells' k(C) (the k_gas/k_liquid of set_phase_change_thermal) EXCEPT at a face touching a per-cell Dirichlet (interfacial) cell, where the pure neighbour's own k is used -- a Dirichlet row is an identity row, so that coefficient's only job is the conductance with which the pure cell reaches a boundary condition that already sits at the interface.
+        Units: rho_cp_* are VOLUMETRIC heat capacities (energy per volume per kelvin) in the solver's physical units, like the k of set_phase_change_thermal. Requires set_phase_change_thermal.
+        """
+
+    def set_divergence_source(self, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        A PRESCRIBED extra divergence source (1/time; under an extent call set_dt first) on the inner cells, added to the Poisson RHS beside the phase-change deposit, so the projection solves div(open u) = S. Registered as the field 'div_source'. Its use is to make a CLOSED (periodic) domain compatible with a net vapour production by carrying a balancing sink; with an outflow face the outflow does that job and this is unnecessary.
+        """
+
+    def clear_divergence_source(self) -> None:
+        """Drop the prescribed divergence source (the field stays registered)."""
+
+    def set_divergence_sink(self, weights: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        WO-P23: an AUTO-BALANCED sink region for the phase-change divergence source. Give a non-negative weight per cell (Fortran-order (nx,ny,nz)); after each deposit the solver subtracts (global sum of the phase-change source) * w / (global sum of w), so a CLOSED domain's Poisson RHS is exactly compatible every step with no user bookkeeping. Put the weights in the LIQUID far from the interface, where the exact solution simply has the liquid leaving. This is what makes a closed-box phase-change run possible without the variable-density outflow operator (whose density-ratio inconsistency is WO-R2's subject). Registered as the field 'div_sink'.
+        """
+
+    def clear_divergence_sink(self) -> None:
+        """Drop the auto-balanced sink region."""
+
+    def apply_phase_change(self, dt: float) -> None:
+        """
+        KINEMATIC phase-change step: build mdot / the PLIC areas / the normals, deposit the divergence source (census only — nothing is projected) and apply the interface regression over `dt`. No Navier-Stokes step, no advection. This is the P0a / P1 driver: an interface regressing under a prescribed or thermally-computed flux, with the momentum and pressure solves out of the picture. dt is in the caller's time units.
+        """
+
+    @overload
+    def enable_vof_momentum(self, rho_c0: float, rho_c1: float) -> None:
+        """
+        Advect rho*u on the HALF-SHIFTED momentum control volumes with the SAME geometric fluxes, the same sweep order and one frozen dilation flag as the colour field, then recover u = (rho^c u)/rho^c. This is what makes the scheme usable above density ratio ~100 (Rudman 1998; Arrufat 2021: a raindrop accurate within 15% at 15 cells/diameter instead of ~200).
+
+        The two densities are REQUIRED, and must be the ones the rho closure produces at C=0 and C=1 — the momentum flux is rho_c0*(a-F) + rho_c1*F with F the geometric flux of the C = 1 phase, so the scheme has to know which density each side carries. ORDER: rho_c0 is the density at C = 0 and rho_c1 the density at C = 1, whichever phase that is (when C = 1 marks the gas, a bubble colour, rho_c1 is the gas density). When a 'rho' closure on 'C' is already registered (set_property_model / set_property_table), the pair is checked against it at C = 0 and C = 1 and a mismatch raises, naming both; registered after this call, it is not checked.
+
+        Turning this on MOVES the VoF advection from the end of step() to its head (the momentum advection must precede the predictor that consumes it), so the advecting field is u^n — the previous step's projected output. u at step 0 must therefore be discretely divergence-free (rest or a uniform field both are). Requires the variable-density path, staggered layout, explicit advection, no immersed solid and no porous continuity, and is refused together with the per-bubble block container (enable_vof_blocks*, in either order): the momentum rides the structured colour's fluxes, not the markers'. rho_c0 and rho_c1 are in the caller's density units.
+        """
+
+    @overload
+    def enable_vof_momentum(self, rho_gas: float, rho_liquid: float) -> None:
+        """
+        Former keyword names of enable_vof_momentum(rho_c0, rho_c1), the canonical spelling: rho_gas = rho_c0 (density at C = 0), rho_liquid = rho_c1 (density at C = 1), whichever phase each is. Deprecated in the next release, removed at 2.0.0.
+        """
+
+    def vof_momentum_enabled(self) -> bool:
+        """Whether momentum-consistent transport is on."""
+
+    def set_property_model(self, target: str, kind: str, field: str, params: Sequence[float] = [], field2: str = '') -> None:
+        """
+        Register a device closure writing a property/body-force field from input field(s). target: a registered field (a property 'mu'/'rho'/… or a body-force component 'force_x'/'force_y'/'force_z'). kind: 'linear' (params [p0,p1,p2]: p0+p1*field+p2*field2), 'boussinesq' (params [rho0,g,beta,T0]: rho0*g*beta*(field-T0) buoyancy), 'arrhenius' (params [mu_ref,B,Tref]: mu_ref*exp(B*(1/field-1/Tref))). Applied at the top of step().
+
+        Units: the input fields are taken as UNSCALED quantities (a phase fraction, a temperature, a concentration -- the solver never rescales a transported scalar), so on a target 'rho', 'mu' or 'force_x/y/z' the parameters are in the solver's PHYSICAL units (a density, a viscosity, a force per volume: rho0*g*beta*(T-T0) as written); any other target takes its field's INTERNAL units (see unit_scales).
+        """
+
+    def set_property_table(self, target: str, field: str, x: Sequence[float], y: Sequence[float]) -> None:
+        """
+        Register a tabulated property: target = piecewise-linear interpolation of (x, y) at the input field value (x ascending, clamped at the ends). Units as set_property_model: y in the target's physical units on 'rho'/'mu'/'force_*', x in the input field's.
+        """
+
+    def update_properties(self) -> None:
+        """
+        Apply all registered property/force closures now (also done at the top of step()).
+        """
+
+    def enable_cell_force(self) -> None:
+        """
+        Allocate + register the per-cell body-force fields force_x/force_y/force_z and route them into the momentum RHS, for an external writer (e.g. CFD-DEM drag feedback) to fill directly via diagnostics.field_view('force_z'). They persist across steps until overwritten. They are raw registry fields: a force per unit volume in INTERNAL units (multiply a physical one by unit_scales['force_density_to_internal']).
+        """
+
+    def enable_drag(self) -> None:
+        """
+        Enable implicit (semi-implicit) linear drag for CFD-DEM: allocate the per-cell 'drag_beta' field (added to the momentum diagonal so a -beta*(u-u_p) source is treated implicitly -> unconditionally stable for the stiff beta of a dense bed) plus force_x/y/z (which carry beta*u_p, the RHS target). Fill 'drag_beta' and 'force_*' via diagnostics.field_view each step.
+        """
+
+    def ghost_width(self) -> int:
+        """
+        Ghost-layer width g of the velocity block (diagnostics.field_view returns an (n+2g) buffer).
+        """
+
+    def has_cutcell_pressure(self) -> bool:
+        """
+        True once the cut-cell pressure operator exists (set_solid or set_pressure_geometry was called). The porous continuity requires it; the coupling driver auto-sets an all-fluid geometry when absent.
+        """
+
+    def set_porous_continuity(self, on: bool = True) -> None:
+        """
+        Enable the volume-averaged (porous) continuity for unresolved CFD-DEM (staggered only): the projection enforces d(eps)/dt + div(eps u) = 0 instead of div(u)=0, so the fluid velocity is NOT solenoidal where the void fraction changes (bubbling/expansion). Binds the 'eps' field (void fraction from the particle deposition, created seeded to 1 if absent; the coupling writes it each step BEFORE step()). eps=1 everywhere reduces exactly to div(u)=0. Pair with max_porous_residual() for the meaningful convergence check.
+        """
+
+    def max_open_divergence_projected(self) -> float:
+        """
+        max|div(open*u)| of the field the projection ACTUALLY produced — the outflow-face correction included, and WITHOUT mutating the velocity.
+
+        Use this instead of max_open_divergence() on any domain with an OUTFLOW face. max_open_divergence() re-imposes the zero-gradient outflow velocity before measuring (its own comment says so), which (a) DESTROYS bcCorrectOutflow's correction — the mechanism by which mass leaves — as a side effect, so calling it once per step inside a time loop changes the run, and (b) reports the divergence of a field the solver never used. Measured on a stratified ratio-1000 outflow box: 5e-3 from the mutating diagnostic, flat in the iteration count, flat in the density ratio and bit-identical in a -DPECLET_FLOW_OPERATOR_DOUBLE build (i.e. not a solver residual), against the projected field's own residual from this call. Identical to max_open_divergence() when there is no outflow face, and on the collocated grid (which already measures the face field).
+        """
+
+    def max_open_divergence(self) -> float:
+        """
+        Return the max cut-cell velocity-flux divergence max|div(open*u)|. With porous continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use max_porous_residual() for the continuity residual.
+        """
+
+    def sync_porous_prev(self) -> None:
+        """
+        Reseed eps^n = eps^{n+1} (d(eps)/dt = 0 for the next step). Call it once the first void-fraction field has been written into 'eps' and before the first step, so that step sees no spurious d(eps)/dt source; any later call simply restarts the d(eps)/dt bookkeeping from the current field.
+        """
+
+    def max_porous_residual(self) -> float:
+        """
+        Residual of the volume-averaged continuity max|div(open*eps*u) + d(eps)/dt| -- the quantity the porous projection drives to zero. 0 unless set_porous_continuity(True).
+        """
+
+    def block_origin(self) -> list[int]:
+        """
+        This rank's inner-block origin in GLOBAL cells ([0,0,0] single-rank). Shift the coupling deposit origin by this so particles in global coordinates land in the local block. The offset is in cells (a count, not a length).
+        """
+
+    def init_mpi(self, gnx: int, gny: int, gnz: int) -> None:
+        """
+        Wire the multi-rank step: pass the GLOBAL grid dims (gnx,gny,gnz). The Solver must have been constructed with this rank's LOCAL block dims (from mpi_block). MPI_Init is called if needed. Call it BEFORE the geometry (set_solid / set_pressure_geometry / set_solid_from_scene): the geometry builds the pressure and velocity multigrids for the partition in force when it runs, so init_mpi raises if a geometry already exists (built first, every rank would solve its own block-periodic pressure problem).
+
+        Placement (host OpenMP builds): threads per rank should divide the cores per L3 cache domain (AMD EPYC Zen 4: 8; Threadripper 5965WX: 6), ideally one rank per domain -- a rank whose threads span two domains runs measurably slower (up to +18 % step time) and no partition fixes it. With more than one rank, when every OpenMP thread is pinned to one CPU, rank 0 prints one stderr line naming the ranks that straddle; nothing else changes.
+        """
+
+    def rank(self) -> int:
+        """This rank's index in MPI_COMM_WORLD."""
+
+    def size(self) -> int:
+        """The number of ranks in MPI_COMM_WORLD."""
+
+class SolverColocatedDiagnostics:
+    """
+    Developer tier of a Solver, reached as `s.diagnostics`: instruments (censuses, timers, budgets, ledgers), solver TUNING beyond the public driver selection, ablation switches and the raw zero-copy / MPI internals. Nothing here is needed to set up, run or read out a simulation. It holds a reference to the solver and no state of its own; the setters that CHANGE RESULTS say so in their docstring.
+    """
+
+    def set_face_interp(self, mode: int) -> None:
+        """
+        The two INTERMEDIATE rungs of the Basilisk embed.h port on the collocated grid (doc/history/collocated_embed_port_plan.md), reachable for the ladder that measures what each piece of the complete port ('embed' = mode 7) is worth: 5 = the FV momentum operator with the true-normal dirichlet_gradient wall drag as a defect correction, on the wall-aware face map with the transpose-gradient pressure force; 6 = plus the openness-weighted -grad(P) predictor and cell correction, on the plain face map (7 adds the wall-aware face map and the solid-cut-cell sliver mask). CHANGES RESULTS; no effect on the staggered solver. Modes 1-4 and 10-13 (ablations) were deleted with their kernels at 1.0.0.
+        """
+
+    def set_incremental_pressure(self, on: bool) -> None:
+        """Toggle the rotational incremental-pressure projection."""
+
+    def set_pressure_warmstart(self, on: bool) -> None:
+        """Seed each pressure solve from the previous step's phi (default off)."""
+
+    def set_rotational_pressure(self, on: bool) -> None:
+        """
+        PM I ablation (Guy-Fogelson 2005): False drops the rotational -mu*div(u*) term from the incremental pressure accumulation (constant-mu path only). Default True = shipped rotational (Timmermans) update.
+        """
+
+    def set_rotational_filter(self, on: bool, eps: float = 0.05) -> None:
+        """
+        Experimental filtered rotational update: smooth div(u*) (mask-aware axis-wise 1-2-1, one-sided into the fluid at walls) before accumulating -mu*div into P. Keeps the O(1) pressure-relaxation gain, removes the checkerboard feedback channel.
+        """
+
+    def set_rotational_weight(self, w: float) -> None:
+        """
+        Under-relax the rotational term: P += ct*phi - w*mu*div(u*). 1 = shipped, 0 = PM I; small w raises the boundary-mode stability threshold ~1/w at ~1/w slower smooth-mode pressure relaxation. phi=0 stays the unique fixed point for any w>0 at every dt.
+        """
+
+    def set_rotational_wall_weight(self, w0: float) -> None:
+        """
+        Wall-banded rotational blend: at fluid cells with a solid axis-neighbour use P += (rho/dt + w0*mu/dx^2)*phi - (1-w0)*mu*div(u*); bulk keeps the full rotational update. Stabilizes the boundary rows without slowing bulk pressure relaxation, and keeps them relaxing at dt->infinity. 0 (default) = off.
+        """
+
+    def set_aperture_order(self, order: int) -> None:
+        """
+        Face-aperture estimator (DEFAULT 2 since 2026-08-26): 1 = legacy one-sample linear model, 2 = marching-squares (5 samples/face, O(h^2); removes the convexity bias measured at +0.59/+0.27% bed permeability at R=8/12 -- see doc/collocated_paper_plan.md row 51). For analytic geometry, exact apertures via set_openness_override are better still. Call before set_solid (a later call raises).
+        """
+
+    def set_advection_wall_velocity(self, on: bool) -> None:
+        """
+        A0: fill the advection inputs' masked (solid) rows with the instantaneous WALL velocity instead of zeros, so a MOVING body's advective term sees the body's own motion. DEFAULT True; False is the pre-A0 ablation (measurement only). Inert on a static scene and on the collocated grid.
+        """
+
+    @property
+    def advection_wall_velocity(self) -> bool:
+        """Whether the wall-velocity advection inputs are in force."""
+
+    def set_uf_advection(self, on: bool) -> None:
+        """
+        Advect the COLLOCATED momentum with the projected, divergence-free MAC face field uf/vf/wf of the last projection instead of the un-projected cell->face average 0.5*(u_i+u_j). DEFAULT True -- the shipped scheme: doc/flow_colocated_plan.md step 3, the Almgren-Bell-Colella prescription (the field the projection just made solenoidal IS the conservative advective flux), and what the FOU operator's conservative row-sum identity needs. False is the ablation that restores the phase-2 average (measurement only; see doc/uf_advection.md). Inert on the staggered grid (the stored velocity already IS the projected face velocity) and before the first projection or set_velocity has built a face field.
+        """
+
+    @property
+    def uf_advection(self) -> bool:
+        """Whether the projected face field is the collocated advecting velocity."""
+
+    def set_comm_avoiding(self, mode: str) -> None:
+        """
+        Communication-avoiding red-black smoothing (multi-rank): exchange a 2-deep ghost layer once per red-black PAIR instead of a 1-deep layer before every colour, redundantly re-smoothing the first colour's ghost ring so the second colour reads exactly what a per-colour exchange would have delivered. BIT-IDENTICAL, at half the halo events (measured on host: np=32 weak efficiency 35% -> 62%). 'both' (DEFAULT on a host backend) | 'off' (DEFAULT on a device backend: USER 2026-10-29, H100 weak scaling measured CA off 21-39 ms/step faster) | 'momentum' (the velocity RB-GS only) | 'pressure' (the pressure-multigrid coarse levels only) -- the split exists to ATTRIBUTE a measured regression to one subsystem. Set it BEFORE init_mpi (a later call raises: the momentum half is latched with the halo topology); either half is inert on blocks smaller than 4 cells on any axis, and on a periodic axis of odd global extent (the pressure half per multigrid level).
+        """
+
+    @property
+    def comm_avoiding(self) -> str:
+        """
+        The communication-avoiding smoothing mode in force (see set_comm_avoiding).
+        """
+
+    def set_multigrid_aspect_threshold(self, theta: float) -> None:
+        """
+        Anisotropic-coarsening aspect threshold theta shared by the pressure and velocity multigrids (doc/anisotropic_metric.md §5.1): an axis is coarsened only while its cell size stays within theta of the smallest one, so a stretched grid semi-coarsens instead of building levels whose operator is dominated by one direction. DEFAULT 2.0; must be > 1; 1e9 restores full coarsening on every axis (the §8.5 item (c) ablation). Only ever consulted on an ANISOTROPIC metric, so it is inert on cubic cells.
+        """
+
+    @property
+    def multigrid_aspect_threshold(self) -> float:
+        """
+        The anisotropic-coarsening threshold in force (see set_multigrid_aspect_threshold).
+        """
+
+    def set_pressure_strict(self, on: bool) -> None:
+        """
+        Raise instead of report when the pressure preconditioner returns a non-finite correction. DEFAULT False: the shipped behaviour caps the solve, prints one line, and raises the pressure_solve_failed() flag, so a check can catch it without changing control flow. True turns the same event into an exception.
+        """
+
+    @property
+    def pressure_strict(self) -> bool:
+        """
+        Whether a non-finite pressure preconditioner output raises (see set_pressure_strict).
+        """
+
+    def set_pressure_coarse_ghost(self, on: bool) -> None:
+        """
+        Zero-gradient (Neumann) coarse ghost on wall/inflow faces before the pressure multigrid's prolongation -- the WO-H symmetry repair. DEFAULT True. False restores the pre-2026-08-30 periodic-wrap ghost, which reinstates the asymmetry that stalls MG-PCG on every 3-D wall-bounded grid: a MEASUREMENT ABLATION, never a production setting. Inert on periodic / IBM problems, where the two are the same.
+        """
+
+    @property
+    def pressure_coarse_ghost(self) -> bool:
+        """
+        Whether the Neumann coarse ghost is in force (see set_pressure_coarse_ghost).
+        """
+
+    def set_fluid_only_constraint(self, mode: str) -> None:
+        """
+        Fluid-only pressure constraint (route 2b, a collocated mechanism instrument; call before set_solid): 'filter' = Design A (openness filter), 'star' = Design B (SPD Kron star elimination), 'off'. Any setting other than 'off' disables the AUTO scheme.
+        """
+
+    def set_outer_iterations(self, n: int) -> None:
+        """Set the number of Picard/outer iterations per step."""
+
+    def set_outer_tolerance(self, tol: float) -> None:
+        """Set the outer (Picard) convergence tolerance."""
+
+    def last_outer_iterations(self) -> int:
+        """Return the outer-iteration count from the last step()."""
+
+    def set_velocity_solver(self, name: str) -> None:
+        """
+        Which solver runs the implicit momentum (diffusion) equation. 'auto' (DEFAULT) picks by the operator's condition number kappa = 1 + 4 dt mu (sum w)/rho -- the multigrid at kappa >= 13, the smoother below -- and names no geometry, so an immersed body and a domain-BC box at the same dt get the same solver. 'gauss_seidel' is the red-black smoother; 'multigrid' the 3-level velocity V-cycle; 'chebyshev' Chebyshev semi-iteration over a Gershgorin interval. ALL FOUR SOLVE THE SAME EQUATION TO THE SAME TOLERANCE, so this changes cost and not the answer -- except that 'gauss_seidel' runs out of sweeps above kappa ~ 50 and then returns a solution that never met it. MEASURED (384^3 cut-cell bed, Snellius): multigrid beats gauss_seidel 1.66x-2.23x across the CPU ladder and 2.19x on one H100; chebyshev beats gauss_seidel by the sqrt(kappa) factor theory predicts but loses to multigrid except at the smallest per-rank blocks, where the evidence is suggestive and not conclusive.
+        """
+
+    def set_velocity_mg_smoother(self, name: str, degree: int = 0, eig_ratio: float = 10.0) -> None:
+        """
+        Which smoother the velocity multigrid uses on every level -- orthogonal to set_velocity_solver, and read only when that selects 'multigrid'. 'gauss_seidel' (DEFAULT) or 'chebyshev'. ABLATION, AND CHEBYSHEV IS MEASURED SLOWER: at degree 4 / eig_ratio 6 it IS the stronger smoother per cycle (8.0 V-cycles against red-black's 9.3) and still loses 1.21x on wall time, because matching red-black's smoothing strength costs the same four halo exchanges two sweeps cost, while Chebyshev needs a separate residual and update pass where a Gauss-Seidel sweep fuses the two. Kept because it is the apparatus for a question that gets asked repeatedly. degree=0 follows the V-cycle's own pre/post/bottom counts.
+        """
+
+    def velocity_solver(self) -> str:
+        """
+        The momentum solver actually in force, resolving 'auto'. Only meaningful after the first step(), which is where the choice is made (dt and mu are final only then).
+        """
+
+    def velocity_mg_smoother(self) -> str:
+        """The velocity multigrid's smoother."""
+
+    def set_velocity_solver_params(self, iters: int, rtol: float = 0.0, min_iters: int = 2) -> None:
+        """
+        Momentum smoother control: `iters` RB-GS sweeps per component, or with rtol > 0 a TOLERANCE STOP — end the loop once the sweep's max velocity increment has contracted to rtol of the first sweep's (iters becomes the cap, min_iters the floor). Easy regimes (small nu*dt/dx^2) exit after ~3-5 sweeps; stiff regimes run to the cap unchanged. rtol = 0 (default) is the legacy fixed count, byte-identical.
+        """
+
+    def set_velocity_multigrid_auto(self, cells_per_rank: int, min_global_cells: int = -1, min_block_extent: int = -1) -> None:
+        """
+        Narrow the rule that selects the momentum solver. Since 2026-09-15 the DEFAULT is the velocity V-cycle on every validated operator mode and at every rank count: measured on the 1.0.0 scaling benchmark it is faster at every rung of both the CPU and the GPU ladder (2.23x at 147k cells/rank, 2.19x on one H100), and the red-black smoother it replaced was running at its sweep cap -- not converging -- on every rung of both. cells_per_rank sets an upper bound in cells per rank (0 = never use the V-cycle); set_velocity_multigrid_auto(65536, 1 << 23) restores the 1.0.0 behaviour exactly. min_block_extent (default 16) is the shortest per-rank inner extent worth building a hierarchy on. An explicit set_velocity_multigrid() overrides all of it.
+        """
+
+    def velocity_multigrid_active(self) -> bool:
+        """
+        Whether the velocity (momentum) solve uses the multigrid V-cycle rather than plain RB-GS. Reads back the OUTCOME, not the setting: an explicit set_velocity_multigrid(on=...) call always wins, but absent one the AUTO rule (set_velocity_multigrid_auto) decides it when the geometry is built (set_solid / set_pressure_geometry / set_solid_from_scene) -- on for a distributed run (np > 1) in an eligible operator mode with a global problem of at least min_global_cells (default 8M) and fewer than cells_per_rank (default 65536) cells per rank, off otherwise. So the value can differ from what the caller last set explicitly, and is only meaningful after geometry has been installed (False on a fresh solver).
+        """
+
+    def scalar_geometry(self, name: str) -> dict:
+        """
+        The cut-cell scalar geometry record (doc/scalar_ibm_design.md §2) as F-order (nx, ny, nz) arrays of this rank's block: 'kappa' (fluid fraction of the fan-tetrahedron PL model), 'aperture_x/y/z' (the SNAPPED, ungated scalar aperture of the -x/-y/-z face of each cell -- the scalar's own, never the pressure openness), 'unknown' (1 where the cell is a fluid unknown: kappa > 1e-14 with an open face). Built on first use after the geometry; shared by every cut-cell scalar. A scalar with a solid field (set_scalar_solid) also gets 'kappa_solid' (1 - kappa) and 'solid_unknown' (1 where the cell is a solid unknown: kappa_solid > 0 and the cell's material conjugate, §2.7).
+        """
+
+    def scalar_census(self, name: str) -> dict:
+        """
+        Census of the cut-cell scalar (collective under MPI, summed over ranks). The solve part, of the last advance or steady solve: 'krylov_iterations', 'krylov_residual' (the true max-norm residual over the reference max(max|b|, max|A c0|)), 'krylov_converged', 'num_mg_levels' (the ScalarMG levels the V-cycle used; 1: level 0 alone), 'steady_incompatibility' (|sum b| / sum|b| of a singular steady problem before its projection, else 0), 'num_solid_unknowns' (0: single phase; the solid unknowns of a conjugate scalar, whose 'probe_rungs' then carries a 'solid' tuple too), 'solid_volume' / 'sealed_solid_volume' (physical: the conjugate solid kappa_s V, and its part in cells that are not solid unknowns -- kappa_s > 0 with no open solid face and no conjugate facet, ruling D-WO7-1). The advection part (design §6.3, the last advance or steady solve): 'num_small_cells' (cut cells whose explicit outflow would exceed the bulk's), 'num_implicit_faces' / 'num_flux_faces' (faces carrying flux that took implicit upwind / all faces carrying flux; steady: all implicit), 'bulk_courant' (C_bulk: max over full cells of dt Out/V; 0 steady), 'num_guarded_flux_faces' (faces with projection flux toward a cell that is not a fluid unknown, whose flux the operator drops), 'num_backflow_faces' (rows of an 'outflow' domain face whose flux enters the domain: their inflow takes the zero-gradient value; a steady solve warns once), 'max_cell_peclet' (the largest aperture-weighted face Peclet number |u_a| a h_a / D over the interior faces; the steady envelope of the advective preconditioner is <= 10). The geometry part: 'num_unknowns' (fluid unknowns), 'num_cut_cells' (cells carrying a facet), 'num_facets', 'num_two_sided' (cells with two facets), 'num_thin_solid' (two-facet cells with solid between two fluids -- a resolution warning), 'num_sealed' / 'sealed_volume' (kappa > 0 behind closed faces; physical volume), 'probe_rungs' ({'fluid': (R0, R1a, R1b, R2)} facet counts of the probe ladder).
+        """
+
+    def scalar_budget(self, name: str) -> dict:
+        """
+        Budget of a cut-cell scalar over the last advance (collective under MPI), physical: 'mass' = sum kappa V c, 'mass_solid' (= sum C_s kappa_s V c_s of a conjugate scalar; 0 single phase), 'd_mass' = the change of mass + mass_solid over the advance, 'wall_in' / 'boundary_in' / 'source_in' = the rates INTO the fluid from the immersed walls (the conjugate interfaces are internal: not in it), the domain faces (the Dirichlet faces' diffusive flux plus the advective flux through inflow/outflow faces) and the source, 'defect' = dt sum V r (r the linear-solver residual), and 'identity_error' = d_mass - dt (wall_in + boundary_in + source_in) + defect, which is round-off for a correct discretization. After a steady solve it is the rate balance: d_mass = 0, defect = sum V r and identity_error = defect - (wall_in + boundary_in + source_in). Computed on request from the stored state.
+        """
+
+    def scalar_facets(self, name: str) -> dict:
+        """
+        Per-facet arrays of a cut-cell scalar on this rank (facet order = x-fastest cell order): 'centroid' (n, 3) physical coordinates, 'normal' (n, 3) into the fluid, 'area' (physical), 'instance' (scene body; 0 for raw-SDF geometry), 'wall_value' (c at the wall from the elimination: robin (D u_p + k s g)/(D + k s), dirichlet g, neumann u_p + q s/D; NaN on a facet whose cell is not an unknown), 'flux' (into the fluid per area, c L/T physical, after the last advance or steady solve; local Nu/Sh maps, first order in the max norm) and 'probe_rung' (0..3 = R0, R1a, R1b, R2).
+        """
+
+    def set_scalar_max_iterations(self, name: str, max_iter: int) -> None:
+        """
+        Cut-cell scalars: the BiCGStab iteration cap (default 200). On non-convergence the iterate is kept, diagnostics.scalar_census reports it and a one-time warning is printed.
+        """
+
+    def outflow_backflow(self) -> dict:
+        """
+        Outflow REVERSAL census over the outflow faces (collective under MPI): 'max_reverse' = the largest reversed normal velocity max(0, -u.n), 'fraction' = reversed / all outlet faces, 'energy_influx' = sum over the reversed faces of rho |u.n| |u|^2 / 2 -- the kinetic-energy production the zero-gradient (do-nothing) outflow admits where the flow re-enters, which is the mechanism that diverges an inflow/outflow run whose recirculation reaches the outlet (a BFS bubble at x_r ~ L, a shed vortex). The backflow stabilization (set_backflow_stabilization, default beta 0.2) removes beta rho |u.n| |u_n|^2 of it; beta >= 0.5 is the unconditional energy bound. All zeros without an outflow face or without reversal. step() warns once, on stderr, when reversal appears while the stabilization is switched off.
+        """
+
+    def last_momentum_residual(self) -> float:
+        """
+        max over components of max|r|/max|b| at exit of the last step's momentum solves (residual mode only; -1 otherwise).
+        """
+
+    def set_deferred_correction(self, on: bool) -> None:
+        """
+        Deferred-correction advection: True (default) = 2nd order (implicit FOU + explicit high-order correction, the high-order scheme being SOU by default or Koren TVD via set_advection_scheme); False = pure implicit FOU (1st-order upwind, more dissipative but unconditionally stable at sharp shear layers).
+        """
+
+    def set_pressure_mean_removal(self, scope: str) -> None:
+        """
+        Nullspace (mean) removal scope in the pressure solve: 'fine' (DEFAULT — only the projections the Krylov iteration needs: rhs/residual, the fine-level V-cycle exit, the final iterate; ~3x fewer global-reduction latency hits per iteration, the measured winner of the multi-GPU ablation) or 'all' (legacy — every V-cycle level + after every matvec). Iteration counts are identical (A preserves mean-freeness); results equal within solver tolerance, not bit-identical.
+        """
+
+    def set_pressure_bottom_solver(self, engine: str) -> None:
+        """
+        Engine of the AGGLOMERATED pressure bottom (set_pressure_bottom 'auto' / 'agglomerated'). 'auto' (DEFAULT): single rank, the singular (periodic / wall) operator, a bottom of at most 8192 cells with at most 64 fluid components (solids allowed) and an axis whose planes hold at most 192 cells, 'direct': one team launch runs flexible CG in FP64 (inner tolerance 1e-5, cap 100) preconditioned by a block-tridiagonal FP32 direct factor of the bottom (planes along one axis, explicit Schur-complement inverses), refactored once per operator change -- no host transfer on a GPU; on a host backend the team has min(8, team_size_max) threads and the FCG's reductions run on one lane, so the result does not depend on the thread count. Everywhere else the GraphAMG solve. 'direct' forces that engine and raises at the bottom solve, naming the failed condition, where it is not eligible; 'algebraic' forces GraphAMG (the A/B instrument). doc/vof_step_performance_design.md §13, §14 H-1.
+        """
+
+    def set_pressure_line_relaxation(self, enabled: bool) -> None:
+        """
+        Zebra line relaxation in the pressure multigrid (DEFAULT True). On a level whose finest axis has stopped coarsening (its extent no longer halves) while the other two keep coarsening, so that the coarse cells are more than 2:1 elongated across it, the smoother solves each line along that axis exactly (tridiagonal; cyclic for a periodic axis) instead of relaxing point by point, which damps the error modes the coarse grid cannot see. Every other level, and every grid without such a level, is unchanged; False restores the point red-black smoother everywhere, bit for bit. Under MPI a level whose line axis is split across ranks keeps the point smoother. Live. doc/mg_depth_policy.md Amendment A2.
+        """
+
+    def set_pressure_vcycle_symmetric(self, enabled: bool) -> None:
+        """
+        The symmetric pressure V-cycle (DEFAULT True since doc/mg_depth_policy.md A3, WO-S3). True: every coarse-to-fine transfer adds the coarse parent's value to each fine cell (piecewise-constant prolongation, the transpose of the cell-average restriction up to the factor 2^k) and the smoothed coarsest level sweeps forward then in reverse, so the V-cycle is a symmetric positive definite preconditioner and the CG drivers keep their optimality on high-contrast and thin-slab grids. False: the pre-A3 trilinear prolongation and forward bottom, bit for bit (the A/B lever). Applies to every pressure driver (PCG, FCG, Chebyshev, the standalone V-cycle, the ghost projection's BiCGStab), single rank and distributed, FP64 and FP32. Live. doc/mg_depth_policy.md Amendment A3.
+        """
+
+    def set_pressure_vcycle_precision(self, mode: str) -> None:
+        """
+        Precision of the V-cycle that preconditions the pressure PCG / FCG (single rank and distributed). 'auto' (DEFAULT since 2026-10-19): 'fp32' where eligible, else 'fp64', on a DEVICE backend (CUDA, HIP), with the FP64 restart below; on a host backend (OpenMP, Serial) 'auto' is 'fp64' -- the host saves too little (~5-8 %) to pay for FP32's risks. 'fp64': the FP64 V-cycle. 'fp32': FP32 face weights (the diagonal derived, never stored), FP32 iterates and flux-form arithmetic on every level above the bottom, the input scaled by an exact power of two; the Krylov matvec, dots, mean projection and stop test stay FP64 -- raises at the solve, naming the failed condition, where not eligible (an outflow face, an overlay solve, a non-bottom level with an odd inner dimension, a float outer operator, a face weight outside [1e-30, 1e30], the mean-removal scope 'all', a driver other than PCG / FCG); forced 'fp32' runs on host backends too. Distributed, FP32 runs down to the first telescope point (FP64 below) and an np=1 run is bitwise the single-rank run in every mode. Takes effect at once. Its weight rounding is not invariant under a non-power-of-two change of units, and it can cap where 'fp64' converges (hence the restart); pass 'fp64' for an FP64-only run. RESTART: under 'auto' a PCG / FCG solve whose FP32 attempt does not meet its stop test (a cap, a non-finite breakdown) is re-solved from x = 0 with the FP64 V-cycle -- the 'fp64' solve of the same right-hand side -- with one warning line, and 'auto' then stays FP64 for the rest of the run (pressure_vcycle_precision() reads 'fp64'); calling this setter again re-arms it. Forced 'fp32' is never restarted (the A/B mode). doc/vof_projection_distributed_design.md §4, §9 (the default). It saves ~19 % of the projection on a GPU (bubble column, RTX 5080), ~11 % on a CPU. Outside the CG drivers' rated contrast (density ratio above ~1e3 with walls) both precisions may cap; FP32 may cap earlier. doc/vof_projection_cost_design.md §4.
+        """
+
+    def set_pressure_initial_guess(self, mode: str, history: int = 2) -> None:
+        """
+        Initial guess of the pressure PCG / FCG solve of the projection (single rank and distributed). 'zero' (DEFAULT): x0 = 0. 'projected': the A-norm projection of the solution onto the span of the last `history` (1 or 2) projection solutions, x0 = c1 phi^n + c2 phi^(n-1) with the 2x2 Galerkin system of the current operator (never worse than x0 = 0 in the A-norm; 0 on non-fluid cells), and the stop stays relative to the ZERO-guess residual max|P b|, so the solve is never looser than the cold one. Raises at the solve, naming the failed condition, where not eligible (the Chebyshev driver, the ghost projection, set_pressure_warmstart(True)). 'auto': 'projected' where eligible, else 'zero', on every backend. 'projected' and 'auto' are opt-in, not the default (decided 2026-10-15). Distributed, the Gram system is allreduced, so every rank takes the same guess; an np=1 run is bitwise the single-rank run. The history restarts empty (a cold solve, then one increment, then two) after this call, a geometry change (set_solid, set_pressure_geometry, init_mpi, redistribute / rebalance_by_weights), a state write (set_field of u/v/w/p/phi, set_state, set_velocity), a driver change, and a failed or capped solve. RESTARTS: no history is checkpointed, so a run restarted from saved fields takes those two cold-history steps and agrees with the uninterrupted run to the solver tolerance, not bitwise. doc/vof_projection_cost_design.md §5, doc/vof_projection_distributed_design.md §6.
+        """
+
+    def set_pressure_prefactor_hoist(self, on: bool) -> None:
+        """
+        Switch the side-instance bottom prefactor (doc/vof_gpu_coarse_tail_design.md §5.6, default ON) off: the variable-rho coefficients are then built in the projection and the direct bottom factored lazily in the bottom solve. Same state bit for bit; for tests and timing comparisons.
+        """
+
+    @property
+    def num_pressure_prefactors(self) -> int:
+        """
+        Side-instance bottom factors launched so far (0 where the prefactor is ineligible: host backends, MPI, constant density, a balanced-force or Chebyshev configuration).
+        """
+
+    def pressure_vcycle_precision(self) -> str:
+        """
+        The precision ('fp32' or 'fp64') the last pressure solve's V-cycles used (set_pressure_vcycle_precision); 'fp64' before any FP32 solve.
+        """
+
+    def set_pressure_graph_amg(self, on: bool) -> None:
+        """
+        Solve the pressure MG's coarsest level with an agglomerated mesh-agnostic algebraic multigrid (core GraphAMG), decomposition-agnostic: with levels=1 this gives a mesh-independent pressure solve that works under a WEIGHTED ORB (where the geometric coarse levels can't cleanly coarsen). Applied at the next set_solid.
+        """
+
+    def set_exact_crossings(self, t: Sequence[float]) -> None:
+        """
+        Analytic-SDF capability: exact wall-crossing fractions overriding the linear-interpolated theta in the momentum cut-cell overlay AND the ghost-projection closures. Flat array of 9*nx*ny*nz values, blocks [(c*3+k)]: component c's staggered point at inner cell i toward its +k neighbour; NaN = no crossing. Call BEFORE set_solid (a later call raises); empty list clears. Single-rank, staggered momentum placement.
+        """
+
+    def set_openness_override(self, ox: Sequence[float], oy: Sequence[float], oz: Sequence[float]) -> None:
+        """
+        Analytic-SDF capability: exact face-aperture (openness) fields for the cut-cell projection, overriding the sampled-SDF openness. Inner nx*ny*nz arrays, x-fastest; ox[i] = fluid fraction of the -x face of cell i. Call BEFORE set_solid (a later call raises); empty ox clears. Single-rank.
+        """
+
+    def set_ghost_projection(self, on: bool, matrix_order: int = 2, rhs_order: int = 2) -> None:
+        """
+        QUARANTINED 2026-08-18 (verification only, unsupported): superseded by the gauge-exact collocated scheme, which matches its accuracy at 5-6x lower cost. Kept as the independent second discretization behind the cross-IBM physics gate. Enabling it on the collocated grid silently selects the plain face map, since it owns the operators the gauge-exact scheme replaces. EXPERIMENTAL directional ghost-cell projection (second staggered IBM): point-based FD divergence with wall-anchored directional closures instead of the openness-weighted cut-cell projection; solved by MG-preconditioned BiCGStab. Call BEFORE set_solid (a later call raises). Closure orders (1=linear, 2=quadratic): (matrix_order, rhs_order) = (2,2) full quadratic 13-point matrix; (1,1) linear 7-point; (1,2) mixed/deferred — 2nd-order steady constraint on a 7-point matrix. Collocated: the same closures/matrix on the face-averaged field, plus a directional (one-sided 2nd-order) cell gradient for the -grad(P) predictor and cell correction; requires face_interp 0. v1: single-rank, periodic + IBM, stationary walls; incompatible with porous/variable-rho/domain-BC/Chebyshev.
+        """
+
+    def pressure_mg_level_ratios(self) -> list[list[int]]:
+        """
+        The pressure multigrid's per-level coarsening ratio, one (rx, ry, rz) per level (read-only).
+
+        On an isotropic domain every coarsenable axis halves, as it always has. On an ANISOTROPIC one (extent giving different spacings per axis) the hierarchy coarsens the FINEST coarsenable axis and defers one that is already at least set_multigrid_aspect_threshold (default 2) times coarser, so the coarse operators stay close to isotropic and the point smoother keeps its rate -- e.g. cells (N, 2N, N/2) on a cube gives (1,2,1), (2,2,1), (2,2,2), ... Empty until set_solid/set_pressure_geometry has built the operator. See flow/doc/anisotropic_metric.md §5.
+        """
+
+    def last_superficial_velocity_shift(self) -> float:
+        """
+        The uniform velocity shift set_superficial_velocity applied at the end of the last step() (physical velocity units; 0 when it is off). Reading it synchronises with the device.
+        """
+
+    def last_balanced_force_iterations(self) -> int:
+        """
+        Pressure-driver iterations of the last step's balanced-force solve (set_balanced_force_projection); 0 when it is off, the force divergence was zero, or the previous split already met the stop.
+        """
+
+    def last_balanced_force_failed(self) -> bool:
+        """
+        Whether the last step's balanced-force solve FAILED (driver breakdown or a non-finite result). A failed solve keeps P and p_balanced unchanged for that step; the first one warns on stderr.
+        """
+
+    def balanced_force_failures(self) -> int:
+        """
+        How many balanced-force solves have failed over the solver's lifetime (see last_balanced_force_failed).
+        """
+
+    def anderson_accelerator(self, window: int = 5, mixing: float = 1.0) -> _AndersonAcceleratorColocated:
+        """
+        A new Anderson accelerator of this solver's steady march (doc/steady_acceleration.md; the public driver is peclet.flow.march_to_steady). window in [1, 8] (default 5), mixing in (0, 1] (default 1.0). Raises on an unsupported configuration (a collocated scheme other than 'ghost', VoF, phase change, scalars, porous, variable properties, drag, cell forces, moving scenes, superficial velocity, pressure warm start, the balanced-force projection) and when the history, (2m+3) * n_fields * 8 * n_padded bytes, does not fit. Collective under MPI.
+        """
+
+    def last_pressure_iterations(self) -> int:
+        """
+        Return the pressure-solver iteration count from the last step().
+
+        A solve that BROKE DOWN (non-finite preconditioner output) reports the iteration CAP, so the usual rule-3b 'a capped pressure solve invalidates the run' check sees it; pressure_solve_failed() distinguishes the two.
+        """
+
+    @property
+    def num_pressure_chebyshev_restarts(self) -> int:
+        """
+        How many Chebyshev pressure solves were redone on cold spectral bounds since construction. Under variable density the bounds are re-estimated every step from the previous estimate's power iterates (5 + 5 iterations instead of 15 + 15 from the right-hand side); a solve on such bounds that reaches the cap, or whose residual after 3 iterations exceeds the initial one, is redone on a cold estimate and counted here; the abandoned attempt's V-cycles count in last_pressure_iterations().
+        """
+
+    @property
+    def num_pressure_chebyshev_growth_trips(self) -> int:
+        """
+        How many Chebyshev pressure solves on cold spectral bounds (the main projection's and the balanced-force pre-projection's) saw their residual rise above the initial one, since construction. Chebyshev converges for every eigenvalue below the sum of its two bounds, so a growing residual means lambda_max was underestimated: the bounds are re-estimated with a bracketing margin (1.15 on lambda_max) and the solve is redone once from its starting iterate; the first such case prints a stderr notice. Expected 0; a solve that does not trip is unchanged bit for bit. doc/mg_depth_policy_log.md 2026-10-30.
+        """
+
+    @property
+    def num_pressure_unconverged_solves(self) -> int:
+        """
+        How many MG-PCG / flexible-CG pressure solves (main and balanced-force projection) since construction ended UNCONVERGED: capped, broken down, or stopped on their recurrence residual while the TRUE residual max|b - A x| (the stop test's norm and mean removal) exceeded max(10 rtol, 1e-8) * r0 -- the floor keeps a round-off-limited solve at a near-machine rtol silent. Each is also reported on stderr (the first, then the 10th, 100th, ...). Under the trilinear V-cycle (set_pressure_vcycle_symmetric(False)) above a density ratio of ~1e3 the preconditioner turns indefinite and both CG drivers can stop 'converged' on a field that is not a projection; the default SPD V-cycle keeps them healthy there. The check reads the result only: fields and iteration counts are unchanged. Identical on every rank.
+        """
+
+    def last_pressure_true_residual(self) -> float:
+        """
+        The last MG-PCG / flexible-CG pressure solve's TRUE residual max|b - A x| divided by its stop tolerance rtol * r0 (r0 the initial residual, or the balanced-force projection's full right-hand side): <= 1 means the exit really meets the tolerance; above max(10, 1e-8 / rtol) the solve counts in num_pressure_unconverged_solves. Unit-free. Not updated by Chebyshev or ghost-projection (BiCGStab) solves; 0 before the first CG solve and after one with a zero right-hand side.
+        """
+
+    def pressure_solve_failed(self) -> bool:
+        """
+        Did the last pressure solve break down on a non-finite recurrence scalar (a preconditioner or operator that produced NaN/Inf)?
+
+        The driver then zeroes the correction and continues -- so the projection was handed NOTHING for that step and the run is invalid. Until 2026-09-04 the only trace was one line on stdout ('preconditioner produced non-finite z') while last_pressure_iterations() reported 0, i.e. a perfectly healthy-looking solve (measured: examples/pore-scale-imbibition, a 3.1-cell throat). Set set_pressure_strict(True) to raise instead.
+        """
+
+    def last_step_timers(self) -> dict:
+        """
+        Per-phase wall times (seconds, THIS rank, device-fenced) of the last step(): 'predictor' (ghost fills + RHS/advection/stencil builds), 'momentum' (implicit-diffusion solves), 'projection' (cut-cell pressure projection), 'step' (whole step). 'pressure_allreduce'/'pressure_allreduce_count' = time in / number of global reductions (MPI_Allreduce) inside the pressure solve — the latency-bound term of the distributed solve (0 on a single rank).
+        """
+
+    def set_exact_crossings_from_scene(self) -> None:
+        """
+        Compute EXACT wall crossings from the installed scene, on device, on every rank -- the in-solver replacement for set_exact_crossings + scripts/exact_apertures_spheres.py. Bisection, not Newton: only SIGN correctness is guaranteed for bound-only leaves.
+        """
+
+    def set_wall_flux_divergence(self, on: bool) -> None:
+        """
+        Rung 3 on/off (default on = correct physics). Off leaves the moving wall's no-slip datum in the momentum operator but drops the wall's own volume flux from the cut-cell projection -- the configuration the Galilean gate uses to exhibit the failure the term fixes.
+        """
+
+    def set_fresh_cell_seed(self, on: bool) -> None:
+        """
+        Fresh-cell policy for MOVING geometry. A point a body has just uncovered inherits whatever the solid held there -- zero, or a stale masked value -- which is one of the two textbook mechanisms behind spurious force oscillations in a moving-boundary IBM. True seeds it with the LOCAL WALL VELOCITY instead, so it starts moving with the surface that released it. Bounded (no extrapolation), no new field, and exactly the old behaviour when nothing moves. DEFAULT TRUE since 2026-08-30: measured on an oscillating sphere translating through the grid, it removes a resolution-INDEPENDENT +2.6..2.9% drag bias, cuts the spurious force oscillation 20-50x to within 17% of the non-moving floor, and improves the resolved CFD-DEM loop's total-momentum conservation 95x. Pass False for the pre-2026-08-30 behaviour.
+        """
+
+    def fluid_momentum_cells(self) -> list[int]:
+        """
+        Unmasked (fluid) staggered momentum cells per component -- the exact discrete datum of the reaction identity: at steady state, sum over bodies of F_c = f_c * N_c.
+        """
+
+    def reaction_budget_terms(self) -> NDArray[numpy.float64]:
+        """
+        Diagnostic decomposition of the reaction identity, shape (2, 3): [0] the unsteady sum sum_i (rho/dt)(u_i - u^n_i) and [1] the advective sum sum_i A_i, both over the FLUID momentum cells of each component. The full discrete identity is sum_bodies F_c = f_c*N_c + sum fb + [1]_c - [0]_c; the Stokes form drops both because they vanish at steady state with advection off. sum_i A_i is the advection operator's net momentum flux through the cut walls -- an O(h) property of that operator, not of the budget.
+        """
+
+    def moving_instance_cut_cells(self) -> NDArray[numpy.float64]:
+        """
+        Per instance: inner cells on this rank it owns that touch a fractional face aperture, recounted whenever any instance moves. ZERO for a moving instance means its surface sits on grid planes (or is sub-cell) and its wall velocity is silently inert (set_solid_from_scene warns). Empty when no instance moves.
+        """
+
+    def moving_instance_degenerate_points(self) -> NDArray[numpy.float64]:
+        """
+        Per instance: staggered velocity points where the sampled SDF is EXACTLY zero -- a face on a lattice plane. Those points are fluid to the mask and not ghosts to the cut-cell fold, so a moving body's datum never enters there (set_solid_from_scene warns). Empty when no instance moves.
+        """
+
+    def instance_center_pinned(self, i: int) -> bool:
+        """
+        True if instance i's centre of rotation is PINNED (an explicit finite centre in the encoding, or set_instance_motion(center=...)); False if it follows the body's translation (NaN in the encoding, the builder's default; legacy all-zero raw arrays).
+        """
+
+    def periodic_image_overlap_cells(self) -> int:
+        """
+        Cells on this rank whose solid/fluid sign was decided by a periodic IMAGE of an instance wider than the box (set_solid_from_scene warns when nonzero): the scene evaluates the UNION of images, so a slab wider than the box refills any cavity carved from it. 0 when no instance is that wide or the images agree.
+        """
+
+    def hydro_force_torque_traction(self) -> NDArray[numpy.float64]:
+        """
+        DIAGNOSTIC -- not the force on the bodies; that is Solver.hydro_force_torque_reaction(). The reconstructed surface-TRACTION loads, shape (4, n_instances, 3): [0] force, [1] torque about the instance centre, [2] the pressure part, [3] the viscous part ([0] == [2] + [3]). The cut-cell surface integral of (-p I + mu(grad u + grad u^T)) against the exact aperture wall-area vector, with a central-difference velocity gradient that spans the wall. It UNDER-READS THE VISCOUS PART: traction / reaction drag = 0.685-0.730 over phi 0.008-0.45 and N 24-128 (measured 2026-09-30), i.e. ~30 % low at ANY resolution -- refinement does not fix it. The torque is low by the same mechanism: a steadily spinning sphere reads 0.59-0.72 of 8 pi mu a^3 Omega / (1 - phi) at R/h 6-12 (the reaction: 1.019-1.027). What it offers that the reaction does not: the pressure/viscous split, and it runs where the reaction refuses (the collocated solver, porous, variable properties, domain BCs, implicit advection). A consistent traction (from the momentum operator's small-cell-robust wall reconstruction) is planned. Was Solver.hydro_force_torque() (deprecated). Atomics: tolerance-reproducible, not bitwise.
+        """
+
+    def wall_area_probe(self) -> list[float]:
+        """
+        Diagnostic: [sum_c x_c*A_wall_x, sum_c y_c*A_wall_y, sum_c z_c*A_wall_z] over all cut cells. Must equal -V_solid componentwise if the aperture wall-area vectors are right, so it separates a force-integral error in the GEOMETRY from one in the traction.
+        """
+
+    def wall_flux_imbalance(self) -> float:
+        """
+        Sum over cells of u_wall . A_wall -- the compatibility datum of the singular pressure problem. Exactly zero for a translating body in a periodic box; small but nonzero for rotation. Reported, not corrected.
+        """
+
+    def get_cut_owner(self) -> NDArray[numpy.int32]:
+        """
+        Per-inner-cell owning scene instance (the argmin behind the sampled SDF), (nx,ny,nz) int32; -1 before set_solid_from_scene. Moving geometry reads its wall velocity off the owner and resolved CFD-DEM posts the hydrodynamic force back to it.
+        """
+
+    def field_view(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Zero-copy view of a registered field's full padded buffer as a Fortran-order (nx+2g, ny+2g, nz+2g) array (g = ghost_width); host → NumPy, device → DLPack (CuPy). step() does not device-synchronize at entry: a driver that writes a view from its own non-blocking stream (cupy/torch) must synchronize that stream before calling step() (null-stream writers stay ordered).
+        """
+
+    def exchange_field(self, name: str) -> None:
+        """
+        Fill a registered field's ghost cells (cross-rank + periodic under MPI; periodic single-rank).
+        """
+
+    def exchange_field_add(self, name: str) -> None:
+        """
+        Add-reduce halo: fold ghost-layer deposits back onto their owner (cross-rank + periodic). The particle->grid deposition primitive for MPI CFD-DEM; single-rank non-periodic no-op.
+        """
+
+    def vof_last_courant(self) -> float:
+        """
+        The interface-local Courant number of the step just taken (0 before the first step).
+        """
+
+    def set_vof_step_parity(self, n: int) -> None:
+        """
+        Set the sweep-permutation counter of the NEXT colour advection: the Weymouth-Yue sweep order is kWySweepPerm[n % 6], cycled so no axis is systematically favoured. Exposed so a benchmark can hold the permutation fixed (n constant) or resume a run across a restart. Default: it increments once per advection from 0.
+        """
+
+    def vof_step_parity(self) -> int:
+        """The sweep-permutation counter of the next colour advection."""
+
+    def set_vof_wisp_eps(self, eps: float) -> None:
+        """
+        Wisp tolerance on the Weymouth-Yue mixed-cell predicate: a cell counts as carrying an interface only while eps < C < 1 - eps, and one outside that band is fluxed ALGEBRAICALLY as C_donor * a — its ACTUAL colour, so the exact telescoping conservation is untouched. The same threshold gates the interface-local Courant band (|C_i - C_j| > eps instead of an exact !=).
+
+        DEFAULT 1e-8 (the same value the V3 curvature predicate uses under surface tension); 0 restores the V1 predicate bit for bit. Two measured reasons it is not 0 (WO-R2 item 4): (i) a domain that DRAINS through an open boundary leaves nothing but round-off residue, ~1e-18, which `0 < C < 1` still calls mixed — the MYC normal of that stencil is degenerate and plicAlpha divides by it (sum C -> -inf -> NaN within three steps on one backend); (ii) the round-off wake behind a passing interface (min C ~ -3.8e-17) kept the whole wake inside the Courant band, so vof_last_courant() on Zalesak read 0.3110 by step 1000 on a case whose interface never exceeds 0.255.
+        """
+
+    def vof_wisp_eps(self) -> float:
+        """The wisp tolerance currently in force (see set_vof_wisp_eps)."""
+
+    def set_pressure_exact_residual(self, on: bool = True) -> None:
+        """
+        Apply the level-0 pressure operator EXACTLY (matrix-free, double, flux form) in the residual and the Krylov matvec instead of reading the float band storage. P1 of the suite defect-correction campaign (suite/docs/archive/DEFECT_CORRECTION_PLAN.md). Per solver, OFF at construction.
+
+        enable_vof() turns it ON, because a two-phase coefficient contrast is exactly what amplifies the float operator's broken row-sum identity A*1 = 0. Measured on Hysing case 2 (64x128x4, adaptive dt, nvidia-cuda): max|div(open u)| 1.85e-03 -> 5.15e-11, with 116/600 pressure iterations, 1123 steps, the dt-limit census and both published functionals (v_rise max 0.2574 at t = 0.671, y_c(3) 1.1082) identical to every printed digit. Everything below level 0 stays float on purpose: it is a preconditioner and its errors change the convergence RATE, never the fixed point. A flag read at every solve, so it may be changed at any time; the ablation is False AFTER enable_vof.
+        """
+
+    def pressure_exact_residual(self) -> bool:
+        """
+        Whether the exact level-0 operator apply is in force (see set_pressure_exact_residual).
+        """
+
+    def set_vof_cutcell_flux_clamp(self, on: bool) -> None:
+        """
+        Ablation: Weymouth's admissible-interval clamp on the openness-weighted cut-cell flux (ON by default). The clamp bounds |F| by what the DONOR actually holds — at most eps*C liquid and at most eps*(1-C) gas of the fluid volume o*|a| swept through the face — applied to the one value both neighbours share, so conservation still telescopes bit-exactly. It is what makes the whole-cell-PLIC-times-open-area flux approximation BOUNDED. Measured with it off on a 24^3 packing at CFL 0.2: the [0,1] clip fires at 3.2e-5 liquid volume per step and the conserved functional drifts 1.3e-8 in 30 steps; with it on the clip stops firing.
+        """
+
+    def vof_filled_color(self) -> NDArray[numpy.float64]:
+        """
+        The colour field INCLUDING the neutral solid-band fill — what the MYC and height-function stencils actually read — as a Fortran-order (nx,ny,nz) array. get_vof()/'C' is the canonical field and carries EXACTLY 0 in solid cells; the fill is a stencil device regenerated at every ghost exchange (three passes with a shrinking depth budget, src/vof/cutcell.hpp), and it is what makes the wall look 90-degree neutral instead of perfectly non-wetting.
+        """
+
+    def vof_geometry(self, which: int) -> NDArray[numpy.float64]:
+        """
+        The cut-cell geometry the colour block runs on, as a Fortran-order (nx,ny,nz) array: 0 = the cell fluid fraction eps (4^3-subsampled, a multiple of 1/64), 1/2/3 = the openness of the +x/+y/+z face of each cell (the ADVECTOR's high-face convention, one cell shifted from the solver's ox/oy/oz), 4 = the classification (1 = SOLID, i.e. eps == 0 AND all six faces closed).
+
+        On an ALL-FLUID solver (set_pressure_geometry, or no cut-cell pressure operator) there is no geometry block and this returns the TRIVIAL geometry the V1 transport kernels actually execute: eps = 1, openness = 1, classification = 0. It used to raise, which meant one diagnostic could not serve a packed scene and its all-fluid control.
+        """
+
+    def set_contact_angle_pivot(self, mode: str) -> None:
+        """
+        ABLATION -- how the theta-plane is anchored in the fluid cell. 'volume' (DEFAULT) match the anchor cell's liquid volume with plicAlpha; 'centroid' pass through the PLIC centroid p_f (the Afkhami-Bussmann / Basilisk contact.h rule); 'projected-centroid' the work order's c = p_f - sdf(p_f) n_w; 'contact-line' the contact line on the wall. 'volume', 'centroid' and 'contact-line' are exactly idempotent (1e-15 on gate G0a); 'projected-centroid' is NOT -- projecting the centroid along n_w shifts the plane by -sdf(p_f) cos(theta), measured 0.26 in cell fraction at theta = 60, with the wrong sign (it removes liquid from the band for a wetting angle).
+        """
+
+    def contact_angle_diagnostics(self) -> dict:
+        """
+        The solid-band census of the CURRENT colour field on this rank: how many band cells each branch of pass 1 wrote ('contact_cells' the theta plane of the cell's own anchor, 'neighbour_cells' the mean of the anchor's MIXED neighbours' planes where the anchor itself is pure phase, 'pure_cells' the pure-phase continuation C_s = C_f, 'parallel_cells' an interface parallel to the wall where no rotation is defined, 'neutral_cells' the WO-Q neutral-mean fallback, 'unfilled_cells' left untouched), plus 'mean_apparent_angle' — the mean angle the fluid-only normal reported at the contact cells BEFORE the rotation, in degrees. That last number is the direct read-out of how far the fluid-side interface still is from the prescribed angle, measured on the fill's own data rather than on a post-processed shape.
+
+        Rung V6 (WO-V6) adds, all zero unless set_contact_angle_dynamic / set_contact_angle_hysteresis is configured: 'dynamic_cells' (band cells the V6 pass produced an angle for), 'pinned_cells' / 'advancing_cells' / 'receding_cells' (the hysteresis branch census), 'mean_imposed_theta' and 'mean_apparent_theta' in degrees, 'max_Ca_cl' = max |mu_l U_cl / sigma| and 'max_contact_speed' = max |U_cl| in solver velocity units.
+        """
+
+    def wall_slip_sandwich_cells(self) -> tuple:
+        """
+        Per velocity component, the number of cut-cell AXES at which a one-cell fluid gap made the Navier closure inapplicable and the no-slip one was kept. Nonzero means part of the wall is silently no-slip; report it.
+        """
+
+    def set_contact_angle_smoothing(self, on: bool) -> None:
+        """
+        ABLATION - the 3-point in-wall mean of U_cl (default ON). A MAC velocity next to a wall is noisy cell to cell and the cube root of the Cox-Voinov relation puts that noise straight into the imposed angle; off measures what the smoothing is worth.
+        """
+
+    def set_contact_angle_clamp(self, lo: float, hi: float) -> None:
+        """
+        The clamp on the Cox-Voinov cube, in degrees (default 1 / 179). The cubic has no solution beyond the maximum receding capillary number (film entrainment) and the fill's plane construction degenerates at 0/180.
+        """
+
+    def vof_dynamic_field(self, which: int) -> NDArray[numpy.float64]:
+        """
+        The V6 per-cell dynamic-wetting state on the inner region, as (nx,ny,nz): 0 the IMPOSED angle in degrees, 1 the measured APPARENT angle in degrees, 2 the smoothed U_cl (positive = the liquid ADVANCES), 3 Ca_cl, 4 the state (0 not a contact cell, 1 Cox-Voinov on the static base, 2 PINNED, 3 advancing, 4 receding). Regenerates the fill, so it is also the direct gate on the pass's decomposition independence.
+        """
+
+    def set_vof_timing(self, on: bool) -> None:
+        """
+        WO-V9: arm (or disarm) the VoF pipeline's per-stage timers, and reset them. OFF by default. When armed, every stage boundary calls Kokkos::fence() before reading the clock -- the same rule the step's three coarse phase timers already follow, because on a device backend queued work would otherwise be billed to whichever stage next reads the clock. A fence changes WHEN work happens, never WHAT it computes: a run with the timers armed is bit-identical to the same run without them (gated in tests/kokkos/test_vof_timing.cpp). When disarmed the cost is one branch per stage and no fence at all.
+        """
+
+    def reset_vof_timing(self) -> None:
+        """Zero the VoF stage timers and the step counter without disarming them."""
+
+    def vof_timing(self) -> dict:
+        """
+        WO-V9: cumulative VoF stage times in SECONDS since the last set_vof_timing/reset_vof_timing, on this rank. `steps` is the number of step() calls in the window, so every entry divides down to a per-step cost. `step`/`predictor`/`momentum_solve`/`projection` are the step's three coarse phases summed over the SAME window (the remainder of `step` is BC re-imposition, Picard bookkeeping and the scalars). `vof_advect` is the whole colour stage and `vof_bridge` the part of it spent in the G=2 <-> g=3 bridges and the C ghost policy; `vof_momentum_advect` is its V2b twin. `k_*` are the advector's own kernels, shared by the colour, momentum-consistent and consistent-energy drivers, so they are the per-KERNEL breakdown of whichever of the two stages is running: `k_reconstruct` the MYC + plicAlpha pass, `k_fluxes` the geometric face fluxes, `k_sweep` the update, `k_clip` the V5a cut-cell clip, `k_exchange` the g = 3 ghost exchange, `k_sweeps` the number of sweeps (3 per advect call). Returns zeros unless the timers are armed.
+        """
+
+    def set_vof_worklist(self, on: bool) -> None:
+        """
+        WyAdvector::useWorklist -- compact the PLIC reconstruction pass onto the mixed cells (a parallel_scan over the reconstruction region, then a dense parallel_for over the compacted list) instead of a guarded parallel_for over the whole region. Default ON. Pure optimization: the flux never reads a non-mixed cell's plane, so the two paths produce the same field BIT FOR BIT (gated in tests/kokkos/test_vof_advect.cpp and measured in WO-V9).
+        """
+
+    def vof_worklist(self) -> bool:
+        """Whether the reconstruction-pass compaction is on."""
+
+    def set_vof_curvature_worklist(self, on: bool) -> None:
+        """
+        WO-V9: run the V3 curvature cascade (the PLIC plane pass, the height functions and the PV fallback) over a COMPACTED list of the interfacial cells instead of over the whole inner region. Default ON. The cascade is the most divergent kernel in the pipeline -- on a resolved droplet the interfacial cells are well under 1 % of the block, so a dense parallel_for puts one or two active lanes in a warp and the other thirty run the guard and then idle for the whole height function. Compaction is a pure re-ordering (each cell reads the same neighbours and writes the same value), so the two paths are BIT-IDENTICAL; tests/kokkos/test_vof_timing.cpp gates that and WO-V9 records the gain.
+        """
+
+    def vof_curvature_worklist(self) -> bool:
+        """Whether the curvature-cascade compaction is on."""
+
+    def vof_diagnostics(self) -> dict:
+        """
+        Colour census over THIS RANK's inner cells: sum (cell-volume units), min, max, the number of mixed cells (0<C<1) and of wisps (C within 1e-8 of 0 or 1). No clipping is applied at this rung, so min/max may leave [0,1] if the CFL cap is raised.
+
+        With an immersed solid (rung V5a) the dict also carries the cut-cell quantities, all zero without one: 'volume' = sum eps_eff*C over fluid cells, the functional the openness-weighted scheme conserves EXACTLY (eps_eff = max(eps, 1/64), the 4^3 subsampling resolution — see src/vof/cutcell.hpp rule 1); 'raw_volume' = sum eps*C, which differs only on eps==0 cells that still own an open face and is therefore NOT the conserved functional; 'solid_sum' = sum of C over solid cells (0 by construction — the neutral band fill lives on the working block, not on 'C'); 'min_fluid'/'max_fluid' over UNCUT fluid cells (eps==1), where Weymouth's boundedness applies verbatim; 'clipped_volume' / 'clipped_signed' = the liquid volume the cut-cell clip moved during the last advection (a TRIPWIRE on the flux approximation, not a mechanism: if it is not negligible the fix is the solid-clipped flux polygon); 'cut_cells' / 'solid_cells'.
+
+        'inflow_volume' / 'outflow_volume' are the liquid volume that ENTERED / LEFT through the domain faces during the LAST colour advection, in the same cell-volume units as 'sum' (0 unless a VoF boundary colour is set — rung V-BC). They are the advector's OWN face fluxes, so sum(C) - sum(C_0) = integral(inflow - outflow) holds to round-off whatever the interface does; vof_bc_volumes() breaks them out per face.
+        """
+
+    def vof_block_stats(self) -> list:
+        """
+        Per-bubble Lagrangian census, one dict per block, in block-id order. 'lo'/'hi' (the global index box) and 'master' are replicated on every rank; the MEASURED entries — 'volume' (sum of C over the box, cell volumes), 'centroid', 'velocity' (d(centroid)/dt of the last advection), 'moments' (the central second moments xx, yy, zz, xy, xz, yz divided by the volume, i.e. the deformation) — are filled only on the block's MASTER and are zero elsewhere.
+
+        'discarded' is the colour a re-centring dropped, cumulatively: Weymouth-Yue leaves round-off residue in every cell its sweeps touch and the box tracks the BUBBLE, not that wake, so the residue falling outside the new box is discarded. Never physical liquid (measured -9.5e-17 over a 20-cell translation, against a bubble volume of 524), but it is reported rather than hidden — a container that silently loses mass is not acceptable.
+
+        'debris_cells' / 'debris_volume' are this step's marker DEBRIS removal (block CSF on only; master only; see set_vof_block_debris): interfacial cells with every cell of the marker within two cells below C = 1/2, and their summed colour. 'debris_returned', 'debris_lost' and 'debris_unresolved' are the cumulative ledger (doc/vof_overlap_design.md 5.3): volume + discarded + debris_lost is conserved. 'full_axis' counts re-centrings whose box had to span a whole periodic axis (it is then [0, L) and copied with the wrap, losslessly; 12.3). 'residue_returned' is the cumulative SIGNED sub-wisp-threshold residue cleared after each advection and returned to the interface with the debris (13): volume + discarded + debris_lost is exact.
+
+        'overlap_*' are the GLOBAL marker-overlap census of the last block advection (vof_overlap_design 5.6; block CSF or the overlap density on), the same in every dict: 'overlap_max_sum' = max over cells of S = sum_k C_k, 'overlap_excess' = sum of (S - 1)^+ (cell volumes), 'overlap_cells' = cells with S > 1 + 1e-8, and 'overlap_bound_active' = the phantom-aware capillary limit (2 rho_min in place of rho_l + rho_g) is in force for the next step (triggered by max S > 1 + 1e-2).
+        """
+
+    def set_vof_phantom_capillary_bound(self, enabled: bool = True) -> None:
+        """
+        The phantom-aware capillary limit of the block container (doc/vof_overlap_design.md 5.6, 11.3), DEFAULT True: while two block markers overlap (max S > 1 + 1e-2) the capillary limit of vof_step_limits() and step() uses 2 rho_min in place of rho_l + rho_g -- the part of one marker's surface inside another is an interface with gas on both sides. False restores the pre-5.6 bound (the ablation; a fixed-dt driver at a density ratio above ~31 otherwise throws at first contact).
+        """
+
+    def set_vof_block_debris(self, enabled: bool) -> None:
+        """
+        Per-step marker DEBRIS removal of the block container (doc/vof_overlap_design.md 5.3, 11). Default: ON under enable_vof_block_csf, off otherwise. A debris cell is an interfacial cell of a marker (1e-8 < C < 1-1e-8) with every cell of that marker within two cells below C = 1/2: colour with no resolvable interface near it (what two overlapping markers tear off each other). Its colour is zeroed and the volume is returned to the marker's attached interfacial cells weighted C(1-C), in a fixed summation order, so the marker volume is exact and the state decomposition-independent. Ledger in vof_block_stats(): debris_cells / debris_volume (this step), debris_returned, debris_lost, debris_unresolved (cumulative, migrate with the block). enabled=False keeps the census (what WOULD be removed) and moves nothing.
+        """
+
+    def set_vof_block_overlap_density(self, enabled: bool) -> None:
+        """
+        OPT-IN MODEL, default False (the MAX union verbatim). With it the union colour that feeds rho(C) and mu(C) -- and the registered 'C' -- becomes C_eff = max_k C_k where S = sum_k C_k <= 1 + 1e-8 and max(0, 2 - S) where markers overlap: the overlap volume is treated as the sub-grid FILM liquid (the 'tent'), so the phantom interface of one marker inside another is an ordinary liquid-gas interface under the base capillary bound. Its cost: the lens holds liquid the real state does not (buoyancy and mixture weight off by 2 V_overlap during a contact), and it changes collision dynamics. See doc/vof_overlap_design.md 5.6.
+        """
+
+    def vof_block_imbalance(self) -> float:
+        """
+        max/mean of the per-rank block-cell load under the CURRENT master assignment (round robin by block id at rung W0). 1.0 is perfect; the weighted-ORB assignment of rung W1 is what this number is here to grade.
+        """
+
+    def vof_block_census(self) -> dict:
+        """
+        Per-rank load census of the block container: 'masters'[r] = blocks rank r masters, 'cells'[r] = the inner cells those blocks carry (the actual VoF work).
+        """
+
+    def vof_block_imbalance_of(self, mode: int) -> float:
+        """
+        The max/mean per-rank block-cell load the given assignment mode WOULD give on the current blocks, without applying it — so a study can put the three modes side by side on one swarm without perturbing the run.
+        """
+
+    def set_vof_block_device_staging(self, on: bool) -> None:
+        """
+        Pack/unpack the block gather and scatter in the block's own MEMORY SPACE (rung W1 item b, default True), with a host staging copy only per MPI MESSAGE — and none at all for the master's own cells, which are a device-to-device copy. False selects rung W0's host-staged path (a full mirror of the local patch per step), which is what the device-vs-host measurement compares against. Every step is a copy of a double, so the two paths are BITWISE identical; the ctest gates that rather than asserting it.
+        """
+
+    def set_vof_block_pool(self, on: bool) -> None:
+        """
+        Recycle the advectors a re-centring retires, keyed by the exact box extent (rung W1 item c, default True). A translating bubble keeps its box SIZE and only moves its origin, so the hit rate is ~100 % and the ten Views of the new box are not allocated. A recycled advector is handed back in the state a freshly initialised one is in (colour and the three face-velocity fields zeroed), so the pool is bitwise inert.
+        """
+
+    def vof_block_pool_stats(self) -> dict:
+        """
+        Block-pool census: 'hits' = advectors recycled, 'misses' = advectors allocated.
+        """
+
+    def vof_block_kappa(self, id: int) -> NDArray[numpy.float64]:
+        """
+        One marker's OWN curvature (internal units, 1/cell) over its block box, the layout of vof_block_color; empty unless this rank masters it and the block CSF is on. A diagnostic.
+        """
+
+    def vof_block_force(self, component: int) -> NDArray[numpy.float64]:
+        """
+        The block CSF face force of component c (0,1,2) as scattered (summed over markers) into the solver's LOW-face slot of each cell, internal units; the field the momentum RHS adds. A diagnostic.
+        """
+
+    def vof_block_curvature_stats(self) -> dict:
+        """
+        Branch census of the last block-CSF curvature pass, SUMMED over this rank's blocks (local to the rank). 'no_estimate' must be 0 on any gated case. 'clipped' = cells whose |kappa| the admissibility clip bounded (set_vof_block_kappa_clip; a NaN counts too); 0 on a resolved interface.
+        """
+
+    def set_outflow_rho_correction(self, on: bool = True) -> None:
+        """
+        The 1/rho_f mobility factor on the HIGH-side outflow face correction. DEFAULT TRUE since WO-R2; pass False for the ablation.
+
+        A projection correction cancels the discrete divergence only if it uses the SAME face coefficient the operator row used. Until WO-R2 the multigrid re-imposed the literal openness 1.0 at every Dirichlet domain face, overwriting buildRhoCoeff's open_f*rho0/rho_f, so the plain phi difference was the consistent partner and WO-R measured this factor making things seven orders WORSE. WO-R2 fixed the operator (CutcellMG::setOutflowCoefficient) and the verdict inverted. Stratified duct, ratio 10, 5 steps, max|div(open u)| of the PROJECTED field:
+                                      old operator   fixed operator
+          without the factor            8.76e-10        9.97e-05
+          with    the factor            9.24e-03        8.31e-10
+        (tests/kokkos/test_vof_bc.cpp gate F2.) Bitwise inert at constant density (rho_f == rho0 makes the factor exactly 1) and gated on the variable-density path.
+        """
+
+    def outflow_rho_correction(self) -> bool:
+        """
+        Whether the 1/rho_f factor is applied to the outflow face correction (WO-R item 4, reversed by WO-R2's operator fix; default True).
+        """
+
+    def set_vof_curvature_weight_width(self, width: float) -> None:
+        """
+        Wendland support width of the PLIC-volumetric fallback fit, in CELL units. Default 2.5, which is Han et al.'s recommended pairing with the 5^3 stencil. Their translating droplet recovers first-order convergence of the spurious currents at 3.5 and loses convergence entirely at 4.5 (over-smoothing), so this is a real trade-off between the locality of the estimate and its robustness to transport error — not a free knob.
+        """
+
+    def set_vof_curvature_mixed_height_fit(self, on: bool = True) -> None:
+        """
+        Enable cascade branch 3, the mixed height-position fit (a paraboloid through the interface positions of whichever columns closed). DEFAULT OFF and it should stay off: measured on an exact-fraction sphere at 16/32/64 it takes over the 19.5-59.6% of cells the height function cannot serve and DESTROYS the convergence of the max curvature error (order 0.00 vs 1.86 with the PLIC-volumetric fallback instead), because its data set is the columns that closed - a slope-selected, asymmetric subset whose lever-arm bias is scale invariant. Shipped as a re-measurable instrument, not a configuration.
+        """
+
+    def csf_diagnostics(self) -> dict:
+        """
+        Census of the CSF face force on THIS RANK: per component the max |F|, the number of faces that carried a force, and the number of ORPHAN faces — faces the colour jumps across but where neither cell has a curvature estimate, so the force was dropped. An orphan is a defect and must be 0; it is counted rather than hidden.
+        """
+
+    def set_phase_change_plane_dirichlet(self, on: bool) -> None:
+        """
+        The PLANE-ANCHORED (ghost-fluid) interfacial Dirichlet condition. ON by default.
+
+        Rungs P0/P1 pinned the whole interfacial CELL at T_G, so the numerical thermal boundary sat at the cell CENTRE while the mass-flux gradient is fitted from the PLIC PLANE — a mismatch of up to half a cell that CHANGES SIGN as the interface sweeps through a cell, and the first-order component of the P1 Stefan error (WO-P01 finding 6). With this on, the condition becomes PER FACE: for a pure cell i whose neighbour j is interfacial, that face's row carries k*open*(T_i - T_G)/theta with theta the distance in cells from i's centre to j's PLIC plane along the face's own axis, and the interfacial cell's own value is never read by any neighbour.
+
+        A per-CELL value (the literal reading of the work order) does NOT work and the measurement is in the findings: giving the interfacial cell the value the one-sided profile takes at its centre is right for the side the fit came from and wrong for the other side — on the P1 Stefan ladder it heats the saturated liquid through the interfacial cell's liquid-side face, which gives the liquid a spurious gradient that feeds straight back into mdot: +6.20/+5.62/+5.42 % at N = 64/128/256, order 0.10, against +1.31/+0.59/+0.20 % and order 1.37 for the cell-centre pinning it was meant to improve on. The per-face form has no such asymmetry (the liquid-side face reads T_G at its own theta, i.e. exactly zero flux for a saturated liquid).
+
+        False restores the rung P0/P1 behaviour bit-for-bit.
+        """
+
+    def set_phase_change_quadratic_fit(self, on: bool) -> None:
+        r"""
+        Fit the one-sided interfacial temperature gradients QUADRATICALLY through the interface value (T - T_G = G phi + Q phi^2) instead of linearly. This is VOF_PLAN section 9 item 1's Aslam quadratic extrapolation in least-squares form — the same 5^3 pure-cell samples, the same Malan collinearity weights, one more basis function, no PDE sweeps. Once the plane-anchored Dirichlet has removed the cell-centre mismatch, the linear fit's O(T\'\' h) curvature bias is the leading error of the rung: its samples start about one cell from the plane and reach two and a half, so a curved profile tilts the straight line through the origin. ON by default (WO-P23): with the plane-anchored Dirichlet it takes the P1 Stefan interface position from +0.195 % to +0.003 % at N = 256, and the mdot kernel itself from order 1.1 to order 2.0. set(False) is the ablation.
+        """
+
+    def set_phase_change_area(self, mode: str) -> None:
+        """
+        WO-P3c: WHICH GEOMETRY the interfacial area A_Gamma comes from. A_Gamma sets the plane shift dV = mdot A dt / rho_l and the divergence source S = mdot A (1/rho_g - 1/rho_l), so a bubble grows as int mdot dA and a biased area is a biased growth rate.
+          'plic' (DEFAULT, rungs P0/P1): plicArea = |m|_2 dV/dalpha on the MYC normal.
+          'cascade-metric': the V3 curvature cascade's own geometry -- the height function's area element sqrt(1 + h_x^2 + h_y^2) from the SAME central differences the curvature differentiates once more (tiers 1/2), the PV paraboloid's gradient (tier 3) -- applied to the PLIC polygon's projected footprint, so the cells of a column still tile.
+          'cascade-normal': the same normals, but the plane is rebuilt on them, plicArea(n*, plicAlpha(n*, C)).
+          'cascade-footprint': the height function's OWN footprint times its own metric, the only per-cell variant whose pieces tile.
+          'sheet-color-centroid' / 'sheet-color-split' / 'sheet-plic-centroid' / 'sheet-plic-split' = WO-P3d, the JOINED sheet: marching tetrahedra on the cell-centre lattice, one watertight surface whose triangles are booked to cells -- the C = 1/2 level set with whole triangles to the cell holding the centroid, the same sheet clipped to each cell's cube, and the same two deposits on the zero of the PLIC-reconstructed signed distance (exact on a TILTED plane, where interpolating C is not, because C(d) is the SZ piecewise cubic). The sheet modes are the only ones whose SUM converges on a curved interface: WO-P3c proved with two analytic controls that every PER-CELL area is first order in h/R because the pieces do not JOIN across cells.
+        All of the per-cell modes are EXACT on a plane, so every planar gate (P0a/P0b/P1/P2) is unmoved. The default is 'plic' because the measurement says so: on a sphere whose colour field is resolved (16^3 sub-sampling), summed plicArea is within 0.5 % of 4 pi R^2 and the cascade does not improve it. WO-P3b's 5.5-9.3 % 'PLIC area deficit' was its probe's own 4^3 sub-sampling, which quantizes C to 1/64 and drops a QUARTER of the interfacial cells (their volume is 1e-4 %, their area 6 %).
+        """
+
+    def phase_change_area(self) -> str:
+        """The set_phase_change_area mode in force, as its name."""
+
+    def set_phase_change_energy_muscl(self, on: bool) -> None:
+        """
+        MinMod-limited donor reconstruction of the face temperature in the CONSISTENT energy flux, instead of the default plain donor-cell (first-order upwind) value. OFF by default. The consistency is what the geometric flux buys; its first-order upwind numerical diffusion |u| h (1 - CFL)/2 thickens the thermal boundary layer and therefore LOWERS the interfacial gradient, which is exactly what mdot is — measured on the P3 Scriven bubble at Ja = 0.5: -2.24 % on R(t) with plain upwind against -1.46 % for the scalar module's Koren TVD (which is NOT consistent). This buys the accuracy back; it is a switch and not a default because it is the energy twin of set_vof_momentum_muscl.
+        """
+
+    def phase_change_diagnostics(self) -> dict:
+        """
+        Per-rank phase-change census of the LAST step: mdot extrema/mean and the interfacial cell count, the total PLIC interface area, the liquid volume the regression removed, the clip-and-redistribute ledger (|deficit| moved, and how many cells clipped at 0 / 1), the deposited divergence source (its sum and how many cells received it), how many interfacial cells found NO pure gas cell within two cells along +n (the source then stays put — a fallback that must be 0 on a resolved interface), the colour extrema, 'band_div' = max|div(open u)| over the INTERFACIAL cells (WO-P23: the direct read-out of whether the field Weymouth-Yue advects with is the liquid velocity there — the band-extended velocity of VOF_PLAN section 9 item 3 is needed iff this is not at the projection floor), and the energy-scalar extrema under the consistent transport.
+        Units are the solver's physical ones: mdot_* a mass flux, interface_area/area_orphan an area, q_* a power, removed_volume/redistributed/unresolved a liquid VOLUME (colour x cell volume), source_sum and band_div 1/time; colours and temperatures as given.
+        """
+
+    def set_phase_change_fit_curvature(self, kappa: float) -> None:
+        """
+        WO-P3f INSTRUMENT (default 0, bitwise inert): prescribe the interface curvature `kappa = div(n)` that the one-sided temperature fits use to measure a sample's distance to the CURVED interface instead of to the interfacial cell's tangent plane (`vof::pcCurvedDistance`). For a spherical GAS bubble of radius R, whose PLIC normal points inward, kappa = -2/R.
+
+        Why it exists: the tangent-plane distance makes the fit FIRST ORDER in h/R on a curved interface, and every off-axis sample is hotter than the plane model expects, so the fitted dT/dn and with it mdot come out HIGH. Measured a priori on an exact sphere with an exactly linear profile: +19.2 / +12.1 / +8.8 / +6.2 % at R = 6 / 10 / 14 / 20, observed order 0.91-0.98 in h/R. This entry point takes a PRESCRIBED kappa so that bias can be measured against a known geometry; it is not a curvature estimator.
+        """
+
+    def set_phase_change_energy_order(self, order: int) -> None:
+        """
+        WO-P3g: the ORDER of the interfacial energy operator. 1 (the shipped WO-P23...P3f scheme) or 2.
+
+        `order = 2` turns on, TOGETHER, the four pieces WO-P3f's instruments indicated:
+          1. `set_phase_change_mdot_operator(True)` -- mdot is the energy operator's OWN interfacial flux q/(h_lv A) instead of a separate least-squares fit, so the heat the energy equation loses and the mass the regression produces are one discrete quantity (and the interfacial AREA cancels out of the mass balance entirely);
+          2. `set_phase_change_gfm_order(2)` -- the Gibou-Fedkiw three-point ghost-fluid row (2/((1+theta) theta), 2/(1+theta)) instead of the two-point (1/theta, 1), which is exact on a quadratic profile at every theta;
+          3. `set_phase_change_curvature_distance(True)` -- the row's theta and the one-sided fits' sample distances are measured to the CURVED interface, with kappa taken per cell from the V3 curvature cascade;
+          4. `set_phase_change_carry_conserve(True)` -- WO-P3f's enthalpy-conserving Dirichlet overwrite.
+
+        Why together and not one at a time: WO-P3f measured the shipped scheme's 1 % Scriven error to be the residue of a CANCELLATION between the fit's +6 % curvature bias, the two-point row's -5 % flux deficit and the overwrite's -0.7...-4.3 % enthalpy destruction, so repairing any ONE alone makes the gate worse.
+        """
+
+    def set_phase_change_deposit_fallback(self, on: bool = True) -> None:
+        """
+        WO-P3f open item 6 / WO-P3g (OFF by default): give an interfacial cell whose two along-the-normal deposit candidates are BOTH still interfacial a target from the 5^3 box instead of leaving the divergence source in place. A cell that keeps its source carries div(open u) = S on its own faces, so Weymouth-Yue advects the colour with a field that is not the liquid velocity -- read it out with `phase_change_diagnostics()['band_div']` and the 'fallback_cells' count.
+        """
+
+    def set_phase_change_mdot_operator(self, on: bool = True) -> None:
+        """
+        WO-P3g item 1 (default OFF): take mdot from the energy operator's own interfacial flux -- the sum of the ghost-fluid rows' Dirichlet couplings evaluated with the converged T -- instead of the one-sided least-squares fit, which stays as `phase_change_diagnostics()['mdot_fit']`. Under a physical domain this needs set_phase_change_energy: the constant-diffusivity flux carries no heat capacity, so the step raises rather than assume one.
+        """
+
+    def set_phase_change_gfm_order(self, order: int) -> None:
+        """
+        WO-P3g item 2 (default 1): the order of the one-sided (ghost-fluid) Dirichlet row. 1 = the shipped two-point form k o (T_Gamma - T_i)/theta; 2 = Gibou-Fedkiw's three-point form through (T_behind, T_i, T_Gamma), which reproduces a quadratic temperature profile exactly at every theta.
+        """
+
+    def set_phase_change_curvature_distance(self, on: bool = True) -> None:
+        """
+        WO-P3g item 3 (default OFF): measure the GFM row's theta and the one-sided fits' sample distances to the CURVED interface, with the mean curvature taken PER CELL from the V3 curvature cascade (the same kappa surface tension uses; positive for a convex blob of liquid, i.e. -2/R for a gas bubble). Supersedes `set_phase_change_fit_curvature`, which prescribes one curvature for the whole field; where both are set the cascade wins.
+        """
+
+    def set_phase_change_carry_conserve(self, on: bool = True) -> None:
+        """
+        WO-P3f OPTION (default OFF): make the interfacial cells' per-cell Dirichlet OVERWRITE enthalpy-conserving.
+
+        An interfacial cell's row is the identity `T = dval`, so whatever the geometric energy transport left there is discarded every step. Over a cell's interfacial lifetime that telescopes to rho c_p (T_entry - dval_exit): a liquid cell the interface sweeps enters with its superheat and leaves as vapour at T_sat, and the difference goes nowhere. Measured on Scriven 128^3 by `phase_change_budget()['d_overwrite']`: -0.7 % of mdot h_lv A_Gamma at Ja = 0.5 and -4.3 % at Ja = 2, one-signed.
+
+        With this on, that enthalpy is handed to the interfacial cell's face neighbours that are still in the solve, weighted by n_d^2 (the clip-and-redistribute allocation), as a fixed-order gather so it is decomposition-independent. Which side receives is decided per axis by which pure neighbour deviates from T_Gamma in the same direction as the interfacial cell itself, i.e. the phase the enthalpy came from -- the superheated liquid on an evaporating bubble, the superheated vapour on the Stefan problem.
+        """
+
+    def phase_change_carry_ledger(self) -> dict:
+        """
+        WO-P3f: the last `set_phase_change_carry_conserve` pass — the enthalpy actually handed back ('deposited') and the enthalpy of the interfacial cells that had NO neighbour left in the solve ('lost', which stays destroyed). Both 0 when the option is off. Units as phase_change_budget's enthalpies.
+        """
+
+    def set_phase_change_budget(self, on: bool = True) -> None:
+        """
+        WO-P3f INSTRUMENT: turn on the energy budget of the phase-change energy solve. Costs one extra cell field and two reductions per energy solve, and is skipped entirely when off (the solve is then bit-identical). Read it with `phase_change_budget()`.
+
+        What it exists for: interfacial cells are Dirichlet rows, i.e. they are OUTSIDE the energy solve, so the set over which enthalpy is conserved changes membership every step as the interface sweeps. A liquid cell that becomes interfacial LEAVES that set carrying its superheat rho c_p (T - T_sat) and an interfacial cell that becomes pure RE-ENTERS it carrying `pcCarriedValue`; neither transfer appears in the latent-heat book-keeping.
+        """
+
+    def phase_change_budget(self) -> dict:
+        """
+        WO-P3f: the ENERGY BUDGET of the LAST energy solve, in the solver's physical units: energies for the enthalpies and powers for `q_gfm`/`q_behind` with set_phase_change_energy on; without it the constant-diffusivity scalar carries no heat capacity and they are temperature x volume (and per time).
+          h_open / h_open_new  sum rho c_p (T - T_sat) over the UNMASKED cells, before / after the solve
+          h_liquid, h_masked   the same over the pure-liquid and the interfacial cells
+          d_overwrite          sum rho c_p (dval - T) over masked cells: what the Dirichlet rows inject when they overwrite the transported temperature (negative = destroyed)
+          d_overwrite_new      the part of it on cells that were NOT masked last step
+          e_enter / e_leave    the enthalpy carried OUT of / INTO the solved set by the cells that changed class this step
+          q_gfm                the heat the plane-anchored rows deliver INTO the unmasked set (negative while a bubble grows); the energy equation's own interfacial flux, to be compared with the regression's `mdot h_lv A_Gamma`
+          n_enter_*/n_leave_*  the class-change census
+        The discrete balance the entries close over one solve is `sum rho c_p (T^{n+1} - T*)/dt = q_gfm + (domain boundary flux) + (solve residual)`.
+        """
+
+    def set_csf_mode(self, mode: str) -> None:
+        """
+        ABLATION. 'face' (default, the only production mode) evaluates the surface-tension force as sigma*kappa_f*(C(i)-C(i-s))/h at the face -- the projection's own gradient operator. 'cell' evaluates a CELL-CENTRED sigma*kappa*grad(C) and face-interpolates it with the arithmetic mean, exactly as the per-cell body-force machinery carries a rho*g field: consistent, convergent, and wrong for surface tension, because the result is not in the range of the operator the projection inverts. Shipped so the difference is a measured number (see the vof_surface_tension ctest), not an argument.
+        """
+
+    def set_vof_interface_eps(self, eps: float) -> None:
+        """
+        Wisp threshold on the curvature cascade's interfacial predicate once surface tension is on: a cell carries an interface only while eps < C < 1-eps. Default 1e-8.
+
+        This is NOT optional and it is not cosmetic. Weymouth-Yue leaves round-off colour residue (measured down to -3e-35) in every cell its sweeps touch; those cells satisfy 0 < C < 1, so the cascade builds a PLIC polygon of area ~0 for them and returns |kappa| up to 1e8 where the physical value is 0.125. A face between such a cell and a REAL interfacial cell then carries a surface-tension force eight orders too large. Measured on a 32^3 static droplet with eps = 0: max|u| 4.5e-4 at step 1 -> 2.7e-1 by step 20, and at 96^3 the run trips the Weymouth-Yue CFL cap. Setting eps = 0 reproduces that, which is the ablation. compute_vof_curvature() called WITHOUT surface tension keeps the rung-V3 predicate (0 < C < 1) unchanged.
+        """
+
+    def vof_interface_eps(self) -> float:
+        """The wisp threshold set by set_vof_interface_eps."""
+
+    def set_vof_block_kappa_clip(self, enabled: bool, kappa_max: float | None = None) -> None:
+        """
+        Curvature admissibility clip of the BLOCK container (doc/vof_overlap_design.md 5.1, 11): after each marker's cascade every interfacial cell gets |kappa| <= kappa_max. DEFAULT ON at kappa_max = 1/Delta_min. kappa_max is PHYSICAL (1/length); None selects the default. enabled=False restores the pre-clip block cascade verbatim (the ablation). The single-field cascade never clips: there a large |kappa| is legitimate (an under-resolved droplet, a contact-line cell).
+
+        Why: a mixed cell with no body of its marker near it (debris left where two markers overlapped) has no closing height-function column and a PLIC-volumetric fit through polygons of area ~0, so its paraboloid is arbitrary (measured |kappa| 273 and 428 per cell against a true 0.4 on channel_18; one-step velocity blow-up). |kappa| <= 1/Delta is a sphere of R >= 2 Delta, the smallest the height function can see, and bounds every CSF face force by sigma |dC| / Delta^2. The value is written only where it changes, so a resolved interface is bit-identical; vof_block_curvature_stats() reports 'clipped'.
+        """
+
+    def set_vof_kappa_frozen(self, on: bool = True) -> None:
+        """
+        INSTRUMENT: stop recomputing the curvature at the head of each step and use whatever is in the 'kappa'/'kappa_branch' fields. With set_vof_kappa_constant this isolates the balanced-force identity from the curvature estimator.
+        """
+
+    def set_vof_kappa_constant(self, kappa: float) -> None:
+        """
+        INSTRUMENT: set kappa to a constant everywhere (inner + ghosts), mark every cell as carrying a valid estimate, and freeze it. The CSF force is then EXACTLY the discrete gradient of sigma*kappa*C, so the projection must annihilate it to round-off from any colour field whatsoever — the exactness gate of rung V4, independent of curvature accuracy and of resolution.
+        """
+
+    def set_rho_face_harmonic(self, on: bool = True) -> None:
+        """
+        Use the HARMONIC instead of the arithmetic face mean of rho in the pressure projection (both the operator coefficient and the velocity correction, so the projection stays exact). DEFAULT OFF, and it should stay off: the arithmetic mean of rho IS the harmonic mean of the mobility 1/rho — the series-correct choice for a normal flux — and it is what makes the discrete hydrostatic balance EXACT, because the momentum time term and the face body force interpolate rho arithmetically and are not switched by this flag. Shipped as a measured knob for the coefficient-coarsening question (VOF_PLAN S3), not as an alternative scheme.
+        """
+
+    def set_vof_rho_floor(self, fraction: float) -> None:
+        """
+        Floor on rho^c in the recovery divide u = (rho^c u)/rho^c, as a FRACTION of min(rho_c0, rho_c1). Default 1e-6. rho^c leaves [rho_c0, rho_c1] only through a wisp in the half-shifted colour and reaching zero would need C^c ~ -1/(ratio-1), so this is a guard, not a model — vof_momentum_diagnostics()['floored'] reports how many control volumes it actually touched.
+        """
+
+    def vof_rho_floor(self) -> float:
+        """The absolute rho^c floor used by the last recovery."""
+
+    def set_vof_momentum_scheme(self, name: str) -> None:
+        """
+        The transported face velocity of the VoF momentum flux (flow doc/vof_momentum_second_order.md). 'upwind': donor cell, convex at every density ratio, first order (the default until 2026-10-31). 'muscl_mixed': a MinMod slope of the MIXED control-volume velocity; it converges to a WRONG limit at high ratio (P1, ratio ~1e3: +3.0/+3.1 % at d/h 16/24; the mechanism is open). 'muscl_mixed_capped': that slope times the mass-aware cap (the diagnosis ablation). 'muscl_phase': each phase's mass flux carries its own face velocity from an interface-biased MC slope, scaled by the cap - second order, a discrete maximum principle at any ratio, the uniform-velocity identity bit-exact; the DEFAULT. vof_momentum_diagnostics()['capped'] counts the faces the cap scaled in the last step. Any other name raises ValueError.
+        """
+
+    def vof_momentum_scheme(self) -> str:
+        """The selected VoF momentum scheme (see set_vof_momentum_scheme)."""
+
+    def vof_viscous_interface_census(self) -> dict:
+        """
+        The sharp interface band of the last step, LOCAL to this rank (sum over ranks yourself): 'band_cells' (interfacial cells, PLIC and virtual planes), 'virtual_cells' (pure cells carrying a face plane), 'film_cells' (virtual cells whose two neighbours along the plane axis are both of the other phase) and 'fit_fallbacks' (cells whose interface fit was singular: tau = D_nn = 0, first order locally). The edge-owner ties (§5.8; every in-domain edge of the owned cells, an edge on a non-periodic high domain face not counted): 'tied_edges' (band edges whose owner set's plateau, the candidates within 1e-6 cells of the closest plane, has two or more members), 'max_tie_spread' (the largest distance spread within a plateau, index units; 0.0 if none), 'min_untied_gap' (the smallest distance from the closest plane to a candidate outside the plateau; inf if none) and 'blended_edges' (band edges with a candidate on the owner-weight ramp, 1e-6 to 1e-5 cells beyond the closest, which enters the edge's weighted mean with a partial weight) -- INFO, not a defect signal; take max/min over ranks yourself. All zero (gap inf) while the sharp interface is inactive.
+        """
+
+    def vof_viscous_interface_fit(self) -> dict:
+        """
+        The sharp interface fit of the last step (doc/vof_sharp_viscous_stress.md §5.3), LOCAL to this rank, as (nx, ny, nz) arrays: 'tau_x', 'tau_y', 'tau_z' (the interface traction tau_hat) and 'dnn' (D_nn_hat), both in internal units, zero off the band, and 'fallback' (1 where the fit was singular). Empty while the sharp interface is inactive. A read-out for verification; it changes nothing.
+        """
+
+    def set_vof_momentum_muscl(self, on: bool = True) -> None:
+        """
+        Former spelling of set_vof_momentum_scheme: on = 'muscl_mixed' (a MinMod slope of the mixed control-volume velocity), off = 'upwind'. Use set_vof_momentum_scheme; 'muscl_phase' is the second-order scheme that stays bounded at high density ratio.
+        """
+
+    def set_vof_momentum_cell_flag(self, on: bool = True) -> None:
+        """
+        ABLATION: use the PRESSURE-cell frozen dilation flag H(C^n-1/2) on the shifted control volume instead of its structural analogue H(C^c,n-1/2). The flag that must be shared is the one of the pair that telescopes, and both members of that pair live on the shifted volume — this switch is the literal reading of the work order, kept as a measurement.
+        """
+
+    def set_vof_flux_clamp(self, on: bool = True) -> None:
+        """
+        ABLATION: drop the Weymouth flux clamp max(0,|a|-(1-C^c_don)) <= |F| <= min(|a|,C^c_don) on the half-shifted control volume. The geometric flux is bounded by what the CURRENT cell planes see in the donor, not by the ADVECTED C^c; the gap is O(a^2) and at density ratio 1e4 a 2.6e-2 undershoot drives rho^c to -255, which the recovery would divide by. Default ON; off is how that statement stays a measured number.
+        """
+
+    def vof_momentum_diagnostics(self) -> dict:
+        """
+        Census over THIS RANK's momentum control volumes: per-component min/max of the half-shifted colour C^c, the summed momentum rho^c u_c (the conservation census), the minimum rho^c before the floor, and the number of control volumes the floor touched; 'clamped' and 'capped' count the faces the Weymouth clamp and the mass-aware cap (set_vof_momentum_scheme) touched in the last step.
+        """
+
+    def vof_advected_velocity(self, component: int) -> NDArray[numpy.float64]:
+        """
+        The recovered advected velocity (rho^c u_c)/rho^c of component c on the inner cells — the momentum RHS's time base. Exposed so the uniform-velocity consistency identity can be gated on the ADVECTION ALONE, with the projection and the momentum solve out of the picture.
+        """
+
+    def set_property_mode(self, mode: str = 'variable', harmonic: bool = False) -> None:
+        """
+        Enable variable-coefficient momentum (variable viscosity): mode 'variable' binds the 'mu' field (get/set_field('mu')) into the diffusion operator; 'constant' reverts. harmonic = harmonic face-viscosity mean (continuous shear stress across a jump) vs arithmetic. A closure targeting 'mu' enables this automatically. The incremental-rotational pressure scheme (large-dt / steady-Stokes) stays active — see set_variable_rotational.
+        """
+
+    def set_variable_rotational(self, mode: str = 'min', chi: float = 1.0) -> None:
+        """
+        Rotational-pressure term under variable viscosity (the constant-mu Timmermans term -mu*div(u*) is only valid for homogeneous viscosity — Deteix & Yakoubi 2018). 'min' (default): constant coefficient chi*mu_min — provably stable at any contrast, exact fallback to the constant-mu scheme for uniform mu. 'full': pointwise chi*mu(i) — better pressure consistency at MILD contrast only. 'off': plain incremental (no rotational term). All modes keep the incremental predictor (large-dt / steady-Stokes capability).
+        """
+
+    def set_density_mode(self, mode: str = 'variable') -> None:
+        """
+        Enable variable density: binds the 'rho' field (get/set_field('rho'), created seeded with set_rho's value if absent) into the momentum time term, the advection weight, the per-cell body force (face-interpolated), and the pressure projection (face coefficient openness*rho0/rho_f with the matching 1/rho_f velocity correction; rho0 = set_rho's value, so a uniform field reduces exactly to the constant solver). A closure targeting 'rho' (e.g. a linear mixture of a transported phase fraction) enables this automatically. For gravity, register a closure force_z = linear(rho, params=[0, -g]).
+
+        COLLOCATED (SolverColocated, rung V8): supported since 2026-09-02, ALL-FLUID only (set_pressure_geometry; an immersed solid, the ghost projection and set_rho_face_harmonic throw). The face coefficient and the face correction are the same as on the staggered grid, applied to the ABC projection's MAC face field, which is the MOMENTUM-weighted map (rho_L u_L + rho_R u_R)/(rho_L + rho_R) of the cell velocities; the CELL correction is the average of the two face corrections of each axis (never a cell-centred grad(phi)/rho_c). The pressure, the CSF and set_body_force (a mean pressure gradient) enter the implicit momentum predictor as the matching face integral rho_c * avg_faces((f - grad_f P)/rho_f); a per-cell force enters at the cell value. The pair is adjoint, so the step is stable at every dt and density ratio and its steady state is dt-independent (doc/collocated_varrho_forces.md). Rated to density ratio ~10 for cases WITH MOTION (a translating drop exceeds the VoF CFL cap at ratio 100 and 1000; momentum consistency needs Favre face states and is not in this rung); exact at rest at ratio 1000.
+        """
+
+    def set_pressure_underrelax(self, omega: float) -> None:
+        """
+        Pressure under-relaxation factor omega_p in (0,1] for the incremental accumulation (MFIX §10.1); 1.0 = off (default). <1 damps the incremental predictor overshoot on stiff porous+drag.
+        """
+
+    def set_porous_deps_dt(self, on: bool) -> None:
+        """
+        Include (default True) or drop the d(eps)/dt source in the porous projection RHS. Drop it to enforce div(eps u)=0 when the per-cell eps deposit's time-derivative is too jagged and destabilizes the eps-weighted pressure solve.
+        """
+
+    def set_porous_conservative(self, on: bool) -> None:
+        """
+        eps-conservative porous momentum + projection pair (default True): time term (eps_f rho/dt) u, eps rho-weighted advective form, projection coefficients open*(eps rho idt)/(eps rho idt+beta) with matching correction. False = the legacy plain-u pair (A/B only; it lets the projection drag gas with the moving porosity at zero inertia cost — a spurious late-time energy source in clustering flows).
+        """
+
+    def rebalance_by_weights(self, weights: Sequence[float]) -> int:
+        """
+        Dynamic load balancing: redistribute the solver's state onto the weighted ORB of per-cell weights (global x-fastest, gnx*gny*gnz), its split planes aligned to 2^a cells with a the largest alignment whose weight imbalance stays within 1.05, so the pressure multigrid keeps coarsening in place for a levels. Returns that alignment (1 = the plain weighted ORB). Pass fluid work + gamma*particle_count; a coupled dem migrates onto the SAME partition with migrate_to_weights(weights, align=<the return value>). State-preserving (bit-exact at np=1, reduction floor at np>1).
+        """
+
+    def bcast_from_root(self, value: object) -> object:
+        """
+        Broadcast a value from rank 0 (identity in the single-rank module; mirrors the MPI API).
+        """
+
+class SolverColocated:
+    """
+    One incompressible Navier-Stokes solver on a block of the grid (staggered MAC, the reference) -- or, for SolverColocated, the same API with cell-centered velocities and the ABC approximate projection. Construct on a (physical) domain; set_rho / set_mu / set_dt and the domain BCs; give it a geometry (set_solid, set_pressure_geometry or a scene); step(); read out with the get_* arrays. Developer instruments and tuning live on `.diagnostics`.
+    """
+
+    @overload
+    def __init__(self, nx: int, ny: int, nz: int) -> None:
+        """
+        Create a solver on an nx x ny x nz grid of UNIT cells (x-fastest, I = x + y*nx + z*nx*ny). Everything is then in cell units: the cell size is 1 and lengths, velocities and the SDF are measured in cells. Prefer the physical form Solver((nx,ny,nz), extent=(Lx,Ly,Lz)). Set the domain BCs before the geometry (a later set_domain_bc raises).
+        """
+
+    @overload
+    def __init__(self, cells: Sequence[int], extent: Sequence[float] | None = None, origin: Sequence[float] = [0.0, 0.0, 0.0], global_cells: Sequence[int] | None = None) -> None:
+        """
+        Create a solver on a PHYSICAL domain: `cells` = (nx, ny, nz), `extent` = the box side lengths (Lx, Ly, Lz) and `origin` = its lower corner, all in the caller's own consistent units. The cell size is extent/cells and is never written by the user: rho, mu, dt, body forces, boundary velocities, surface tension, the SDF handed to set_solid and the coordinates of set_scene are all physical, and the velocity, pressure and curvature that come back are physical too.
+
+        extent=None (the default) keeps the historical CELL-UNIT behaviour, bit for bit: the spacing is 1 and every quantity is in cells.
+
+        ANISOTROPIC cells (extent/cells different per axis) are supported since Phase 2 on the staggered Solver AND (since commit C4) on SolverColocated: sampled or scene geometry, constant or variable properties, variable density, porous continuity with or without implicit drag, every domain-BC type, every pressure driver and bottom, the velocity multigrid, scalar transport, the hydrodynamic force and torque integrals, and MPI. moving geometry included. What still REFUSES one, with a message naming the three spacings and what lifts it: enable_vof (Phase 3). Three spacings that agree to 1e-12 relative are SNAPPED to one, so an isotropic domain stays bit-identical however its extent was written. Under MPI `cells` is this rank's block (from mpi_block) while `extent`/`origin` describe the GLOBAL domain, so pass the global grid as `global_cells` - the same numbers init_mpi gets.
+        """
+
+    @property
+    def diagnostics(self) -> SolverColocatedDiagnostics:
+        """
+        The developer tier of this solver (instruments, tuning, ablations, internals).
+        """
+
+    @property
+    def cells(self) -> list[int]:
+        """
+        This rank's inner block resolution (nx, ny, nz) -- the shape of every field array (get_u, get_p, the SDF for set_solid). Under MPI it is the LOCAL block from mpi_block().
+        """
+
+    @property
+    def global_cells(self) -> list[int]:
+        """
+        The GLOBAL grid resolution (gnx, gny, gnz); == `cells` single-rank, the numbers init_mpi gets under MPI (the CFD-DEM co-decomposition weight field is this shape).
+        """
+
+    @property
+    def extent(self) -> list[float]:
+        """
+        The GLOBAL domain side lengths. Equal to the cell counts without a physical domain.
+        """
+
+    @property
+    def origin(self) -> list[float]:
+        """The physical lower corner of the GLOBAL domain (0,0,0 by default)."""
+
+    @property
+    def spacing(self) -> list[float]:
+        """
+        The cell size [dx, dy, dz] = extent/cells as three floats; [1.0, 1.0, 1.0] without a physical domain (the cell-unit default). Three spacings within 1e-12 relative are snapped to one value, so an isotropic box is exactly isotropic.
+        """
+
+    @property
+    def unit_scales(self) -> dict:
+        """
+        The factors between the caller's units and the ones the solver computes in.
+
+        The solver keeps computing on the UNIT LATTICE and folds the metric into constants at its API boundary, so every array reached through the RAW field registry (diagnostics.field_view / get_field / set_field) is in those INTERNAL units, unlike get_u/get_p, which convert. `identity` is True when no extent was given, and then every factor is exactly 1.0 and internal == physical. Multiply a physical value by *_to_internal, and an internal one by force_to_physical (a total force) to come back. The registered 'mdot' field is in mass_flux_to_internal units and 'pc_source' / 'div_source' in divergence_to_internal units; a transported scalar is never rescaled.
+        """
+
+    @property
+    def physical_units(self) -> bool:
+        """
+        True when the solver was given an extent, i.e. lengths are physical rather than cells.
+        """
+
+    def cell_centers(self) -> tuple:
+        """
+        The physical cell-center coordinates of THIS rank's inner block as three 1-D float64 arrays (x, y, z), i.e. origin + (i + 1/2) * spacing per axis. np.meshgrid(*s.cell_centers(), indexing='ij') is the grid an SDF for set_solid is sampled on. Under MPI these are the LOCAL block's centers in GLOBAL coordinates. CELL-UNIT TRAP: without an extent this is i + 1/2, while set_scene puts cell i's centre at i -- the same body given as a scene and as an SDF sampled here lands half a cell apart. With an extent both use origin + (i + 1/2) * spacing. Unifying the cell-unit convention changes results; deferred to 2.0.0.
+        """
+
+    def set_rho(self, rho: float) -> None:
+        """
+        Set the fluid density rho (the caller's units). Under a physical domain the FIRST call pins the reference density the internal scales are built on; a later change rebuilds the momentum operator at the next step.
+        """
+
+    def set_mu(self, mu: float) -> None:
+        """
+        Set the dynamic viscosity mu (the caller's units); a change after the geometry rebuilds the momentum operator at the next step.
+        """
+
+    def set_viscous_stress(self, form: str) -> None:
+        """
+        Viscous stress form under variable viscosity: 'auto' (default), 'full' or 'laplacian'. 'full' = div(mu (grad u + grad u^T)), the transpose term explicit on u^n as conservative MAC stress elements (doc/full_viscous_stress.md); 'laplacian' = div(mu grad u), the form before the AUTO default (it reproduces earlier variable-mu numbers). The Laplacian form imposes the wrong tangential stress condition at a viscosity jump (an h-independent interface force: +19.5 % rise velocity for a drop at viscosity ratio 0.1). 'auto' resolves at each step to 'full' on the staggered Solver with the arithmetic face viscosity, no porous momentum, no moving scene instances and no immersed solid, else to 'laplacian' with a one-time stderr notice. Inert for a constant mu. An explicit 'full' is staggered-only (SolverColocated raises) and is refused at step() with the harmonic face viscosity, porous momentum or moving scene instances. With solids it stays allowed, but it drops the transpose flux across the staircase face: an O(gamma h) near-wall error on oblique walls (gamma the wall shear rate), present for any non-uniform mu; the repair is open. The form is a name, not a physical quantity.
+        """
+
+    def set_vof_viscous_interface(self, mode: str) -> None:
+        """
+        The viscous stress at the VoF interface (doc/vof_sharp_viscous_stress.md): 'auto' (default), 'sharp' or 'averaged'. 'averaged' = the cell mu(C) and the 4-cell mean on the MAC edges, first order across an oblique interface (the operator before the sharp interface; it reproduces earlier numbers bitwise). 'sharp' = on every band edge the row's own PLIC face-fraction viscosity (implicit band and explicit transpose), a per-link interface-traction correction from a kinked least-squares fit of the interface state, and the cell midsection force of the normal-stress jump 2[mu]D_nn (explicit on u^n): second order. 'auto' resolves at each step to 'sharp' when VoF is on, mu = LinearMix(C) (set_property_model('mu', 'linear', 'C', ...)) varies and the full viscous stress is active (set_viscous_stress), with no immersed solid, porous momentum, moving scene instances or phase change; else to 'averaged' with a one-time stderr notice. SolverColocated always resolves 'auto' to 'averaged' and raises on 'sharp'. An explicit 'sharp' raises at step() outside that scope and with the harmonic face viscosity. Inert for a constant mu. A cell is interfacial iff eps < C < 1 - eps with eps = diagnostics.vof_interface_eps() (the wisp guard, default 1e-8). Read-outs: diagnostics.vof_viscous_interface_census() / vof_viscous_interface_fit(). Any other mode raises ValueError.
+        """
+
+    def vof_viscous_interface(self) -> str:
+        """
+        The selected VoF viscous interface mode, 'auto', 'sharp' or 'averaged' (see set_vof_viscous_interface; what 'auto' resolved to shows in diagnostics.vof_viscous_interface_census()).
+        """
+
+    def set_dt(self, dt: float) -> None:
+        """
+        Set the time step dt (the caller's time unit); the momentum solve is scaled by 1/dt (well-conditioned at large dt). Under a physical domain the FIRST call pins the reference time the internal scales are built on; any later call (step_adaptive makes them) rebuilds the momentum operator at the next step.
+        """
+
+    def set_body_force(self, force: Sequence[float]) -> None:
+        """
+        Set the body force per unit volume (fx, fy, fz) as one 3-sequence — e.g. a mean pressure gradient.
+        """
+
+    def set_superficial_velocity(self, enabled: bool, axis: str = 'x', velocity: float = 0.0) -> None:
+        """
+        Hold the SUPERFICIAL velocity along a periodic axis at `velocity` (physical units): the volume mean of that velocity component, i.e. the volume flux of the MIXTURE through any cross-section divided by the cross-section's full area. In multiphase flow 'velocity' alone is ambiguous between superficial and interstitial (per-phase); this is the superficial one. At the end of every step() one uniform shift is added to that component on every face; on an axis with no boundary a uniform shift of the normal velocity leaves every cell divergence unchanged, so the field stays discretely divergence-free. `velocity = 0` is a closed (batch) column: the flow can circulate but not pass through (TBFsolver's constant flow rate at 0). The mean is a device reduction, global under MPI; single-rank the step makes no host round trip for it. Staggered Solver, all-fluid domain (set_pressure_geometry), periodic `axis` only -- step() raises otherwise. set_superficial_velocity(False) turns it off. diagnostics.last_superficial_velocity_shift() is the shift the last step applied.
+        """
+
+    def set_balanced_force_projection(self, enabled: bool) -> None:
+        """
+        Balanced-force projection (flow doc/collocated_varrho_forces.md §4.6), on both grids. Once per step, before the momentum predictor, the gradient part of the forces (set_body_force, the per-cell force fields, the CSF) is moved into the pressure with one extra solve of the projection's own operator, so static balances -- a hydrostatic column, a constant-curvature drop -- are exact from the first step at every viscosity, dt, density ratio and immersed-solid aperture. The solve does not depend on the flow state, so stability and the converged steady state are identical on and off; off leaves a decaying transient balance residue. get_p() stays the total physical pressure; its balanced part is the registered field 'p_balanced', which is RESTART STATE: registered as soon as the option is active, restoring it with 'p' (set_field) keeps the split, and omitting it (or switching the option on after steps with it off) re-splits P -- never a second copy of the balanced pressure. Cost: one extra pressure solve per step while the forces change, solved for the increment of the previous split and skipped when that is already converged -- a static interface costs no iterations. Default: ON on SolverColocated with variable density or surface tension, OFF otherwise; with an inflow/outflow face that default resolves OFF (a one-time stderr notice says so); an explicit call always wins. Refused (named error) with porous continuity, the ghost projection, set_fluid_only_constraint(2), the block CSF, inflow/outflow faces, the non-incremental pressure, and on the constant-density SolverColocated path (nothing to balance there).
+        """
+
+    @property
+    def balanced_force_projection(self) -> bool:
+        """
+        Whether the balanced-force projection runs (see set_balanced_force_projection).
+        """
+
+    def set_advection(self, on: bool) -> None:
+        """
+        Enable/disable momentum advection (high-order scheme SOU by default; implicit FOU + deferred correction on the domain-BC path). ON by default since 2026-10-23; False => Stokes (no inertia), which a creeping-flow script must now ask for. Inert under enable_vof_momentum, whose VoF fluxes carry the momentum advection.
+        """
+
+    def set_advection_scheme(self, scheme: str) -> None:
+        """
+        High-order momentum advection scheme: 'sou' (second-order upwind, the default) or 'koren' (Koren TVD).
+        """
+
+    def set_collocated_scheme(self, name: str) -> None:
+        """
+        Collocated cut-cell projection scheme (no effect on the staggered solver). DEFAULT since 2026-08-25: AUTO = 'ghost' where supported, falling back to 'gauge-exact' with a stderr notice on porous/variable-rho/domain-BC/Chebyshev configurations (ghost v1 limits); any explicit selection here disables AUTO.
+          'ghost' -- the fluid-only constraint scheme (binary-openness divergence + directional closures + the same gauge-exact gradient). Family-free, unconditionally stable (dt 60..1e20, no stabilizer), protocol-independent (C2), both-bed clean ladder -1.4% (R=8) -> +0.22% asymptote, Z&H anchor -0.018% at N=128. Costs: nonsymmetric BiCGStab pressure solve (~2.3-2.7x), ~1.6 KB/cell overlay (single-GPU size cap), fragmentation guard. MPI-capable (np=1,2,4 ctests); at-scale np>=16 hardening in progress. Equivalent to diagnostics.set_ghost_projection(True, 2, 2); the (1, 2) mixed mode stays quarantined there.
+          'gauge-exact' (the AUTO fallback) -- the aperture constraint with the directional gauge-exact pressure gradient. Cheapest scheme measured (symmetric MG-PCG, no fragmentation guard). CAVEATS from the 2026-08 campaign (doc/collocated_invisible_subspace.md): possesses an attractor FAMILY of steady states (support-inconsistent gradient/constraint pair) selected by march protocol, and a rotational-update instability whose wall-blend stopgap (diagnostics.set_rotational_wall_weight) has a resolution-dependent margin -- UNSTABLE at (R>=16 cells/radius, dt>=600); use fixed dt<=60 protocols at high resolution. Clean-protocol bias vs the staggered reference: -2.5% (R=8) -> ~+0.2% asymptote.
+          'embed' -- the complete Basilisk embed.h port (doc/history/collocated_embed_port_plan.md): the finite-volume momentum operator with the true-normal dirichlet_gradient wall drag applied as a defect correction on the IBM matrix, the openness-weighted -grad(P) predictor and cell correction, the wall-aware face map and the solid-cut-cell sliver mask. The live candidate for removing the collocated accuracy ceiling; its two intermediate rungs are diagnostics.set_face_interp(5 | 6).
+          'plain' -- the legacy path: plain 1/2-1/2 face average + central-difference grad(P). FIRST order at curved cut cells (the cell gradient reads the decoupled p=0 of solid-centred neighbours, an O(1/h) gauge error), and on a dense bed it also fails to reach steady state within 800 steps at coarse resolution. Kept for reproducing published results.
+        """
+
+    def set_decomposition(self, levels: int, max_imbalance: float = 1.05) -> None:
+        """
+        Choose how this solver's shared MPI decomposition is built. levels=0 (DEFAULT) = AUTO: the aligned ORB (split positions on the FINE grid snapped to a power of two, capped at 16, i.e. 5 nested multigrid levels) whenever it is exactly balanced; otherwise the coarse-first partition at depth 5, then 4, built with a balance-aware split axis, the first whose max-block/min-block ratio stays within max_imbalance (default 1.05) and that nests at least as many levels in place as the aligned ORB (every block even and at least 4 cells wide at each); otherwise the balance-aware aligned ORB if it has a smaller largest block and nests at least min(3, the aligned ORB's) levels; otherwise the aligned ORB. AUTO never cuts an axis the aligned ORB leaves whole, and changes its set of cut axes only when the aligned ORB's largest block is at least 5/4 of the mean. levels=1 = the aligned ORB as is (the default before 2026-10: use it to reproduce an older np > 1 partition). levels >= 2 = COARSE-FIRST: build the ORB on the grid coarsened levels-1 times and refine the partition upward, so every block is a multiple of the coarsening factor BY CONSTRUCTION and the hierarchy nests for the full requested depth; each depth from `levels` down to 2 is built and MEASURED, and the deepest one within max_imbalance is taken, else the aligned ORB. levels < 0 or max_imbalance <= 1.0 raise ValueError. Call BEFORE init_mpi() (a later call raises), and pass the SAME levels / max_imbalance to flow.mpi_block() -- both derive the same partition and must agree.
+        """
+
+    @property
+    def decomposition_levels(self) -> int:
+        """
+        This solver's decomposition mode (0 = auto, 1 = aligned ORB, >= 2 = coarse-first with that depth).
+        """
+
+    @property
+    def decomposition_max_imbalance(self) -> float:
+        """
+        The load-imbalance budget the auto and coarse-first searches stay within.
+        """
+
+    def set_pressure_bottom_extent(self, cells: int) -> None:
+        """
+        The threshold set_pressure_bottom('auto') applies: agglomerate the coarsest level onto a global operator once the coarsest GLOBAL grid exceeds this many cells on any AXIS (not cell count -- what a few smoother sweeps cannot fix is a mode spanning many cells along one axis). DEFAULT 4. Under the automatic depth (set_pressure_multigrid levels=0) it also enters the depth, at the geometry build: a later call changes the agglomeration but not the depth already resolved. `cells` is in cells (a count, not a length); <= 0 restores the default.
+        """
+
+    @property
+    def pressure_bottom_extent(self) -> int:
+        """
+        The agglomerated-bottom extent threshold (see set_pressure_bottom_extent). Measured in cells (a count, not a length).
+        """
+
+    def set_implicit_advection(self, on: bool) -> None:
+        """Use implicit-FOU advection with deferred-correction TVD."""
+
+    def set_velocity_residual_tolerance(self, rtol: float) -> None:
+        """
+        Residual-based momentum stop: a component's implicit solve ends once max|b - A u| <= rtol * max(max|b|, max|A u|) over the solved unknowns (at least one sweep always runs; a round-off floor stops a solve that cannot improve). rtol < 0 (DEFAULT) FOLLOWS THE PRESSURE SOLVER'S rtol -- the projection consumes u* and resolves the divergence the momentum residual leaves to its own tolerance; rtol > 0 fixes it; rtol == 0 restores the legacy update criterion (relative to the FIRST sweep's update, which on a warm-started near-steady step is noise and cost the whole sweep cap). Every path.
+        """
+
+    def velocity_residual_tolerance(self) -> float:
+        """
+        The momentum residual tolerance in force (resolves the follow-the-pressure default).
+        """
+
+    def set_backflow_stabilization(self, beta: float) -> None:
+        """
+        Outflow backflow-stabilization coefficient (Bazilevs 2009 / Esmaily-Moghadam 2011): beta in [0,1] scales the dissipative outflow term that prevents backflow divergence when flow reverses at the outlet (e.g. a separated wake / BFS recirculation). Default 0.2; 0 = off. Inert where the outlet is purely outgoing.
+        """
+
+    def set_pressure_solver_params(self, iters: int) -> None:
+        """Set the pressure smoother iteration count."""
+
+    def set_pressure_multigrid(self, on: bool, levels: int = 0) -> None:
+        """
+        Set the pressure multigrid depth, fixed at the next geometry build. levels=0 (the default) derives it: the shallowest depth >= 4 whose global coarsest grid the exact bottom solver admits (<= 8192 cells, a plane of <= 192; an operator with an outflow face keeps depth 4), or where coarsening ends by itself. levels=1 => pure RB-GS, no coarse grid; levels >= 2 => exactly that depth. The resolved depth is len(diagnostics.pressure_mg_level_ratios()). set_pressure_bottom_extent must precede the geometry to enter the depth (doc/mg_depth_policy.md).
+        """
+
+    def set_pressure_chebyshev(self, on: bool, max_iter: int = 120, rtol: float = 1e-09) -> None:
+        """
+        Use the communication-light Chebyshev pressure accelerator. Mutually exclusive with the two CG drivers (on=True clears an FCG selection); on=False deselects Chebyshev and falls back to FCG if that is selected, otherwise to MG-PCG.
+        """
+
+    def set_pressure_telescope(self, on: bool) -> None:
+        """
+        Coarse-level TELESCOPING of the pressure multigrid (multi-rank). The geometric hierarchy coarsens a level in place, which needs every rank's block even on that axis; once a block turns odd the hierarchy used to STOP, leaving a coarsest grid far too large to solve (384^3 on 1536 ranks: blocks die at 3x6x4 with the coarsest extent still 48, and the pressure iteration count grows 16.6 -> 38.7 across the ladder). With this on, a blocked level instead merges ORB siblings onto fewer ranks (the merged block's origin is its parent's split value, so parity is restored), moves the residual down / correction up within rank groups, and the roots keep coarsening on a sub-communicator to a tiny bottom. Idle ranks below the telescope point cost nothing that matters; the iteration count becomes a property of the problem rather than the rank count. ON by default since 2026-09-02 (the FoxBerry ladder); False restores the in-place-only hierarchy, byte-identical to before telescoping existed. See suite/docs/archive/MG_TELESCOPING_PLAN.md.
+        """
+
+    def pressure_telescope(self) -> bool:
+        """
+        Whether the pressure multigrid's coarse levels telescope (merge ORB siblings onto fewer ranks once a level's block turns odd) rather than stop coarsening in place. Reads back set_pressure_telescope's current setting; ON by default since 2026-09-02 (the FoxBerry ladder), so this is normally True even though it was never called explicitly -- check it rather than assuming the legacy in-place-only hierarchy.
+        """
+
+    def set_pressure_bottom(self, mode: str) -> None:
+        """
+        Coarse-level (bottom) solve of the pressure multigrid. A V-cycle converges at a domain-independent rate only if its COARSEST level is effectively solved, and a geometric hierarchy cannot always get small enough: an axis stops coarsening once it turns odd, and under MPI once ANY rank's block turns odd -- so at fixed cells/rank the coarsest GLOBAL grid grows with the rank count and the bottom is progressively under-solved. 'auto' (DEFAULT) agglomerates the coarsest level onto a global operator and solves it exactly whenever it exceeds set_pressure_bottom_extent (4) cells on any axis, and uses the cheap smoothed bottom otherwise (byte-identical to 'smoother' then). 'smoother' = never agglomerate (legacy). 'agglomerated' = always. Measured on one GPU (2048x64x64 channel): a smoothed bottom needs 13.5 pressure iterations/step at 4 levels and 6.0 at 6, against 4.4 at full geometric depth; agglomerated it is 4.0 at BOTH depths, and faster in wall-clock than the deep hierarchy. Works on the cut-cell IBM and ghost-projection paths (per-fluid-component null-space projection, 2026-08-13). Under the automatic depth (set_pressure_multigrid levels=0) the mode also enters the depth, at the geometry build: a later call changes the bottom solve but not the depth already resolved.
+        """
+
+    def set_pressure_pcg(self, on: bool, max_iter: int = 200, rtol: float = 1e-08) -> None:
+        """
+        Use the MG-PCG pressure accelerator (single-GPU default) and set its iteration cap and relative tolerance. on=True GENUINELY selects: it clears both competing selections (Chebyshev and FCG), so it works after diagnostics.set_density_mode / set_porous -- last set wins. on=False RAISES: MG-PCG is the terminal fallback of the driver dispatch, so it cannot be deselected on its own -- select the driver you want instead (set_pressure_chebyshev(True, ...) or set_pressure_fcg(True, ...)). Under diagnostics.set_ghost_projection the nonsymmetric operator is solved by BiCGStab; this call still sets that solve's cap/tolerance (they are shared) and does not change its method.
+        """
+
+    def set_pressure_fcg(self, on: bool, max_iter: int = 200, rtol: float = 1e-08) -> None:
+        """
+        Use the FLEXIBLE MG-CG pressure accelerator: the same V-cycle-preconditioned CG as set_pressure_pcg, the same stopping estimate/mean removal, and the same cap+tolerance (they are shared -- it is the same solve), differing only in the beta recurrence (Polak-Ribiere r^T(z_{k+1}-z_k)/r^T z_k instead of Fletcher-Reeves). Costs one extra level-0 vector and one extra global dot per iteration; buys tolerance of a preconditioner that is not symmetric with respect to the fine operator. On a symmetric preconditioner the two betas are algebraically identical, so FCG reproduces PCG's iteration count. Unlike set_pressure_pcg this flag GENUINELY selects: on=True clears the Chebyshev selection (so it works after diagnostics.set_density_mode/set_porous), on=False returns to MG-PCG, and a later set_pressure_chebyshev(True, ...) wins over it.
+        """
+
+    def set_velocity_multigrid(self, on: bool, levels: int = 4, vcycles: int = 8) -> None:
+        """Enable velocity (momentum) multigrid for the implicit diffusion solve."""
+
+    def set_domain_bc(self, face: str, type: str, velocity: Sequence[float] = [0.0, 0.0, 0.0]) -> None:
+        """
+        Set a per-face domain BC. `face` is one of '-x', '+x', '-y', '+y', '-z', '+z'; `type` is 'periodic' (the default on every face), 'wall' (no-slip), 'inflow' (Dirichlet `velocity` -- an inlet, or a lid with a tangential velocity), 'outflow' (zero-gradient velocity, p = 0) or 'slip' (free-slip / symmetry plane: zero normal velocity, zero normal derivative of the tangential components, pressure Neumann like a wall; `velocity` is ignored). The TYPE must be set BEFORE the geometry (set_solid / set_pressure_geometry / set_solid_from_scene): it is folded into the operators when the geometry is built, and a call that would CHANGE it raises afterwards. A VALUE update on a face whose type is unchanged (ramping an inflow jet, a lid's tangential speed) is allowed at any time and takes effect the next step. A half-domain closed by a 'slip' face reproduces the full symmetric domain pointwise (tests/kokkos/test_freeslip). Both grids (Solver and SolverColocated). `velocity` is in the caller's units (length/time).
+        """
+
+    def set_domain_bc_profile(self, face: str, profile: Annotated[NDArray[numpy.float64], dict(order='C')]) -> None:
+        """
+        Prescribe a per-position inlet velocity profile (Nb,Nc,3) over a face (one of '-x', '+x', '-y', '+y', '-z', '+z'; sets it to 'inflow'). Like set_domain_bc, the TYPE (making a face inflow for the first time) must be set BEFORE the geometry; updating the profile on a face that is ALREADY inflow is allowed after the geometry.
+        """
+
+    def set_pressure_geometry(self, sdf: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Set an all-fluid SDF for the cut-cell pressure operator without an immersed solid (the channel/BFS domain-BC path). For a no-slip immersed BODY in an inflow/outflow domain, call set_solid(sdf, cutcell_pressure=True) instead -- do NOT also call this (a second geometry setter overwrites the SDF and wipes the solid).
+        """
+
+    def set_scene(self, node_ints: Annotated[NDArray[numpy.int32], dict(order='C')], node_reals: Annotated[NDArray[numpy.float64], dict(order='C')], instance_ints: Annotated[NDArray[numpy.int32], dict(order='C')], instance_reals: Annotated[NDArray[numpy.float64], dict(order='C')], periodic: bool = False) -> None:
+        """
+        Install an analytic geometry scene from core's flat encoding (3 ints + 16 reals per node, 2 ints + 18 reals per instance -- reals[17] is the centre-pinned flag; legacy 17-real records are accepted, reading an all-zero centre as 'follows the body'). Coordinates are the caller's own PHYSICAL ones when the solver was given an extent -- so ONE scene serves flow, dem and voro unchanged -- and CELL UNITS on the global inner grid otherwise (cell (i,j,k)'s centre at (i,j,k) -- half a cell from cell_centers(), which returns i + 1/2 in cell units). The scene is replicated on every rank, so scene-derived geometry needs no communication and -- unlike diagnostics.set_exact_crossings -- is NOT single-rank only. periodic=True treats the scene as min-image periodic over the global grid (one instance per body, no images); periodic=False leaves images to the caller.
+        """
+
+    def set_solid_from_scene(self, cutcell_pressure: bool = True) -> None:
+        """
+        Sample the installed scene onto this rank's inner grid and install it as the solid, entirely on device (no nx*ny*nz float64 host round trip). The scene's coordinates are physical (the caller's length units) under an extent.
+        """
+
+    def has_scene(self) -> bool:
+        """
+        True once set_scene has installed an analytic CSG scene on this solver. False for geometry set any other way (set_solid with a sampled SDF, set_pressure_geometry), and false again if no scene has been given yet. set_solid_from_scene and the scene-derived per-body hydrodynamic force/motion bookkeeping all require this to be True first.
+        """
+
+    def set_instance_motion(self, instance: int, lin_vel: Sequence[float] = [0.0, 0.0, 0.0], ang_vel: Sequence[float] = [0.0, 0.0, 0.0], center: Sequence[float] | None = None) -> None:
+        """
+        Rigid-body motion of one scene instance, in the scene's own coordinates per time (the caller's physical length with an extent, CELLS without one; the angular velocity is 1/time either way). Any nonzero component switches the solver onto the moving-geometry path: the momentum operator's no-slip datum becomes the local wall velocity and the cut-cell projection gains the wall's own volume flux. All-zero keeps the static path, bit for bit. Staggered grid only in v1 (no ghost projection / porous / variable rho).
+        """
+
+    def has_moving_instance(self) -> bool:
+        """True when at least one scene instance carries a nonzero velocity."""
+
+    def num_scene_instances(self) -> int:
+        """
+        Number of instances in the scene set by set_scene (0 before it). Instance indices run 0..num_scene_instances()-1 in set_instance_transform / set_instance_motion, scene_owner() and the hydrodynamic force/torque accessors.
+        """
+
+    def set_instance_transform(self, instance: int, translation: Sequence[float], quat: Sequence[float] = [0.0, 0.0, 0.0, 1.0]) -> None:
+        """
+        Move one scene instance (quat as (x,y,z,w)). Takes effect at the next rebuild_geometry(): the SDF, the cut-cell overlay, the apertures and the pressure operator are all derived from the transforms, so moving one without rebuilding would run the solver on stale geometry.
+        """
+
+    def refresh_wall_velocity(self) -> None:
+        """
+        Re-derive ONLY the wall-velocity fields and the momentum operator that folds them in, for a driver that changes an instance's VELOCITY every step while its transform stays put -- the linearised oscillating body, a shear cell driven by counter-moving plates. set_instance_motion alone does not reach those fields (they are built in set_solid_from_scene), so the alternative is a full rebuild_geometry() per step to update a boundary condition. Refuses if a transform has changed since the last geometry build, because it does NOT re-sample the SDF, the apertures, the ownership field or the pressure operator. Velocity and pressure are untouched. Velocities stay in the caller's units (set_instance_motion).
+        """
+
+    def rebuild_geometry(self) -> None:
+        """
+        Re-derive all geometry from the current instance transforms. Velocity and pressure are PRESERVED across the rebuild (set_solid zeroes them by design). Full rebuild: the measured cost is ~65% momentum/IBM stencils, ~35% pressure/MG, scene sampling in the noise. Cells uncovered by the motion inherit zero, not an extrapolated fluid value.
+        """
+
+    def hydro_force_torque_reaction(self) -> NDArray[numpy.float64]:
+        """
+        THE hydrodynamic force and torque on each scene instance: the DISCRETE REACTION -- the momentum the fluid actually lost to each body, assembled from the composed step's budget (time term, body force, and the viscous fluxes at u*; the pressure telescopes inside each owner region and needs no field). Shape (2, n_instances, 3): [0] force, [1] torque about the instance centre. The force is exactly conservative (sum = f * V_fluid at steady state, to the solver residual) and as accurate as the flow solution it sustains: Zick & Homsy's drag within 0.7 % at N = 24 (tests/python/test_hydro_force_units.py). The torque carries the closed-form transposed-stress wall term; measured 2026-09-30 on a steadily spinning sphere it reads 1.019-1.027 of 8 pi mu a^3 Omega / (1 - phi) at R/h 6-12 (over-reads ~2 %, falling with resolution), and on a translating sphere whose true torque is zero it is zero to 1e-15 on a symmetric placement and |T| / (|F| R) = 5e-5 to 1e-3 off it. diagnostics.hydro_force_torque_traction() is the surface-traction estimate: ~30 % low, but it carries the pressure/viscous split. Staggered only; EXPLICIT advection is carried (the stashed advective RHS term is subtracted); implicit advection / porous / variable properties / domain BCs are refused loudly (v2); call after step(). Atomics: tolerance-reproducible, not bitwise.
+        """
+
+    def hydro_force_torque(self) -> NDArray[numpy.float64]:
+        """
+        DEPRECATED (warns) -- the canonical names are hydro_force_torque_reaction() for the force and torque on the bodies, and diagnostics.hydro_force_torque_traction() for what this returns. It is NOT the force on the bodies: it is the reconstructed surface-traction integral, which under-reads the drag by ~30 % at any resolution (the viscous part; traction / reaction 0.685-0.730 over phi 0.008-0.45, N 24-128). Returns exactly what diagnostics.hydro_force_torque_traction() returns (shape (4, n_instances, 3): force, torque, pressure part, viscous part); see that method for the details. Where the reaction refuses (SolverColocated, porous, variable properties, domain BCs, implicit advection) the traction is the only estimate there is -- call it by its diagnostic name and allow for the under-read. Kept working under the suite's rule for a shipped name (docs/NAMING.md section 0); removal needs a major release. Force and torque come back in the caller's (physical) units.
+        """
+
+    def instance_center(self, i: int) -> list[float]:
+        """
+        The resolved centre of rotation of instance i (world coordinates). In the caller's length units.
+        """
+
+    def set_solid(self, sdf: Annotated[NDArray[numpy.float64], dict(order='F')], cutcell_pressure: bool = False) -> None:
+        """
+        Set the solid SDF as a Fortran-order (nx,ny,nz) float64 array sampled at cell_centers() (negative inside the solid, positive in fluid, in the solver's length unit). cutcell_pressure=True enables the open-face-weighted cut-cell pressure operator (proper no-slip); it composes with domain BCs, so this is the single call for a no-slip immersed body in an inflow/outflow domain. The multigrid coarse operators are always the rediscretized per-level cut-cell operators (the former `pressure_coarse=` mode selector is gone).
+        """
+
+    def set_state(self, u: Annotated[NDArray[numpy.float64], dict(order='F')], v: Annotated[NDArray[numpy.float64], dict(order='F')], w: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Upload an initial velocity field (u,v,w each a Fortran-order (nx,ny,nz) float64 array).
+        """
+
+    def step(self) -> None:
+        """
+        Advance the solver one time step (semi-implicit: diffusion + projection).
+
+        ATOMIC across the two explicit two-phase stability caps: the Weymouth-Yue boundedness cap and the Brackbill capillary limit are evaluated at the HEAD of the call, so a rejected dt leaves every field bitwise as it was and a retry at a smaller dt is exact. (Before 2026-09-04 the momentum half had already advanced by the rejected dt, so catch-and-halve desynchronised colour and momentum.) The WY pre-check reads the field the call starts from; where the projection itself accelerates the field inside the step, use step_adaptive().
+        """
+
+    def step_adaptive(self, cfl_target: float = 0.4, capillary_cfl: float = 0.4, dt_max: float = float('inf')) -> float:
+        """
+        One step at a dt re-picked from the CURRENT state; returns the dt used.
+
+        dt = min(cfl_target * cfl_dt, capillary_cfl * capillary_dt, dt_max) with both limits taken from vof_step_limits() at the moment of the call, then set_dt(dt) + step(). Needs enable_vof().
+
+        WHY: both limits are INSTANTANEOUS. Re-picking every ten steps is safe for a free bubble or a falling film and is NOT safe in a packing -- a throat jet can grow max|uf| by more than 50 %% inside ten steps (measured, examples/bubble-through-packing) and the WY cap is a hard throw; and capillary_dt itself reads the density field, so a value taken before the closures have run can be 7x too large (measured, examples/pore-scale-imbibition). This is bitwise the `dt = 0.4*min(L['cfl_dt'], L['capillary_dt']); s.set_dt(dt); s.step()` loop the gallery drivers write by hand (IEEE multiplication is monotone, so f*min(a,b) == min(f*a,f*b)). set_dt/step semantics are unchanged. cfl_target and capillary_cfl are dimensionless; dt_max and the returned dt are in the caller's time units.
+        """
+
+    def set_velocity(self, c: int, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Write component c's inner velocity from a Fortran-order (nx,ny,nz) float64 array (solid rows re-masked). Initial-condition hook: a uniform stream around a fixed body is the Galilean twin of the same body towed through fluid at rest. The array is in the caller's velocity units (length/time), as get_u returns it.
+        """
+
+    def get_u(self) -> NDArray[numpy.float64]:
+        """
+        Return the x-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).
+        """
+
+    def get_v(self) -> NDArray[numpy.float64]:
+        """
+        Return the y-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).
+        """
+
+    def get_w(self) -> NDArray[numpy.float64]:
+        """
+        Return the z-velocity component as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).
+        """
+
+    def get_p(self) -> NDArray[numpy.float64]:
+        """
+        Return the physical pressure as a Fortran-order (nx,ny,nz) float64 array (index [x,y,z]).
+        """
+
+    def get_ox(self) -> NDArray[numpy.float64]:
+        """
+        The -x face openness field of the cut-cell operator: the fluid area fraction (0..1, dimensionless) of the face between cells (i-1,j,k) and (i,j,k), as a Fortran-order (nx,ny,nz) float64 array over THIS rank's inner cells. Computed by set_solid from the SDF (1 everywhere without a solid); it is what the momentum operator and the geometric cut-cell projection see. get_ox_proj is the openness the PROJECTION actually conserves fluxes through, which differs under diagnostics.set_ghost_projection (binary/coupled faces).
+        """
+
+    def get_oy(self) -> NDArray[numpy.float64]:
+        """The geometric -y face openness per inner cell, (nx,ny,nz); see get_ox."""
+
+    def get_oz(self) -> NDArray[numpy.float64]:
+        """The geometric -z face openness per inner cell, (nx,ny,nz); see get_ox."""
+
+    def get_ox_proj(self) -> NDArray[numpy.float64]:
+        """
+        -x face openness whose fluxes the projection CONSERVES (binary/COUPLED under diagnostics.set_ghost_projection, geometric cut-cell otherwise). Use for flux bookkeeping (peclet.pnm extract_network_flow).
+        """
+
+    def get_oy_proj(self) -> NDArray[numpy.float64]:
+        """-y face openness the projection conserves (see get_ox_proj)."""
+
+    def get_oz_proj(self) -> NDArray[numpy.float64]:
+        """-z face openness the projection conserves (see get_ox_proj)."""
+
+    def get_uf(self) -> NDArray[numpy.float64]:
+        """
+        Return the divergence-free FACE x-velocity (collocated: projected MAC field; staggered: == get_u).
+        """
+
+    def get_vf(self) -> NDArray[numpy.float64]:
+        """
+        Return the divergence-free FACE y-velocity (collocated: projected MAC field; staggered: == get_v).
+        """
+
+    def get_wf(self) -> NDArray[numpy.float64]:
+        """
+        Return the divergence-free FACE z-velocity (collocated: projected MAC field; staggered: == get_w).
+        """
+
+    def add_field(self, name: str) -> None:
+        """
+        Register a new zero-initialised cell-centred field on the grid (for transported scalars or material properties). Idempotent.
+        """
+
+    def has_field(self, name: str) -> bool:
+        """Whether a field of this name is registered."""
+
+    def field_names(self) -> list[str]:
+        """
+        Names of all registered fields (velocity u/v/w, p, sdf, plus any added), sorted.
+        """
+
+    def get_field(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Return a registered field's inner region as a Fortran-order (nx,ny,nz) float64 array.
+        """
+
+    def set_field(self, name: str, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Write a Fortran-order (nx,ny,nz) float64 array into a registered field's inner region (ghosts refilled on the next diagnostics.exchange_field/step).
+        """
+
+    def add_scalar(self, name: str, diffusivity: float = 0.0, scheme: str = 'koren', iters: int | None = None, cutcell: bool = False) -> None:
+        """
+        Register a transported scalar (temperature/concentration/...): constant diffusivity (length^2/time, in the solver's physical units -- cells^2 per time unit without an extent), advection scheme 'fou' (first-order upwind), 'koren' (Koren TVD, the default) or 'sou' (second-order upwind), and RB-GS diffusion sweeps (iters, default 50). The scalar is a registered field (get_field/set_field/diagnostics.field_view). Requires geometry (set_solid/set_pressure_geometry) for the openness-weighted operators.
+
+        cutcell=True selects the cut-cell discretization (doc/scalar_ibm_design.md): kappa (fluid fraction) storage, the scalar's own apertures, wall conditions per body (set_scalar_wall, default insulating), sources (set_scalar_source), BiCGStab to a residual tolerance (set_scalar_residual_tolerance; iters must then be None), a steady solve (solve_scalar_steady) and per-body wall fluxes (scalar_wall_flux). Cells that are not fluid unknowns hold 0. Advection is not yet part of the cut-cell operator.
+        """
+
+    @overload
+    def set_scalar_bc(self, name: str, face: str, type: str, value: float = 0.0) -> None:
+        """
+        Scalar boundary condition on a domain face ('-x', '+x', '-y', '+y', '-z', '+z'): type 'periodic', 'neumann' (zero flux, adiabatic) or 'dirichlet' (the given value, in the scalar's own units: the solver never rescales a transported scalar). Single-rank for a legacy scalar; a cut-cell scalar takes it under MPI too, and its periodic / non-periodic faces must match set_domain_bc (checked at the first advance). For a cut-cell scalar `value` may also be a per-face profile (next overload).
+        """
+
+    @overload
+    def set_scalar_bc(self, name: str, face: str, type: str, value: Annotated[NDArray[numpy.float64], dict(shape=(None, None), device='cpu')]) -> None:
+        """
+        Cut-cell scalars: a Dirichlet domain face with a per-face PROFILE, shape (N_t1, N_t2) over this rank's face cells in the face's tangential axes in x, y, z order (-x/+x: (ny, nz); -y/+y: (nx, nz); -z/+z: (nx, ny)), as set_domain_bc_profile. The value is the scalar at the boundary face centre.
+        """
+
+    def set_scalar_wall(self, name: str, type: str, value: float = 0.0, coefficient: float = 0.0, instance: int | None = None) -> None:
+        """
+        Cut-cell scalars: the condition on the immersed walls of one scene instance (instance=int, needs a scene) or of every body (instance=None, which also clears the per-instance settings). 'neumann': value = the flux INTO the fluid per area (c L/T; 0, the default for every body, is insulating). 'dirichlet': value = the wall concentration. 'robin': flux into the fluid = coefficient * (value - c_wall), coefficient = k (L/T, >= 0; a first-order surface reaction is k_r with value 0). Physical units under an extent; takes effect at the next advance or steady solve.
+        """
+
+    def set_scalar_solid(self, name: str, diffusivity: float, capacity: float = 1.0, partition: float = 1.0, contact_resistance: float = 0.0, instance: int | None = None) -> None:
+        """
+        Cut-cell scalars, conjugate transport (doc/scalar_ibm_design.md §1.1): the solid interior of one scene instance (instance=int, needs a scene) or of every body (instance=None, which also clears the per-instance settings) carries the scalar too. diffusivity = D_s (L^2/T, the solid's own, >= 0), capacity = C_s (> 0; heat: (rho c_p)_s/(rho c_p)_f, a porous particle: its porosity), partition = K (> 0; c_s = K c at equilibrium), contact_resistance = R_c (T/L, >= 0; the interface flux is (c_s/K - c)/R_c). The solid field is the registered field '<name>_solid' (it holds c_s/K, internal; get_scalar_solid returns c_s). A later set_scalar_wall for the same instance makes it a wall again (last call wins). Takes effect at the next advance or steady solve. Physical units under an extent.
+        """
+
+    def get_scalar_solid(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Cut-cell scalars: a copy of the solid concentration c_s = K psi_s of a conjugate scalar, (nx, ny, nz) F-order on this rank's block, NaN outside the solid unknowns (all NaN before the first advance or steady solve with a conjugate body).
+        """
+
+    @overload
+    def set_scalar_source(self, name: str, source: float) -> None:
+        """
+        Cut-cell scalars: a uniform volumetric source S (c/T, physical), weighted by the fluid fraction kappa.
+        """
+
+    @overload
+    def set_scalar_source(self, name: str, source: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Cut-cell scalars: a per-cell volumetric source S (c/T, physical), an (nx, ny, nz) F-order array on this rank's block, weighted by kappa.
+        """
+
+    def set_scalar_residual_tolerance(self, name: str, rtol: float) -> None:
+        """
+        Cut-cell scalars: the max-norm relative residual tolerance of the solve, max|b - A c| <= rtol * max(max|b|, max|A c0|) (default 1e-10).
+        """
+
+    def set_scalar_mean_gradient(self, name: str, gradient: Sequence[float]) -> None:
+        """
+        Cut-cell scalars: the closure (mean-gradient) mode. The field then holds the periodic fluctuation theta of c = G.x + theta, written in the frame moving with the fluid's mean velocity; G = `gradient` (c/L, physical; x the cell_centers() coordinates). Every axis with a nonzero component must be periodic (checked at the next advance or solve). (0, 0, 0) turns it off. Read the result with scalar_mean_flux.
+        """
+
+    def scalar_mean_flux(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Cut-cell scalars: the box-averaged total flux vector (3,), c L/T (physical), of the last advance or steady solve: the diffusive face sum of -D a A (c_j - c_i) with c = theta + G.x (the face's true displacement), plus the advective (1/V_box) sum_i (U_i - kappa_i V Ubar) theta_i in the moving frame, V_box the whole box (solid included). Exact as a plane average for steady fields without wall sources. Effective diffusivity k* = -J.G/(D|G|^2); dispersion D* = -J/(phi G), phi the discrete porosity. Collective under MPI.
+        """
+
+    def solve_scalar_steady(self, name: str) -> None:
+        """
+        Cut-cell scalars: solve the steady problem now (no storage term) from the current field as the initial guess. Statistics in diagnostics.scalar_census.
+        """
+
+    def scalar_wall_flux(self, name: str) -> NDArray[numpy.float64]:
+        """
+        Cut-cell scalars: the integrated flux INTO the fluid per body over the last advance or steady solve, shape (num_bodies,) (one body without a scene), in c L^3/T (physical). Collective under MPI.
+        """
+
+    def has_scalar(self, name: str) -> bool:
+        """Whether a transported scalar of this name is registered."""
+
+    def advance_scalars(self) -> None:
+        """
+        Advance all registered scalars one dt with the current velocity (also done by step()).
+        """
+
+    def enable_vof(self) -> None:
+        """
+        Enable the geometric (PLIC + Weymouth-Yue) VoF colour field 'C'. Registers 'C' as an ordinary cell field (get_field/set_field/diagnostics.field_view/closure input) and allocates the colour field's OWN g=3 working block + halo; the solver's G=2 is untouched. C is advected at the end of every step() with the just-projected face velocities.
+
+        RUNG V2a SCOPE — read before using: there is NO surface tension (rung V4) and NO momentum-consistent transport (rung V2b). Mass and momentum are advected by different fluxes, so a mixed cell carries a spurious interfacial momentum source of order delta-rho; the literature (Rudman 1998, Arrufat 2021) is unambiguous that this breaks down around density ratio 1000 unless the resolution is absurd. **V2a is valid only at MODEST density ratios** for cases with motion. A high-ratio case AT REST (the hydrostatic acid test) is exact, because there is no momentum to mis-advect. COLLOCATED (SolverColocated) is supported since rung V8 (2026-09-02), ALL-FLUID only: the colour is advected by the PROJECTED face field uf_/vf_/wf_ (the field the ABC approximate projection makes exactly divergence-free, which is what Weymouth-Yue's conservation proof needs), and the CSF enters the implicit momentum predictor as the mass-adjoint face integral (doc/collocated_varrho_forces.md). An immersed solid on that grid THROWS (the cut-cell colour transport of rung V5a is staggered-only), and so does enable_vof_momentum. On the collocated grid the SPURIOUS-CURRENT number to read is the FACE field (get_uf/get_vf/get_wf): the CELL field additionally carries the approximate projection's invisible odd-even mode, which centerToFace annihilates and the projection therefore cannot remove. An IMMERSED SOLID is supported since rung V5a: the geometric fluxes are openness-weighted and the update is done in fluid-volume units, so sum eps_eff*C is conserved exactly against the projection's own openness-weighted divergence; it needs set_solid(..., cutcell_pressure=True) (the staircase operator has no face openness to weight with) and it approximates the solid-clipped flux polygon by (whole-cell PLIC slab) x (open area) — see diagnostics.vof_diagnostics()['clipped_volume'].
+        """
+
+    def set_vof(self, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Set the colour field from a Fortran-order (nx,ny,nz) float64 array: C = the LIQUID volume fraction of the cell, in [0,1]. Enables VoF if it is not on yet. Initialise it SHARP (0/1 with the exact fraction in the interface cells) — geometric VoF keeps a sharp interface and a diffuse initial profile is simply a different problem.
+        """
+
+    def get_vof(self) -> NDArray[numpy.float64]:
+        """
+        The colour field's inner region as a Fortran-order (nx,ny,nz) float64 array (== get_field('C')).
+        """
+
+    def vof_max_courant(self) -> float:
+        """
+        INTERFACE-LOCAL Courant number max|uf|*dt/h over the faces of mixed cells and their face neighbours, with the current velocity and dt (all-reduce max under MPI). This — not the global max — is the number Weymouth's boundedness bound applies to: a global max over-throttles badly (measured on Zalesak: 0.314 at a quiescent domain corner while the interface never exceeded 0.157). Pick dt as dt*cfl_target/vof_max_courant().
+        """
+
+    def set_vof_cfl_limit(self, value: float) -> None:
+        """
+        Weymouth-Yue boundedness cap on the interface-local Courant number. Default 0.25 — the PROVEN 3D bound 1/(2(N-1)) from Weymouth's thesis eq. A.33; the widely-quoted 0.5 is the 2D value. step() throws when it is exceeded. Conservation is INDEPENDENT of boundedness (the telescoping is algebraic), so an over-CFL run loses 0<=C<=1, not volume.
+        """
+
+    def vof_cfl_limit(self) -> float:
+        """The Weymouth-Yue boundedness cap currently in force."""
+
+    def advect_vof(self, dt: float) -> None:
+        r"""
+        KINEMATIC colour advection: advance C ONCE with the solver's CURRENT face velocity over `dt` (seconds), with NO Navier-Stokes step. This is the advection-benchmark entry point (Zalesak, LeVeque, and the cut-cell conservation gates): a frozen projected velocity advecting a colour field is a pure statement about the transport scheme, with the momentum and pressure solves out of the picture.\n\nIt THROWS if the current velocity is not discretely divergence-free to 1e-10, measured with max_open_divergence_projected() (the NON-mutating diagnostic). That is not a nicety: Weymouth-Yue's exact conservation is CONDITIONAL on sum_f o_f u_f = 0 per cell, because the dilation term adds H(C-1/2) times that residual to every full cell's volume budget. Run step() to a steady state (or project()) and advect with the solver's own output; never with an analytic sample, which is solenoidal only to O(h^2).
+
+        It ALSO throws when no cut-cell pressure operator exists (WO-R2): without one the divergence guard measures nothing at all — max_open_divergence() returns 0.0 — and a cell-centre-sampled LeVeque field (true max|div| 0.612) was silently accepted and lost 4.93 % of the liquid in 50 steps. Call set_pressure_geometry(sdf) on an all-fluid box, or set_solid(sdf, cutcell_pressure=True).
+        """
+
+    def set_contact_angle(self, theta: float) -> None:
+        """
+        Rung V5b (WO-S). Prescribe a STATIC contact angle, in DEGREES, measured THROUGH THE LIQUID, on every immersed SDF wall. Needs set_solid(..., cutcell_pressure=True) + enable_vof; with no call the wall stays at the neutral 90-degree fill of rung V5a and every V5a number is byte-identical.
+
+        What it changes is PASS 1 of the solid-band fill and nothing else: the band cells receive the volume fractions of the plane that continues the fluid-side interface into the solid at angle theta (m . n_w = cos theta, with n_w = grad(sdf)/|grad(sdf)| the solid->fluid wall normal and m the PLIC normal pointing into the gas). The unmodified V3 height-function/MYC cascade then returns the curvature of an interface meeting the wall at theta and the V4 balanced force does the rest — NO force is added at the wall. theta = 0 fills the band with liquid (complete wetting), theta = 180 empties it.
+
+        Construction (src/vof/wetting.hpp): the anchor fluid cell is found by walking along n_w; its fluid-only Youngs normal supplies the AZIMUTH of the contact line (its in-wall component, which a fluid-restricted stencil measures to ~1e-14 on a plane) while the angle to the wall is replaced by the prescribed one — the wall-normal component of a fluid-only estimator is unusable (measured 23 deg of error at theta = 30 against 2.3 for the full stencil, gate G0e). The plane is then anchored by matching the anchor cell's own liquid volume, which makes the fill EXACTLY idempotent: an interface that already meets the wall at theta is reproduced to 1e-15 (gate G0a), so theta is a fixed point of the scheme.
+        """
+
+    def set_contact_angle_field(self, theta: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        Per-cell static contact angle in DEGREES, as a Fortran-order (nx,ny,nz) array. Only the value AT the solid band cell being filled is read, so cells away from a wall are irrelevant. theta is a field so the dynamic-angle rung (V6) changes only what fills it.
+        """
+
+    def contact_angle(self) -> float:
+        """The prescribed static contact angle in degrees (90 if none was set)."""
+
+    def set_contact_angle_dynamic(self, enabled: bool, theta_e: float = 90.0, slip_length_cells: float = 0.0, mu_liquid: float = 0.0, sigma: float = 0.0) -> None:
+        """
+        Rung V6 (WO-V6). The DYNAMIC contact angle -- `enabled=False` turns it (and the hysteresis) off so the static angle stands again; `enabled=True` imposes at the grid scale the Cox-Voinov apparent angle of a contact line moving at speed U_cl, with the outer cut-off at the CELL SIZE and an EXPLICIT slip length lambda (Afkhami, Zaleski & Bussmann, JCP 228:5370, 2009):
+
+            theta_Delta^3 = theta_e^3 + 9 Ca_cl ln(Delta/lambda),   Ca_cl = mu_l U_cl / sigma
+
+        angles in radians internally, arguments in DEGREES; Ca_cl > 0 advancing, < 0 receding; theta_Delta is clamped into [1, 179] degrees (diagnostics.set_contact_angle_clamp).
+
+        `slip_length_cells` is lambda/Delta and must lie in (0, 1). It is not a tuning knob you may omit from a report: a VoF contact line's NUMERICAL slip is proportional to the cell size, so without an explicit lambda the imposed angle is silently grid-dependent (VOF_PLAN section 6). ALWAYS state lambda alongside a dynamic-wetting result.
+
+        `mu_liquid` is the liquid dynamic viscosity entering Ca_cl (solver units); `sigma` defaults to whatever set_surface_tension holds. theta_e also becomes the static base angle, so this call replaces set_contact_angle. U_cl is measured as -u.t_hat at the anchor fluid cell of each band cell, with t_hat the IN-WALL direction of the fluid-side PLIC normal (m points into the gas, so the liquid advances along -t_hat), then smoothed with a 3-point mean along t_hat. Needs set_solid(..., cutcell_pressure=True) + enable_vof; with no call every V5b number is byte-identical.
+        """
+
+    def set_contact_angle_hysteresis(self, theta_a: float, theta_r: float) -> None:
+        """
+        Rung V6 (WO-V6). Advancing / receding contact-angle hysteresis, in DEGREES. While the measured apparent angle lies in [theta_r, theta_a] the contact line is PINNED and the fill imposes the APPARENT angle itself — which reproduces the current interface exactly, because the V5b fill is idempotent (WO-S finding 1), so no Young force appears and the line does not move. Above theta_a the advancing angle is imposed and below theta_r the receding one, each with the Cox-Voinov correction of set_contact_angle_dynamic when that is also configured. Sets the static base to (theta_a+theta_r)/2 if no angle was set yet.
+        """
+
+    def set_wall_slip_length(self, lambda_cells: float) -> None:
+        """
+        Rung V6b (WO-V6b) - the VELOCITY half of the dynamic contact line. In the Robust-Scaled cut-cell IBM closure the TANGENTIAL wall datum stops being no-slip and becomes the NAVIER condition
+
+            u_t(wall) - u_body = lambda * d(u_t)/dn
+
+        with `lambda_cells` the slip length in the caller's own units (CELLS without a physical domain, where the cell size is 1); the model needs lambda < one cell. The wall-NORMAL component is untouched: the wall stays impermeable, with the moving-body velocity as its datum. 0 (the default) restores the validated no-slip closure BIT-IDENTICALLY - the closure polynomials are the lambda = 0 members of the same family, and the lambda > 0 branch is never entered.
+
+        It is ONE lambda with set_contact_angle_dynamic: either call overwrites the shared value (last call wins), so the Cox-Voinov inner cut-off and the momentum wall closure cannot disagree. Only this call switches the MOMENTUM half on, so every WO-V6 result taken with the angle half alone is unchanged.
+
+        Why it exists, measured: with no-slip the contact line advances only at the scheme's own numerical slip, ~1/180 of Lucas-Washburn (WO-V6 finding 6), and WO-V7's pore-scale campaign found every IMBIBITION verdict inverted below the capillary number at which the imposed velocity crosses that numerical slip velocity. Typical values are 0.01-0.5 cells; state lambda with every dynamic-wetting result. Staggered grids only; needs set_solid(..., cutcell_pressure=True). Changing it rebuilds the three cut-cell overlays and the momentum operator in place (the velocity field is NOT reset).
+
+        APPROXIMATIONS, both stated because they are invisible from the call: the tangential projector is taken DIAGONAL (the cross terms -n_c n_j u_j are dropped; they vanish exactly for an axis-aligned wall and are O(n_c n_j) otherwise), and an axis whose BOTH neighbours are solid (a one-cell fluid gap) keeps the no-slip closure - counted by diagnostics.wall_slip_sandwich_cells().
+        """
+
+    def wall_slip_length(self) -> float:
+        """The Navier slip length in force, in the caller's units (0 = no-slip)."""
+
+    def vof_has_geometry(self) -> bool:
+        """
+        True when the colour advection is running the CUT-CELL (openness-weighted) kernels, i.e. an immersed solid is present and set_solid ran with cutcell_pressure=True. False means the uncut rung-V1 kernels are running, byte-identically to a solid-free build.
+        """
+
+    def enable_vof_blocks(self, seeds: Sequence[Sequence[float]] | None = None) -> None:
+        """
+        Carry each bubble on its OWN VoF block (the TBFsolver vofBlock pattern, VOF_PLAN §10): one Weymouth-Yue advector per marker on a small moving global index box (bubble extent + 3 cells, its own g = 3 halo on top) with a master rank of its own, and the registered 'C' the closures see is the UNION C = max_blocks C_block.
+
+        WHY: two bubbles that touch CANNOT coalesce numerically — colliding markers overlap in space but never merge, so coalescence becomes an explicit model decision (rung W4) instead of a numerical accident of a single global colour field. Measured on the gate: 236 cells carry BOTH markers at closest approach (30.0 cells of shared liquid) while each marker's own volume is conserved to 2.6e-15, and the single-field control merges them irreversibly (neck colour 0.77 against the blocks' 0.00 after the reversal).
+
+        `seeds=None` DROPS the container (the structured colour field 'C' and advect_vof are unaffected). Otherwise 'seeds' is a list of (cx, cy, cz, radius) spheres in CELL units, global indices -- these are GRID coordinates and a physical domain does not convert them. The colour is the same exact sphere fraction set_vof would take.
+
+        SCOPE at W0: ALL-FLUID (an immersed solid raises — the cut-cell block is rung W12) and KINEMATIC (advect_vof_blocks(dt); NS coupling is W12). Masters are assigned round robin by block id, deliberately independent of where the bubble's cells live — the weighted-ORB assignment is rung W1; diagnostics.vof_block_imbalance() is the number to beat.
+        """
+
+    def vof_blocks_enabled(self) -> bool:
+        """
+        True while the block container exists (enable_vof_blocks with seeds; None drops it).
+        """
+
+    def advect_vof_blocks(self, dt: float) -> None:
+        """
+        Advance every block by dt with the CURRENT (projected) face velocity and union the result into 'C' — the block twin of advect_vof(dt), and it carries the same precondition: it RAISES unless the face field is discretely divergence-free to 1e-10, because Weymouth-Yue's exact conservation is conditional on it.
+
+        Per step: gather the face velocity from the ranks that own each block's cells to its master (plain Isend/Irecv — the block table and the decomposition are both replicated, so every rank knows every message size and an NBX handshake would only rediscover it), run the three sweeps on the dense block, re-centre the box, replicate the table, and scatter the inner colour back with UNPACK_MAX.
+
+        NOTE on the union: max() from an empty union CLIPS the negative Weymouth-Yue round-off residue to an exact 0 — measured up to 6.2e-17 on the LeVeque gate, and every measured union/global-field difference was exactly that and nothing else. dt is in the caller's time units.
+        """
+
+    def enable_vof_blocks_from_field(self, boxes: Sequence[Sequence[int]]) -> None:
+        """
+        Seed the block container from the CURRENT colour field: one marker per given global index box (lo_x, lo_y, lo_z, hi_x, hi_y, hi_z; half-open), its colour copied out of the field set_vof installed. The general seeding path — enable_vof_blocks(spheres) is a convenience over it — and the way a marker of any shape enters (a quasi-2-D Hysing cylinder, a scanned bubble, an arbitrary blob found with a host connected-component labelling).
+
+        The boxes are the BUBBLE extents; the container grows each by its own 3-cell margin. They must not share a cell: the seeding gather is a copy, not a union, so a cell inside two boxes would be handed to both markers.
+        """
+
+    def vof_block_color(self, id: int) -> NDArray[numpy.float64]:
+        """
+        One marker's OWN inner color as a Fortran-order (nx,ny,nz) float64 array over its block box (diagnostics.vof_block_stats()['lo'/'hi']); empty on a rank that does not master it.
+
+        This is the block's ONLY state, so {box, color} per marker is a COMPLETE checkpoint of the container -- and it is the only exact one: re-seeding from the union color field (enable_vof_blocks_from_field) hands each of two TOUCHING markers a slice of the other, because that gather is a copy of the union clipped to the seed extent. enable_vof_blocks_from_colors(boxes, colors) restarts the container from these.
+        """
+
+    def enable_vof_blocks_from_colors(self, boxes: Sequence[Sequence[int]], colors: list) -> None:
+        """
+        Restart the block container from a vof_block_color() checkpoint: one marker per (lo_x, lo_y, lo_z, hi_x, hi_y, hi_z) INNER box (exactly the 'lo'/'hi' of diagnostics.vof_block_stats(), NOT grown by the margin again) with its colour written directly. Exact whatever the markers are doing -- nothing is gathered out of the union field.
+        """
+
+    def set_vof_block_assign(self, mode: str, every: int = 0) -> None:
+        """
+        Master assignment of the block container (rung W1). 'round-robin' by block id (rung W0's, blind to block SIZE), 'lpt' = LONGEST-PROCESSING-TIME greedy on the block cell counts, 'orb' = weighted ORB over a 1-D block space (core's BlockDecomposer<1> with the cell counts as weights). 'every' > 0 re-runs the assignment every 'every' block steps and MIGRATES the colour of any block that changed master (nothing else in a block is state, so the migration is exact and the bitwise gates hold across it).
+
+        All three are pure functions of the REPLICATED block table, so every rank computes the same assignment without an exchange -- which is what lets a re-assignment happen mid-run without breaking a bitwise gate. LPT is the measured winner (see the WO-W12 findings): the ORB's blocks must be CONTIGUOUS in block id, which LPT is free of.
+        """
+
+    def vof_block_assign(self) -> str:
+        """The current master-assignment mode ('round-robin' | 'lpt' | 'orb')."""
+
+    def enable_vof_block_csf(self) -> None:
+        """
+        Form the surface-tension force PER BLOCK (rung W2): each marker runs its own curvature cascade on its own dense box and forms the V4 balanced-force face force there (sigma kappa_f (C(i) - C(i-s))/h with the same selective face-curvature rule addCsfRhs uses), and the three face fields are scattered into the global RHS with UNPACK_SUM — TBFsolver's VOF.f90::computeSurfaceTension structure on the suite's kernels.
+
+        WHY THE FORCE AND NOT THE CURVATURE IS SCATTERED: kappa is not additive and the union colour is a max, so a face between two OVERLAPPING markers has no single (kappa, dC) pair to build a force from. The force is the additive quantity, and forming it where each marker's own colour still exists is the only place the balanced-force pairing (the same face difference the projection's gradient uses) is available per marker.
+
+        Requires set_surface_tension(sigma) and the block container; STAGGERED only. Once on, step() drives the whole two-phase stage through the blocks: the union C feeds the closures exactly as before, and the colour is advected by the blocks in the advect_vof slot.
+        """
+
+    def set_vof_inflow(self, face: str, value: float) -> None:
+        """
+        Colour of the fluid ENTERING through inflow face 'face' ('-x', '+x', '-y', '+y', '-z', '+z'); 1 = liquid, 0 = gas. The face must already be an inflow (set_domain_bc(face, 'inflow', ...)) or this raises.
+
+        The value may be FRACTIONAL, and it then means 'this fraction of the incoming flux is liquid' — a flux statement, not a sub-cell interface position. That is exactly how it is implemented: on a face whose donor is outside the domain the geometric flux is replaced by the algebraic C_donor*a (wyFaceFluxBc), because a uniform prescribed ghost band has no usable MYC normal and the inflow colour is boundary DATA.
+
+        Setting this also makes the property ghosts of that face follow the inflow colour through the registered closures (rho_ghost = rho(C_inflow)) instead of copying the interior — without it the inlet FACE density is the interior's, wrong by up to the density ratio at a liquid inlet into a gas domain. Default (nothing set): the zero-gradient copy, i.e. today's behaviour, bit for bit.
+        """
+
+    def set_vof_inflow_profile(self, face: str, profile: Annotated[NDArray[numpy.float64], dict(order='C')]) -> None:
+        """
+        Per-position inflow colour (Nb,Nc) on the INNER grid of the face's two perpendicular axes, resampled with the same clamp rule set_domain_bc_profile uses for the velocity. This is how a liquid distributor over part of an inlet is expressed: the colour profile says WHERE liquid enters, the velocity profile says how fast.
+        """
+
+    def set_vof_backflow(self, face: str, value: float = 0.0) -> None:
+        """
+        inletOutlet colour on OUTFLOW face 'face' ('-x' ... '+z'; default 0 = gas): where the boundary face velocity points back INTO the domain, the colour ghost carries this value instead of the zero-gradient copy. This is OpenFOAM's inletOutletFvPatchField (Rusche 2002 thesis section 4), the standard VoF outlet — an outlet is a place where you know what leaves (whatever is inside) but must STATE what comes back. Zero-gradient on a reversing face re-injects whatever happens to be sitting at the outlet, which for a draining film feeds the film back into the domain. Where the fluid leaves, zero-gradient is kept.
+        """
+
+    def vof_bc_volumes(self) -> list[float]:
+        """
+        Signed liquid volume that crossed each of the six domain faces during the LAST colour advection, in cell-volume units, POSITIVE for liquid ENTERING the domain. Local to this rank. Six entries in face order (-x,+x,-y,+y,-z,+z); only faces carrying a domain BC are meaningful.
+        """
+
+    def vof_bc_volumes_total(self) -> list[float]:
+        """
+        The same, accumulated since enable_vof() or the last reset_vof_bc_volumes().
+        """
+
+    def reset_vof_bc_volumes(self) -> None:
+        """
+        Zero the per-face boundary liquid ledger (both the per-step and the running totals).
+        """
+
+    def compute_vof_curvature(self) -> dict:
+        """
+        VoF rung V3: compute the interface curvature from the CURRENT colour field and store it in the registered cell fields 'kappa' and 'kappa_branch'. Returns THIS RANK's branch census as a dict.
+
+        'kappa' is the RAW registered field, kappa = 2H in 1/h (cell units); vof_curvature() returns the same thing in 1/length. POSITIVE for a convex blob of liquid: a sphere of liquid of radius R cells reads +2/R, an infinite cylinder +1/R, a plane 0.
+
+        The cascade is Popinet's (2009): a standard height function on 7-cell column sums of C over the 3x3 transverse patch in the direction of the largest |n| (branch 1), the same in the other two directions (branch 2), then the PLIC-VOLUMETRIC paraboloid fit of Jibben et al. on a 5^3 Wendland-weighted stencil (branches 4/5) — the best cost/accuracy fallback per Han, Evrard & Desjardins, IJMF 174:104769 (2024). Branch 3 (the mixed height-position fit) is off by default; branch 0 is 'not an interfacial cell' and branch 6 is 'NO estimate', which must never occur.
+
+        ALWAYS read 'kappa_branch' alongside 'kappa': kappa is 0 both where there is no interface (branch 0) and where no estimate could be made (branch 6).
+
+        Two things the literature settles and this is NOT a bug: the fallback ALWAYS fires somewhere below ~5 cells per diameter (measured here: 100% of interfacial cells at D/dx = 2.8-4.4, ~19% at D/dx = 38-48 on a sphere), and with advection-realistic volume fractions the curvature error STOPS CONVERGING below C*dx ~ 1e-2 for every known method. Curvature order is not the thing to chase; transport fidelity is.
+        """
+
+    def vof_curvature(self) -> NDArray[numpy.float64]:
+        """
+        The curvature field's inner region as a Fortran-order (nx,ny,nz) float64 array, in 1/h in 1/LENGTH. Call compute_vof_curvature() first; get_field('kappa') is the RAW solver-internal field, which is 1/h.
+        """
+
+    def vof_curvature_branch(self) -> NDArray[numpy.float64]:
+        """
+        Which cascade branch produced each cell's curvature, as a Fortran-order (nx,ny,nz) float64 array: 0 not interfacial, 1 height function, 2 height function in a non-preferred direction, 3 mixed height-position fit, 4 PLIC-volumetric paraboloid fit, 5 the same with the rank-deficient 3-parameter model, 6 NO estimate. == get_field('kappa_branch').
+        """
+
+    def set_surface_tension(self, sigma: float) -> None:
+        """
+        VoF rung V4: turn on the BALANCED-FORCE continuum surface force with coefficient sigma (0 = off, the default). Enables VoF and the curvature cascade, which then runs once per step at the head, from the same colour field the density closure sees.
+
+        The force at the staggered velocity unknown u_c(i) is
+
+            F = sigma * kappa_f * (C(i) - C(i - s_c)) / h
+
+        i.e. the colour difference is the projection's OWN face difference — the identical discrete gradient operator the pressure uses (Francois et al. 2006; Popinet 2009). That is the whole content of 'balanced force': with a constant kappa the force is exactly a discrete gradient, so the projection annihilates it and a static drop stays at machine zero. Face-interpolating a cell-centred sigma*kappa*grad(C) instead — the obvious way to reuse the per-cell body force — is not a discrete gradient of anything and leaves spurious currents of order sigma*kappa/mu that no curvature accuracy removes.
+
+        UNITS: sigma is a force per unit LENGTH in the caller's own units -- the system rho, mu and set_body_force are stated in (so per CELL without a physical domain, where the cell size is 1). SIGN: kappa is positive for a convex blob of liquid and C is the liquid fraction, so the equilibrium pressure is P = sigma*kappa*C + const — the Young-Laplace overpressure INSIDE the drop.
+
+        Surface tension is EXPLICIT, so step() enforces the Brackbill capillary time step (see capillary_dt()).
+        """
+
+    def surface_tension(self) -> float:
+        """The surface-tension coefficient (0 when the CSF is off)."""
+
+    def capillary_dt(self) -> float:
+        """
+        The Brackbill (1992) capillary time-step limit sqrt((rho_1+rho_2) h^3 / (4 pi sigma)), +inf when surface tension is off. Denner & van Wachem (2015) verified this IS the stability boundary of an explicit CSF — the prefactor 1/(4 pi), the h^{3/2} scaling and the SUM of the phase densities (both phases oscillate). The density sum is the declared phase pair under enable_vof_momentum, otherwise min(rho)+max(rho) over the field. In the caller's time units.
+        """
+
+    def set_capillary_cfl(self, factor: float) -> None:
+        """
+        Safety factor on the capillary limit: step() raises when dt > factor * capillary_dt(). Default 1.0 — the Brackbill formula was measured to be the boundary itself, so it carries no built-in margin. Set it huge to disable the check, the same escape hatch set_vof_cfl_limit is for the Weymouth-Yue cap.
+        """
+
+    def vof_step_limits(self) -> dict:
+        """
+        Both explicit two-phase step limits at the current state, and which one binds: the largest dt the interface-local Weymouth-Yue CFL cap admits ('cfl_dt'), the Brackbill capillary limit ('capillary_dt'), and min(cfl_dt, capillary_cfl*capillary_dt) with a 'capillary_binds' flag. At pore-scale capillary numbers the capillary limit is expected to bind first.
+        """
+
+    def enable_phase_change(self, rho_gas: float, rho_liquid: float, h_lv: float = 1.0) -> None:
+        """
+        Enable VoF phase change (VOF_PLAN section 9, rungs P0/P1; the Boyd & Ling 2023 / Malan 2021 pattern). rho_gas/rho_liquid are densities and h_lv the latent heat (energy per mass), all in the solver's physical units. Registers 'mdot' (the interfacial mass flux, POSITIVE = evaporation) and 'pc_source' (the deposited divergence source); both are raw-registry fields and hold INTERNAL values -- multiply by 1/unit_scales['mass_flux_to_internal'] and 1/unit_scales['divergence_to_internal'] (both 1 without an extent).
+
+        What it does per step, at the HEAD of step(): (1) reconstruct the PLIC plane of every interfacial cell and take its POLYGON AREA A analytically (A = |m|_2 dV/dalpha, not a finite difference); (2) evaluate mdot (prescribed by set_mass_flux*, or computed by set_phase_change_thermal); (3) deposit S = mdot A (1/rho_g - 1/rho_l) into the nearest PURE GAS cell along +n, so the interfacial cell's own face velocity stays the LIQUID velocity and Weymouth-Yue keeps a field its conservation proof is entitled to; (4) regress the interface by a PLIC PLANE SHIFT, C -> C - mdot A dt/rho_l, with clip-and-redistribute along -n when a cell empties. There is NEVER a volume source in the C equation (the Hardt-Wondra smeared source leaves unresolvable residue and breaks the WY bounds).
+
+        The densities are given explicitly rather than read off a closure (the same contract as enable_vof_momentum). SCOPE at this rung: staggered grid, NO immersed solid, not composable with enable_vof_momentum; all three throw with a message. A CLOSED domain needs the net vapour production to leave somewhere: use an outflow face, or set_divergence_source() with a balancing sink, or rho_g = rho_l (then S == 0).
+        """
+
+    def set_mass_flux_uniform(self, mdot: float) -> None:
+        """
+        P0: prescribe a UNIFORM interfacial mass flux (mass per area per time; positive = evaporation, liquid consumed). Turns the thermal mass flux OFF. Under an extent, call set_rho and set_dt first: the value is converted into the 'mdot' field once.
+        """
+
+    def set_mass_flux(self, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        P0: prescribe a per-cell interfacial mass flux from a Fortran-order (nx,ny,nz) float64 array, in the units of set_mass_flux_uniform (and with its call-order rule). Turns the thermal mass flux OFF.
+        """
+
+    def set_phase_change_thermal(self, enabled: bool, scalar: str = '', t_sat: float = 0.0, k_gas: float = 0.0, k_liquid: float = 0.0, r_int: float = 0.0) -> None:
+        """
+        P1: compute mdot each step from a registered scalar (the temperature) instead of prescribing it; `enabled=False` stops that (back to the prescribed mdot field):
+
+            mdot = ( k_g dT_g/dn - k_l dT_l/dn ) / h_lv ,   n = m/|m|_2 (LIQUID -> GAS)
+
+        Each one-sided derivative is a weighted least-squares fit THROUGH the interface value over the PURE-PHASE cells of a 5^3 stencil on that side, with Malan's collinearity weight w = (d.n)^2/|d|^3 and the exact normal distance from the PLIC plane. Interfacial cells are pinned at T_G = t_sat + mdot*r_int in the energy solve through a per-cell Dirichlet mask on the scalar (r_int = 0 is the hard Dirichlet; a nonzero r_int is the Schrage/IHTR Robin condition of Bures & Sato 2021).
+
+        SIGN CONVENTION -- the interfacial energy balance is mdot*h_lv = (q_l - q_g).n with q = -k grad T and n pointing OUT OF THE LIQUID, which is the form above. Check it on the Stefan problem: superheated vapour behind the interface gives grad(T_g).n > 0 and mdot > 0, i.e. evaporation. The opposite pairing (k_l grad T_l - k_g grad T_g) with the SAME n would condense a superheated vapour.
+
+        The energy scalar's diffusivity is whatever add_scalar was given (a CONSTANT); per-cell k(C) and the consistent rho c_p T geometric transport are set_phase_change_energy. That is not a limitation for the Stefan gate, where the liquid is saturated and pinned at T_sat.
+
+        Units: t_sat in the temperature scalar's own units (never rescaled); k_gas/k_liquid are thermal conductivities (power per length per kelvin) and r_int an interfacial resistance (kelvin per mass flux), all in the solver's physical units.
+        """
+
+    def vof_interface_area(self) -> float:
+        """
+        Total interfacial area of the colour field (an area in the solver's units; cells squared without an extent), summed over the inner region and globally reduced under MPI. Uses the geometry diagnostics.set_phase_change_area selects, so the number a page quotes and the number the phase change integrates are the same one. Needs enable_vof; phase change need not be on. A sphere of radius R reads 4 pi R^2 to about 0.2-0.8 % once its colour field is resolved (WO-P3c).
+        """
+
+    def set_phase_change_energy(self, enabled: bool, rho_cp_gas: float = 0.0, rho_cp_liquid: float = 0.0) -> None:
+        """
+        CONSISTENT rho*c_p*T transport (VOF_PLAN section 9 item 6) for the scalar named by set_phase_change_thermal; `enabled=False` returns to the constant-diffusivity scalar operator and the Koren TVD advective term (the rung P0/P1 energy path). Two things change together:
+         (1) TRANSPORT: H = (rho c_p) T is advected with the colour advection's OWN geometric fluxes, sweep order and frozen dilation flag (vof/energy_advect.hpp), and T is recovered as H / (rho c_p)(C^{n+1}) -- so a uniform temperature is preserved EXACTLY at any heat capacity ratio. With two different fluxes the heat carried into a mixed cell is divided by a capacity built from another flux: an error of order d(rho c_p), i.e. ~2000x at water/steam, which is the artificial interfacial heating this removes.
+         (2) DIFFUSION: the implicit operator becomes A_C = rho c_p(C)/dt + sum_f k_f open_f with k_f the arithmetic mean of the cells' k(C) (the k_gas/k_liquid of set_phase_change_thermal) EXCEPT at a face touching a per-cell Dirichlet (interfacial) cell, where the pure neighbour's own k is used -- a Dirichlet row is an identity row, so that coefficient's only job is the conductance with which the pure cell reaches a boundary condition that already sits at the interface.
+        Units: rho_cp_* are VOLUMETRIC heat capacities (energy per volume per kelvin) in the solver's physical units, like the k of set_phase_change_thermal. Requires set_phase_change_thermal.
+        """
+
+    def set_divergence_source(self, array: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        A PRESCRIBED extra divergence source (1/time; under an extent call set_dt first) on the inner cells, added to the Poisson RHS beside the phase-change deposit, so the projection solves div(open u) = S. Registered as the field 'div_source'. Its use is to make a CLOSED (periodic) domain compatible with a net vapour production by carrying a balancing sink; with an outflow face the outflow does that job and this is unnecessary.
+        """
+
+    def clear_divergence_source(self) -> None:
+        """Drop the prescribed divergence source (the field stays registered)."""
+
+    def set_divergence_sink(self, weights: Annotated[NDArray[numpy.float64], dict(order='F')]) -> None:
+        """
+        WO-P23: an AUTO-BALANCED sink region for the phase-change divergence source. Give a non-negative weight per cell (Fortran-order (nx,ny,nz)); after each deposit the solver subtracts (global sum of the phase-change source) * w / (global sum of w), so a CLOSED domain's Poisson RHS is exactly compatible every step with no user bookkeeping. Put the weights in the LIQUID far from the interface, where the exact solution simply has the liquid leaving. This is what makes a closed-box phase-change run possible without the variable-density outflow operator (whose density-ratio inconsistency is WO-R2's subject). Registered as the field 'div_sink'.
+        """
+
+    def clear_divergence_sink(self) -> None:
+        """Drop the auto-balanced sink region."""
+
+    def apply_phase_change(self, dt: float) -> None:
+        """
+        KINEMATIC phase-change step: build mdot / the PLIC areas / the normals, deposit the divergence source (census only — nothing is projected) and apply the interface regression over `dt`. No Navier-Stokes step, no advection. This is the P0a / P1 driver: an interface regressing under a prescribed or thermally-computed flux, with the momentum and pressure solves out of the picture. dt is in the caller's time units.
+        """
+
+    @overload
+    def enable_vof_momentum(self, rho_c0: float, rho_c1: float) -> None:
+        """
+        Advect rho*u on the HALF-SHIFTED momentum control volumes with the SAME geometric fluxes, the same sweep order and one frozen dilation flag as the colour field, then recover u = (rho^c u)/rho^c. This is what makes the scheme usable above density ratio ~100 (Rudman 1998; Arrufat 2021: a raindrop accurate within 15% at 15 cells/diameter instead of ~200).
+
+        The two densities are REQUIRED, and must be the ones the rho closure produces at C=0 and C=1 — the momentum flux is rho_c0*(a-F) + rho_c1*F with F the geometric flux of the C = 1 phase, so the scheme has to know which density each side carries. ORDER: rho_c0 is the density at C = 0 and rho_c1 the density at C = 1, whichever phase that is (when C = 1 marks the gas, a bubble colour, rho_c1 is the gas density). When a 'rho' closure on 'C' is already registered (set_property_model / set_property_table), the pair is checked against it at C = 0 and C = 1 and a mismatch raises, naming both; registered after this call, it is not checked.
+
+        Turning this on MOVES the VoF advection from the end of step() to its head (the momentum advection must precede the predictor that consumes it), so the advecting field is u^n — the previous step's projected output. u at step 0 must therefore be discretely divergence-free (rest or a uniform field both are). Requires the variable-density path, staggered layout, explicit advection, no immersed solid and no porous continuity, and is refused together with the per-bubble block container (enable_vof_blocks*, in either order): the momentum rides the structured colour's fluxes, not the markers'. rho_c0 and rho_c1 are in the caller's density units.
+        """
+
+    @overload
+    def enable_vof_momentum(self, rho_gas: float, rho_liquid: float) -> None:
+        """
+        Former keyword names of enable_vof_momentum(rho_c0, rho_c1), the canonical spelling: rho_gas = rho_c0 (density at C = 0), rho_liquid = rho_c1 (density at C = 1), whichever phase each is. Deprecated in the next release, removed at 2.0.0.
+        """
+
+    def vof_momentum_enabled(self) -> bool:
+        """Whether momentum-consistent transport is on."""
+
+    def set_property_model(self, target: str, kind: str, field: str, params: Sequence[float] = [], field2: str = '') -> None:
+        """
+        Register a device closure writing a property/body-force field from input field(s). target: a registered field (a property 'mu'/'rho'/… or a body-force component 'force_x'/'force_y'/'force_z'). kind: 'linear' (params [p0,p1,p2]: p0+p1*field+p2*field2), 'boussinesq' (params [rho0,g,beta,T0]: rho0*g*beta*(field-T0) buoyancy), 'arrhenius' (params [mu_ref,B,Tref]: mu_ref*exp(B*(1/field-1/Tref))). Applied at the top of step().
+
+        Units: the input fields are taken as UNSCALED quantities (a phase fraction, a temperature, a concentration -- the solver never rescales a transported scalar), so on a target 'rho', 'mu' or 'force_x/y/z' the parameters are in the solver's PHYSICAL units (a density, a viscosity, a force per volume: rho0*g*beta*(T-T0) as written); any other target takes its field's INTERNAL units (see unit_scales).
+        """
+
+    def set_property_table(self, target: str, field: str, x: Sequence[float], y: Sequence[float]) -> None:
+        """
+        Register a tabulated property: target = piecewise-linear interpolation of (x, y) at the input field value (x ascending, clamped at the ends). Units as set_property_model: y in the target's physical units on 'rho'/'mu'/'force_*', x in the input field's.
+        """
+
+    def update_properties(self) -> None:
+        """
+        Apply all registered property/force closures now (also done at the top of step()).
+        """
+
+    def enable_cell_force(self) -> None:
+        """
+        Allocate + register the per-cell body-force fields force_x/force_y/force_z and route them into the momentum RHS, for an external writer (e.g. CFD-DEM drag feedback) to fill directly via diagnostics.field_view('force_z'). They persist across steps until overwritten. They are raw registry fields: a force per unit volume in INTERNAL units (multiply a physical one by unit_scales['force_density_to_internal']).
+        """
+
+    def enable_drag(self) -> None:
+        """
+        Enable implicit (semi-implicit) linear drag for CFD-DEM: allocate the per-cell 'drag_beta' field (added to the momentum diagonal so a -beta*(u-u_p) source is treated implicitly -> unconditionally stable for the stiff beta of a dense bed) plus force_x/y/z (which carry beta*u_p, the RHS target). Fill 'drag_beta' and 'force_*' via diagnostics.field_view each step.
+        """
+
+    def ghost_width(self) -> int:
+        """
+        Ghost-layer width g of the velocity block (diagnostics.field_view returns an (n+2g) buffer).
+        """
+
+    def has_cutcell_pressure(self) -> bool:
+        """
+        True once the cut-cell pressure operator exists (set_solid or set_pressure_geometry was called). The porous continuity requires it; the coupling driver auto-sets an all-fluid geometry when absent.
+        """
+
+    def set_porous_continuity(self, on: bool = True) -> None:
+        """
+        Enable the volume-averaged (porous) continuity for unresolved CFD-DEM (staggered only): the projection enforces d(eps)/dt + div(eps u) = 0 instead of div(u)=0, so the fluid velocity is NOT solenoidal where the void fraction changes (bubbling/expansion). Binds the 'eps' field (void fraction from the particle deposition, created seeded to 1 if absent; the coupling writes it each step BEFORE step()). eps=1 everywhere reduces exactly to div(u)=0. Pair with max_porous_residual() for the meaningful convergence check.
+        """
+
+    def max_open_divergence_projected(self) -> float:
+        """
+        max|div(open*u)| of the field the projection ACTUALLY produced — the outflow-face correction included, and WITHOUT mutating the velocity.
+
+        Use this instead of max_open_divergence() on any domain with an OUTFLOW face. max_open_divergence() re-imposes the zero-gradient outflow velocity before measuring (its own comment says so), which (a) DESTROYS bcCorrectOutflow's correction — the mechanism by which mass leaves — as a side effect, so calling it once per step inside a time loop changes the run, and (b) reports the divergence of a field the solver never used. Measured on a stratified ratio-1000 outflow box: 5e-3 from the mutating diagnostic, flat in the iteration count, flat in the density ratio and bit-identical in a -DPECLET_FLOW_OPERATOR_DOUBLE build (i.e. not a solver residual), against the projected field's own residual from this call. Identical to max_open_divergence() when there is no outflow face, and on the collocated grid (which already measures the face field).
+        """
+
+    def max_open_divergence(self) -> float:
+        """
+        Return the max cut-cell velocity-flux divergence max|div(open*u)|. With porous continuity this is NOT ~0 -- it equals -d(eps)/dt (the bed expanding). Use max_porous_residual() for the continuity residual.
+        """
+
+    def sync_porous_prev(self) -> None:
+        """
+        Reseed eps^n = eps^{n+1} (d(eps)/dt = 0 for the next step). Call it once the first void-fraction field has been written into 'eps' and before the first step, so that step sees no spurious d(eps)/dt source; any later call simply restarts the d(eps)/dt bookkeeping from the current field.
+        """
+
+    def max_porous_residual(self) -> float:
+        """
+        Residual of the volume-averaged continuity max|div(open*eps*u) + d(eps)/dt| -- the quantity the porous projection drives to zero. 0 unless set_porous_continuity(True).
+        """
+
+    def block_origin(self) -> list[int]:
+        """
+        This rank's inner-block origin in GLOBAL cells ([0,0,0] single-rank). Shift the coupling deposit origin by this so particles in global coordinates land in the local block. The offset is in cells (a count, not a length).
+        """
+
+    def init_mpi(self, gnx: int, gny: int, gnz: int) -> None:
+        """
+        Wire the multi-rank step: pass the GLOBAL grid dims (gnx,gny,gnz). The Solver must have been constructed with this rank's LOCAL block dims (from mpi_block). MPI_Init is called if needed. Call it BEFORE the geometry (set_solid / set_pressure_geometry / set_solid_from_scene): the geometry builds the pressure and velocity multigrids for the partition in force when it runs, so init_mpi raises if a geometry already exists (built first, every rank would solve its own block-periodic pressure problem).
+
+        Placement (host OpenMP builds): threads per rank should divide the cores per L3 cache domain (AMD EPYC Zen 4: 8; Threadripper 5965WX: 6), ideally one rank per domain -- a rank whose threads span two domains runs measurably slower (up to +18 % step time) and no partition fixes it. With more than one rank, when every OpenMP thread is pinned to one CPU, rank 0 prints one stderr line naming the ranks that straddle; nothing else changes.
+        """
+
+    def rank(self) -> int:
+        """This rank's index in MPI_COMM_WORLD."""
+
+    def size(self) -> int:
+        """The number of ranks in MPI_COMM_WORLD."""
+
+def mpi_block(gnx: int, gny: int, gnz: int, levels: int = 0, max_imbalance: float = 1.05) -> tuple[list[int], list[int]]:
+    """
+    Return this MPI rank's ORB block of the global (gnx,gny,gnz) grid as (origin, size), each a length-3 list [x,y,z]. Use it to slice the global SDF into this rank's local block for a distributed Solver, in this order: Solver(*size), init_mpi(gnx, gny, gnz), then the geometry (init_mpi raises after set_solid / set_pressure_geometry). MPI_Init is called if needed.
+
+    levels / max_imbalance choose how the partition is built and MUST match the values given to Solver.set_decomposition() -- both derive the same partition and have to agree. levels=0 (DEFAULT) = AUTO: the aligned ORB (split positions on the FINE grid snapped to a power of two, capped at 16, i.e. 5 nested multigrid levels) whenever it is exactly balanced; otherwise the coarse-first partition at depth 5, then 4, with a balance-aware split axis, the first within max_imbalance (default 1.05) that nests at least as many levels in place as the aligned ORB (every block even and at least 4 cells wide at each); otherwise the balance-aware aligned ORB if it has a smaller largest block and nests at least min(3, the aligned ORB's) levels; otherwise the aligned ORB. AUTO never cuts an axis the aligned ORB leaves whole, and changes its set of cut axes only when the aligned ORB's largest block is at least 5/4 of the mean. levels=1 = the aligned ORB as is (the default before 2026-10: reproduces an older np > 1 partition). levels >= 2 = COARSE-FIRST: build the ORB on the grid coarsened levels-1 times and refine the partition upward, so every block is a multiple of the coarsening factor BY CONSTRUCTION and the hierarchy nests for the full requested depth. Coarse-first also balances better: the aligned ORB picks a split and then rounds it (a balanced 96|96 can round to 128|64), whereas on the coarse grid one cell IS the quantum. Each depth from `levels` down to 2 is BUILT and measured, and the deepest one whose max-block/min-block ratio stays within max_imbalance is taken, else the aligned ORB.
+    """
+
+def predict_hierarchy(gnx: int, gny: int, gnz: int, np: int, levels: int, telescope: bool = True, min_extent: int = 4, decomposition_levels: int = 0, max_imbalance: float = 1.05, weights: Sequence[float] | None = None) -> object:
+    """
+    The pressure-multigrid hierarchy init_mpi WOULD build for this grid / rank count / level request, for the level-0 decomposition that decomposition_levels / max_imbalance describe (pass what you will pass to Solver.set_decomposition) and with or without coarse-level telescoping -- a pure function, no MPI, no allocation, any rank count. Returns one row per level: (global dims, ranks holding the level, block-0 dims, ratio to the next level, telescopes-out). Pre-flight any job with it. telescope defaults to True, the Solver's own default (set_pressure_telescope), so the forecast is the hierarchy the solver builds; telescope=False forecasts the in-place-only hierarchy, which at np > 1 can stop coarsening early. levels=0 forecasts the automatic depth (doc/mg_depth_policy.md) for the singular operator (periodic / all-Neumann / immersed solid; no outflow face), at the default bottom extent 4.
+
+    weights: per-cell weights, exactly what diagnostics.rebalance_by_weights takes (global x-fastest, gnx*gny*gnz values). Given, the forecast is the hierarchy AFTER that rebalance: level 0 is its aligned weighted ORB (split planes on multiples of 2^a, a the largest alignment whose weight imbalance stays within 1.05; decomposition_levels / max_imbalance are then ignored, as the rebalance ignores set_decomposition), and a stage may be a repartition onto fewer ranks (reported as telescopes-out). The return is then the pair (rows, align), align = 2^a -- the value rebalance_by_weights returns and a co-decomposing dem takes as migrate_to_weights(weights, align=...). None (default): the rows alone, unchanged. min_extent is in cells (a count, not a length).
+    """
+
+has_mpi: bool
+
+class _AndersonAccelerator:
+    """
+    Anderson accelerator of a steady march (doc/steady_acceleration.md): type-II Anderson on the march state (velocity + P, plus the collocated face field under projected-face advection), velocity-only metric. Created by s.diagnostics.anderson_accelerator(); the public driver is peclet.flow.march_to_steady. step(accelerate) is ONE call of the solver's step() (preceded by the lazy mix when accelerate and a mix is pending); between calls the solver always holds a genuine step output.
+    """
+
+    def step(self, accelerate: bool = True) -> None:
+        """
+        One map evaluation: when accelerate and a mix is pending, the solver's state is replaced by the Anderson mix first; then one solver.step(). accelerate=False is a plain step that still records history. Raises if the configuration became unsupported (the same refusals as the constructor).
+        """
+
+    @property
+    def residual(self) -> float:
+        """
+        Relative velocity residual ||g_u - x_u|| / ||g_u|| of the last evaluation (inf before the first).
+        """
+
+    @property
+    def status(self) -> str:
+        """'active' or 'disabled' (acceleration stopped; steps are plain)."""
+
+    @property
+    def reason(self) -> str:
+        r"""Why the status is not 'active' (\'\' while active)."""
+
+    @property
+    def num_restarts(self) -> int:
+        """History restarts so far."""
+
+    @property
+    def num_resets(self) -> int:
+        """
+        History resets because the state or the parameters (dt, rho, mu, body force, advection on / scheme / implicit) were changed from outside.
+        """
+
+    @property
+    def num_columns(self) -> int:
+        """Window columns in use."""
+
+    @property
+    def window(self) -> int:
+        """The window m."""
+
+    @property
+    def mixing(self) -> float:
+        """The mixing beta."""
+
+    @property
+    def memory_bytes(self) -> int:
+        """Bytes of the history: (2m+3) * n_fields * 8 * n_padded (this rank)."""
+
+    @property
+    def seconds(self) -> float:
+        """
+        Cumulative wall time spent in the accelerator, solver.step() excluded (device-fenced), seconds, this rank.
+        """
+
+    def reset(self) -> None:
+        """Clear the history (the next call starts a new window)."""
+
+    def disable(self) -> None:
+        """Stop accelerating for good; step() is then a plain step."""
+
+
+class _AndersonAcceleratorColocated:
+    """
+    Anderson accelerator of a steady march (doc/steady_acceleration.md): type-II Anderson on the march state (velocity + P, plus the collocated face field under projected-face advection), velocity-only metric. Created by s.diagnostics.anderson_accelerator(); the public driver is peclet.flow.march_to_steady. step(accelerate) is ONE call of the solver's step() (preceded by the lazy mix when accelerate and a mix is pending); between calls the solver always holds a genuine step output.
+    """
+
+    def step(self, accelerate: bool = True) -> None:
+        """
+        One map evaluation: when accelerate and a mix is pending, the solver's state is replaced by the Anderson mix first; then one solver.step(). accelerate=False is a plain step that still records history. Raises if the configuration became unsupported (the same refusals as the constructor).
+        """
+
+    @property
+    def residual(self) -> float:
+        """
+        Relative velocity residual ||g_u - x_u|| / ||g_u|| of the last evaluation (inf before the first).
+        """
+
+    @property
+    def status(self) -> str:
+        """'active' or 'disabled' (acceleration stopped; steps are plain)."""
+
+    @property
+    def reason(self) -> str:
+        r"""Why the status is not 'active' (\'\' while active)."""
+
+    @property
+    def num_restarts(self) -> int:
+        """History restarts so far."""
+
+    @property
+    def num_resets(self) -> int:
+        """
+        History resets because the state or the parameters (dt, rho, mu, body force, advection on / scheme / implicit) were changed from outside.
+        """
+
+    @property
+    def num_columns(self) -> int:
+        """Window columns in use."""
+
+    @property
+    def window(self) -> int:
+        """The window m."""
+
+    @property
+    def mixing(self) -> float:
+        """The mixing beta."""
+
+    @property
+    def memory_bytes(self) -> int:
+        """Bytes of the history: (2m+3) * n_fields * 8 * n_padded (this rank)."""
+
+    @property
+    def seconds(self) -> float:
+        """
+        Cumulative wall time spent in the accelerator, solver.step() excluded (device-fenced), seconds, this rank.
+        """
+
+    def reset(self) -> None:
+        """Clear the history (the next call starts a new window)."""
+
+    def disable(self) -> None:
+        """Stop accelerating for good; step() is then a plain step."""
+
