@@ -84,7 +84,7 @@ openness (`coarsenOpenAvg`, must not become harmonic). Restriction is the 8-chil
 prolongation trilinear: **R ≠ c·Pᵀ, so today's V-cycle is already a non-symmetric preconditioner**
 (the reason `solveFCG` exists).
 
-**Register rules that bind D** (`../docs/decisions/flow.md`):
+**Register rules that bind D** (`../../docs/decisions/flow.md`):
 - *Defect-correction rule* (settled 2026-09-01): Krylov matvec and residual = the exact double
   operator in flux form; V-cycles, smoothers and AMG below are preconditioners and **may be float**.
 - *Precision policy rule* (2026-08-31): a quantity an algorithm requires to satisfy an exact
@@ -96,7 +96,7 @@ prolongation trilinear: **R ≠ c·Pᵀ, so today's V-cycle is already a non-sym
 - *Device bottom* (2026-10-03): an FP32 factor inside an FP64-verified iteration is admissible; an
   unrefined FP32 bottom is not. A·1 = 0, the mean projection and the stopping residual stay FP64.
 - No environment variable changes a result; ablations are `s.diagnostics` setters; strings for
-  modes; one setter per concept (`../docs/NAMING.md`).
+  modes; one setter per concept (`../../docs/NAMING.md`).
 - x-fastest iteration; rule H on host (pencils/rows, no host `MDRange3` in hot paths); host
   `-ffp-contract=off`; the host-serial cutoff 8192 stands; host-only branches select on
   `std::is_same_v<memory_space, HostSpace>`; device bits unchanged unless recorded.
@@ -839,7 +839,7 @@ WO except C0, whose host order change applies at every np (np-tests at their tol
 - **Q-P12 [pref] Device fusion of the Krylov reductions** (≈ −0.5 ms GPU, a device re-baseline).
   *Default:* no.
 - **Q-P13 [pref] Setter names** (`set_pressure_vcycle_precision`, `set_pressure_initial_guess`, on
-  `s.diagnostics`). *Default:* these names; check them against `../docs/NAMING.md` in WO-D1.
+  `s.diagnostics`). *Default:* these names; check them against `../../docs/NAMING.md` in WO-D1.
 - **R-1.** D's host gain may be at the low end if the smoother is gather-bound (S first, §9).
 - **R-2.** E's gain may be small if curvature noise dominates φ's step-to-step change.
 - **R-3.** C0 changes every host pressure result at the 1e-15 level; the host hashes move once.

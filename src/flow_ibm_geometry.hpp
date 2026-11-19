@@ -627,8 +627,67 @@ void Solver<Grid>::setSolidStarOverlay() {
   }
 }
 
+// Ghost-projection fragmentation guard (setSolidGhostProjectionOverlay): BFS over the COUPLED
+// graph of the periodic nx*ny*nz sdf `work`; fluid cells outside the largest component are
+// marked solid in place (pockets decoupled for the projection only).
+inline void gpDecouplePockets(std::vector<double>& work, int nx, int ny, int nz, bool verbose) {
+  const std::size_t nTot = work.size();
+  auto id = [&](int x, int y, int z) {
+    return (std::size_t)((x + nx) % nx) + (std::size_t)((y + ny) % ny) * nx +
+           (std::size_t)((z + nz) % nz) * (std::size_t)nx * ny;
+  };
+  std::vector<int> comp(nTot, -1);
+  std::vector<std::size_t> stack;
+  int ncomp = 0, mainComp = -1;
+  std::size_t mainSize = 0, nActive = 0;
+  for (std::size_t seed = 0; seed < nTot; ++seed) {
+    if (comp[seed] >= 0 || work[seed] < 0.0)
+      continue;
+    std::size_t size = 0;
+    comp[seed] = ncomp;
+    stack.assign(1, seed);
+    while (!stack.empty()) {
+      const std::size_t c = stack.back();
+      stack.pop_back();
+      ++size;
+      const int x = (int)(c % nx), y = (int)((c / nx) % ny), z = (int)(c / ((std::size_t)nx * ny));
+      const int nb[6][3] = {{x - 1, y, z}, {x + 1, y, z}, {x, y - 1, z},
+                            {x, y + 1, z}, {x, y, z - 1}, {x, y, z + 1}};
+      for (auto& q : nb) {
+        const std::size_t j = id(q[0], q[1], q[2]);
+        if (comp[j] >= 0 || work[j] < 0.0)
+          continue;
+        // COUPLED face: mean-of-centers face sdf fluid AND both centers fluid
+        if (0.5 * (work[c] + work[j]) < 0.0)
+          continue;
+        comp[j] = ncomp;
+        stack.push_back(j);
+      }
+    }
+    if (size > mainSize) {
+      mainSize = size;
+      mainComp = ncomp;
+    }
+    nActive += size;
+    ++ncomp;
+  }
+  if (ncomp > 1) {
+    std::size_t pockets = 0;
+    for (std::size_t i = 0; i < nTot; ++i)
+      if (work[i] >= 0.0 && comp[i] != mainComp) {
+        work[i] = -(std::abs(work[i]) * 1.001 + 1e-30);
+        ++pockets;
+      }
+    if (verbose)
+      printf(
+          "peclet::flow ghost projection: %d fluid components; decoupled %zu pocket "
+          "cells outside the main component (%zu of %zu fluid cells)\n",
+          ncomp, pockets, mainSize, nActive);
+  }
+}
+
 template <class Grid>
-void Solver<Grid>::setSolidGhostProjectionOverlay(CCField din) {
+std::vector<double> Solver<Grid>::gpPocketGuardSdf(CCField din) {
   // A few setup paths below (the ghost-projection pocket decoupling) are host-side
   // connected-component analyses and genuinely need the inner SDF on the host. Materialise it
   // ONCE, lazily, so the common path keeps the device-resident benefit.
@@ -644,6 +703,127 @@ void Solver<Grid>::setSolidGhostProjectionOverlay(CCField din) {
     }
     return sdfInnerHost_;
   };
+  std::vector<double> sdfGpHost;
+  std::vector<double> work;
+  int fx = nx_, fy = ny_, fz = nz_;
+  bool verbose = true;
+#ifdef PECLET_FLOW_MPI
+  int myRank = 0;
+  if (distributed_) {
+    MPI_Comm_rank(comm_, &myRank);
+    int nRanks = 1;
+    MPI_Comm_size(comm_, &nRanks);
+    fx = gnx_;
+    fy = gny_;
+    fz = gnz_;
+    verbose = myRank == 0;
+    std::vector<int> cnts(nRanks), disp(nRanks);
+    long acc = 0;
+    for (int r = 0; r < nRanks; ++r) {
+      const auto b = dec_->block(r);
+      cnts[r] = (int)(b.size[0] * b.size[1] * b.size[2]);
+      disp[r] = (int)acc;
+      acc += cnts[r];
+    }
+    std::vector<double> flat((std::size_t)acc);
+    MPI_Allgatherv(sdfInner_().data(), (int)sdfInner_().size(), MPI_DOUBLE, flat.data(),
+                   cnts.data(), disp.data(), MPI_DOUBLE, comm_);
+    work.assign((std::size_t)fx * fy * fz, 0.0);
+    for (int r = 0; r < nRanks; ++r) {
+      const auto b = dec_->block(r);
+      const double* src = flat.data() + disp[r];
+      for (int z = 0; z < (int)b.size[2]; ++z)
+        for (int y = 0; y < (int)b.size[1]; ++y)
+          for (int x = 0; x < (int)b.size[0]; ++x)
+            work[(std::size_t)(x + b.origin[0]) + (std::size_t)(y + b.origin[1]) * fx +
+                 (std::size_t)(z + b.origin[2]) * (std::size_t)fx * fy] =
+                src[(std::size_t)x + (std::size_t)y * b.size[0] +
+                    (std::size_t)z * (std::size_t)b.size[0] * b.size[1]];
+    }
+  } else
+#endif
+    work = sdfInner_();
+  gpDecouplePockets(work, fx, fy, fz, verbose);
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    const auto b = dec_->block(myRank);
+    sdfGpHost.resize(sdfInner_().size());
+    for (int z = 0; z < nz_; ++z)
+      for (int y = 0; y < ny_; ++y)
+        for (int x = 0; x < nx_; ++x)
+          sdfGpHost[(std::size_t)x + (std::size_t)y * nx_ +
+                    (std::size_t)z * (std::size_t)nx_ * ny_] =
+              work[(std::size_t)(x + b.origin[0]) + (std::size_t)(y + b.origin[1]) * fx +
+                   (std::size_t)(z + b.origin[2]) * (std::size_t)fx * fy];
+  } else
+#endif
+    sdfGpHost = std::move(work);
+  return sdfGpHost;
+}
+
+template <class Grid>
+void Solver<Grid>::gpUploadSdf(const std::vector<double>& sdfGpHost, std::size_t nInner,
+                               CCField sdfGp) {
+#ifdef PECLET_FLOW_MPI
+  if (distributed_) {
+    // local inner block + halo exchange (cross-rank + periodic), same as the sdf_ upload:
+    // the overlay build reads sdfGp ghosts up to +/-2 = G across block boundaries.
+    auto h = Kokkos::create_mirror_view(sdfGp_);
+    Kokkos::deep_copy(h, sdfGp_);
+    for (int z = 0; z < nz_; ++z)
+      for (int y = 0; y < ny_; ++y)
+        for (int x = 0; x < nx_; ++x)
+          h((long)(x + G) + (long)(y + G) * e_.x + (long)(z + G) * (long)e_.x * e_.y) =
+              sdfGpHost[(std::size_t)x + (std::size_t)y * nx_ +
+                        (std::size_t)z * (std::size_t)nx_ * ny_];
+    Kokkos::deep_copy(sdfGp_, h);
+    velDev_->exchange(sdfGp_);
+  } else
+#endif
+  {  // upload + periodic wrap (same pattern as the sdf upload above)
+    CCField din("peclet::flow::sdfGpInner_d", nInner);
+    Kokkos::deep_copy(
+        din,
+        Kokkos::View<const double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+            sdfGpHost.data(), sdfGpHost.size()));
+    CCExec space;
+    const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
+    Kokkos::parallel_for(
+        "peclet::flow::sdfgp_wrap", MDRange3<CCExec>(space, {0, 0, 0}, {ex, ey, ez}),
+        KOKKOS_LAMBDA(int x, int y, int z) {
+          const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
+                    iz = (((z - g) % nz) + nz) % nz;
+          sdfGp((long)x + (long)y * ex + (long)z * (long)ex * ey) =
+              din((std::size_t)ix + (std::size_t)iy * nx + (std::size_t)iz * (std::size_t)nx * ny);
+        });
+    space.fence();
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::gpBuildOverlay(CCField sdfGp) {
+  gpBinaryOpenness(oxb_, oyb_, ozb_, CCConst(sdfGp), e_);
+  gpNRows_ =
+      buildGpOverlay(CCConst(sdfGp), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_, gpCounter_,
+                     gpMatrixOrder_, gpRhsOrder_, hasExactCross_ ? CCConst(tEx_[0][0]) : CCConst(),
+                     hasExactCross_ ? CCConst(tEx_[1][1]) : CCConst(),
+                     hasExactCross_ ? CCConst(tEx_[2][2]) : CCConst(),
+                     /*useGhost=*/distributed_);
+  if (gpDebugLevel() > 0) {  // PECLET_FLOW_GP_DEBUG row forensics (analysis only)
+    int gpDbgRank = 0;
+#ifdef PECLET_FLOW_MPI
+    if (distributed_)
+      MPI_Comm_rank(comm_, &gpDbgRank);
+#endif
+    gpDebugReport(gpOv_, gpNRows_, C3{nx_, ny_, nz_}, gpIdMap_, gpDbgRank);
+  }
+  copyInner(ox1_, e1_, 1, CCConst(oxb_), e_, G);  // MG surrogate = binary openness
+  copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
+  copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
+}
+
+template <class Grid>
+void Solver<Grid>::setSolidGhostProjectionOverlay(CCField din) {
   if (ghostProjection_) {
     // Directional ghost-cell projection: build the closure overlay + the binary (COUPLED)
     // openness. The binary field replaces the geometric openness on the MG rails (the MG
@@ -676,172 +856,12 @@ void Solver<Grid>::setSolidGhostProjectionOverlay(CCField din) {
     // every rank must agree on the main component, so allgather the inner sdf, run the
     // deterministic guard on the global grid identically on every rank, and keep this
     // rank's block of the result.
-    std::vector<double> sdfGpHost;
-    {
-      std::vector<double> work;
-      int fx = nx_, fy = ny_, fz = nz_;
-      bool verbose = true;
-#ifdef PECLET_FLOW_MPI
-      int myRank = 0;
-      if (distributed_) {
-        MPI_Comm_rank(comm_, &myRank);
-        int nRanks = 1;
-        MPI_Comm_size(comm_, &nRanks);
-        fx = gnx_;
-        fy = gny_;
-        fz = gnz_;
-        verbose = myRank == 0;
-        std::vector<int> cnts(nRanks), disp(nRanks);
-        long acc = 0;
-        for (int r = 0; r < nRanks; ++r) {
-          const auto b = dec_->block(r);
-          cnts[r] = (int)(b.size[0] * b.size[1] * b.size[2]);
-          disp[r] = (int)acc;
-          acc += cnts[r];
-        }
-        std::vector<double> flat((std::size_t)acc);
-        MPI_Allgatherv(sdfInner_().data(), (int)sdfInner_().size(), MPI_DOUBLE, flat.data(),
-                       cnts.data(), disp.data(), MPI_DOUBLE, comm_);
-        work.assign((std::size_t)fx * fy * fz, 0.0);
-        for (int r = 0; r < nRanks; ++r) {
-          const auto b = dec_->block(r);
-          const double* src = flat.data() + disp[r];
-          for (int z = 0; z < (int)b.size[2]; ++z)
-            for (int y = 0; y < (int)b.size[1]; ++y)
-              for (int x = 0; x < (int)b.size[0]; ++x)
-                work[(std::size_t)(x + b.origin[0]) + (std::size_t)(y + b.origin[1]) * fx +
-                     (std::size_t)(z + b.origin[2]) * (std::size_t)fx * fy] =
-                    src[(std::size_t)x + (std::size_t)y * b.size[0] +
-                        (std::size_t)z * (std::size_t)b.size[0] * b.size[1]];
-        }
-      } else
-#endif
-        work = sdfInner_();
-      const std::size_t nTot = work.size();
-      const int nx = fx, ny = fy, nz = fz;
-      auto id = [&](int x, int y, int z) {
-        return (std::size_t)((x + nx) % nx) + (std::size_t)((y + ny) % ny) * nx +
-               (std::size_t)((z + nz) % nz) * (std::size_t)nx * ny;
-      };
-      std::vector<int> comp(nTot, -1);
-      std::vector<std::size_t> stack;
-      int ncomp = 0, mainComp = -1;
-      std::size_t mainSize = 0, nActive = 0;
-      for (std::size_t seed = 0; seed < nTot; ++seed) {
-        if (comp[seed] >= 0 || work[seed] < 0.0)
-          continue;
-        std::size_t size = 0;
-        comp[seed] = ncomp;
-        stack.assign(1, seed);
-        while (!stack.empty()) {
-          const std::size_t c = stack.back();
-          stack.pop_back();
-          ++size;
-          const int x = (int)(c % nx), y = (int)((c / nx) % ny),
-                    z = (int)(c / ((std::size_t)nx * ny));
-          const int nb[6][3] = {{x - 1, y, z}, {x + 1, y, z}, {x, y - 1, z},
-                                {x, y + 1, z}, {x, y, z - 1}, {x, y, z + 1}};
-          for (auto& q : nb) {
-            const std::size_t j = id(q[0], q[1], q[2]);
-            if (comp[j] >= 0 || work[j] < 0.0)
-              continue;
-            // COUPLED face: mean-of-centers face sdf fluid AND both centers fluid
-            if (0.5 * (work[c] + work[j]) < 0.0)
-              continue;
-            comp[j] = ncomp;
-            stack.push_back(j);
-          }
-        }
-        if (size > mainSize) {
-          mainSize = size;
-          mainComp = ncomp;
-        }
-        nActive += size;
-        ++ncomp;
-      }
-      if (ncomp > 1) {
-        std::size_t pockets = 0;
-        for (std::size_t i = 0; i < nTot; ++i)
-          if (work[i] >= 0.0 && comp[i] != mainComp) {
-            work[i] = -(std::abs(work[i]) * 1.001 + 1e-30);
-            ++pockets;
-          }
-        if (verbose)
-          printf(
-              "peclet::flow ghost projection: %d fluid components; decoupled %zu pocket "
-              "cells outside the main component (%zu of %zu fluid cells)\n",
-              ncomp, pockets, mainSize, nActive);
-      }
-#ifdef PECLET_FLOW_MPI
-      if (distributed_) {
-        const auto b = dec_->block(myRank);
-        sdfGpHost.resize(sdfInner_().size());
-        for (int z = 0; z < nz_; ++z)
-          for (int y = 0; y < ny_; ++y)
-            for (int x = 0; x < nx_; ++x)
-              sdfGpHost[(std::size_t)x + (std::size_t)y * nx_ +
-                        (std::size_t)z * (std::size_t)nx_ * ny_] =
-                  work[(std::size_t)(x + b.origin[0]) + (std::size_t)(y + b.origin[1]) * fx +
-                       (std::size_t)(z + b.origin[2]) * (std::size_t)fx * fy];
-      } else
-#endif
-        sdfGpHost = std::move(work);
-    }
+    const std::vector<double> sdfGpHost = gpPocketGuardSdf(din);
     sdfGp_ = CCField("peclet::flow::sdfGp", n_);
     CCField sdfGp = sdfGp_;  // the projection's sdf view (pockets decoupled); persisted for
                              // the collocated gpCenterGrad predictor/correction
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      // local inner block + halo exchange (cross-rank + periodic), same as the sdf_ upload:
-      // the overlay build reads sdfGp ghosts up to +/-2 = G across block boundaries.
-      auto h = Kokkos::create_mirror_view(sdfGp_);
-      Kokkos::deep_copy(h, sdfGp_);
-      for (int z = 0; z < nz_; ++z)
-        for (int y = 0; y < ny_; ++y)
-          for (int x = 0; x < nx_; ++x)
-            h((long)(x + G) + (long)(y + G) * e_.x + (long)(z + G) * (long)e_.x * e_.y) =
-                sdfGpHost[(std::size_t)x + (std::size_t)y * nx_ +
-                          (std::size_t)z * (std::size_t)nx_ * ny_];
-      Kokkos::deep_copy(sdfGp_, h);
-      velDev_->exchange(sdfGp_);
-    } else
-#endif
-    {  // upload + periodic wrap (same pattern as the sdf upload above)
-      CCField din("peclet::flow::sdfGpInner_d", nInner);
-      Kokkos::deep_copy(
-          din,
-          Kokkos::View<const double*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
-              sdfGpHost.data(), sdfGpHost.size()));
-      CCExec space;
-      const int ex = e_.x, ey = e_.y, ez = e_.z, nx = nx_, ny = ny_, nz = nz_, g = G;
-      Kokkos::parallel_for(
-          "peclet::flow::sdfgp_wrap", MDRange3<CCExec>(space, {0, 0, 0}, {ex, ey, ez}),
-          KOKKOS_LAMBDA(int x, int y, int z) {
-            const int ix = (((x - g) % nx) + nx) % nx, iy = (((y - g) % ny) + ny) % ny,
-                      iz = (((z - g) % nz) + nz) % nz;
-            sdfGp((long)x + (long)y * ex + (long)z * (long)ex * ey) = din(
-                (std::size_t)ix + (std::size_t)iy * nx + (std::size_t)iz * (std::size_t)nx * ny);
-          });
-      space.fence();
-    }
-    gpBinaryOpenness(oxb_, oyb_, ozb_, CCConst(sdfGp), e_);
-    gpNRows_ = buildGpOverlay(CCConst(sdfGp), e_, G, C3{nx_, ny_, nz_}, gpOv_, gpIdMap_, gpCounter_,
-                              gpMatrixOrder_, gpRhsOrder_,
-                              hasExactCross_ ? CCConst(tEx_[0][0]) : CCConst(),
-                              hasExactCross_ ? CCConst(tEx_[1][1]) : CCConst(),
-                              hasExactCross_ ? CCConst(tEx_[2][2]) : CCConst(),
-                              /*useGhost=*/distributed_);
-    if (gpDebugLevel() > 0) {  // PECLET_FLOW_GP_DEBUG row forensics (analysis only)
-      int gpDbgRank = 0;
-#ifdef PECLET_FLOW_MPI
-      if (distributed_)
-        MPI_Comm_rank(comm_, &gpDbgRank);
-#endif
-      gpDebugReport(gpOv_, gpNRows_, C3{nx_, ny_, nz_}, gpIdMap_, gpDbgRank);
-    }
-    copyInner(ox1_, e1_, 1, CCConst(oxb_), e_, G);  // MG surrogate = binary openness
-    copyInner(oy1_, e1_, 1, CCConst(oyb_), e_, G);
-    copyInner(oz1_, e1_, 1, CCConst(ozb_), e_, G);
+    gpUploadSdf(sdfGpHost, nInner, sdfGp);
+    gpBuildOverlay(sdfGp);
   }
 }
 

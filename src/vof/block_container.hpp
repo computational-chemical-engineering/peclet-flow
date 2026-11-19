@@ -1410,6 +1410,12 @@ class VofBlockSet {
     DebrisJob job[kDebrisBatch];
     int nj;
   };
+  /// One acting block of `debrisPassBatchImpl`: its lists' lengths and whether D is removed.
+  struct DebrisPending {
+    VofBlock* b;
+    long k, nD, nR, nA, nDr;
+    bool removeD;
+  };
   void debrisPassBatchImpl(std::vector<VofBlock*>& bs) {
     const bool doDebris = csfEnabled && debrisCensus, doResidue = wispEps > 0.0;
     const int g = ghost_;
@@ -1433,12 +1439,7 @@ class VofBlockSet {
       ensure(listD_, "vof::block::debris_list");
     if (doResidue)
       ensure(listR_, "vof::block::residue_list");
-    struct Pending {
-      VofBlock* b;
-      long k, nD, nR, nA, nDr;
-      bool removeD;
-    };
-    std::vector<Pending> pend;
+    std::vector<DebrisPending> pend;
     std::vector<DebrisJob> jobs;
     for (std::size_t k = 0; k < bs.size(); ++k) {
       VofBlock& b = *bs[k];
@@ -1520,7 +1521,7 @@ class VofBlockSet {
             ++upd;
           },
           nA);
-      Pending pb{&b, static_cast<long>(k), nD, nR, nA, removeD ? nD : 0, removeD};
+      DebrisPending pb{&b, static_cast<long>(k), nD, nR, nA, removeD ? nD : 0, removeD};
       pend.push_back(pb);
       DebrisJob j;
       j.c = c.data();
@@ -1542,6 +1543,12 @@ class VofBlockSet {
     // the double the serial loop gave it (review finding 4). `lost` (a cap at 1, expected never to
     // fire) is summed in list order from a per-cell scratch only when some cell was capped.
     const long np = static_cast<long>(pend.size());
+    debrisSums(jobs, np);
+    debrisApply(pend, off, doDebris, np);
+  }
+  /// `debrisPassBatchImpl`, step 2: the sums of every acting block (`np` jobs) in batched
+  /// launches of one thread per block, then ONE device->host copy into `debrisOutHost_`.
+  void debrisSums(const std::vector<DebrisJob>& jobs, long np) {
     if (static_cast<long>(debrisOut_.extent(0)) < 6 * np) {
       debrisOut_ = SField("vof::block::debris_out", 6 * np);
       debrisOutHost_ = Kokkos::create_mirror_view(debrisOut_);
@@ -1587,9 +1594,13 @@ class VofBlockSet {
           });
     }
     Kokkos::deep_copy(debrisOutHost_, out);  // ONE device->host copy for every block
+  }
+  /// `debrisPassBatchImpl`, steps 3-5 per acting block: the per-cell writes and the ledger.
+  void debrisApply(const std::vector<DebrisPending>& pend, const std::vector<long>& off,
+                   bool doDebris, long np) {
     auto hoAll = debrisOutHost_;
     for (long p = 0; p < np; ++p) {
-      const Pending& pb = pend[p];
+      const DebrisPending& pb = pend[p];
       VofBlock& b = *pb.b;
       const long o = off[pb.k];
       const I3 n = b.adv_.inner();

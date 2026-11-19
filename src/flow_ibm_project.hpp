@@ -12,6 +12,74 @@ namespace peclet::flow {
 
 template <class Grid>
 void Solver<Grid>::step() {
+  // The step*() phases are contiguous blocks of this function, called in their original order
+  // (WO-HO): launches, fences, halo/MPI calls and the refusals keep their order inside them.
+  stepPrechecks();
+
+  // The momentum-solver choice, for a configuration that never calls set_solid. set_solid is the
+  // other (and historically the only) place it is made; a domain-BC case with no immersed solid
+  // never reaches it, which is why enabling the velocity MG there used to build no hierarchy and
+  // segfault. Deciding at the head of the first step is if anything more correct than deciding in
+  // set_solid: every flag the eligibility test reads (advection scheme, variable properties,
+  // drag, porous) is final by now, whereas at set_solid time it need not be.
+  if (!vmgDecided_) {
+    setSolidVelocityMgAuto();
+    initVelocityMg();
+    vmgDecided_ = true;
+  }
+  const double ts0 = phaseTick();
+  tPredictor_ = tMomentum_ = tProjection_ = 0.0;
+  lastMomentumSweeps_ = 0;
+  lastMomentumResid_ = -1.0;
+  mg_.resetAllreduceCounters();
+  const bool hoisted = stepHeadFields();
+  stepStencils();
+  const bool fullStress = stepTimeBase();
+  stepPressureGhosts();
+  stepBalancedForce(hoisted);
+  lastOuterIters_ = 0;
+  for (int outer = 0; outer < outerIters_; ++outer) {
+    const double tp0 = phaseTick();
+    lastOuterIters_ = outer + 1;
+    if (outerTol_ > 0)
+      for (int c = 0; c < 3; ++c)
+        Kokkos::deep_copy(prev_[c], C[c].u);
+    stepPredictorInputs();
+    const bool coloFF = stepPredictorRhs();
+    stepPredictorForces(coloFF, fullStress);
+    stepPredictorOperator();
+    stepPredictorCoarseAdvection();
+    const double tp1 = phaseTick();
+    tPredictor_ += tp1 - tp0;
+    stepMomentumSolve();
+    const double tp2 = phaseTick();
+    tMomentum_ += tp2 - tp1;
+    stepProjection();
+    tProjection_ += phaseTick() - tp2;
+    stepPostProjection();
+    if (outerTol_ > 0) {  // outer convergence: max velocity change over this Picard iteration
+      double corr = 0.0;
+      for (int c = 0; c < 3; ++c)
+        corr = Kokkos::fmax(corr, maxAbsDiffInner(CCConst(C[c].u), CCConst(prev_[c])));
+      lastOuterCorr_ = corr;
+      if (corr < outerTol_)
+        break;
+    }
+  }
+  stepTransport();
+  stepBackflowWarning();
+  tStep_ = phaseTick() - ts0;
+  if (vofTiming_) {  // WO-V9: the coarse phases, summed over the profiled window
+    tStepSum_ += tStep_;
+    tPredSum_ += tPredictor_;
+    tMomSum_ += tMomentum_;
+    tProjSum_ += tProjection_;
+    ++vt_.steps;
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::stepPrechecks() {
   // ISSUES sweep item 1 (VOF_PLAN section 13 item 9): make `step()` ATOMIC across the two
   // explicit two-phase stability throws. Both used to fire AFTER the momentum half had already
   // advanced by the rejected dt -- the Weymouth-Yue boundedness cap from inside `advectVof`
@@ -39,23 +107,10 @@ void Solver<Grid>::step() {
   else if (fullStress_ && varProps_)
     requireFullStressScope("step");
   resolveSharpViscous();  // the sharp interface (inert unless requested; refusals here)
+}
 
-  // The momentum-solver choice, for a configuration that never calls set_solid. set_solid is the
-  // other (and historically the only) place it is made; a domain-BC case with no immersed solid
-  // never reaches it, which is why enabling the velocity MG there used to build no hierarchy and
-  // segfault. Deciding at the head of the first step is if anything more correct than deciding in
-  // set_solid: every flag the eligibility test reads (advection scheme, variable properties,
-  // drag, porous) is final by now, whereas at set_solid time it need not be.
-  if (!vmgDecided_) {
-    setSolidVelocityMgAuto();
-    initVelocityMg();
-    vmgDecided_ = true;
-  }
-  const double ts0 = phaseTick();
-  tPredictor_ = tMomentum_ = tProjection_ = 0.0;
-  lastMomentumSweeps_ = 0;
-  lastMomentumResid_ = -1.0;
-  mg_.resetAllreduceCounters();
+template <class Grid>
+bool Solver<Grid>::stepHeadFields() {
   // Momentum-consistent geometric VoF (rung V2b, WO-K): the colour field and rho^c u_c are
   // advanced TOGETHER, by the same fluxes, at the head of the step — the momentum advection has
   // to precede the predictor that consumes it. The advecting field is u^n, the previous step's
@@ -107,6 +162,11 @@ void Solver<Grid>::step() {
   // source that pumps the particles through the drag (measured in the HCS benchmark).
   if (porous_ && porousCons_)
     updateEpsRho();
+  return hoisted;
+}
+
+template <class Grid>
+void Solver<Grid>::stepStencils() {
   // The sharp viscous interface: planes + band classes of this step's colour, before the bands.
   if (sharpActive_)
     sharpViscousGeometry();
@@ -117,6 +177,10 @@ void Solver<Grid>::step() {
       !implicitAdv())
     rebuildStencils();
   dtDirty_ = false;  // implicit-FOU rebuilds per Picard below (reads dt_ live) — clear either way
+}
+
+template <class Grid>
+bool Solver<Grid>::stepTimeBase() {
   // u^n time base, fixed for the whole step (Picard lags the advecting velocity at u^k, not the
   // base).
   for (int c = 0; c < 3; ++c)
@@ -138,6 +202,11 @@ void Solver<Grid>::step() {
     if (!implicitAdv())
       rebuildStencils();
   }
+  return fullStress;
+}
+
+template <class Grid>
+void Solver<Grid>::stepPressureGhosts() {
   if (cutcellPressure_ && incremental_) {
     fillGhosts(P_);
     if (hasBc_)
@@ -153,6 +222,10 @@ void Solver<Grid>::step() {
     if (effVarRho())
       fillPropGhosts(effRhoField());
   }
+}
+
+template <class Grid>
+void Solver<Grid>::stepBalancedForce(bool hoisted) {
   // (B) The balanced-force projection (doc/collocated_varrho_forces.md §4.6.2): once per step,
   // before the Picard loop. Byte-identical (not even a flag read beyond this) when it is off.
   coeffBuiltThisStep_ = hoisted;  // X: the reset must not undo the hoist
@@ -181,136 +254,152 @@ void Solver<Grid>::step() {
                      "to silence this notice.\n");
     }
   }
-  lastOuterIters_ = 0;
-  for (int outer = 0; outer < outerIters_; ++outer) {
-    const double tp0 = phaseTick();
-    lastOuterIters_ = outer + 1;
-    if (outerTol_ > 0)
-      for (int c = 0; c < 3; ++c)
-        Kokkos::deep_copy(prev_[c], C[c].u);
-    if (advectsMomentum() || hasBc_ || (Grid::collocated && faceInterp_ >= 5 && faceInterp_ <= 7))
-      for (int c = 0; c < 3; ++c)
-        fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect / embed defect matvec
-    // A0 (advective cut-wall flux): build the advection's wall-aware velocity inputs. AFTER the
-    // ghost exchange, over the extended block, so ghost solid rows carry the wall velocity too.
-    // No-op -- and no allocation -- unless a scene instance is moving; static scenes keep reading
-    // C[*].u byte for byte. See buildAdvInputs().
-    buildAdvInputs();
-    // Porous advection-form compensation: the Koren/SOU/FOU advection operators are CONSERVATIVE
-    // (flux form, ∇·(u u)), which equals the true advective transport u·∇u only for a solenoidal
-    // advecting field. Under the volume-averaged continuity div(eps u)=0 the plain divergence
-    // div(u) = -(1/eps) u·grad(eps) != 0, and the flux form silently adds the spurious force
-    // +u(div u) — largest where grad(eps) is large (clusters), where it pumps particle kinetic
-    // energy through the drag with no physical source (measured: HCS variance rising ~x30 past
-    // the clustering plateau). Compensate by subtracting u_f·div(u)_f from the advection in the
-    // RHS (the exact identity u·∇u = ∇·(uu) − u∇·u; div(u) at the face = mean of the two cell
-    // divergences). Gated on porous_ so every other path is byte-identical.
-    if (porous_ && advectsMomentum())
-      computeDivAdv();
-    // Rung V8: on the collocated grid with variable density and/or surface tension the pressure
-    // and every force go INSIDE this implicit predictor through the mass-adjoint face integral —
-    // WHY, and why never as a face acceleration after the viscous solve: see buildRhsColoVar.
-    // `colocatedFaceForce()` is false on the staggered path and on every constant-density
-    // collocated path without CSF, so this dispatch is inert there.
-    const bool coloFF = colocatedFaceForce();
-    for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
-      coloFF ? buildRhsColoVar(c)
-             : (vofMomEnabled_ ? buildRhsVarMom(c)
-                               : (effVarRho() ? buildRhsVar(c)
-                                              : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c))));
-    // Rung V4 (WO-P): the balanced-force CSF, ADDED to whichever RHS the configuration built --
-    // at the same place, and with the same face difference, as the incremental -grad(P^n) just
-    // above it. Independent of the time term and the advection form, hence additive rather than a
-    // fifth RHS kernel. Gated: byte-identical when surface tension is off.
-    if (csfActive() && !coloFF) {
-      const double _t0 = vofTick();  // WO-V9
-      for (int c = 0; c < 3; ++c)
-        vofBlockCsf()
-            ? addCsfRhsBlocks(c)
-            : (csfMode_ == 0 ? addCsfRhs(c, C[c].b, true) : addCsfRhsCellInterp(c, C[c].b, true));
-      vofAdd(vt_.csf, _t0);
-    }
-    // Full viscous stress: rs_c * T_c(u^n), explicit on the time base and constant across Picard
-    // iterations; additive like the CSF, independent of which RHS kernel ran (§4.2-§4.3). Skipped
-    // entirely when mu is globally uniform (§4.4).
-    if (fullStress && !muUniform_)
-      for (int c = 0; c < 3; ++c)
-        addFullStressRhsComp(c);
-    // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
-    // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
-    // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
-    // stencil path (inflow/outflow) -- implicitAdv() -> fully-implicit upwind advection (stable
-    // at large dt). The velocity-MG BC path keeps its own FOU coarse operator.
-    if (implicitAdv() && (!hasBc_ || !useVelocityMg_ || mixedVelocityMg()))
-      for (int c = 0; c < 3; ++c)
-        (varProps_ || effVarRho()) ? buildAdvStencilVar(c) : buildAdvStencil(c);
-    // Outflow backflow stabilization: dissipate reverse flow at the outlet in the momentum
-    // operator used by the domain-BC stencil smoother (prevents backflow divergence). Inert
-    // without reversal.
-    if (bcStencilPath() && backflowBeta_ > 0.0 && hasOutflow_)
-      for (int c = 0; c < 3; ++c)
-        applyBackflowStab(c);
-    // upwind-convective velocity-MG: restrict the (frozen u^k) advecting velocity to the coarse
-    // levels ONCE, before the per-component solves update it (shared across the 3 momentum
-    // components).
-    if (useVelocityMg_ && advectsMomentum() &&
-        ((implicitFou_ && !hasBc_) || (mixedVelocityMg() && implicitAdv())))
-      vmg_.restrictAdvVelocities(  // A0: same inputs as the fine operator -- including the
-                                   // collocated projected face field, so the coarse FOU
-                                   // preconditioner stays consistent with the fine one
-                                   // (levels >= 1 only; level 0 IS buildAdvStencil's operator)
-          ufAdvVelocity() ? openFaceView(0) : advVelView(0),
-          ufAdvVelocity() ? openFaceView(1) : advVelView(1),
-          ufAdvVelocity() ? openFaceView(2) : advVelView(2));
-    const double tp1 = phaseTick();
-    tPredictor_ += tp1 - tp0;
+}
+
+template <class Grid>
+void Solver<Grid>::stepPredictorInputs() {
+  if (advectsMomentum() || hasBc_ || (Grid::collocated && faceInterp_ >= 5 && faceInterp_ <= 7))
     for (int c = 0; c < 3; ++c)
-      smoothComp(c);  // per-component IBM implicit-diffusion solve
-    // Route (b): stash u* for the reaction-force budget. Every Picard iteration overwrites, so
-    // what survives is the LAST momentum solve -- the one whose viscous fluxes, together with
-    // the last projection, actually produced u^{n+1} (the time base is u^n for every iteration,
-    // so earlier iterations leave no trace in the final state except through P_). A pure
-    // deep_copy: no numerical effect on any solve.
-    if constexpr (!Grid::collocated) {
-      if (hasScene_) {
-        for (int c = 0; c < 3; ++c) {
-          if (uStar_[c].extent(0) != n_)
-            uStar_[c] = CCField("uStar", n_);
-          Kokkos::deep_copy(uStar_[c], C[c].u);
-        }
-        haveUStar_ = true;
+      fillVelGhosts(c, 0);  // explicit ghosts (periodic + BC) for advect / embed defect matvec
+  // A0 (advective cut-wall flux): build the advection's wall-aware velocity inputs. AFTER the
+  // ghost exchange, over the extended block, so ghost solid rows carry the wall velocity too.
+  // No-op -- and no allocation -- unless a scene instance is moving; static scenes keep reading
+  // C[*].u byte for byte. See buildAdvInputs().
+  buildAdvInputs();
+  // Porous advection-form compensation: the Koren/SOU/FOU advection operators are CONSERVATIVE
+  // (flux form, ∇·(u u)), which equals the true advective transport u·∇u only for a solenoidal
+  // advecting field. Under the volume-averaged continuity div(eps u)=0 the plain divergence
+  // div(u) = -(1/eps) u·grad(eps) != 0, and the flux form silently adds the spurious force
+  // +u(div u) — largest where grad(eps) is large (clusters), where it pumps particle kinetic
+  // energy through the drag with no physical source (measured: HCS variance rising ~x30 past
+  // the clustering plateau). Compensate by subtracting u_f·div(u)_f from the advection in the
+  // RHS (the exact identity u·∇u = ∇·(uu) − u∇·u; div(u) at the face = mean of the two cell
+  // divergences). Gated on porous_ so every other path is byte-identical.
+  if (porous_ && advectsMomentum())
+    computeDivAdv();
+}
+
+template <class Grid>
+bool Solver<Grid>::stepPredictorRhs() {
+  // Rung V8: on the collocated grid with variable density and/or surface tension the pressure
+  // and every force go INSIDE this implicit predictor through the mass-adjoint face integral —
+  // WHY, and why never as a face acceleration after the viscous solve: see buildRhsColoVar.
+  // `colocatedFaceForce()` is false on the staggered path and on every constant-density
+  // collocated path without CSF, so this dispatch is inert there.
+  const bool coloFF = colocatedFaceForce();
+  for (int c = 0; c < 3; ++c)  // RHS from u^n base + advection lagged at u^k
+    coloFF ? buildRhsColoVar(c)
+           : (vofMomEnabled_ ? buildRhsVarMom(c)
+                             : (effVarRho() ? buildRhsVar(c)
+                                            : (hasCellForce_ ? buildRhsForced(c) : buildRhs(c))));
+  return coloFF;
+}
+
+template <class Grid>
+void Solver<Grid>::stepPredictorForces(bool coloFF, bool fullStress) {
+  // Rung V4 (WO-P): the balanced-force CSF, ADDED to whichever RHS the configuration built --
+  // at the same place, and with the same face difference, as the incremental -grad(P^n) just
+  // above it. Independent of the time term and the advection form, hence additive rather than a
+  // fifth RHS kernel. Gated: byte-identical when surface tension is off.
+  if (csfActive() && !coloFF) {
+    const double _t0 = vofTick();  // WO-V9
+    for (int c = 0; c < 3; ++c)
+      vofBlockCsf()
+          ? addCsfRhsBlocks(c)
+          : (csfMode_ == 0 ? addCsfRhs(c, C[c].b, true) : addCsfRhsCellInterp(c, C[c].b, true));
+    vofAdd(vt_.csf, _t0);
+  }
+  // Full viscous stress: rs_c * T_c(u^n), explicit on the time base and constant across Picard
+  // iterations; additive like the CSF, independent of which RHS kernel ran (§4.2-§4.3). Skipped
+  // entirely when mu is globally uniform (§4.4).
+  if (fullStress && !muUniform_)
+    for (int c = 0; c < 3; ++c)
+      addFullStressRhsComp(c);
+}
+
+template <class Grid>
+void Solver<Grid>::stepPredictorOperator() {
+  // Implicit-FOU: rebuild the IBM velocity stencil = backward-Euler diffusion + rho*FOU(u^k),
+  // then re-apply the cut-cell bake. Per Picard iteration (advecting velocity changes). Applies
+  // to the IBM (periodic/porous) path when the user opts in, AND ALWAYS to the domain-BC
+  // stencil path (inflow/outflow) -- implicitAdv() -> fully-implicit upwind advection (stable
+  // at large dt). The velocity-MG BC path keeps its own FOU coarse operator.
+  if (implicitAdv() && (!hasBc_ || !useVelocityMg_ || mixedVelocityMg()))
+    for (int c = 0; c < 3; ++c)
+      (varProps_ || effVarRho()) ? buildAdvStencilVar(c) : buildAdvStencil(c);
+  // Outflow backflow stabilization: dissipate reverse flow at the outlet in the momentum
+  // operator used by the domain-BC stencil smoother (prevents backflow divergence). Inert
+  // without reversal.
+  if (bcStencilPath() && backflowBeta_ > 0.0 && hasOutflow_)
+    for (int c = 0; c < 3; ++c)
+      applyBackflowStab(c);
+}
+
+template <class Grid>
+void Solver<Grid>::stepPredictorCoarseAdvection() {
+  // upwind-convective velocity-MG: restrict the (frozen u^k) advecting velocity to the coarse
+  // levels ONCE, before the per-component solves update it (shared across the 3 momentum
+  // components).
+  if (useVelocityMg_ && advectsMomentum() &&
+      ((implicitFou_ && !hasBc_) || (mixedVelocityMg() && implicitAdv())))
+    vmg_.restrictAdvVelocities(  // A0: same inputs as the fine operator -- including the
+                                 // collocated projected face field, so the coarse FOU
+                                 // preconditioner stays consistent with the fine one
+                                 // (levels >= 1 only; level 0 IS buildAdvStencil's operator)
+        ufAdvVelocity() ? openFaceView(0) : advVelView(0),
+        ufAdvVelocity() ? openFaceView(1) : advVelView(1),
+        ufAdvVelocity() ? openFaceView(2) : advVelView(2));
+}
+
+template <class Grid>
+void Solver<Grid>::stepMomentumSolve() {
+  for (int c = 0; c < 3; ++c)
+    smoothComp(c);  // per-component IBM implicit-diffusion solve
+  // Route (b): stash u* for the reaction-force budget. Every Picard iteration overwrites, so
+  // what survives is the LAST momentum solve -- the one whose viscous fluxes, together with
+  // the last projection, actually produced u^{n+1} (the time base is u^n for every iteration,
+  // so earlier iterations leave no trace in the final state except through P_). A pure
+  // deep_copy: no numerical effect on any solve.
+  if constexpr (!Grid::collocated) {
+    if (hasScene_) {
+      for (int c = 0; c < 3; ++c) {
+        if (uStar_[c].extent(0) != n_)
+          uStar_[c] = CCField("uStar", n_);
+        Kokkos::deep_copy(uStar_[c], C[c].u);
       }
-    }
-    const double tp2 = phaseTick();
-    tMomentum_ += tp2 - tp1;
-    // The porous (volume-averaged) projection lives entirely on the cut-cell operator rails
-    // (divergOpenEps + buildPorousCoeff* into CutcellMG). Without set_solid /
-    // set_pressure_geometry there is NO projection at all — the gas would never accelerate to
-    // the interstitial velocity in a bed and the drag comes out ~5x too weak (a fluidized bed
-    // quietly refuses to fluidize). Fail loudly instead of silently dropping the constraint.
-    if (porous_ && !cutcellPressure_)
-      throw std::runtime_error(
-          "set_porous_continuity(True) requires the cut-cell pressure operator: call "
-          "set_solid(...) or set_pressure_geometry(all-fluid SDF) before stepping (a "
-          "domain-BC-only box otherwise runs with NO continuity constraint at all)");
-    if (cutcellPressure_)
-      project();  // cut-cell projection -> incompressible
-    tProjection_ += phaseTick() - tp2;
-    if (hasBc_)
-      applyVelocityBcAll(0, false);  // re-impose domain BCs (keep outflow), components 0, 1, 2
-    // WO-5b: a cut-cell scalar's open-face flux is the one this projection constrained; keep it
-    // before any ghost fill wraps the high-side plane (no-op without one; the last iteration wins).
-    if (cutcellPressure_)
-      scalarCaptureOpenFaceFlux();
-    if (outerTol_ > 0) {  // outer convergence: max velocity change over this Picard iteration
-      double corr = 0.0;
-      for (int c = 0; c < 3; ++c)
-        corr = Kokkos::fmax(corr, maxAbsDiffInner(CCConst(C[c].u), CCConst(prev_[c])));
-      lastOuterCorr_ = corr;
-      if (corr < outerTol_)
-        break;
+      haveUStar_ = true;
     }
   }
+}
+
+template <class Grid>
+void Solver<Grid>::stepProjection() {
+  // The porous (volume-averaged) projection lives entirely on the cut-cell operator rails
+  // (divergOpenEps + buildPorousCoeff* into CutcellMG). Without set_solid /
+  // set_pressure_geometry there is NO projection at all — the gas would never accelerate to
+  // the interstitial velocity in a bed and the drag comes out ~5x too weak (a fluidized bed
+  // quietly refuses to fluidize). Fail loudly instead of silently dropping the constraint.
+  if (porous_ && !cutcellPressure_)
+    throw std::runtime_error(
+        "set_porous_continuity(True) requires the cut-cell pressure operator: call "
+        "set_solid(...) or set_pressure_geometry(all-fluid SDF) before stepping (a "
+        "domain-BC-only box otherwise runs with NO continuity constraint at all)");
+  if (cutcellPressure_)
+    project();  // cut-cell projection -> incompressible
+}
+
+template <class Grid>
+void Solver<Grid>::stepPostProjection() {
+  if (hasBc_)
+    applyVelocityBcAll(0, false);  // re-impose domain BCs (keep outflow), components 0, 1, 2
+  // WO-5b: a cut-cell scalar's open-face flux is the one this projection constrained; keep it
+  // before any ghost fill wraps the high-side plane (no-op without one; the last iteration wins).
+  if (cutcellPressure_)
+    scalarCaptureOpenFaceFlux();
+}
+
+template <class Grid>
+void Solver<Grid>::stepTransport() {
   // Geometric VoF (rung V2a): advance the colour field with the just-projected, discretely
   // divergence-free face velocities — the SAME slot, and the same justification, as
   // advanceScalars() below (Weymouth-Yue's exact conservation is conditioned on the advecting
@@ -333,6 +422,10 @@ void Solver<Grid>::step() {
   // starts from the constrained field exactly as a driver shifting it between steps would. No-op
   // when off.
   applySuperficialVelocity();
+}
+
+template <class Grid>
+void Solver<Grid>::stepBackflowWarning() {
   // The UNSTABLE outflow regime, detected rather than guessed (peclet-examples ISSUES.md
   // "Inflow/outflow diverges to NaN"): reversed flow on an outflow face with the backflow
   // stabilization switched OFF. Checked only in that configuration (beta <= 0 is not the
@@ -359,14 +452,6 @@ void Solver<Grid>::step() {
                      "before the outlet. Monitor with outflow_backflow().\n",
                      ob.maxReverse, 100.0 * ob.fraction, ob.energyInflux);
     }
-  }
-  tStep_ = phaseTick() - ts0;
-  if (vofTiming_) {  // WO-V9: the coarse phases, summed over the profiled window
-    tStepSum_ += tStep_;
-    tPredSum_ += tPredictor_;
-    tMomSum_ += tMomentum_;
-    tProjSum_ += tProjection_;
-    ++vt_.steps;
   }
 }
 
@@ -1792,143 +1877,172 @@ void Solver<Grid>::constraintDivergence(CCConst fx, CCConst fy, CCConst fz, CCFi
 template <class Grid>
 void Solver<Grid>::projectCorrectVelocities() {
   if constexpr (Grid::collocated) {
-    // phi: zero-gradient (Neumann) at non-periodic walls so the cell-centered central-difference
-    // correction carries no spurious normal acceleration through the wall (the periodic fill
-    // wrapped the opposite boundary's phi). Outflow (Dirichlet p=0) is handled by hasOutflow_
-    // above (phase 5b).
-    if (hasBc_) {
-      B3 e{e_.x, e_.y, e_.z};
-      for (int a = 0; a < 3; ++a)
-        for (int s = 0; s < 2; ++s) {
-          const int t = bc_[2 * a + s];
-          if (t != 0 && t != 3 && touchesGlobalFace(2 * a + s))
-            bcNeumannGhost(phi_, e, G, a, s);
-        }
-    }
-    // Correct the face field (-> discretely divergence-free; transient this step) and the cell
-    // field (central-difference cell gradient).
-    // rung V8: per-face 1/rho_f on the gradient, matching the operator coefficient
-    // c_f = o_f*rho0/rho_f — the SAME exact-adjoint face correction the staggered path uses.
-    // Phase 2 C2 (doc/anisotropic_metric.md §3): the per-axis weight w_a multiplies the whole
-    // existing correction, matching the w_a on the operator row of that axis.  1.0 isotropic.
-    if (varRho_)
-      projectCorrectVar(uf_, vf_, wf_, CCConst(phi_), CCConst(rhoField_), rho_, e_, G, u_.w[0],
-                        u_.w[1], u_.w[2]);
-    else
-      projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
-      starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
-                       C3{nx_, ny_, nz_}, e_, G, e_, G, exactResidual_, u_.w[0], u_.w[1], u_.w[2]);
-    // Complete the face field's ghosts, KEEPING each high-side boundary face: a plain fillGhosts
-    // wraps the inlet plane onto the outlet, so bcCorrectOutflow below would correct the wrong
-    // value (doc/uf_outlet_fix.md). Momentum never saw it (openFaceView), the scalars and the
-    // backflow census did.
-    fillFaceGhostsKeepBoundary(uf_, 0);
-    fillFaceGhostsKeepBoundary(vf_, 1);
-    fillFaceGhostsKeepBoundary(wf_, 2);
-    if (hasOutflow_) {  // correct the high-side outflow face on the face field so mass leaves
-                        // (phi=0 there)
-      B3 e{e_.x, e_.y, e_.z};
-      CCField fa[3] = {uf_, vf_, wf_};
-      // WO-R2 item 1: same rule as the staggered path below — with the operator's outflow row
-      // carrying rho0/rho_f (setOutflowCoefficient) the consistent correction carries it too.
-      const bool var = varRho_ && !porous_ && outflowRhoCorr_;
-      for (int a = 0; a < 3; ++a)
-        if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
-          if (var)
-            bcCorrectOutflowVar(fa[a], phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_, u_.w[a]);
-          else
-            bcCorrectOutflow(fa[a], phi_, e, G, a, u_.w[a]);
-        }
-    }
+    projectPhiWallGhosts();
+    projectCorrectFaceField();
+    projectCorrectFaceFieldOutflow();
     // The face field is now final for this step. Derive the OPEN-boundary view the next
     // predictor's advection and the divergence diagnostic read (buildOpenFaceField explains why
     // the outflow face cannot be the mass-balance closure there); a no-op without an outflow.
     buildOpenFaceField();
-    if (colocatedFaceForce()) {
-      // Rung V8 (S8.5): the cell correction is the predictor's face-to-cell reconstruction applied
-      // to the face corrections k(j) = w (rho0/rho_f)(phi(j) - phi(j-s)) — the transpose of the
-      // constraint, so the pair stays adjoint (collocated_varrho.hpp). Replaces the whole
-      // constant-density cell-correction chain below.
-      CCField oax[3] = {ox_, oy_, oz_};
-      for (int cc = 0; cc < 3; ++cc)
-        correctCellFaceAverageVar(C[cc].u, CCConst(phi_),
-                                  CCConst(varRho_ ? rhoField_ : C[cc].rscale), CCConst(oax[cc]),
-                                  varRho_, rho_, strideOf(cc), e_, G, u_.w[cc]);
-    } else if (ghostProjection_ || faceInterp_ == 9) {
-      // Ghost cell correction (also the gauge-exact scheme): the directional gpCenterGrad
-      // gradient of phi — 2nd-order one-sided at cut cells, never reads a decoupled
-      // (solid/pocket) phi. The same operator supplies the momentum's -grad(P^n) predictor
-      // (buildRhs), so the pressure force the momentum feels and the correction stay one
-      // operator family.
-      for (int cc = 0; cc < 3; ++cc) {
-        gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G,
-                     u_.w[cc]);
-        subtractField(C[cc].u, CCConst(tgp_), e_, G);
-      }
-    } else if (faceInterp_ == 5) {  // embed 5: cell correction = the TRANSPOSE of the
-      // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
-      CCField xcs[3] = {xcx_, xcy_, xcz_};
-      CCField oax[3] = {ox_, oy_, oz_};
-      for (int cc = 0; cc < 3; ++cc) {
-        transposeGradWallAware(tgp_, CCConst(phi_), CCConst(sdf_), CCConst(oax[cc]),
-                               CCConst(xcs[cc]), true, cc, e_, G, u_.w[cc]);
-        subtractField(C[cc].u, CCConst(tgp_), e_, G);
-      }
-    } else if (faceInterp_ == 6 || faceInterp_ == 7) {  // embed: openness-WEIGHTED cell correction
-      // (full open-face pressure force at cut cells) — Basilisk centered_grad
-      projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
-                               CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    } else {
-      projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
-                           CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    }
+    projectCorrectCellField();
   } else {
-    if (porous_ && porousCons_)  // eps-conservative gradient rho*idt/(eps_f rho idt + beta_f),
-                                 // matching buildPorousCoeffCons (see mac_pressure.hpp)
-      projectCorrectPorousCons(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(epsField_),
-                               CCConst(dragBeta_), hasDrag_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
-                               u_.w[2]);
-    else if (porous_ &&
-             hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
-      projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_),
-                               rho_ / dt_, e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    else if (varRho_ && rhoFaceHarmonic_)  // the WO-J harmonic knob: coefficient AND correction
-      projectCorrectVarHarm(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
-                            u_.w[0], u_.w[1], u_.w[2]);
-    else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
-      projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
-                        u_.w[0], u_.w[1], u_.w[2]);
-    else
-      projectCorrect(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
-    if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses
-                        // (mass leaves)
-      B3 e{e_.x, e_.y, e_.z};
-      // WO-R item 4: with variable density every OTHER corrected face carries the mobility
-      // factor rho0/rho_f (projectCorrectVar) and this one did not — a ratio-sized error on the
-      // outflow face, invisible at constant density (rho_f == rho0) which is why the channel/BFS
-      // validations never saw it. The porous branches keep the plain correction: their
-      // coefficient is the drag/eps relaxation, not 1/rho, and a two-phase porous outlet is not
-      // this rung. `!varRho_` is byte-identical.
-      // `set_outflow_rho_correction(False)` drops the 1/rho_f
-      // factor. DEFAULT ON since WO-R2 fixed the operator's outflow-face coefficient — see
-      // setOutflowRhoCorrection for the before/after table and the mechanism.
-      const bool var = varRho_ && !porous_ && outflowRhoCorr_;
-      for (int a = 0; a < 3; ++a)
-        if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
-          if (var)
-            bcCorrectOutflowVar(C[a].u, phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_, u_.w[a]);
-          else
-            bcCorrectOutflow(C[a].u, phi_, e, G, a, u_.w[a]);
-        }
-      outflowCorrValid_ = true;  // the outflow face now carries the mass that leaves
-    }
+    projectCorrectStaggered();
+    projectCorrectStaggeredOutflow();
   }
   // the grad(phi) correction also touches solid faces; re-impose no-slip there so the decoupled
   // solid velocity cannot accumulate (matches the CUDA apply_mask/mask_k after correct_k ->
   // stability).
   for (int c = 0; c < 3; ++c)
     maskVelocity(c);
+}
+
+template <class Grid>
+void Solver<Grid>::projectPhiWallGhosts() {
+  // phi: zero-gradient (Neumann) at non-periodic walls so the cell-centered central-difference
+  // correction carries no spurious normal acceleration through the wall (the periodic fill
+  // wrapped the opposite boundary's phi). Outflow (Dirichlet p=0) is handled by hasOutflow_
+  // above (phase 5b).
+  if (hasBc_) {
+    B3 e{e_.x, e_.y, e_.z};
+    for (int a = 0; a < 3; ++a)
+      for (int s = 0; s < 2; ++s) {
+        const int t = bc_[2 * a + s];
+        if (t != 0 && t != 3 && touchesGlobalFace(2 * a + s))
+          bcNeumannGhost(phi_, e, G, a, s);
+      }
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectFaceField() {
+  // Correct the face field (-> discretely divergence-free; transient this step) and the cell
+  // field (central-difference cell gradient).
+  // rung V8: per-face 1/rho_f on the gradient, matching the operator coefficient
+  // c_f = o_f*rho0/rho_f — the SAME exact-adjoint face correction the staggered path uses.
+  // Phase 2 C2 (doc/anisotropic_metric.md §3): the per-axis weight w_a multiplies the whole
+  // existing correction, matching the w_a on the operator row of that axis.  1.0 isotropic.
+  if (varRho_)
+    projectCorrectVar(uf_, vf_, wf_, CCConst(phi_), CCConst(rhoField_), rho_, e_, G, u_.w[0],
+                      u_.w[1], u_.w[2]);
+  else
+    projectCorrect(uf_, vf_, wf_, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
+  if (fluidOnlyMode_ == 2)  // Design B: replace the solid side's phi=0 by phibar_s at
+    starCorrectFaces(uf_, vf_, wf_, CCConst(phi_), starOv_, nStar_,  // fluid|solid faces
+                     C3{nx_, ny_, nz_}, e_, G, e_, G, exactResidual_, u_.w[0], u_.w[1], u_.w[2]);
+  // Complete the face field's ghosts, KEEPING each high-side boundary face: a plain fillGhosts
+  // wraps the inlet plane onto the outlet, so bcCorrectOutflow below would correct the wrong
+  // value (doc/uf_outlet_fix.md). Momentum never saw it (openFaceView), the scalars and the
+  // backflow census did.
+  fillFaceGhostsKeepBoundary(uf_, 0);
+  fillFaceGhostsKeepBoundary(vf_, 1);
+  fillFaceGhostsKeepBoundary(wf_, 2);
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectFaceFieldOutflow() {
+  if (hasOutflow_) {  // correct the high-side outflow face on the face field so mass leaves
+                      // (phi=0 there)
+    B3 e{e_.x, e_.y, e_.z};
+    CCField fa[3] = {uf_, vf_, wf_};
+    // WO-R2 item 1: same rule as the staggered path below — with the operator's outflow row
+    // carrying rho0/rho_f (setOutflowCoefficient) the consistent correction carries it too.
+    const bool var = varRho_ && !porous_ && outflowRhoCorr_;
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
+        if (var)
+          bcCorrectOutflowVar(fa[a], phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_, u_.w[a]);
+        else
+          bcCorrectOutflow(fa[a], phi_, e, G, a, u_.w[a]);
+      }
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectCellField() {
+  if (colocatedFaceForce()) {
+    // Rung V8 (S8.5): the cell correction is the predictor's face-to-cell reconstruction applied
+    // to the face corrections k(j) = w (rho0/rho_f)(phi(j) - phi(j-s)) — the transpose of the
+    // constraint, so the pair stays adjoint (collocated_varrho.hpp). Replaces the whole
+    // constant-density cell-correction chain below.
+    CCField oax[3] = {ox_, oy_, oz_};
+    for (int cc = 0; cc < 3; ++cc)
+      correctCellFaceAverageVar(C[cc].u, CCConst(phi_), CCConst(varRho_ ? rhoField_ : C[cc].rscale),
+                                CCConst(oax[cc]), varRho_, rho_, strideOf(cc), e_, G, u_.w[cc]);
+  } else if (ghostProjection_ || faceInterp_ == 9) {
+    // Ghost cell correction (also the gauge-exact scheme): the directional gpCenterGrad
+    // gradient of phi — 2nd-order one-sided at cut cells, never reads a decoupled
+    // (solid/pocket) phi. The same operator supplies the momentum's -grad(P^n) predictor
+    // (buildRhs), so the pressure force the momentum feels and the correction stay one
+    // operator family.
+    for (int cc = 0; cc < 3; ++cc) {
+      gpCenterGrad(tgp_, CCConst(phi_), CCConst(ghostProjection_ ? sdfGp_ : sdf_), cc, e_, G,
+                   u_.w[cc]);
+      subtractField(C[cc].u, CCConst(tgp_), e_, G);
+    }
+  } else if (faceInterp_ == 5) {  // embed 5: cell correction = the TRANSPOSE of the
+    // wall-aware map, keeping (T, Tᵀ) an adjoint pair (transposeGradWallAware)
+    CCField xcs[3] = {xcx_, xcy_, xcz_};
+    CCField oax[3] = {ox_, oy_, oz_};
+    for (int cc = 0; cc < 3; ++cc) {
+      transposeGradWallAware(tgp_, CCConst(phi_), CCConst(sdf_), CCConst(oax[cc]), CCConst(xcs[cc]),
+                             true, cc, e_, G, u_.w[cc]);
+      subtractField(C[cc].u, CCConst(tgp_), e_, G);
+    }
+  } else if (faceInterp_ == 6 || faceInterp_ == 7) {  // embed: openness-WEIGHTED cell correction
+    // (full open-face pressure force at cut cells) — Basilisk centered_grad
+    projectCorrectCenterOpen(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
+                             CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
+  } else {
+    projectCorrectCenter(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(ox_), CCConst(oy_),
+                         CCConst(oz_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
+  }
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectStaggered() {
+  if (porous_ && porousCons_)  // eps-conservative gradient rho*idt/(eps_f rho idt + beta_f),
+                               // matching buildPorousCoeffCons (see mac_pressure.hpp)
+    projectCorrectPorousCons(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(epsField_),
+                             CCConst(dragBeta_), hasDrag_, rho_ / dt_, e_, G, u_.w[0], u_.w[1],
+                             u_.w[2]);
+  else if (porous_ &&
+           hasDrag_)  // drag-relaxed gradient w_f=idt/(idt+beta_f), matching buildPorousCoeffDrag
+    projectCorrectPorousDrag(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(dragBeta_), rho_ / dt_,
+                             e_, G, u_.w[0], u_.w[1], u_.w[2]);
+  else if (varRho_ && rhoFaceHarmonic_)  // the WO-J harmonic knob: coefficient AND correction
+    projectCorrectVarHarm(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
+                          u_.w[0], u_.w[1], u_.w[2]);
+  else if (varRho_)  // per-face 1/rho on the gradient, matching the operator coefficient
+    projectCorrectVar(C[0].u, C[1].u, C[2].u, CCConst(phi_), CCConst(rhoField_), rho_, e_, G,
+                      u_.w[0], u_.w[1], u_.w[2]);
+  else
+    projectCorrect(C[0].u, C[1].u, C[2].u, CCConst(phi_), e_, G, u_.w[0], u_.w[1], u_.w[2]);
+}
+
+template <class Grid>
+void Solver<Grid>::projectCorrectStaggeredOutflow() {
+  if (hasOutflow_) {  // correct the high-side outflow normal face that projectCorrect misses
+                      // (mass leaves)
+    B3 e{e_.x, e_.y, e_.z};
+    // WO-R item 4: with variable density every OTHER corrected face carries the mobility
+    // factor rho0/rho_f (projectCorrectVar) and this one did not — a ratio-sized error on the
+    // outflow face, invisible at constant density (rho_f == rho0) which is why the channel/BFS
+    // validations never saw it. The porous branches keep the plain correction: their
+    // coefficient is the drag/eps relaxation, not 1/rho, and a two-phase porous outlet is not
+    // this rung. `!varRho_` is byte-identical.
+    // `set_outflow_rho_correction(False)` drops the 1/rho_f
+    // factor. DEFAULT ON since WO-R2 fixed the operator's outflow-face coefficient — see
+    // setOutflowRhoCorrection for the before/after table and the mechanism.
+    const bool var = varRho_ && !porous_ && outflowRhoCorr_;
+    for (int a = 0; a < 3; ++a)
+      if (bc_[2 * a + 1] == 3 && touchesGlobalFace(2 * a + 1)) {
+        if (var)
+          bcCorrectOutflowVar(C[a].u, phi_, rhoField_, rho_, e, G, a, rhoFaceHarmonic_, u_.w[a]);
+        else
+          bcCorrectOutflow(C[a].u, phi_, e, G, a, u_.w[a]);
+      }
+    outflowCorrValid_ = true;  // the outflow face now carries the mass that leaves
+  }
 }
 
 template <class Grid>
