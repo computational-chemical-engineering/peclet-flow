@@ -2586,6 +2586,28 @@ class CutcellMG {
     removeMean(l0, l0.x);
     Kokkos::deep_copy(CCExec(), x, l0.x);
   }
+  // The host-scalar attempts' p^T Ap guard: true leaves the loop with the last finite iterate. A
+  // non-finite pAp is a failed solve; pAp <= 1e-300 is a CONVERGED direction.
+  bool pApBreakdown(double pAp) {
+    if (!std::isfinite(pAp) || pAp <= 1e-300) {
+      if (!std::isfinite(pAp))
+        solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
+      return true;            // keep the last finite iterate
+    }
+    return false;
+  }
+  // The Krylov drivers' stop test on max|r| = rn (traced per iteration): true when converged, it
+  // then counting this iteration.
+  bool cgConverged(int& it, double rn, double r0, double rtol, double rref, bool trace) {
+    if (trace)
+      printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
+    if (rn < rtol * rref) {
+      lastSolveConverged_ = true;
+      ++it;
+      return true;
+    }
+    return false;
+  }
   // solvePCGAttempt's z = M r and r^T z, summed over the ranks; p = z too when p is given (the
   // first application). f32 (§5.7): the FP32 V-cycle takes e = ilogb(rn) from the GLOBAL max the
   // host already holds and forms the local r^T z (slot k) in its exit pass; the Allreduce sums it.
@@ -2631,18 +2653,9 @@ class CutcellMG {
     // E-dist (doc/vof_projection_distributed_design.md §6 item 3): solvePCGResident's guess branch,
     // unfused (distributed); with a projected guess r0 below is rref = max|P b|, the zero-guess
     // residual. The guess trace is collective (every rank runs it, rank 0 prints).
-    const bool guessOn = guessV1_.extent(0) > 0;
-    const bool traceGuess = guessOn && mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
-    double r0 = 0.0, r0w = 0.0;
-    if (guessOn && guessHist_ > 0) {
-      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar, /*fused=*/false,
-                          traceGuess ? &r0w : nullptr);
-    } else {
-      r0 = guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
-      r0w = r0;
-    }
-    if (traceGuess)
-      guessTraceSave(x);
+    const StartResidual s0 = startResidual(b, x, r, Ap, z, star, nStar, nnStar, /*fused=*/false,
+                                           /*resident=*/false);
+    const double r0 = s0.r0;
     // D-dist (doc/vof_projection_distributed_design.md §5.7): the FP32 V-cycle on an eligible
     // solve (a global decision: fp32VcycleIneligible reads global data only); pcgPrecondRz. The
     // driver allreduces its r^T z (the Allreduce dot() spends). z is zeroed once (§5.5: the exit
@@ -2672,20 +2685,12 @@ class CutcellMG {
         return failNonFiniteZ("solvePCG", l0, x, maxit);
       for (; it < maxit; ++it) {
         const double pAp = matvecPAp(l0, Ap, p, star, nStar, nnStar);
-        if (!std::isfinite(pAp) || pAp <= 1e-300) {
-          if (!std::isfinite(pAp))
-            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
-          break;                  // keep the last finite iterate
-        }
+        if (pApBreakdown(pAp))
+          break;
         const double alpha = rz / pAp;
         const double rn = cgUpdate(l0, x, r, p, Ap, alpha, fuseK4);
-        if (trace)
-          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * rref) {
-          lastSolveConverged_ = true;
-          ++it;
+        if (cgConverged(it, rn, r0, rtol, rref, trace))
           break;
-        }
         const double rznew = pcgPrecondRz(l0, f32, fuseK4, z, r, rn, kRzNew, CCField());
         const double beta = rznew / rz;
         if (!std::isfinite(rznew)) {
@@ -2697,8 +2702,8 @@ class CutcellMG {
       }
     }
     finalRemoveMean(l0, x);
-    if (traceGuess)
-      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
+    if (s0.traceGuess)
+      guessTraceExit(l0, b, x, r0, s0.r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
@@ -3228,6 +3233,33 @@ class CutcellMG {
     removeMean(l0, r);     // compatibility: project rhs/residual onto the range
     return maxabs(l0, r);  // host read (once per solve)
   }
+  // An attempt's starting residual (E, §5.3). With a projected guess armed, r0 is rref = max|P b|,
+  // the zero-guess residual, and r0w the guess's own residual (traced only); else r = b - A x
+  // (initialResidual on the resident driver, guessResidual on the host-scalar ones) and r0w = r0.
+  // fused: projectedGuess's fused pass. The guess trace (collective; rank 0 prints) saves x.
+  struct StartResidual {
+    double r0, r0w;
+    bool traceGuess;  // the guess trace is on: the attempt ends with guessTraceExit
+  };
+  StartResidual startResidual(CCField b, CCField x, CCField r, CCField Ap, CCField z,
+                              const StarOverlay* star, int nStar, C3 nnStar, bool fused,
+                              bool resident) {
+    Level& l0 = lv_[0];
+    const bool guessOn = guessV1_.extent(0) > 0;
+    const bool traceGuess = guessOn && mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
+    double r0 = 0.0, r0w = 0.0;
+    if (guessOn && guessHist_ > 0) {
+      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar, fused,
+                          traceGuess ? &r0w : nullptr);
+    } else {
+      r0 = resident ? initialResidual(l0, b, x, r, Ap, star, nStar, nnStar)
+                    : guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
+      r0w = r0;
+    }
+    if (traceGuess)
+      guessTraceSave(x);
+    return StartResidual{r0, r0w, traceGuess};
+  }
   // solvePCGResident's Ap = A p and p^T Ap into slot kPAp: C1's one fused pass when fuse (and no
   // "all"-scope mean removal), else the matvec, that mean removal and the dot.
   void matvecDotPAp(Level& l0, CCField Ap, CCField p, bool fuse, const StarOverlay* star, int nStar,
@@ -3276,6 +3308,103 @@ class CutcellMG {
       Kokkos::deep_copy(CCExec(), p, z);
     return readSlot(kRz);  // host read (the initial guard)
   }
+  // solvePCGResident's alpha = rz / pAp on the device, or the pAp breakdown flag. The R test hook
+  // (dbgBrkWhich_ 1) poisons p^T Ap at iteration dbgBrkIter_ first.
+  void residentAlpha(int it) {
+    if (dbgBrkWhich_ == 1 && it == dbgBrkIter_)
+      setSlot(kPAp, std::numeric_limits<double>::quiet_NaN());
+    auto ks = ks_;
+    const double brkPAp = kBrkPAp;  // by value into the kernel
+    Kokkos::parallel_for(           // alpha = rz / pAp, or the pAp breakdown flag
+        "mgpcg_alpha", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
+          const double pAp = ks(kPAp);
+          if (ks(kStop) == 0.0) {
+            if (Kokkos::isfinite(pAp) && pAp > 1e-300)
+              ks(kAlpha) = ks(kRz) / pAp;
+            else
+              ks(kStop) = brkPAp;
+          }
+        });
+  }
+  // solvePCGResident's x += alpha p, r -= alpha Ap onto the range and max|r| into slot kRn, all
+  // skipped once the stop flag is set: C2 + C3 when fuse, else the update kernel, the
+  // stop-guarded mean removal and maxabsTo.
+  void residentUpdate(Level& l0, CCField xx, CCField rr, CCField pp, CCField aa, bool fuse) {
+    if (fuse) {
+      pcgUpdateSum(l0, xx, rr, pp, aa);  // C2: the update + the fluid sum of r
+      meanSubtractMaxTo(l0, rr, kRn);    // C3: the stop-guarded subtract + max|r|
+    } else {
+      auto ks = ks_;
+      const std::size_t n = xx.extent(0);
+      Kokkos::parallel_for(  // x += alpha p; r -= alpha Ap (axpy's expressions)
+          "mgpcg_update", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
+          KOKKOS_LAMBDA(std::size_t i) {
+            if (ks(kStop) != 0.0)
+              return;
+            const double a = ks(kAlpha), na = -a;
+            xx(i) += a * pp(i);
+            rr(i) += na * aa(i);
+          });
+      removeMean(l0, rr, /*stopGuard=*/true);
+      maxabsTo(l0, rr, kRn);
+    }
+  }
+  // solvePCGResident's one host read per iteration (the packet {pAp, rn, stop, bottomFlag}) and its
+  // exit test: a breakdown (it then names the iteration that computed it) or convergence (it then
+  // counts this one). Returns true to leave the loop; rn is max|r|.
+  bool residentPacketExit(int& it, double rtol, double rref, double r0, bool trace, double& rn) {
+    Kokkos::deep_copy(CCExec(), kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));
+    CCExec().fence("peclet::flow::mg_packet");  // THE read
+    const double pAp = kpk_(0), stop = kpk_(2);
+    rn = kpk_(1);
+    noteBottomFlag(kpk_(3));  // a non-finite scalar in a device bottom solve
+    if (stop == kBrkRz) {     // r^T z of the previous iteration was non-finite
+      solveFailed_ = true;    // ISSUES sweep item 6: a breakdown, not a convergence
+      --it;                   // report the iteration that computed it
+      return true;
+    }
+    if (stop == kBrkPAp) {
+      if (!std::isfinite(pAp))
+        solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
+      return true;            // keep the last finite iterate
+    }
+    return cgConverged(it, rn, r0, rtol, rref, trace);
+  }
+  // solvePCGResident's z = M r with r^T z into slot kRzNew (C4: from the V-cycle's exit pass, else
+  // dotTo), e = ilogb(rn) the FP32 V-cycle's scale; with the health instrument (rzOld = r_{k+1}^T
+  // z_k) and the R test hook (dbgBrkWhich_ 2), which poisons r^T z at iteration dbgBrkIter_.
+  void residentPrecondRz(Level& l0, bool f32, bool fuse, int e, CCField z, CCField r, int it,
+                         bool health, bool trace) {
+    const double rzOld = health ? dot(l0, r, z) : 0.0;         // r_{k+1}^T z_k (the instrument)
+    if (!precondDotTo(f32, fuse, e, kRzNew, z, r, CCField()))  // C4: from the exit pass
+      dotTo(l0, r, z, kRzNew);
+    if (health)
+      noteHealth(rzOld, it, trace, f32);
+    if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
+      setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
+  }
+  // solvePCGResident's beta = r^T z_new / r^T z and rz = r^T z_new on the device (or the r^T z
+  // breakdown flag), then p = z + beta p; both skipped once the stop flag is set.
+  void residentBetaAypx(CCField pp, CCField zz, std::size_t n) {
+    auto ks = ks_;
+    const double brkRz = kBrkRz;  // by value into the kernel
+    Kokkos::parallel_for(         // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
+        "mgpcg_beta", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
+          const double rznew = ks(kRzNew);
+          if (Kokkos::isfinite(rznew)) {
+            ks(kBeta) = rznew / ks(kRz);
+            ks(kRz) = rznew;
+          } else {
+            ks(kStop) = brkRz;
+          }
+        });
+    Kokkos::parallel_for(  // p = z + beta p (aypx's expression)
+        "mgaypx", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n), KOKKOS_LAMBDA(std::size_t i) {
+          if (ks(kStop) != 0.0)
+            return;
+          pp(i) = zz(i) + ks(kBeta) * pp(i);
+        });
+  }
   int solvePCGResident(CCField b, CCField x, CCField r, CCField p, CCField z, CCField Ap, int maxit,
                        double rtol, int pre, int post, int bottom, const StarOverlay* star,
                        int nStar, C3 nnStar) {
@@ -3290,23 +3419,14 @@ class CutcellMG {
     const bool trace = mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
     // E (§5.3): with a projected guess r0 below is rref = max|P b|, the zero-guess residual (the
     // guard, the stop and the FP32 V-cycle's scale exponent read it; the host holds no other)
-    const bool guessOn = guessV1_.extent(0) > 0;
-    double r0 = 0.0, r0w = 0.0;
-    if (guessOn && guessHist_ > 0) {
-      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
-                          hostKrylovFusion() && star == nullptr, trace ? &r0w : nullptr);
-    } else {
-      r0 = initialResidual(l0, b, x, r, Ap, star, nStar, nnStar);
-      r0w = r0;
-    }
-    if (trace && guessOn)
-      guessTraceSave(x);
+    const StartResidual s0 =
+        startResidual(b, x, r, Ap, z, star, nStar, nnStar, hostKrylovFusion() && star == nullptr,
+                      /*resident=*/true);
+    const double r0 = s0.r0;
     // X1: the stop reference, as in solvePCG's distributed loop, solveFCG and solveChebyshev: r0,
     // or the caller's FULL right-hand-side norm when one is set (setStopReference; only the
     // balanced-force projection sets it). Unset, rref IS r0: `rtol * rref` is the old test bitwise.
-    const double rref = stopRef_ > 0.0 ? stopRef_ : r0;
-    cgStopRef_ = rref;  // Q18: the exit check (cgTrueResidual) reads the stop test's own scale
-    cgStopRtol_ = rtol;
+    const double rref = armStopTest(r0, rtol);
     int it = 0;
     if (trace)
       printf("[mg] solve %d: r0=%.6e rtol=%.1e (pre=%d post=%d bottom=%d)\n", dbgSolve_, r0, rtol,
@@ -3325,97 +3445,25 @@ class CutcellMG {
     const bool f32 = beginAttemptPrecision(maxit);
     const bool health = trace || healthTrace_;
     healthLog_.clear();
-    int eNext = 0;
     lastSolveConverged_ = r0 == 0.0;  // R (§4): the loop is skipped on a zero residual
     if (r0 > 0.0 && std::isfinite(r0)) {
-      eNext = std::ilogb(r0);
-      const double rz0 = firstPrecondRz(l0, f32, fuseC, eNext, z, r, p);  // the initial guard
+      const double rz0 = firstPrecondRz(l0, f32, fuseC, std::ilogb(r0), z, r, p);  // the guard
       if (!std::isfinite(rz0))
         return failNonFiniteZ("solvePCG", l0, x, maxit);
       setSlot(kStop, 0.0);
-      auto ks = ks_;
       const std::size_t n = x.extent(0);
-      CCField xx = x, rr = r, pp = p, zz = z, aa = Ap;
-      const double brkPAp = kBrkPAp, brkRz = kBrkRz;  // by value into the kernels
       bool exited = false;
       for (; it < maxit; ++it) {
         matvecDotPAp(l0, Ap, p, fuseC, star, nStar, nnStar);
-        if (dbgBrkWhich_ == 1 && it == dbgBrkIter_)
-          setSlot(kPAp, std::numeric_limits<double>::quiet_NaN());
-        Kokkos::parallel_for(  // alpha = rz / pAp, or the pAp breakdown flag
-            "mgpcg_alpha", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
-              const double pAp = ks(kPAp);
-              if (ks(kStop) == 0.0) {
-                if (Kokkos::isfinite(pAp) && pAp > 1e-300)
-                  ks(kAlpha) = ks(kRz) / pAp;
-                else
-                  ks(kStop) = brkPAp;
-              }
-            });
-        if (fuseC) {
-          pcgUpdateSum(l0, x, r, p, Ap);  // C2: the update + the fluid sum of r
-          meanSubtractMaxTo(l0, r, kRn);  // C3: the stop-guarded subtract + max|r|
-        } else {
-          Kokkos::parallel_for(  // x += alpha p; r -= alpha Ap (axpy's expressions)
-              "mgpcg_update", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n),
-              KOKKOS_LAMBDA(std::size_t i) {
-                if (ks(kStop) != 0.0)
-                  return;
-                const double a = ks(kAlpha), na = -a;
-                xx(i) += a * pp(i);
-                rr(i) += na * aa(i);
-              });
-          removeMean(l0, r, /*stopGuard=*/true);
-          maxabsTo(l0, r, kRn);
-        }
-        Kokkos::deep_copy(CCExec(), kpk_, Kokkos::subview(ks_, std::make_pair(0, kPacket)));
-        CCExec().fence("peclet::flow::mg_packet");  // THE read
-        const double pAp = kpk_(0), rn = kpk_(1), stop = kpk_(2);
-        noteBottomFlag(kpk_(3));  // a non-finite scalar in a device bottom solve
-        if (stop == kBrkRz) {     // r^T z of the previous iteration was non-finite
-          solveFailed_ = true;    // ISSUES sweep item 6: a breakdown, not a convergence
-          --it;                   // report the iteration that computed it
+        residentAlpha(it);
+        residentUpdate(l0, x, r, p, Ap, fuseC);
+        double rn = 0.0;
+        if (residentPacketExit(it, rtol, rref, r0, trace, rn)) {
           exited = true;
           break;
         }
-        if (stop == kBrkPAp) {
-          if (!std::isfinite(pAp))
-            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
-          exited = true;
-          break;  // keep the last finite iterate
-        }
-        if (trace)
-          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * rref) {
-          lastSolveConverged_ = true;
-          ++it;
-          exited = true;
-          break;
-        }
-        eNext = std::ilogb(rn);
-        const double rzOld = health ? dot(l0, r, z) : 0.0;  // r_{k+1}^T z_k (the instrument)
-        if (!precondDotTo(f32, fuseC, eNext, kRzNew, z, r, CCField()))  // C4: from the exit pass
-          dotTo(l0, r, z, kRzNew);
-        if (health)
-          noteHealth(rzOld, it, trace, f32);
-        if (dbgBrkWhich_ == 2 && it == dbgBrkIter_)
-          setSlot(kRzNew, std::numeric_limits<double>::quiet_NaN());
-        Kokkos::parallel_for(  // beta = r^T z_new / r^T z; rz = r^T z_new -- or the flag
-            "mgpcg_beta", Kokkos::RangePolicy<CCExec>(CCExec(), 0, 1), KOKKOS_LAMBDA(int) {
-              const double rznew = ks(kRzNew);
-              if (Kokkos::isfinite(rznew)) {
-                ks(kBeta) = rznew / ks(kRz);
-                ks(kRz) = rznew;
-              } else {
-                ks(kStop) = brkRz;
-              }
-            });
-        Kokkos::parallel_for(  // p = z + beta p (aypx's expression)
-            "mgaypx", Kokkos::RangePolicy<CCExec>(CCExec(), 0, n), KOKKOS_LAMBDA(std::size_t i) {
-              if (ks(kStop) != 0.0)
-                return;
-              pp(i) = zz(i) + ks(kBeta) * pp(i);
-            });
+        residentPrecondRz(l0, f32, fuseC, std::ilogb(rn), z, r, it, health, trace);
+        residentBetaAypx(p, z, n);
       }
       if (!exited && maxit > 0 && readSlot(kStop) == kBrkRz) {
         solveFailed_ = true;  // the last iteration's r^T z was non-finite
@@ -3423,8 +3471,8 @@ class CutcellMG {
       }
     }
     removeMean(l0, x);  // H-2b: in place (was the l0.x round trip; same cells, same values)
-    if (trace && guessOn)
-      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
+    if (s0.traceGuess)
+      guessTraceExit(l0, b, x, r0, s0.r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
@@ -3474,6 +3522,20 @@ class CutcellMG {
       Kokkos::deep_copy(CCExec(), p, z);
     return dot(l0, r, z);
   }
+  // solveFCGAttempt's DIAGNOSTIC (PECLET_FLOW_MG_DEBUG>=2): `pr` is |r_{k+1}^T z_k| /
+  // |r_{k+1}^T z_{k+1}| -- the term Fletcher-Reeves keeps and Polak-Ribiere removes. With a
+  // preconditioner that is symmetric w.r.t. the fine operator this is EXACTLY zero in exact
+  // arithmetic, so a measured pr ~ 1e-14 says "the V-cycle is symmetric here (and FCG == PCG by
+  // construction)" while pr = O(1) says "it is not" -- a direct read-out of the hypothesis, per
+  // iteration, that needs no extra solve. The health log (§4.4.5) records it too: FCG forms this
+  // dot anyway.
+  void fcgNotePr(int it, double beta, double rznew, double rzcross, bool trace) {
+    if (trace)
+      printf("[mg]   it %3d  beta=%.6e  pr=%.3e (|r^T z_k| / |r^T z_{k+1}|)\n", it + 1, beta,
+             rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
+    if (healthTrace_)  // §4.4.5: FCG forms this dot anyway
+      healthLog_.push_back(rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
+  }
   // One flexible-CG attempt (R, §4: solveFCG's body before the restart wrapper).
   int solveFCGAttempt(CCField b, CCField x, CCField r, CCField p, CCField z, CCField zp, CCField Ap,
                       int maxit, double rtol, int pre, int post, int bottom,
@@ -3497,18 +3559,10 @@ class CutcellMG {
     // E (§5.3): with a projected guess r0 is rref = max|P b| (see solvePCGResident). The guess
     // trace is collective (E-dist §6 item 2: every rank runs it, rank 0 prints), so it does not
     // take `trace`'s rank-0 restriction; single rank the two coincide.
-    const bool guessOn = guessV1_.extent(0) > 0;
-    const bool traceGuess = guessOn && mgDebugLevel() >= 2 && dbgSolve_ < mgDebugSolves();
-    double r0 = 0.0, r0w = 0.0;
-    if (guessOn && guessHist_ > 0) {
-      r0 = projectedGuess(l0, b, x, r, Ap, z, star, nStar, nnStar,
-                          hostKrylovFusion() && star == nullptr, traceGuess ? &r0w : nullptr);
-    } else {
-      r0 = guessResidual(l0, b, x, r, Ap, star, nStar, nnStar);
-      r0w = r0;
-    }
-    if (traceGuess)
-      guessTraceSave(x);
+    const StartResidual s0 =
+        startResidual(b, x, r, Ap, z, star, nStar, nnStar, hostKrylovFusion() && star == nullptr,
+                      /*resident=*/false);
+    const double r0 = s0.r0;
     const double rref = armStopTest(r0, rtol);
     int it = 0;
     if (trace)
@@ -3524,20 +3578,12 @@ class CutcellMG {
         return failNonFiniteZ("solveFCG", l0, x, maxit);
       for (; it < maxit; ++it) {
         const double pAp = matvecPAp(l0, Ap, p, star, nStar, nnStar);
-        if (!std::isfinite(pAp) || pAp <= 1e-300) {
-          if (!std::isfinite(pAp))
-            solveFailed_ = true;  // ISSUES sweep item 6 (pAp <= 1e-300 is a CONVERGED direction)
-          break;                  // keep the last finite iterate
-        }
+        if (pApBreakdown(pAp))
+          break;
         const double alpha = rz / pAp;
         const double rn = cgUpdate(l0, x, r, p, Ap, alpha, fuseC23);
-        if (trace)
-          printf("[mg]   it %3d  |r|inf=%.6e  r/r0=%.4e\n", it + 1, rn, rn / r0);
-        if (rn < rtol * rref) {
-          lastSolveConverged_ = true;
-          ++it;
+        if (cgConverged(it, rn, r0, rtol, rref, trace))
           break;
-        }
         Kokkos::deep_copy(CCExec(), zp, z);  // z_k, before the preconditioner overwrites it
         const double rznew = fcgPrecondRz(l0, f32, fuseC4, z, r, rn, CCField());
         const double rzcross = dot(l0, r, zp);
@@ -3546,24 +3592,14 @@ class CutcellMG {
           break;                // preconditioner breakdown: keep the last finite iterate
         }
         const double beta = (rznew - rzcross) / rz;  // Polak-Ribiere: r^T (z_{k+1} - z_k) / r^T z
-        // DIAGNOSTIC (PECLET_FLOW_MG_DEBUG>=2): `pr` is |r_{k+1}^T z_k| / |r_{k+1}^T z_{k+1}| --
-        // the term Fletcher-Reeves keeps and Polak-Ribiere removes. With a preconditioner that is
-        // symmetric w.r.t. the fine operator this is EXACTLY zero in exact arithmetic, so a
-        // measured pr ~ 1e-14 says "the V-cycle is symmetric here (and FCG == PCG by construction)"
-        // while pr = O(1) says "it is not" -- a direct read-out of the hypothesis, per iteration,
-        // that needs no extra solve.
-        if (trace)
-          printf("[mg]   it %3d  beta=%.6e  pr=%.3e (|r^T z_k| / |r^T z_{k+1}|)\n", it + 1, beta,
-                 rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
-        if (healthTrace_)  // §4.4.5: FCG forms this dot anyway
-          healthLog_.push_back(rznew != 0.0 ? std::abs(rzcross / rznew) : 0.0);
+        fcgNotePr(it, beta, rznew, rzcross, trace);
         aypx(p, beta, z);
         rz = rznew;
       }
     }
     finalRemoveMean(l0, x);
-    if (traceGuess)
-      guessTraceExit(l0, b, x, r0, r0w, it, guessHist_, star, nStar, nnStar);
+    if (s0.traceGuess)
+      guessTraceExit(l0, b, x, r0, s0.r0w, it, guessHist_, star, nStar, nnStar);
     return it;
   }
 
@@ -6027,6 +6063,97 @@ class CutcellMG {
       fflush(stdout);
     }
   }
+  // pcgAmg's rhs anatomy (PECLET_FLOW_AGMG_DEBUG), BEFORE the null-space projection (b is
+  // gid-ordered): max|b| over the solid and the fluid rows, the fluid and all-row means, and the
+  // max per-component |sum(b)| / |b|_max (the per-pocket incompatibility).
+  struct AmgRhsAnatomy {
+    double bSolidMax = 0, bFluidMax = 0, bFluidMean = 0, bAllMean = 0, bCompMax = 0;
+  };
+  AmgRhsAnatomy amgRhsAnatomy(const std::vector<double>& b) const {
+    const std::size_t n = (std::size_t)amgGlobalN_;
+    AmgRhsAnatomy a;
+    long nf = 0;
+    double sf = 0, sa = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+      sa += b[i];
+      if (i < amgSolid_.size() && amgSolid_[i])
+        a.bSolidMax = std::max(a.bSolidMax, std::fabs(b[i]));
+      else {
+        a.bFluidMax = std::max(a.bFluidMax, std::fabs(b[i]));
+        sf += b[i];
+        ++nf;
+      }
+    }
+    a.bFluidMean = nf ? sf / (double)nf : 0.0;
+    a.bAllMean = n ? sa / (double)n : 0.0;
+    if (amgNComp_ > 1) {
+      std::vector<double> cs((std::size_t)amgNComp_, 0.0);
+      for (std::size_t i = 0; i < n; ++i)
+        if (amgComp_[i] >= 0)
+          cs[(std::size_t)amgComp_[i]] += b[i];
+      for (double s : cs)
+        a.bCompMax = std::max(a.bCompMax, std::fabs(s));
+      a.bCompMax /= (a.bFluidMax > 0 ? a.bFluidMax : 1.0);
+    }
+    return a;
+  }
+  // pcgAmg's null-space projection of v: the mean of each connected fluid component.
+  void amgMeanZero(std::vector<double>& v) const {
+    if (!removeMean_)
+      return;  // Dirichlet-anchored (outflow) operator: non-singular, no null space to project
+    // The null space is one constant PER CONNECTED FLUID COMPONENT — solid cells are identity
+    // rows (non-singular) and a coarse level can pinch fluid off into pockets, each carrying its
+    // own constant. Projecting the ALL-cell mean out instead (the old code) both leaves null
+    // components alive and writes a spurious value onto every solid coordinate; the next matvec
+    // (identity rows) feeds that back into the residual, the effective preconditioner turns
+    // nonsymmetric, and the inner CG stalls at its iteration cap (measured on random_spheres:
+    // every bottom solve capped at 200 with relres up to ~1, +41% outer iterations).
+    if (amgNComp_ <= 0)
+      return;
+    const std::size_t n = (std::size_t)amgGlobalN_;
+    std::vector<double> m((std::size_t)amgNComp_, 0.0);
+    std::vector<long> cnt((std::size_t)amgNComp_, 0);
+    for (std::size_t i = 0; i < n; ++i)
+      if (amgComp_[i] >= 0) {
+        m[(std::size_t)amgComp_[i]] += v[i];
+        ++cnt[(std::size_t)amgComp_[i]];
+      }
+    for (std::size_t c = 0; c < m.size(); ++c)
+      m[c] = cnt[c] ? m[c] / (double)cnt[c] : 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+      if (amgComp_[i] >= 0)
+        v[i] -= m[(std::size_t)amgComp_[i]];
+  }
+  // pcgAmg's dot product over the first n entries, in index order.
+  static double amgDot(const std::vector<double>& a, const std::vector<double>& c, std::size_t n) {
+    double s = 0;
+    for (std::size_t i = 0; i < n; ++i)
+      s += a[i] * c[i];
+    return s;
+  }
+  // pcgAmg's per-call report (PECLET_FLOW_AGMG_DEBUG; every call at level 2, else the first 60,
+  // every 50th and every capped one): iterations, relative residual, the rhs anatomy and max|x|
+  // over the solid and the fluid rows.
+  void amgReport(const AmgRhsAnatomy& a, const std::vector<double>& x, const std::vector<double>& r,
+                 int it, double r0, int dbg) {
+    const std::size_t n = (std::size_t)amgGlobalN_;
+    double xSolidMax = 0, xFluidMax = 0;
+    for (std::size_t i = 0; i < n; ++i)
+      if (i < amgSolid_.size() && amgSolid_[i])
+        xSolidMax = std::max(xSolidMax, std::fabs(x[i]));
+      else
+        xFluidMax = std::max(xFluidMax, std::fabs(x[i]));
+    const double rn = std::sqrt(amgDot(r, r, n));
+    ++agmgCalls_;
+    if (dbg >= 2 || agmgCalls_ <= 60 || it >= 100 || agmgCalls_ % 50 == 0) {
+      printf(
+          "[agmg] call=%ld iters=%d relres=%.2e  |b|sol=%.3e |b|fl=%.3e  "
+          "mean(b) fl=%.3e all=%.3e  compat=%.2e  |x|sol=%.3e |x|fl=%.3e%s\n",
+          agmgCalls_, it, r0 > 0 ? rn / r0 : 0.0, a.bSolidMax, a.bFluidMax, a.bFluidMean,
+          a.bAllMean, a.bCompMax, xSolidMax, xFluidMax, it >= 100 ? "  CAP" : "");
+      fflush(stdout);
+    }
+  }
   // GraphAMG-preconditioned CG on the global bottom operator. For the periodic/all-Neumann case the
   // operator is singular (constant null space) and the mean must be projected out of the rhs and
   // the preconditioned residual (compatibility). With a Dirichlet outflow (removeMean_ == false)
@@ -6036,71 +6163,14 @@ class CutcellMG {
   void pcgAmg(std::vector<double>& b, std::vector<double>& x) {
     const std::size_t n = (std::size_t)amgGlobalN_;
     const int dbg = agmgDebug();
-    double bSolidMax = 0, bFluidMax = 0, bFluidMean = 0, bAllMean = 0;
-    if (dbg) {  // rhs anatomy BEFORE the null-space projection (b is gid-ordered)
-      long nf = 0;
-      double sf = 0, sa = 0;
-      for (std::size_t i = 0; i < n; ++i) {
-        sa += b[i];
-        if (i < amgSolid_.size() && amgSolid_[i])
-          bSolidMax = std::max(bSolidMax, std::fabs(b[i]));
-        else {
-          bFluidMax = std::max(bFluidMax, std::fabs(b[i]));
-          sf += b[i];
-          ++nf;
-        }
-      }
-      bFluidMean = nf ? sf / (double)nf : 0.0;
-      bAllMean = n ? sa / (double)n : 0.0;
-    }
-    double bCompMax = 0;  // max per-component |sum(b)| / |b|_max: the per-pocket incompatibility
-    if (dbg && amgNComp_ > 1) {
-      std::vector<double> cs((std::size_t)amgNComp_, 0.0);
-      for (std::size_t i = 0; i < n; ++i)
-        if (amgComp_[i] >= 0)
-          cs[(std::size_t)amgComp_[i]] += b[i];
-      for (double s : cs)
-        bCompMax = std::max(bCompMax, std::fabs(s));
-      bCompMax /= (bFluidMax > 0 ? bFluidMax : 1.0);
-    }
-    auto meanZero = [&](std::vector<double>& v) {
-      if (!removeMean_)
-        return;  // Dirichlet-anchored (outflow) operator: non-singular, no null space to project
-      // The null space is one constant PER CONNECTED FLUID COMPONENT — solid cells are identity
-      // rows (non-singular) and a coarse level can pinch fluid off into pockets, each carrying its
-      // own constant. Projecting the ALL-cell mean out instead (the old code) both leaves null
-      // components alive and writes a spurious value onto every solid coordinate; the next matvec
-      // (identity rows) feeds that back into the residual, the effective preconditioner turns
-      // nonsymmetric, and the inner CG stalls at its iteration cap (measured on random_spheres:
-      // every bottom solve capped at 200 with relres up to ~1, +41% outer iterations).
-      if (amgNComp_ <= 0)
-        return;
-      std::vector<double> m((std::size_t)amgNComp_, 0.0);
-      std::vector<long> cnt((std::size_t)amgNComp_, 0);
-      for (std::size_t i = 0; i < n; ++i)
-        if (amgComp_[i] >= 0) {
-          m[(std::size_t)amgComp_[i]] += v[i];
-          ++cnt[(std::size_t)amgComp_[i]];
-        }
-      for (std::size_t c = 0; c < m.size(); ++c)
-        m[c] = cnt[c] ? m[c] / (double)cnt[c] : 0.0;
-      for (std::size_t i = 0; i < n; ++i)
-        if (amgComp_[i] >= 0)
-          v[i] -= m[(std::size_t)amgComp_[i]];
-    };
-    meanZero(b);
+    const AmgRhsAnatomy rhs = dbg ? amgRhsAnatomy(b) : AmgRhsAnatomy{};
+    amgMeanZero(b);
     x.assign(n, 0.0);
     std::vector<double> r = b, z(n), p(n), Ap(n);
     amg_->apply(r, z);
-    meanZero(z);
+    amgMeanZero(z);
     p = z;
-    auto dot = [&](const std::vector<double>& a, const std::vector<double>& c) {
-      double s = 0;
-      for (std::size_t i = 0; i < n; ++i)
-        s += a[i] * c[i];
-      return s;
-    };
-    double rz = dot(r, z), r0 = std::sqrt(dot(r, r));
+    double rz = amgDot(r, z, n), r0 = std::sqrt(amgDot(r, r, n));
     // 1e-8 is deliberate: the V-cycle's outer iteration count is unchanged from a far looser
     // bottom (measured), while 1e-10 sits at/below the double-precision floor of this
     // projected solve (rounding of the per-iteration null-space projection), where CG grinds
@@ -6115,7 +6185,7 @@ class CutcellMG {
       // residual (8 x -0x1.ffffffffffffcp-103 -> 8 x 0x1p-154 on the uniform periodic porous bed),
       // the AMG maps it to z = 0, and rz / pAp = 0/0 poisoned x with NaN, which the outer PCG then
       // reported as a non-finite preconditioner and a CAPPED solve.
-      const double pAp = dot(p, Ap);
+      const double pAp = amgDot(p, Ap, n);
       if (!(pAp > 0.0))
         break;
       const double a = rz / pAp;
@@ -6123,35 +6193,19 @@ class CutcellMG {
         x[i] += a * p[i];
         r[i] -= a * Ap[i];
       }
-      if (std::sqrt(dot(r, r)) <= 1e-8 * r0)
+      if (std::sqrt(amgDot(r, r, n)) <= 1e-8 * r0)
         break;
       amg_->apply(r, z);
-      meanZero(z);
-      const double rzn = dot(r, z);
+      amgMeanZero(z);
+      const double rzn = amgDot(r, z, n);
       const double beta = rzn / rz;
       rz = rzn;
       for (std::size_t i = 0; i < n; ++i)
         p[i] = z[i] + beta * p[i];
     }
-    meanZero(x);
-    if (dbg) {
-      double xSolidMax = 0, xFluidMax = 0;
-      for (std::size_t i = 0; i < n; ++i)
-        if (i < amgSolid_.size() && amgSolid_[i])
-          xSolidMax = std::max(xSolidMax, std::fabs(x[i]));
-        else
-          xFluidMax = std::max(xFluidMax, std::fabs(x[i]));
-      const double rn = std::sqrt(dot(r, r));
-      ++agmgCalls_;
-      if (dbg >= 2 || agmgCalls_ <= 60 || it >= 100 || agmgCalls_ % 50 == 0) {
-        printf(
-            "[agmg] call=%ld iters=%d relres=%.2e  |b|sol=%.3e |b|fl=%.3e  "
-            "mean(b) fl=%.3e all=%.3e  compat=%.2e  |x|sol=%.3e |x|fl=%.3e%s\n",
-            agmgCalls_, it, r0 > 0 ? rn / r0 : 0.0, bSolidMax, bFluidMax, bFluidMean, bAllMean,
-            bCompMax, xSolidMax, xFluidMax, it >= 100 ? "  CAP" : "");
-        fflush(stdout);
-      }
-    }
+    amgMeanZero(x);
+    if (dbg)
+      amgReport(rhs, x, r, it, r0, dbg);
   }
 #ifdef PECLET_FLOW_MPI
   template <class T>
@@ -6672,6 +6726,95 @@ class CutcellMG {
     return m > 0 ? A[top][top] : 0.0;
   }
 
+  // estimateEigenvalues' seed when cold: the right-hand side plus a broadband, np-independent
+  // component of the same max amplitude (doc/mg_depth_policy_log.md 2026-10-29): a right-hand side
+  // confined to an invariant subspace of M^{-1}A (an x-y-uniform hydrostatic load) otherwise hides
+  // the top of the spectrum from the power iteration, and the symmetric V-cycle's top lies above 1.
+  void eigSeedRhs(Level& l0, CCField srhs, CCConst seed) {
+    Kokkos::deep_copy(CCExec(), srhs, seed);
+    if (symVcycle_) {  // off: the pre-A3 estimate bit for bit (A3.3 item 4)
+      const double sm = maxabs(l0, srhs);
+      addSeedNoise(l0, srhs, sm > 0.0 ? sm : 1.0);
+    }
+  }
+  // estimateEigenvalues' T = M^{-1} A: out = M^{-1} A in, projected onto the fluid range; w = A in
+  // is left for the Rayleigh quotient.
+  void eigApplyT(Level& l0, CCField out, CCField in, CCField w) {
+    matvecOverlap(l0, w, in);
+    precondVcycle(out, w);  // A5
+    removeMean(l0, out);
+    maskSolid(l0, out);
+  }
+  // x / |x|; returns |x|.
+  double eigNormalize(Level& l0, CCField x) {
+    double nr = std::sqrt(dot(l0, x, x));
+    if (nr > 0)
+      scale(x, 1.0 / nr);
+    return nr;
+  }
+  // x = src onto the fluid range, normalized; returns its norm before.
+  double eigSeed(Level& l0, CCField x, CCField src) {
+    Kokkos::deep_copy(CCExec(), x, src);
+    removeMean(l0, x);
+    maskSolid(l0, x);
+    return eigNormalize(l0, x);
+  }
+  // Keeps x in dst (allocated at n cells on first use): a later warm estimate's seed.
+  void eigKeep(CCField& dst, CCField x, const char* label, std::size_t n) {
+    if (dst.extent(0) != n)
+      dst = CCField(label, n);
+    Kokkos::deep_copy(CCExec(), dst, x);
+  }
+  // estimateEigenvalues' power iteration for lambda_max from v (iters steps; 1 with none); v
+  // leaves as the last iterate.
+  double eigPowerMax(Level& l0, CCField v, CCField w, CCField z, int iters) {
+    double lmax = 1.0;
+    for (int k = 0; k < iters; ++k) {
+      eigApplyT(l0, z, v, w);
+      if (symVcycle_) {
+        // T = M^{-1} A is self-adjoint in the A inner product when M is symmetric, so the
+        // Rayleigh quotient is taken there: (Av . Tv) / (Av . v), w = A v as eigApplyT left it,
+        // both sums in ONE reduction. It never exceeds lambda_max and its error is quadratic in
+        // the iterate's; the Euclidean v . Tv is not a Rayleigh quotient of this T (with it the
+        // true top reached 1.129 x the estimate, doc/mg_depth_policy_log.md 2026-10-29/30).
+        double wz = 0.0, wv = 0.0;
+        dotPair(l0, w, z, v, wz, wv);
+        lmax = wv > 0.0 ? wz / wv : 0.0;
+      } else {  // the trilinear V-cycle (M not symmetric): the pre-A3 estimate bit for bit
+        lmax = dot(l0, v, z);
+      }
+      Kokkos::deep_copy(CCExec(), v, z);
+      eigNormalize(l0, v);
+    }
+    return lmax;
+  }
+  // estimateEigenvalues' shifted power iteration on shift*I - T from v (iters steps); returns the
+  // Rayleigh quotient mu (0 with none), v leaving as the last iterate.
+  double eigPowerMin(Level& l0, CCField v, CCField w, CCField z, int iters, double shift) {
+    double mu = 0.0;
+    for (int k = 0; k < iters; ++k) {
+      eigApplyT(l0, z, v, w);
+      lin(z, shift, v, -1.0, z);  // z = shift*v - T v
+      mu = dot(l0, v, z);
+      Kokkos::deep_copy(CCExec(), v, z);
+      eigNormalize(l0, v);
+    }
+    return mu;
+  }
+  // estimateEigenvalues' bounds from the direct (max) and shifted (min) Rayleigh estimates: a
+  // robust min/max bracket with lmin >= 0.02 lmax, then the one-shot test hook's scale.
+  void eigBracket(double shift, double mu, double& lmin, double& lmax) {
+    double e_hi = lmax, e_lo = shift - mu;  // direct (max) + shifted (min) Rayleigh estimates
+    lmin = e_lo < e_hi ? e_lo : e_hi;
+    lmax = e_lo < e_hi ? e_hi : e_lo;  // robust min/max bracket
+    if (lmin < 0.02 * lmax)
+      lmin = 0.02 * lmax;
+    if (dbgEigScale_ != 1.0) {  // test hook (debugSetEigenScale): one estimate only
+      lmin *= dbgEigScale_;
+      lmax *= dbgEigScale_;
+      dbgEigScale_ = 1.0;
+    }
+  }
   // Estimate the spectral bounds [lmin,lmax] of M^{-1}A (M^{-1} = one symmetric V-cycle) by power
   // iteration (direct for the max + a shifted iteration for the min), seeded by `seed` (or, with
   // EigenStart::Warm, by the iterates a previous estimate kept). Communication-heavy, so the CUDA
@@ -6690,44 +6833,9 @@ class CutcellMG {
     CCField v = workVector(0, n, "ev_v"), w = workVector(1, n, "ev_w"),
             z = workVector(2, n, "ev_z"), srhs = workVector(3, n, "ev_srhs");
     const bool warm = start == EigenStart::Warm, keep = start != EigenStart::Cold;
-    if (!warm) {
-      // The right-hand side plus a broadband, np-independent component of the same max amplitude
-      // (doc/mg_depth_policy_log.md 2026-10-29): a right-hand side confined to an invariant
-      // subspace of M^{-1}A (an x-y-uniform hydrostatic load) otherwise hides the top of the
-      // spectrum from the power iteration, and the symmetric V-cycle's top lies above 1.
-      Kokkos::deep_copy(CCExec(), srhs, seed);
-      if (symVcycle_) {  // off: the pre-A3 estimate bit for bit (A3.3 item 4)
-        const double sm = maxabs(l0, srhs);
-        addSeedNoise(l0, srhs, sm > 0.0 ? sm : 1.0);
-      }
-    }
-    auto matvec = [&](CCField y, CCField x) { matvecOverlap(l0, y, x); };
-    auto applyT = [&](CCField out,
-                      CCField in) {  // out = M^{-1} A in, projected onto the fluid range
-      matvec(w, in);
-      precondVcycle(out, w);  // A5
-      removeMean(l0, out);
-      maskSolid(l0, out);
-    };
-    auto normalize = [&](CCField x) {
-      double nr = std::sqrt(dot(l0, x, x));
-      if (nr > 0)
-        scale(x, 1.0 / nr);
-      return nr;
-    };
-    auto seedf = [&](CCField x, CCField src) {
-      Kokkos::deep_copy(CCExec(), x, src);
-      removeMean(l0, x);
-      maskSolid(l0, x);
-      return normalize(x);
-    };
-    auto keepf = [&](CCField& dst, CCField x, const char* label) {
-      if (dst.extent(0) != n)
-        dst = CCField(label, n);
-      Kokkos::deep_copy(CCExec(), dst, x);
-    };
-    const double nrMax = seedf(v, warm ? eigVmax_ : srhs);
-    lmax = 1.0;
+    if (!warm)
+      eigSeedRhs(l0, srhs, seed);
+    const double nrMax = eigSeed(l0, v, warm ? eigVmax_ : srhs);
     if (symVcycle_ && !warm) {
       // A cold estimate on the symmetric V-cycle ((c), DECISIONS_GPU.log 2026-10-30 "A3
       // finish"): lambda_max is the top Ritz value of a short PCG run from the seed, v leaves as
@@ -6735,25 +6843,9 @@ class CutcellMG {
       // top 9 % under (collocated_stability_guard: 0.995 of 1.088).
       lmax = lanczosTop(l0, v, keep);
     } else
-      for (int k = 0; k < iters; ++k) {
-        applyT(z, v);
-        if (symVcycle_) {
-          // T = M^{-1} A is self-adjoint in the A inner product when M is symmetric, so the
-          // Rayleigh quotient is taken there: (Av . Tv) / (Av . v), w = A v as applyT left it, both
-          // sums in ONE reduction. It never exceeds lambda_max and its error is quadratic in the
-          // iterate's; the Euclidean v . Tv is not a Rayleigh quotient of this T (with it the true
-          // top reached 1.129 x the estimate, doc/mg_depth_policy_log.md 2026-10-29/30).
-          double wz = 0.0, wv = 0.0;
-          dotPair(l0, w, z, v, wz, wv);
-          lmax = wv > 0.0 ? wz / wv : 0.0;
-        } else {  // the trilinear V-cycle (M not symmetric): the pre-A3 estimate bit for bit
-          lmax = dot(l0, v, z);
-        }
-        Kokkos::deep_copy(CCExec(), v, z);
-        normalize(v);
-      }
+      lmax = eigPowerMax(l0, v, w, z, iters);
     if (keep)
-      keepf(eigVmax_, v, "ev_vmax");
+      eigKeep(eigVmax_, v, "ev_vmax", n);
     // The min iteration runs on shift*I - T. A shift below the true lambda_max makes it converge
     // to the wrong end of the spectrum and the lower bound collapse (pressure_wallbounded case B
     // diverged on it, doc/mg_depth_policy_log.md 2026-10-29). The power iteration approaches the
@@ -6766,33 +6858,17 @@ class CutcellMG {
       if (shift < lmax)
         shift = lmax;
     }
-    const double nrMin = seedf(v, warm ? eigVmin_ : srhs);
-    double mu = 0.0;
-    for (int k = 0; k < iters; ++k) {
-      applyT(z, v);
-      lin(z, shift, v, -1.0, z);  // z = shift*v - T v
-      mu = dot(l0, v, z);
-      Kokkos::deep_copy(CCExec(), v, z);
-      normalize(v);
-    }
+    const double nrMin = eigSeed(l0, v, warm ? eigVmin_ : srhs);
+    const double mu = eigPowerMin(l0, v, w, z, iters, shift);
     if (keep) {
-      keepf(eigVmin_, v, "ev_vmin");
+      eigKeep(eigVmin_, v, "ev_vmin", n);
       // Only a non-degenerate estimate may seed a warm one: a zero seed (a zero right-hand side,
       // e.g. a fluid at rest) leaves zero iterates and lmax = 0, from which a warm estimate would
       // return zero bounds -- and a Chebyshev solve on them NaN, which maxabs cannot see.
       eigWarm_ =
           nrMax > 0.0 && nrMin > 0.0 && std::isfinite(lmax) && lmax > 0.0 && std::isfinite(mu);
     }
-    double e_hi = lmax, e_lo = shift - mu;  // direct (max) + shifted (min) Rayleigh estimates
-    lmin = e_lo < e_hi ? e_lo : e_hi;
-    lmax = e_lo < e_hi ? e_hi : e_lo;  // robust min/max bracket
-    if (lmin < 0.02 * lmax)
-      lmin = 0.02 * lmax;
-    if (dbgEigScale_ != 1.0) {  // test hook (debugSetEigenScale): one estimate only
-      lmin *= dbgEigScale_;
-      lmax *= dbgEigScale_;
-      dbgEigScale_ = 1.0;
-    }
+    eigBracket(shift, mu, lmin, lmax);
   }
   // Test hook: the NEXT estimateEigenvalues returns both bounds multiplied by `s` (s < 1 forces a
   // lambda_max below the spectrum's top, the growth guard's trigger). One-shot.
@@ -7802,15 +7878,16 @@ class CutcellMG {
   // (setRepartition(true): `chooseStageTarget` with maxBlockCells = the largest level-0 block, so
   // a stage may be a Repartition). `*align`, when given, receives that partition's alignment 2^a
   // -- rebalanceByWeights' return value. Without weights the forecast is unchanged.
-  static std::vector<PlanRow> predict(int gnx, int gny, int gnz, int np, int nLevels,
-                                      bool telescope, int minExtent = 4, int decompLevels = 0,
-                                      double maxImbalance = 1.05,
-                                      const std::vector<peclet::core::Real>* weights = nullptr,
-                                      int* align = nullptr) {
+  // predict's level-0 partition of the gs grid: core's aligned weighted ORB at its 1.05 budget
+  // (maxBlockCells = its largest block, as setRepartition arms it; *align = 2^a) with weights,
+  // else decomposition() (*align = 1).
+  static peclet::core::decomp::BlockDecomposer<3> predictLevel0(
+      C3 gs, int np, int decompLevels, double maxImbalance,
+      const std::vector<peclet::core::Real>* weights, int* align,
+      peclet::core::Index& maxBlockCells) {
     using Dec = peclet::core::decomp::BlockDecomposer<3>;
-    std::vector<PlanRow> rows;
+    const int gnx = gs.x, gny = gs.y, gnz = gs.z;
     Dec cur;
-    peclet::core::Index maxBlockCells = 0;  // 0: sibling merges only (an unweighted dec0)
     if (weights) {
       if (weights->size() != (std::size_t)gnx * (std::size_t)gny * (std::size_t)gnz)
         throw std::invalid_argument(
@@ -7826,7 +7903,60 @@ class CutcellMG {
       if (align)
         *align = 1;
     }
+    return cur;
+  }
+  // predict's telescoping stage out of level gs (telescope on): initMpi's trigger (a block that
+  // cannot be lifted, or one below minExtent, while some axis can still halve on several ranks)
+  // and core's policy. maxBlockCells = 0: flow's sibling-merge search, which never returns a
+  // Repartition; > 0 for a weighted dec0, as setRepartition arms it. A stage replaces cur and
+  // marks r.tele (and r.repartition).
+  static void predictStage(peclet::core::decomp::BlockDecomposer<3>& cur, C3 gs, int minExtent,
+                           peclet::core::Index maxBlockCells, PlanRow& r) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    const bool canAny = canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z);
+    auto liftable = [&](const Dec& d) { return teleLiftable(d, gs); };
+    const bool blocked = !liftable(cur);
+    const bool tooSmall =
+        minExtent > 0 && peclet::core::decomp::minBlockExtent(cur) < (peclet::core::Index)minExtent;
+    if ((blocked || tooSmall) && canAny && cur.numBlocks() > 1) {
+      auto t = peclet::core::decomp::chooseStageTarget(cur, peclet::core::IVec<3>{gs.x, gs.y, gs.z},
+                                                       liftable, minExtent, maxBlockCells);
+      if (t.kind == peclet::core::decomp::StageKind::SiblingMerge ||
+          t.kind == peclet::core::decomp::StageKind::Repartition) {
+        r.repartition = t.kind == peclet::core::decomp::StageKind::Repartition;
+        cur = std::move(t.dec);
+        r.tele = true;
+      }
+    }
+  }
+  // predict's coarsening out of level gs on partition cur: each axis that can halve on every
+  // block (r.ratio 2 there); returns the next level's extent.
+  static C3 predictRatio(const peclet::core::decomp::BlockDecomposer<3>& cur, C3 gs, PlanRow& r) {
+    C3 next = gs;
+    if (canHalve(gs.x) && evenBlocksOn(cur, 0)) {
+      r.ratio.x = 2;
+      next.x = gs.x / 2;
+    }
+    if (canHalve(gs.y) && evenBlocksOn(cur, 1)) {
+      r.ratio.y = 2;
+      next.y = gs.y / 2;
+    }
+    if (canHalve(gs.z) && evenBlocksOn(cur, 2)) {
+      r.ratio.z = 2;
+      next.z = gs.z / 2;
+    }
+    return next;
+  }
+  static std::vector<PlanRow> predict(int gnx, int gny, int gnz, int np, int nLevels,
+                                      bool telescope, int minExtent = 4, int decompLevels = 0,
+                                      double maxImbalance = 1.05,
+                                      const std::vector<peclet::core::Real>* weights = nullptr,
+                                      int* align = nullptr) {
+    using Dec = peclet::core::decomp::BlockDecomposer<3>;
+    std::vector<PlanRow> rows;
+    peclet::core::Index maxBlockCells = 0;  // 0: sibling merges only (an unweighted dec0)
     C3 gs{gnx, gny, gnz};
+    Dec cur = predictLevel0(gs, np, decompLevels, maxImbalance, weights, align, maxBlockCells);
     // doc/mg_depth_policy.md §4.3: nLevels == 0 forecasts the AUTO depth for the SINGULAR operator
     // (extent 4, mode auto, all-periodic), as initMpi resolves it.
     const bool autoDepth = nLevels == 0;
@@ -7843,35 +7973,9 @@ class CutcellMG {
       const bool autoStop =
           autoDepth && L + 1 >= kAutoMinLevels && bottomAdmissible(gs, 4, false, -1, perBc);
       if (L + 1 < nLevelsCap && !autoStop) {
-        const bool canAny = canHalve(gs.x) || canHalve(gs.y) || canHalve(gs.z);
-        auto liftable = [&](const Dec& d) { return teleLiftable(d, gs); };
-        const bool blocked = !liftable(cur);
-        const bool tooSmall = minExtent > 0 && peclet::core::decomp::minBlockExtent(cur) <
-                                                   (peclet::core::Index)minExtent;
-        // initMpi's trigger + core's policy (maxBlockCells = 0: flow's sibling-merge search,
-        // which never returns a Repartition; > 0 for a weighted dec0, as setRepartition arms it)
-        if (telescope && (blocked || tooSmall) && canAny && cur.numBlocks() > 1) {
-          auto t = peclet::core::decomp::chooseStageTarget(
-              cur, peclet::core::IVec<3>{gs.x, gs.y, gs.z}, liftable, minExtent, maxBlockCells);
-          if (t.kind == peclet::core::decomp::StageKind::SiblingMerge ||
-              t.kind == peclet::core::decomp::StageKind::Repartition) {
-            r.repartition = t.kind == peclet::core::decomp::StageKind::Repartition;
-            cur = std::move(t.dec);
-            r.tele = true;
-          }
-        }
-        if (canHalve(gs.x) && evenBlocksOn(cur, 0)) {
-          r.ratio.x = 2;
-          next.x = gs.x / 2;
-        }
-        if (canHalve(gs.y) && evenBlocksOn(cur, 1)) {
-          r.ratio.y = 2;
-          next.y = gs.y / 2;
-        }
-        if (canHalve(gs.z) && evenBlocksOn(cur, 2)) {
-          r.ratio.z = 2;
-          next.z = gs.z / 2;
-        }
+        if (telescope)
+          predictStage(cur, gs, minExtent, maxBlockCells, r);
+        next = predictRatio(cur, gs, r);
       }
       rows.push_back(r);
       if (next.x == gs.x && next.y == gs.y && next.z == gs.z)

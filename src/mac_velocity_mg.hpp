@@ -763,6 +763,48 @@ class VelocityMG {
     }
   }
 
+  // solve()'s global max over its communicator (distributed); the local value otherwise.
+  double solveMax(double v, [[maybe_unused]] Comm comm) const {
+#ifdef PECLET_FLOW_MPI
+    if (distributed_ && comm != MPI_COMM_NULL) {
+      double g = 0.0;
+      MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, MPI_MAX, comm);
+      return g;
+    }
+#endif
+    return v;
+  }
+  // Chebyshev needs an interval that CONTAINS each level's spectrum, and every rank must use
+  // the SAME polynomial or the iterates drift apart. The operator is fixed for the whole solve,
+  // so the Gershgorin reduction runs once per level in solve() -- not inside smooth(), which would
+  // put an all-reduce on every level of every V-cycle and hand back the latency the smoother saves.
+  void chebLevelBounds(Comm comm) {
+    for (Level& lv : lv_) {
+      double lo = 0.0, hi = 0.0;
+      ibmStencilJacobiBounds(FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS), FPC(lv.AN), FPC(lv.AB),
+                             FPC(lv.AT), usePin_ ? CCConst(lv.pin) : empty_, lv.ext, G, lo, hi);
+      lv.chebHi = solveMax(hi, comm);
+    }
+  }
+  // solve()'s level-0 residual res = b - A x (BC hook first) and its global max|res| over the
+  // inner cells.
+  double level0Residual(Comm comm) {
+    Level& l0 = lv_[0];
+    fill(l0, l0.x);
+    if (bcApplyL0_)
+      bcApplyL0_(l0.x);
+    residualVarPin(l0.res, CCConst(l0.x), CCConst(l0.rhs), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE),
+                   FPC(l0.AS), FPC(l0.AN), FPC(l0.AB), FPC(l0.AT),
+                   usePin_ ? CCConst(l0.pin) : empty_, l0.ext, G);
+    // the held normal-Dirichlet face (wall / inflow, -side) is imposed, not solved: not part
+    // of the convergence measure
+    if (bcMode_ && heldComp_ >= 0) {
+      const int t = bc_[2 * heldComp_];
+      if ((t == 1 || t == 2 || t == 4) && touches(l0, 2 * heldComp_))
+        zeroPlane(l0.res, l0.ext, heldComp_, G);
+    }
+    return solveMax(maxAbsInner(CCConst(l0.res), l0.ext, G), comm);
+  }
   // solve A x = b (b,x on the level-0 G=2 block): up to nvc V-cycles. Solution left in x.
   // Two optional stops (global max under MPI):
   //   tol    > 0: max|x_{k+1} - x_k| over the inner cells <= tol * (first cycle's) -- the update
@@ -800,44 +842,8 @@ class VelocityMG {
       Kokkos::deep_copy(l0.rhs, b);
       Kokkos::deep_copy(l0.x, x);
     }
-    auto gmax = [&](double v) {
-#ifdef PECLET_FLOW_MPI
-      if (distributed_ && comm != MPI_COMM_NULL) {
-        double g = 0.0;
-        MPI_Allreduce(&v, &g, 1, MPI_DOUBLE, MPI_MAX, comm);
-        return g;
-      }
-#endif
-      return v;
-    };
-    // Chebyshev needs an interval that CONTAINS each level's spectrum, and every rank must use
-    // the SAME polynomial or the iterates drift apart. The operator is fixed for the whole solve,
-    // so the Gershgorin reduction runs once per level here -- not inside smooth(), which would put
-    // an all-reduce on every level of every V-cycle and hand back the latency the smoother saves.
     if (chebSmooth_)
-      for (Level& lv : lv_) {
-        double lo = 0.0, hi = 0.0;
-        ibmStencilJacobiBounds(FPC(lv.AC), FPC(lv.AW), FPC(lv.AE), FPC(lv.AS), FPC(lv.AN),
-                               FPC(lv.AB), FPC(lv.AT), usePin_ ? CCConst(lv.pin) : empty_, lv.ext,
-                               G, lo, hi);
-        lv.chebHi = gmax(hi);
-      }
-    auto residual = [&]() {
-      fill(l0, l0.x);
-      if (bcApplyL0_)
-        bcApplyL0_(l0.x);
-      residualVarPin(l0.res, CCConst(l0.x), CCConst(l0.rhs), FPC(l0.AC), FPC(l0.AW), FPC(l0.AE),
-                     FPC(l0.AS), FPC(l0.AN), FPC(l0.AB), FPC(l0.AT),
-                     usePin_ ? CCConst(l0.pin) : empty_, l0.ext, G);
-      // the held normal-Dirichlet face (wall / inflow, -side) is imposed, not solved: not part
-      // of the convergence measure
-      if (bcMode_ && heldComp_ >= 0) {
-        const int t = bc_[2 * heldComp_];
-        if ((t == 1 || t == 2 || t == 4) && touches(l0, 2 * heldComp_))
-          zeroPlane(l0.res, l0.ext, heldComp_, G);
-      }
-      return gmax(maxAbsInner(CCConst(l0.res), l0.ext, G));
-    };
+      chebLevelBounds(comm);
     // The forcing may enter through a Dirichlet ghost (an inflow) rather than through b, so the
     // convergence scale is max(max|b|, max|A x|) with max|A x| = max|b - r| from the initial
     // residual -- max|b| alone is ~0 on the first step from rest and the stop never triggers.
@@ -849,9 +855,10 @@ class VelocityMG {
     int used = nvc;
     lastResRatio_ = -1.0;
     if (useRes) {  // scale only; at least one cycle always runs (see IbmSolver::velSweepLoop)
-      const double r0 = residual();
-      bnorm = std::max(gmax(maxAbsInner(CCConst(l0.rhs), l0.ext, G)),
-                       gmax(maxAbsDiffInner(CCConst(l0.rhs), CCConst(l0.res), l0.ext, G)));
+      const double r0 = level0Residual(comm);
+      bnorm =
+          std::max(solveMax(maxAbsInner(CCConst(l0.rhs), l0.ext, G), comm),
+                   solveMax(maxAbsDiffInner(CCConst(l0.rhs), CCConst(l0.res), l0.ext, G), comm));
       lastResRatio_ = bnorm > 0.0 ? r0 / bnorm : 0.0;
     }
     double rPrev = -1.0;
@@ -860,7 +867,7 @@ class VelocityMG {
         Kokkos::deep_copy(prev_, l0.x);
       vcycle(0);
       if (useRes) {
-        const double r = residual();
+        const double r = level0Residual(comm);
         lastResRatio_ = bnorm > 0.0 ? r / bnorm : 0.0;
         // round-off floor / stagnation guard (see IbmSolver::velSweepLoop)
         const bool floor = r <= 1e-14 * bnorm || (rPrev >= 0.0 && r >= rPrev);
@@ -870,7 +877,7 @@ class VelocityMG {
           break;
         }
       } else if (useDu) {
-        const double du = gmax(maxAbsDiffInner(CCConst(l0.x), CCConst(prev_), l0.ext, G));
+        const double du = solveMax(maxAbsDiffInner(CCConst(l0.x), CCConst(prev_), l0.ext, G), comm);
         if (v == 0)
           du0 = du;
         if (du <= tol * du0) {
