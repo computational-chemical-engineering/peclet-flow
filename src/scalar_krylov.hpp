@@ -318,6 +318,208 @@ inline void residentXR(const ScalarVec& x, const ScalarVec& r, const ScalarVec& 
 }
 }  // namespace skr
 
+namespace skr {
+
+/// The vectors and settings of one `scalarBiCGStab` call: the right-hand side, the iterate (the
+/// initial guess and the result), the scratch r, rh, p, v, t, z, z2, the iteration cap, the
+/// absolute stop threshold rtol * ref and the singular flag (§5.1).
+struct BiCGStabArgs {
+  const ScalarVec& b;
+  const ScalarVec& x;
+  const ScalarVec& r;
+  const ScalarVec& rh;
+  const ScalarVec& p;
+  const ScalarVec& v;
+  const ScalarVec& t;
+  const ScalarVec& z;
+  const ScalarVec& z2;
+  int maxit = 0;
+  double thresh = 0.0;
+  bool singular = false;
+};
+
+/// A residual max-norm that is not finite ends the solve.
+inline void requireFinite(double rn) {
+  if (!std::isfinite(rn))
+    throw std::runtime_error("scalar cut-cell solve: non-finite residual");
+}
+
+/// r = b - A x (t as scratch), mean removed in the singular case.
+template <class Ops>
+inline void residualOf(Ops& ops, const BiCGStabArgs& w) {
+  ops.matvec(w.t, w.x);
+  copy(w.r, w.t);
+  residualFrom(w.r, w.b, ops.e, ops.g);
+  if (w.singular)
+    ops.removeMean(w.r);
+}
+
+/// The stagnation stop: true once 30 iterations brought no 0.1 % improvement of the best
+/// residual (the best-so-far level is then accepted); otherwise records an improvement.
+inline bool stagnated(double rn, double& best, int& lastImprove, int it) {
+  if (rn < 0.999 * best) {
+    best = rn;
+    lastImprove = it;
+    return false;
+  }
+  return it - lastImprove > 30;
+}
+
+/// One BiCGStab pass from the current x (CutcellMG::solveBiCGStab's loop, with the §5.1 stop).
+template <class Ops>
+inline void bicgPass(Ops& ops, const BiCGStabArgs& w, int& it) {
+  const C3 e = ops.e;
+  const int g = ops.g;
+  const ScalarVec &x = w.x, &r = w.r, &rh = w.rh, &p = w.p, &v = w.v, &t = w.t, &z = w.z,
+                  &z2 = w.z2;
+  const bool singular = w.singular;
+  residualOf(ops, w);  // r = b - A x  (t as scratch)
+  copy(rh, r);         // shadow residual r^ = r_0
+  const double r0n = ops.maxabs(r);
+  requireFinite(r0n);
+  if (!(r0n > w.thresh))
+    return;
+  double rho = 1.0, alpha = 1.0, omega = 1.0;
+  double best = r0n;
+  int lastImprove = it;
+  zero(p);
+  zero(v);
+  for (; it < w.maxit; ++it) {
+    const double rhoNew = ops.dot(rh, r);
+    if (!std::isfinite(rhoNew) || std::fabs(rhoNew) < 1e-300)
+      break;  // (rh, r) breakdown: keep the last finite iterate
+    const double beta = (rhoNew / rho) * (alpha / omega);
+    rho = rhoNew;
+    axpy(p, -omega, v, e, g);  // p = r + beta (p - omega v)
+    aypx(p, beta, r, e, g);
+    ops.precond(z, p);
+    ops.matvec(v, z);
+    if (singular)
+      ops.removeMean(v);
+    const double rhv = ops.dot(rh, v);
+    if (!std::isfinite(rhv) || std::fabs(rhv) < 1e-300)
+      break;
+    alpha = rho / rhv;
+    axpy(r, -alpha, v, e, g);  // r <- s = r - alpha v
+    if (singular)
+      ops.removeMean(r);
+    double rn = ops.maxabs(r);
+    requireFinite(rn);
+    if (rn <= w.thresh) {
+      axpy(x, alpha, z, e, g);
+      ++it;
+      break;
+    }
+    ops.precond(z2, r);
+    ops.matvec(t, z2);
+    if (singular)
+      ops.removeMean(t);
+    double tr = 0.0, tt = 0.0;
+    ops.dot2(t, r, t, tr, tt);
+    if (!std::isfinite(tt) || tt < 1e-300) {
+      axpy(x, alpha, z, e, g);  // omega breakdown: take the alpha half-step, stop
+      ++it;
+      break;
+    }
+    omega = tr / tt;
+    if (!std::isfinite(omega) || std::fabs(omega) < 1e-300) {
+      axpy(x, alpha, z, e, g);
+      ++it;
+      break;
+    }
+    axpy(x, alpha, z, e, g);
+    axpy(x, omega, z2, e, g);
+    axpy(r, -omega, t, e, g);
+    if (singular)
+      ops.removeMean(r);
+    rn = ops.maxabs(r);
+    requireFinite(rn);
+    if (rn <= w.thresh || stagnated(rn, best, lastImprove, it)) {
+      ++it;  // converged, or stagnation: accept the best-so-far level
+      break;
+    }
+  }
+}
+
+/// The resident pass's packet {stop, max|r|} (both phases combined with std::fmax, as
+/// ops.maxabs): THE device-to-host read of a half or full step.
+template <class Ops>
+inline double readPacket(Ops& ops, const BiCGStabArgs& w, double& stop) {
+  const auto& ks = ops.ks;
+  ops.maxabsTo(w.r, slot(ks, kRn), slot(ks, kRnS));
+  Kokkos::deep_copy(ops.pk, Kokkos::subview(ks, std::make_pair((int)kStop, (int)kStop + 3)));
+  stop = ops.pk(0);
+  return w.x.solid ? std::fmax(ops.pk(1), ops.pk(2)) : ops.pk(1);
+}
+
+/// The same pass with the scalars on the device (WO-9b; see the file comment). Statement for
+/// statement `bicgPass` above, through the skr::resident* kernels.
+template <class Ops>
+inline void bicgPassResident(Ops& ops, const BiCGStabArgs& w, int& it) {
+  const C3 e = ops.e;
+  const int g = ops.g;
+  const ScalarVec &x = w.x, &r = w.r, &rh = w.rh, &p = w.p, &v = w.v, &t = w.t, &z = w.z,
+                  &z2 = w.z2;
+  residualOf(ops, w);  // (w.singular is false here: the resident pass is not singular)
+  copy(rh, r);
+  const double r0n = ops.maxabs(r);
+  requireFinite(r0n);
+  if (!(r0n > w.thresh))
+    return;
+  double best = r0n;
+  int lastImprove = it;
+  zero(p);
+  zero(v);
+  const auto& ks = ops.ks;
+  residentInit(ks);
+  for (; it < w.maxit; ++it) {
+    ops.dotTo(rh, r, slot(ks, kRhoNew));
+    residentBeta(ks);
+    residentP(p, v, r, ks, e, g);  // p = r + beta (p - omega v)
+    ops.precond(z, p);
+    ops.matvec(v, z);
+    ops.dotTo(rh, v, slot(ks, kRhv));
+    residentAlpha(ks);
+    residentS(r, v, ks, e, g);  // r <- s = r - alpha v
+    double stop = 0.0;
+    double rn = readPacket(ops, w, stop);  // THE read of the half-step
+    if (stop != 0.0)
+      break;  // (rh, r) or (rh, v) breakdown: keep the last finite iterate
+    requireFinite(rn);
+    if (rn <= w.thresh) {
+      residentXHalf(x, z, ks, e, g);
+      ++it;
+      break;
+    }
+    ops.precond(z2, r);
+    ops.matvec(t, z2);
+    ops.dot2To(t, r, t, slot(ks, kTr), slot(ks, kTt));
+    residentOmega(ks);
+    residentXR(x, r, z, z2, t, ks, e, g);
+    rn = readPacket(ops, w, stop);  // THE read of the full step
+    if (stop != 0.0) {
+      ++it;  // tt / omega breakdown: the alpha half-step was taken, stop
+      break;
+    }
+    requireFinite(rn);
+    if (rn <= w.thresh || stagnated(rn, best, lastImprove, it)) {
+      ++it;  // converged, or stagnation: accept the best-so-far level
+      break;
+    }
+  }
+}
+
+/// The true residual max|b - A x| after a pass (mean removed in the singular case).
+template <class Ops>
+inline double bicgTrueResidual(Ops& ops, const BiCGStabArgs& w) {
+  residualOf(ops, w);
+  const double rn = ops.maxabs(w.r);
+  requireFinite(rn);
+  return rn;
+}
+
+}  // namespace skr
+
 /// BiCGStab on A x = b. `ops` provides
 ///   void matvec(const ScalarVec& y, const ScalarVec& x)   y = A x (exchanges x's ghosts itself)
 ///   void precond(const ScalarVec& z, const ScalarVec& r)  z = M^-1 r (a fixed linear operator)
@@ -326,14 +528,13 @@ inline void residentXR(const ScalarVec& x, const ScalarVec& r, const ScalarVec& 
 ///   double maxabs(const ScalarVec& a)                     global inner-cell max |a|
 ///   void removeMean(const ScalarVec& a)                   singular case only: the unknown-row mean
 ///   C3 e; int g;                                          the block
-/// Scratch: r, rh, p, v, t, z, z2. x holds the initial guess and the result.
+/// Scratch: r, rh, p, v, t, z, z2. x holds the initial guess and the result. One pass, its true
+/// residual, and one restart pass when that is above 10 rtol ref.
 template <class Ops>
 ScalarKrylovResult scalarBiCGStab(Ops& ops, const ScalarVec& b, const ScalarVec& x,
                                   const ScalarVec& r, const ScalarVec& rh, const ScalarVec& p,
                                   const ScalarVec& v, const ScalarVec& t, const ScalarVec& z,
                                   const ScalarVec& z2, int maxit, double rtol, bool singular) {
-  const C3 e = ops.e;
-  const int g = ops.g;
   ScalarKrylovResult res;
   ops.matvec(t, x);  // t = A x0
   const double ax0 = ops.maxabs(t);
@@ -342,180 +543,16 @@ ScalarKrylovResult scalarBiCGStab(Ops& ops, const ScalarVec& b, const ScalarVec&
   if (!std::isfinite(res.ref))
     throw std::runtime_error("scalar cut-cell solve: non-finite right-hand side or initial guess");
   const double thresh = rtol * res.ref;
+  const skr::BiCGStabArgs w{b, x, r, rh, p, v, t, z, z2, maxit, thresh, singular};
   int it = 0;
-  // One BiCGStab pass from the current x (CutcellMG::solveBiCGStab's loop, with the §5.1 stop).
-  auto pass = [&]() {
-    ops.matvec(t, x);  // r = b - A x  (t as scratch)
-    skr::copy(r, t);
-    skr::residualFrom(r, b, e, g);
-    if (singular)
-      ops.removeMean(r);
-    skr::copy(rh, r);  // shadow residual r^ = r_0
-    const double r0n = ops.maxabs(r);
-    if (!std::isfinite(r0n))
-      throw std::runtime_error("scalar cut-cell solve: non-finite residual");
-    if (!(r0n > thresh))
-      return;
-    double rho = 1.0, alpha = 1.0, omega = 1.0;
-    double best = r0n;
-    int lastImprove = it;
-    skr::zero(p);
-    skr::zero(v);
-    for (; it < maxit; ++it) {
-      const double rhoNew = ops.dot(rh, r);
-      if (!std::isfinite(rhoNew) || std::fabs(rhoNew) < 1e-300)
-        break;  // (rh, r) breakdown: keep the last finite iterate
-      const double beta = (rhoNew / rho) * (alpha / omega);
-      rho = rhoNew;
-      skr::axpy(p, -omega, v, e, g);  // p = r + beta (p - omega v)
-      skr::aypx(p, beta, r, e, g);
-      ops.precond(z, p);
-      ops.matvec(v, z);
-      if (singular)
-        ops.removeMean(v);
-      const double rhv = ops.dot(rh, v);
-      if (!std::isfinite(rhv) || std::fabs(rhv) < 1e-300)
-        break;
-      alpha = rho / rhv;
-      skr::axpy(r, -alpha, v, e, g);  // r <- s = r - alpha v
-      if (singular)
-        ops.removeMean(r);
-      double rn = ops.maxabs(r);
-      if (!std::isfinite(rn))
-        throw std::runtime_error("scalar cut-cell solve: non-finite residual");
-      if (rn <= thresh) {
-        skr::axpy(x, alpha, z, e, g);
-        ++it;
-        break;
-      }
-      ops.precond(z2, r);
-      ops.matvec(t, z2);
-      if (singular)
-        ops.removeMean(t);
-      double tr = 0.0, tt = 0.0;
-      ops.dot2(t, r, t, tr, tt);
-      if (!std::isfinite(tt) || tt < 1e-300) {
-        skr::axpy(x, alpha, z, e, g);  // omega breakdown: take the alpha half-step, stop
-        ++it;
-        break;
-      }
-      omega = tr / tt;
-      if (!std::isfinite(omega) || std::fabs(omega) < 1e-300) {
-        skr::axpy(x, alpha, z, e, g);
-        ++it;
-        break;
-      }
-      skr::axpy(x, alpha, z, e, g);
-      skr::axpy(x, omega, z2, e, g);
-      skr::axpy(r, -omega, t, e, g);
-      if (singular)
-        ops.removeMean(r);
-      rn = ops.maxabs(r);
-      if (!std::isfinite(rn))
-        throw std::runtime_error("scalar cut-cell solve: non-finite residual");
-      if (rn <= thresh) {
-        ++it;
-        break;
-      }
-      if (rn < 0.999 * best) {
-        best = rn;
-        lastImprove = it;
-      } else if (it - lastImprove > 30) {
-        ++it;  // stagnation: accept the best-so-far level
-        break;
-      }
-    }
-  };
-  // The same pass with the scalars on the device (WO-9b; see the file comment). Statement for
-  // statement `pass` above, through the skr::resident* kernels.
-  auto passResident = [&]() {
-    ops.matvec(t, x);
-    skr::copy(r, t);
-    skr::residualFrom(r, b, e, g);
-    skr::copy(rh, r);
-    const double r0n = ops.maxabs(r);
-    if (!std::isfinite(r0n))
-      throw std::runtime_error("scalar cut-cell solve: non-finite residual");
-    if (!(r0n > thresh))
-      return;
-    double best = r0n;
-    int lastImprove = it;
-    skr::zero(p);
-    skr::zero(v);
-    const auto& ks = ops.ks;
-    skr::residentInit(ks);
-    // the packet {stop, max|r|} (both phases combined with std::fmax, as ops.maxabs)
-    auto readPacket = [&](double& stop) {
-      ops.maxabsTo(r, skr::slot(ks, skr::kRn), skr::slot(ks, skr::kRnS));
-      Kokkos::deep_copy(ops.pk,
-                        Kokkos::subview(ks, std::make_pair((int)skr::kStop, (int)skr::kStop + 3)));
-      stop = ops.pk(0);
-      return x.solid ? std::fmax(ops.pk(1), ops.pk(2)) : ops.pk(1);
-    };
-    for (; it < maxit; ++it) {
-      ops.dotTo(rh, r, skr::slot(ks, skr::kRhoNew));
-      skr::residentBeta(ks);
-      skr::residentP(p, v, r, ks, e, g);  // p = r + beta (p - omega v)
-      ops.precond(z, p);
-      ops.matvec(v, z);
-      ops.dotTo(rh, v, skr::slot(ks, skr::kRhv));
-      skr::residentAlpha(ks);
-      skr::residentS(r, v, ks, e, g);  // r <- s = r - alpha v
-      double stop = 0.0;
-      double rn = readPacket(stop);  // THE read of the half-step
-      if (stop != 0.0)
-        break;  // (rh, r) or (rh, v) breakdown: keep the last finite iterate
-      if (!std::isfinite(rn))
-        throw std::runtime_error("scalar cut-cell solve: non-finite residual");
-      if (rn <= thresh) {
-        skr::residentXHalf(x, z, ks, e, g);
-        ++it;
-        break;
-      }
-      ops.precond(z2, r);
-      ops.matvec(t, z2);
-      ops.dot2To(t, r, t, skr::slot(ks, skr::kTr), skr::slot(ks, skr::kTt));
-      skr::residentOmega(ks);
-      skr::residentXR(x, r, z, z2, t, ks, e, g);
-      rn = readPacket(stop);  // THE read of the full step
-      if (stop != 0.0) {
-        ++it;  // tt / omega breakdown: the alpha half-step was taken, stop
-        break;
-      }
-      if (!std::isfinite(rn))
-        throw std::runtime_error("scalar cut-cell solve: non-finite residual");
-      if (rn <= thresh) {
-        ++it;
-        break;
-      }
-      if (rn < 0.999 * best) {
-        best = rn;
-        lastImprove = it;
-      } else if (it - lastImprove > 30) {
-        ++it;  // stagnation: accept the best-so-far level
-        break;
-      }
-    }
-  };
-  auto trueResidual = [&]() {
-    ops.matvec(t, x);
-    skr::copy(r, t);
-    skr::residualFrom(r, b, e, g);
-    if (singular)
-      ops.removeMean(r);
-    const double rn = ops.maxabs(r);
-    if (!std::isfinite(rn))
-      throw std::runtime_error("scalar cut-cell solve: non-finite residual");
-    return rn;
-  };
   const bool resident = ops.resident && !singular;
   if (res.ref > 0.0) {
-    resident ? passResident() : pass();
-    res.trueRes = trueResidual();
+    resident ? skr::bicgPassResident(ops, w, it) : skr::bicgPass(ops, w, it);
+    res.trueRes = skr::bicgTrueResidual(ops, w);
     if (res.trueRes > 10.0 * thresh && it < maxit) {
       res.restarted = true;
-      resident ? passResident() : pass();
-      res.trueRes = trueResidual();
+      resident ? skr::bicgPassResident(ops, w, it) : skr::bicgPass(ops, w, it);
+      res.trueRes = skr::bicgTrueResidual(ops, w);
     }
   }
   res.iterations = it;
