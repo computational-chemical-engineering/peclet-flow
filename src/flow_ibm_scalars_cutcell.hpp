@@ -779,6 +779,224 @@ inline CutContext cutContext(C3 e, int g, std::size_t n, const scg::ScalarCutGeo
   return cx;
 }
 
+/// What the face-flux pass counted: the faces carrying flux, those the guard zeroed, and the
+/// largest face speed of the projection.
+struct FaceFluxCounts {
+  long flux = 0, guarded = 0;
+  double vmax = 0.0;
+};
+
+/// The face flux of the projection in force, guarded (sco::faceFluxes); the open (inflow/outflow)
+/// global faces this rank touches take the captured boundary-face flux `openFlux[f]`, written over
+/// the guard's 0 (WO-5b, §6.5). A steady solve fills the face velocity's ghosts itself.
+template <class Grid>
+inline FaceFluxCounts faceFluxPass(Solver<Grid>& s, ScalarField& sc, bool steady,
+                                   const bool openHere[6], const CCField openFlux[6],
+                                   const CutContext& cx) {
+  ScalarCutState& st = *sc.cut;
+  const CCConst unk = cx.unk;
+  const C3 e = cx.e;
+  const int g = cx.g;
+  FaceFluxCounts fc;
+  for (int a = 0; a < 3; ++a) {
+    const typename Solver<Grid>::ScalarFaceFlux ff = s.scalarFaceFlux(a);
+    if (steady)  // IN PLACE on C[a].u / uf_: keep the high-side face (doc/uf_outlet_fix.md)
+      s.fillFaceGhostsKeepBoundary(ff.vel, a);
+    fc.vmax = std::fmax(fc.vmax, sco::maxabsLocal(CCConst(ff.vel), e, g));
+    sco::faceFluxes(st.phi[a], CCConst(ff.vel), CCConst(ff.open), unk, a, e);
+    for (int side = 0; side < 2; ++side)
+      if (openHere[2 * a + side])
+        sco::openFaceFluxes(st.phi[a], CCConst(openFlux[2 * a + side]), unk, a, side, e, g);
+    long n1 = 0, n2 = 0;
+    sco::faceFluxCountsLocal(CCConst(st.phi[a]), CCConst(ff.vel), CCConst(ff.open), a, e, g, n1,
+                             n2);
+    fc.flux += n1;
+    fc.guarded += n2;
+  }
+  return fc;
+}
+
+/// The all-rank maxima of the face flux: max |phi|, the face speed, A2's census max_cell_peclet
+/// (max |phi_a| / (Lam' w_a) over interior faces) and the collocated CELL speed `vcell`.
+template <class Units>
+inline void advectionMaxima(const ScalarCutState& st, double vmax, double vcell,
+                            const CutContext& cx, const Units& u, double mx[4]) {
+  const C3 e = cx.e;
+  const int g = cx.g;
+  mx[0] = sco::maxAbsFluxLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]), e, g);
+  mx[1] = vmax;
+  mx[2] = sco::maxCellPecletLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]),
+                                  cx.unk, st.lam, u.w, e, g);
+  mx[3] = vcell;
+#ifdef PECLET_FLOW_MPI
+  if (cx.distributed) {
+    double o[4] = {0.0, 0.0, 0.0, 0.0};
+    MPI_Allreduce(mx, o, 4, MPI_DOUBLE, MPI_MAX, cx.comm);
+    for (int k = 0; k < 4; ++k)
+      mx[k] = o[k];
+  }
+#endif
+}
+
+/// The moving fluids the cut-cell scalar cannot advect, refused rather than silently ignored:
+/// `noFaceField` (collocated, the projected face field never built), `noProjection` (no cut-cell
+/// pressure operator), `noOpenFlux` (an open face whose flux no projection has supplied yet).
+inline void refuseUnadvectable(const std::string& name, const double mx[4], bool noFaceField,
+                               bool noProjection, bool noOpenFlux) {
+  // Review finding 1 (ruling D-WOR-1): on the collocated grid the advecting field is the projected
+  // MAC face field uf_/vf_/wf_. set_solid zeroes it and a raw set_field('u', ...) does not seed it,
+  // so before the first projection a moving fluid would read max|uf| = 0 and be silently left
+  // unadvected (the trap advect_vof closed for VoF, ISSUES sweep item 5). Refused, as there.
+  if (noFaceField && mx[3] > 0.0)
+    throw std::runtime_error(
+        "cut-cell scalar '" + name +
+        "': SolverColocated advects with the projected MAC FACE field uf_/vf_/wf_ (the only "
+        "discretely divergence-free field on this grid), and it has never been built since the "
+        "geometry was set -- it is all zeros, so the moving fluid would be silently ignored. "
+        "Call set_state()/set_velocity() (which seed the face field through the same "
+        "centerToFace map project() uses) or step() first (doc/scalar_ibm_design.md §6.1)");
+  // WO-5 (open, reported): without the cut-cell pressure operator no projection runs and no
+  // openness exists (set_solid(..., cutcell_pressure=False)), so there is no discretely
+  // divergence-free face flux to advect with (§6.1); a moving fluid is refused rather than left
+  // silently unadvected. A fluid at rest (diffusion only, WO-3/WO-4) is unaffected.
+  if (noProjection && mx[1] > 0.0)
+    throw std::runtime_error("cut-cell scalar '" + name +
+                             "': the fluid moves but no cut-cell projection exists to advect "
+                             "with -- use set_solid(..., cutcell_pressure=True) or "
+                             "set_pressure_geometry (doc/scalar_ibm_design.md §6.1)");
+  // WO-5b: the flux of an open domain face is the one the projection constrained, captured by
+  // step(); before the first projection there is none to advect with.
+  if (noOpenFlux && mx[1] > 0.0)
+    throw std::runtime_error("cut-cell scalar '" + name +
+                             "': the fluid moves and the domain has an inflow/outflow face, but no "
+                             "projection has supplied that face's flux yet -- advance with step() "
+                             "(doc/scalar_ibm_design.md §6.5)");
+}
+
+/// The advection census of the last advance, zeroed before it is counted.
+inline void resetAdvectionCensus(ScalarCutState& st) {
+  st.numSmall = 0;
+  st.numImplicitFaces = 0;
+  st.bulkCourant = 0.0;
+  st.numFluxFaces = 0;
+  st.numGuardedFaces = 0;
+  st.numBackflowFaces = 0;
+}
+
+/// No face carries flux: only the guarded faces are counted (all ranks).
+inline void countGuardedOnly(ScalarCutState& st, long nGuard, const CutContext& cx) {
+  long cnt[1] = {nGuard};
+#ifdef PECLET_FLOW_MPI
+  if (cx.distributed) {
+    long o[1];
+    MPI_Allreduce(cnt, o, 1, MPI_LONG, MPI_SUM, cx.comm);
+    cnt[0] = o[0];
+  }
+#endif
+  (void)cx;
+  st.numGuardedFaces = cnt[0];
+}
+
+/// §6.3, transient: C_bulk = the global MAX over full cells of dt Out / V, then the per-cell
+/// small-cell flags, their ghosts the owner's.
+template <class Grid>
+inline void classifySmallCells(Solver<Grid>& s, ScalarField& sc, const scg::ScalarCutGeometry& gm,
+                               double dt, const CutContext& cx) {
+  ScalarCutState& st = *sc.cut;
+  const CCConst unk = cx.unk, kap = cx.kap;
+  const C3 e = cx.e;
+  const int g = cx.g;
+  const CCConst px(st.phi[0]), py(st.phi[1]), pz(st.phi[2]);
+  double cb = sco::bulkCourantLocal(px, py, pz, kap, unk, CCConst(gm.sax), CCConst(gm.say),
+                                    CCConst(gm.saz), dt, e, g);
+#ifdef PECLET_FLOW_MPI
+  if (cx.distributed) {
+    double o = 0.0;
+    MPI_Allreduce(&cb, &o, 1, MPI_DOUBLE, MPI_MAX, cx.comm);
+    cb = o;
+  }
+#endif
+  st.bulkCourant = cb;
+  // Review finding 7 (D-WO5-1): koren with forward Euler is TVD only to bulk Courant 1/2 (min
+  // -21 at C = 0.9 with no solid); legacy-identical, so said once rather than refused.
+  if (sc.scheme == 1 && cb > 0.5 && !st.warnedKoren) {
+    st.warnedKoren = true;
+    if (s.scalarRootRank())
+      std::fprintf(stderr,
+                   "peclet.flow: cut-cell scalar '%s': scheme 'koren' at bulk Courant %.3f > 1/2 "
+                   "-- the explicit limiter is bounded only to 1/2 and overshoots above it; "
+                   "reduce dt or use scheme='fou' (diagnostics.scalar_census 'bulk_courant', "
+                   "printed once)\n",
+                   sc.name.c_str(), cb);
+  }
+  sco::smallCells(st.small, px, py, pz, kap, unk, dt, std::fmax(0.5, cb), e, g);
+  // Review finding 6 (ruling D-WOR-6): the ghost flags are the OWNER's, by one exchange per
+  // advance, so a face's implicit/explicit split agrees across ranks whatever the ghost fluxes
+  // (formerly ghost layer 1 was recomputed locally, which agreed only through flow's
+  // outflow-correction and ghost-fill ranges). The periodic wrap beyond a non-periodic face is
+  // then cleared with the unknown flags, as the local computation had it.
+  s.fillGhosts(st.small);
+  sco::zeroNonUnknown(st.small, unk, e, 0);
+}
+
+/// The advection census (all ranks): small cells, implicit faces, faces carrying flux, guarded
+/// faces and outflow-face backflow rows; it also marks the open-face rows built.
+inline void countAdvection(ScalarField& sc, bool steady, const bool openHere[6],
+                           const FaceFluxCounts& fc, const CutContext& cx) {
+  ScalarCutState& st = *sc.cut;
+  const CCConst unk = cx.unk;
+  const C3 e = cx.e;
+  const int g = cx.g;
+  long cnt[5] = {sco::countSmallLocal(CCConst(st.small), e, g), 0, fc.flux, fc.guarded, 0};
+  for (int a = 0; a < 3; ++a)
+    cnt[1] += sco::countImplicitLocal(CCConst(st.phi[a]), CCConst(st.small), unk, a, steady, e, g);
+  for (int f = 0; f < 6; ++f) {
+    st.openFace[f] = openHere[f];
+    if (!openHere[f])
+      continue;
+    long n1 = 0, n2 = 0, n3 = 0;
+    sco::openFaceCountsLocal(CCConst(st.phi[f / 2]), CCConst(st.small), unk, st.openInflow[f],
+                             f / 2, f % 2, steady, e, g, n1, n2, n3);
+    cnt[2] += n1;
+    cnt[1] += n2;
+    cnt[4] += n3;
+  }
+#ifdef PECLET_FLOW_MPI
+  if (cx.distributed) {
+    long o[5];
+    MPI_Allreduce(cnt, o, 5, MPI_LONG, MPI_SUM, cx.comm);
+    for (int k = 0; k < 5; ++k)
+      cnt[k] = o[k];
+  }
+#endif
+  st.numSmall = cnt[0];
+  st.numImplicitFaces = cnt[1];
+  st.numFluxFaces = cnt[2];
+  st.numGuardedFaces = cnt[3];
+  st.numBackflowFaces = cnt[4];
+}
+
+/// Review finding 2a (ruling D-WOR-2a): A2 requires an implicit backflow row to be reported. Such
+/// a row is AC += F_out < 0 (inflow at the zero-gradient value c_i); it costs the column its
+/// dominance (no M-matrix there), and A2's coarse mass omega_open is clamped at 0 on it.
+template <class Grid>
+inline void warnBackflow(const Solver<Grid>& s, ScalarField& sc, bool steady) {
+  ScalarCutState& st = *sc.cut;
+  if (steady && st.numBackflowFaces > 0 && !st.warnedBackflow) {
+    st.warnedBackflow = true;
+    if (s.scalarRootRank())
+      std::fprintf(stderr,
+                   "peclet.flow: cut-cell scalar '%s': %ld outflow-face row(s) carry BACKFLOW in "
+                   "the steady solve (flow entering through an 'outflow' face). Their inflow "
+                   "takes the zero-gradient value c_i, which is not a well-posed inflow condition "
+                   "(doc/scalar_ibm_design.md §6.5): the matrix loses column dominance there, and "
+                   "the advective preconditioner's coarse mass omega_open is clamped at 0 on those "
+                   "rows (A2). Prefer an 'inflow' face where fluid enters "
+                   "(diagnostics.scalar_census 'num_backflow_faces', printed once)\n",
+                   sc.name.c_str(), st.numBackflowFaces);
+  }
+}
+
 /// The surrogate diagonal, the Krylov scratch and the per-facet coefficients, sized to the block.
 inline void allocateWork(ScalarField& sc, std::size_t n, long numFacets) {
   ScalarCutState& st = *sc.cut;
@@ -1499,10 +1717,12 @@ template <class Grid>
 void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
   ScalarCutState& st = *sc.cut;
   const scg::ScalarCutGeometry& gm = scg_;
-  const CCConst unk(gm.unknown), kap(gm.kappa);
+  scd::CutContext cx = scd::cutContext(e_, G, n_, gm, distributed_);
+#ifdef PECLET_FLOW_MPI
+  cx.comm = comm_;
+#endif
   for (int a = 0; a < 3; ++a)
-    if (st.phi[a].extent(0) != n_)
-      st.phi[a] = CCField(sc.name + "_cc_phi", n_);
+    scd::ensureField(st.phi[a], n_, sc.name, "_cc_phi");
   // the face flux of the projection in force, guarded (sco::faceFluxes). A steady solve is called
   // outside step(), so it fills the face velocity's ghosts itself (advanceScalars did for an
   // advance).
@@ -1516,174 +1736,33 @@ void Solver<Grid>::scalarCutAdvection(ScalarField& sc, bool steady) {
     st.openFace[f] = false;
     st.openInflow[f] = bc_[f] == 2;
   }
-  long nFlux = 0, nGuard = 0;
-  double vmax = 0.0;
-  for (int a = 0; a < 3; ++a) {
-    const ScalarFaceFlux ff = scalarFaceFlux(a);
-    if (steady)  // IN PLACE on C[a].u / uf_: keep the high-side face (doc/uf_outlet_fix.md)
-      fillFaceGhostsKeepBoundary(ff.vel, a);
-    vmax = std::fmax(vmax, sco::maxabsLocal(CCConst(ff.vel), e_, G));
-    sco::faceFluxes(st.phi[a], CCConst(ff.vel), CCConst(ff.open), unk, a, e_);
-    for (int side = 0; side < 2; ++side)
-      if (openHere[2 * a + side])
-        sco::openFaceFluxes(st.phi[a], CCConst(scalarOpenFlux_[2 * a + side]), unk, a, side, e_, G);
-    long n1 = 0, n2 = 0;
-    sco::faceFluxCountsLocal(CCConst(st.phi[a]), CCConst(ff.vel), CCConst(ff.open), a, e_, G, n1,
-                             n2);
-    nFlux += n1;
-    nGuard += n2;
-  }
-  // (the third entry: A2's census max_cell_peclet, max |phi_a| / (Lam' w_a) over interior faces;
-  // the fourth, collocated only: the CELL velocity, which moves while the face field may not exist)
+  const scd::FaceFluxCounts fc =
+      scd::faceFluxPass(*this, sc, steady, openHere, scalarOpenFlux_, cx);
+  // (the fourth maximum, collocated only: the CELL velocity, which moves while the face field may
+  // not exist)
   double vcell = 0.0;
   if constexpr (Grid::collocated)
     for (int a = 0; a < 3; ++a)
       vcell = std::fmax(vcell, sco::maxabsLocal(CCConst(C[a].u), e_, G));
-  double mx[4] = {
-      sco::maxAbsFluxLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]), e_, G), vmax,
-      sco::maxCellPecletLocal(CCConst(st.phi[0]), CCConst(st.phi[1]), CCConst(st.phi[2]), unk,
-                              st.lam, u_.w, e_, G),
-      vcell};
-#ifdef PECLET_FLOW_MPI
-  if (distributed_) {
-    double o[4] = {0.0, 0.0, 0.0, 0.0};
-    MPI_Allreduce(mx, o, 4, MPI_DOUBLE, MPI_MAX, comm_);
-    for (int k = 0; k < 4; ++k)
-      mx[k] = o[k];
-  }
-#endif
+  double mx[4];
+  scd::advectionMaxima(st, fc.vmax, vcell, cx, u_, mx);
   st.maxCellPeclet = mx[2];
-  // Review finding 1 (ruling D-WOR-1): on the collocated grid the advecting field is the projected
-  // MAC face field uf_/vf_/wf_. set_solid zeroes it and a raw set_field('u', ...) does not seed it,
-  // so before the first projection a moving fluid would read max|uf| = 0 and be silently left
-  // unadvected (the trap advect_vof closed for VoF, ISSUES sweep item 5). Refused, as there.
-  if constexpr (Grid::collocated)
-    if (!faceFieldValid_ && mx[3] > 0.0)
-      throw std::runtime_error(
-          "cut-cell scalar '" + sc.name +
-          "': SolverColocated advects with the projected MAC FACE field uf_/vf_/wf_ (the only "
-          "discretely divergence-free field on this grid), and it has never been built since the "
-          "geometry was set -- it is all zeros, so the moving fluid would be silently ignored. "
-          "Call set_state()/set_velocity() (which seed the face field through the same "
-          "centerToFace map project() uses) or step() first (doc/scalar_ibm_design.md §6.1)");
-  // WO-5 (open, reported): without the cut-cell pressure operator no projection runs and no
-  // openness exists (set_solid(..., cutcell_pressure=False)), so there is no discretely
-  // divergence-free face flux to advect with (§6.1); a moving fluid is refused rather than left
-  // silently unadvected. A fluid at rest (diffusion only, WO-3/WO-4) is unaffected.
-  if (!cutcellPressure_ && mx[1] > 0.0)
-    throw std::runtime_error("cut-cell scalar '" + sc.name +
-                             "': the fluid moves but no cut-cell projection exists to advect "
-                             "with -- use set_solid(..., cutcell_pressure=True) or "
-                             "set_pressure_geometry (doc/scalar_ibm_design.md §6.1)");
-  // WO-5b: the flux of an open domain face is the one the projection constrained, captured by
-  // step(); before the first projection there is none to advect with.
-  if (anyOpen && !scalarOpenValid_ && mx[1] > 0.0)
-    throw std::runtime_error("cut-cell scalar '" + sc.name +
-                             "': the fluid moves and the domain has an inflow/outflow face, but no "
-                             "projection has supplied that face's flux yet -- advance with step() "
-                             "(doc/scalar_ibm_design.md §6.5)");
+  scd::refuseUnadvectable(sc.name, mx, Grid::collocated && !faceFieldValid_, !cutcellPressure_,
+                          anyOpen && !scalarOpenValid_);
   st.advecting = mx[0] > 0.0;
-  st.numSmall = 0;
-  st.numImplicitFaces = 0;
-  st.bulkCourant = 0.0;
-  st.numFluxFaces = 0;
-  st.numGuardedFaces = 0;
-  st.numBackflowFaces = 0;
+  scd::resetAdvectionCensus(st);
   if (!st.advecting) {
-    long cnt[1] = {nGuard};
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      long o[1];
-      MPI_Allreduce(cnt, o, 1, MPI_LONG, MPI_SUM, comm_);
-      cnt[0] = o[0];
-    }
-#endif
-    st.numGuardedFaces = cnt[0];
+    scd::countGuardedOnly(st, fc.guarded, cx);
     return;
   }
-  if (st.small.extent(0) != n_)
-    st.small = CCField(sc.name + "_cc_small", n_);
-  if (st.outflow.extent(0) != n_)
-    st.outflow = CCField(sc.name + "_cc_outflow", n_);
-  const CCConst px(st.phi[0]), py(st.phi[1]), pz(st.phi[2]);
-  if (steady) {  // §6.7: implicit FOU on every face; no classification
+  scd::ensureField(st.small, n_, sc.name, "_cc_small");
+  scd::ensureField(st.outflow, n_, sc.name, "_cc_outflow");
+  if (steady)  // §6.7: implicit FOU on every face; no classification
     Kokkos::deep_copy(CCExec(), st.small, 0.0);
-  } else {
-    // §6.3: C_bulk = the global MAX over full cells of dt Out / V, then the per-cell flags
-    double cb = sco::bulkCourantLocal(px, py, pz, kap, unk, CCConst(gm.sax), CCConst(gm.say),
-                                      CCConst(gm.saz), dt_, e_, G);
-#ifdef PECLET_FLOW_MPI
-    if (distributed_) {
-      double o = 0.0;
-      MPI_Allreduce(&cb, &o, 1, MPI_DOUBLE, MPI_MAX, comm_);
-      cb = o;
-    }
-#endif
-    st.bulkCourant = cb;
-    // Review finding 7 (D-WO5-1): koren with forward Euler is TVD only to bulk Courant 1/2 (min
-    // -21 at C = 0.9 with no solid); legacy-identical, so said once rather than refused.
-    if (sc.scheme == 1 && cb > 0.5 && !st.warnedKoren) {
-      st.warnedKoren = true;
-      if (scalarRootRank())
-        std::fprintf(stderr,
-                     "peclet.flow: cut-cell scalar '%s': scheme 'koren' at bulk Courant %.3f > 1/2 "
-                     "-- the explicit limiter is bounded only to 1/2 and overshoots above it; "
-                     "reduce dt or use scheme='fou' (diagnostics.scalar_census 'bulk_courant', "
-                     "printed once)\n",
-                     sc.name.c_str(), cb);
-    }
-    sco::smallCells(st.small, px, py, pz, kap, unk, dt_, std::fmax(0.5, cb), e_, G);
-    // Review finding 6 (ruling D-WOR-6): the ghost flags are the OWNER's, by one exchange per
-    // advance, so a face's implicit/explicit split agrees across ranks whatever the ghost fluxes
-    // (formerly ghost layer 1 was recomputed locally, which agreed only through flow's
-    // outflow-correction and ghost-fill ranges). The periodic wrap beyond a non-periodic face is
-    // then cleared with the unknown flags, as the local computation had it.
-    fillGhosts(st.small);
-    sco::zeroNonUnknown(st.small, unk, e_, 0);
-  }
-  long cnt[5] = {sco::countSmallLocal(CCConst(st.small), e_, G), 0, nFlux, nGuard, 0};
-  for (int a = 0; a < 3; ++a)
-    cnt[1] += sco::countImplicitLocal(CCConst(st.phi[a]), CCConst(st.small), unk, a, steady, e_, G);
-  for (int f = 0; f < 6; ++f) {
-    st.openFace[f] = openHere[f];
-    if (!openHere[f])
-      continue;
-    long n1 = 0, n2 = 0, n3 = 0;
-    sco::openFaceCountsLocal(CCConst(st.phi[f / 2]), CCConst(st.small), unk, st.openInflow[f],
-                             f / 2, f % 2, steady, e_, G, n1, n2, n3);
-    cnt[2] += n1;
-    cnt[1] += n2;
-    cnt[4] += n3;
-  }
-#ifdef PECLET_FLOW_MPI
-  if (distributed_) {
-    long o[5];
-    MPI_Allreduce(cnt, o, 5, MPI_LONG, MPI_SUM, comm_);
-    for (int k = 0; k < 5; ++k)
-      cnt[k] = o[k];
-  }
-#endif
-  st.numSmall = cnt[0];
-  st.numImplicitFaces = cnt[1];
-  st.numFluxFaces = cnt[2];
-  st.numGuardedFaces = cnt[3];
-  st.numBackflowFaces = cnt[4];
-  // Review finding 2a (ruling D-WOR-2a): A2 requires an implicit backflow row to be reported. Such
-  // a row is AC += F_out < 0 (inflow at the zero-gradient value c_i); it costs the column its
-  // dominance (no M-matrix there), and A2's coarse mass omega_open is clamped at 0 on it.
-  if (steady && st.numBackflowFaces > 0 && !st.warnedBackflow) {
-    st.warnedBackflow = true;
-    if (scalarRootRank())
-      std::fprintf(stderr,
-                   "peclet.flow: cut-cell scalar '%s': %ld outflow-face row(s) carry BACKFLOW in "
-                   "the steady solve (flow entering through an 'outflow' face). Their inflow "
-                   "takes the zero-gradient value c_i, which is not a well-posed inflow condition "
-                   "(doc/scalar_ibm_design.md §6.5): the matrix loses column dominance there, and "
-                   "the advective preconditioner's coarse mass omega_open is clamped at 0 on those "
-                   "rows (A2). Prefer an 'inflow' face where fluid enters "
-                   "(diagnostics.scalar_census 'num_backflow_faces', printed once)\n",
-                   sc.name.c_str(), st.numBackflowFaces);
-  }
+  else
+    scd::classifySmallCells(*this, sc, gm, dt_, cx);
+  scd::countAdvection(sc, steady, openHere, fc, cx);
+  scd::warnBackflow(*this, sc, steady);
 }
 
 template <class Grid>
