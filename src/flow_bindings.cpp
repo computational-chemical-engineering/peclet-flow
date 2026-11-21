@@ -46,11 +46,14 @@
 #include "anderson_accelerator.hpp"
 #include "flow_bindings_checks.hpp"
 #include "flow_bindings_common.hpp"
+#include "flow_bindings_sharp_viscous.hpp"
 #include "flow_ibm.hpp"
 #include "peclet/core/python/kokkos_teardown.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
 
 namespace nb = nanobind;
+// The topic binders (flow_bindings_<topic>.hpp).
+namespace fb = peclet::flow::bindings;
 // Input validation and the checked setters bound in place of a member (flow_bindings_checks.hpp).
 namespace chk = peclet::flow::binding_checks;
 // The shared binding helpers (flow_bindings_common.hpp).
@@ -166,13 +169,14 @@ static void bind_accelerator(nb::module_& m, const char* name) {
 template <class Grid>
 static void bind_diagnostics(nb::module_& m, const char* name) {
   using D = Diagnostics<Grid>;
-  nb::class_<D>(
+  nb::class_<D> cls(
       m, name,
       "Developer tier of a Solver, reached as `s.diagnostics`: instruments (censuses, timers, "
       "budgets, ledgers), solver TUNING beyond the public driver selection, ablation switches "
       "and the raw zero-copy / MPI internals. Nothing here is needed to set up, run or read out "
       "a simulation. It holds a reference to the solver and no state of its own; the setters "
-      "that CHANGE RESULTS say so in their docstring.")
+      "that CHANGE RESULTS say so in their docstring.");
+  cls
       .def(
           "set_face_interp",
           [](D& diag, int mode) {
@@ -2083,52 +2087,9 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "vof_momentum_scheme", [](D& diag) { return diag.s->vofMomentumScheme(); },
           "The selected VoF momentum scheme (see set_vof_momentum_scheme).")
-      .def(
-          "vof_viscous_interface_census",
-          [](D& diag) {
-            const auto c = diag.s->vofViscousInterfaceCensus();
-            nb::dict d;
-            d["band_cells"] = c.band;
-            d["virtual_cells"] = c.virt;
-            d["film_cells"] = c.film;
-            d["fit_fallbacks"] = c.fallback;
-            d["tied_edges"] = c.tied;
-            d["max_tie_spread"] = c.tieSpread;
-            d["min_untied_gap"] = c.untiedGap;
-            d["blended_edges"] = c.blended;
-            return d;
-          },
-          "The sharp interface band of the last step, LOCAL to this rank (sum over ranks "
-          "yourself): 'band_cells' (interfacial cells, PLIC and virtual planes), "
-          "'virtual_cells' (pure cells carrying a face plane), 'film_cells' (virtual cells "
-          "whose two neighbours along the plane axis are both of the other phase) and "
-          "'fit_fallbacks' (cells whose interface fit was singular: tau = D_nn = 0, first order "
-          "locally). The edge-owner ties (§5.8; every in-domain edge of the owned cells, an edge "
-          "on a non-periodic high domain face not counted): 'tied_edges' (band edges whose owner "
-          "set's plateau, the candidates within 1e-6 cells of the closest plane, has two or more "
-          "members), 'max_tie_spread' (the largest distance spread within a plateau, index "
-          "units; 0.0 if none), 'min_untied_gap' (the smallest distance from the closest plane "
-          "to a candidate outside the plateau; inf if none) and 'blended_edges' (band edges with "
-          "a candidate on the owner-weight ramp, 1e-6 to 1e-5 cells beyond the closest, which "
-          "enters the edge's weighted mean with a partial weight) -- INFO, not a defect signal; "
-          "take max/min over ranks yourself. All zero (gap inf) while the sharp interface is "
-          "inactive.")
-      .def(
-          "vof_viscous_interface_fit",
-          [](D& diag) {
-            auto f = diag.s->vofViscousInterfaceFit();
-            const char* key[5] = {"tau_x", "tau_y", "tau_z", "dnn", "fallback"};
-            nb::dict d;
-            for (int k = 0; k < 5; ++k)
-              if (!f[k].empty())
-                d[key[k]] = field_out(*diag.s, std::move(f[k]));
-            return d;
-          },
-          "The sharp interface fit of the last step (doc/vof_sharp_viscous_stress.md §5.3), "
-          "LOCAL to this rank, as (nx, ny, nz) arrays: 'tau_x', 'tau_y', 'tau_z' (the interface "
-          "traction tau_hat) and 'dnn' (D_nn_hat), both in internal units, zero off the band, "
-          "and 'fallback' (1 where the fit was singular). Empty while the sharp interface is "
-          "inactive. A read-out for verification; it changes nothing.")
+      ;
+  fb::bindDiagnosticsSharpViscous<Grid>(cls);
+  cls
       .def(
           "set_vof_momentum_muscl", [](D& diag, bool on) { diag.s->setVofMomentumMuscl(on); },
           nb::arg("on") = true,
@@ -2284,7 +2245,8 @@ static void bind_diagnostics(nb::module_& m, const char* name) {
       .def(
           "bcast_from_root", [](D&, nb::object v) { return v; }, nb::arg("value"),
           "Broadcast a value from rank 0 (identity in the single-rank module; mirrors the MPI "
-          "API).");
+          "API).")
+      ;
 }
 
 // Register a solver class for the given GridLayout policy (Staggered -> "Solver", Colocated ->
@@ -2295,14 +2257,15 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
   using S = BoundSolver<Grid>;
   using D = Diagnostics<Grid>;
   bind_diagnostics<Grid>(m, diag_name);
-  nb::class_<S>(
+  nb::class_<S> cls(
       m, name,
       "One incompressible Navier-Stokes solver on a block of the grid (staggered MAC, the "
       "reference) -- or, for SolverColocated, the same API with cell-centered velocities and "
       "the ABC approximate projection. Construct on a (physical) domain; set_rho / set_mu / "
       "set_dt and the domain BCs; give it a geometry (set_solid, set_pressure_geometry or a "
       "scene); step(); read out with the get_* arrays. Developer instruments and tuning live "
-      "on `.diagnostics`.")
+      "on `.diagnostics`.");
+  cls
       .def_prop_ro(
           "diagnostics", [](S& s) { return D{&s}; }, nb::keep_alive<0, 1>(),
           "The developer tier of this solver (instruments, tuning, ablations, internals).")
@@ -2435,28 +2398,9 @@ static void bind_solver(nb::module_& m, const char* name, const char* diag_name)
            "staircase face: an O(gamma h) near-wall error on oblique walls (gamma the wall shear "
            "rate), present for any non-uniform mu; the repair is open. "
            "The form is a name, not a physical quantity.")
-      .def("set_vof_viscous_interface", &S::setVofViscousInterface, nb::arg("mode"),
-           "The viscous stress at the VoF interface (doc/vof_sharp_viscous_stress.md): 'auto' "
-           "(default), 'sharp' or 'averaged'. 'averaged' = the cell mu(C) and the 4-cell mean on "
-           "the MAC edges, first order across an oblique interface (the operator before the "
-           "sharp interface; it reproduces earlier numbers bitwise). 'sharp' = on every band edge "
-           "the row's own PLIC face-fraction viscosity (implicit band and explicit transpose), a "
-           "per-link interface-traction correction from a kinked least-squares fit of the "
-           "interface state, and the cell midsection force of the normal-stress jump 2[mu]D_nn "
-           "(explicit on u^n): second order. 'auto' resolves at each step to 'sharp' when VoF is "
-           "on, mu = LinearMix(C) (set_property_model('mu', 'linear', 'C', ...)) varies and the "
-           "full viscous stress is active (set_viscous_stress), with no immersed solid, porous "
-           "momentum, moving scene instances or phase change; else to 'averaged' with a one-time "
-           "stderr notice. SolverColocated always resolves 'auto' to 'averaged' and raises on "
-           "'sharp'. An explicit 'sharp' raises at step() outside that scope and with the "
-           "harmonic face viscosity. Inert for a constant mu. A cell is interfacial iff eps < C "
-           "< 1 - eps with eps = diagnostics.vof_interface_eps() (the wisp guard, default 1e-8). "
-           "Read-outs: diagnostics.vof_viscous_interface_census() / vof_viscous_interface_fit(). "
-           "Any other mode raises ValueError.")
-      .def("vof_viscous_interface", &S::vofViscousInterface,
-           "The selected VoF viscous interface mode, 'auto', 'sharp' or 'averaged' (see "
-           "set_vof_viscous_interface; what 'auto' resolved to shows in "
-           "diagnostics.vof_viscous_interface_census()).")
+      ;
+  fb::bindSolverSharpViscous<Grid>(cls);
+  cls
       .def("set_dt", &chk::setDt<S>, nb::arg("dt"),
            "Set the time step dt (the caller's time unit); the momentum solve is scaled by 1/dt "
            "(well-conditioned at large dt). Under a physical domain the FIRST call pins the "
