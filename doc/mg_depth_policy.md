@@ -239,7 +239,7 @@ telescoping triggers and stages, `idleBelow`, `allocFp64(lv_.back())`, `buildBot
   no longer clamped to 1 — no caller passes 0: grep of flow, coupling, pnm, peclet-examples
   2026-10-24). `nLevels_` default `0` from WO-2. The docstring states the rule in one sentence and
   the observable: the resolved depth is `len(diagnostics.pressure_mg_level_ratios())` (existing,
-  `flow_bindings.cpp:934`) — **no new public name**.
+  `pressure_mg_level_ratios` in `flow_bindings_tuning.hpp`) — **no new public name**.
 - `predict_hierarchy(..., levels=0)` forecasts AUTO for the singular operator (docstring says so;
   for an outflow case before WO-5 the answer is 4; WO-5 adds an `outflow=False` keyword, Q6).
 - Takes effect at the next geometry build, as today.

@@ -105,7 +105,7 @@ ms/step depending on the layout.
 | F8 | 8×3 genoa: ranks 2 and 5 straddle a CCD, +17.6 ms; halo unpack 2.7×, `bc_vel` 2.4×, streaming kernels +5–8 %. The workstation reproduces it with roles swapped (6×4 on 6-core CCDs: 67.6 vs 4×6 47.1) | IMBAL Q2 |
 | F9 | VoF block work at 24×1 genoa: 8–10.5 ms on ranks 0–15, 1.5–3.0 on 16–23 (max 10.5 vs mean 6.4) | IMBAL Q1 |
 | F10 | Velocity MG uses the solver's decomposition in place, without telescoping (`mac_velocity_mg.hpp:447`), so it needs ≥ 3 in-place halvings for `vmgLevels = 4` | code |
-| F11 | Every level-0 decomposition in flow goes through `CutcellMG::decomposition`: `flow_ibm_mpi.hpp:23`, `flow_bindings.cpp:3842` (`mpi_block`), `mac_cutcell_mg.hpp:1495, 6803` (`predict_hierarchy`). `scripts/check_decomposition.py` calls the bindings | grep |
+| F11 | Every level-0 decomposition in flow goes through `CutcellMG::decomposition`: `flow_ibm_mpi.hpp:23`, `flow_bindings.cpp` (`mpi_block`), `mac_cutcell_mg.hpp:1495, 6803` (`predict_hierarchy`). `scripts/check_decomposition.py` calls the bindings | grep |
 | F12 | CFD-DEM: a moving multi-rank run co-decomposes through the *weighted* ORB (`rebalance_by_weights` + dem `migrate_to_weights`). A fixed bed adopts flow's init partition through `block_origin()` | `coupling/python/peclet_coupling/driver.py:351` |
 | F13 | Register invariant: "the ORB must never split the wall-normal axis (y) in wall-bounded flow". It comes from the channel, where the driver hard-aborts. The factory is BC-agnostic and does not enforce it. The legacy default already splits the bubble column's wall axis y at np 6, 8, 12 and 24, and the 8×3 bench layout (4×2×1) splits y. Those runs pass G-NUM-H against single-rank (H-6: 2.3–3.6e-14, iterations identical), and the campaign recorded "no rule change" (DECISIONS_DISTCPU.log, Q-7). The y-unsplit 4×1×2 is not slower (98.4 vs 100.4) | `../../docs/decisions/flow.md:1273`; [sim]; S-2C |
 
@@ -357,7 +357,7 @@ return A
 - **Debug print:** `mgDebugLevel()` prints which branch fired (A-exact / C5 / C4 / A2 / A-fallback)
   and the max/min.
 - **Bindings:** update the docstrings of `set_decomposition` and `mpi_block`
-  (`flow_bindings.cpp:2381`, `:3834`) and the flow CLAUDE.md "Decomposition" bullet:
+  (`flow_bindings_core.hpp`, `flow_bindings.cpp`) and the flow CLAUDE.md "Decomposition" bullet:
   - 0 = auto (default);
   - 1 = the legacy aligned ORB (pre-2026-10 default, for reproducing old np > 1 partitions);
   - ≥ 2 = coarse-first search.
